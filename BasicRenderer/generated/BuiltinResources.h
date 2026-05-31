@@ -109,6 +109,8 @@ struct Builtin {
   inline static constexpr std::string_view PerFrameBuffer = "Builtin::PerFrameBuffer";
   inline static constexpr std::string_view PerMaterialDataBuffer = "Builtin::PerMaterialDataBuffer";
   inline static constexpr std::string_view PerMaterialOpenPBRDataBuffer = "Builtin::PerMaterialOpenPBRDataBuffer";
+  inline static constexpr std::string_view InstanceDrawRecordBuffer = "Builtin::InstanceDrawRecordBuffer";
+  inline static constexpr std::string_view PerInstanceTransformBuffer = "Builtin::PerInstanceTransformBuffer";
   inline static constexpr std::string_view PerMeshBuffer = "Builtin::PerMeshBuffer";
   inline static constexpr std::string_view PerMeshInstanceBuffer = "Builtin::PerMeshInstanceBuffer";
   inline static constexpr std::string_view PerObjectBuffer = "Builtin::PerObjectBuffer";

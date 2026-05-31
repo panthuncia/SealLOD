@@ -6,6 +6,18 @@ struct MeshInstanceClodOffsets
     uint clodMeshMetadataIndex;
 };
 
+MeshInstanceClodOffsets LoadCLodOffsetsForDrawRecord(InstanceDrawRecordBuffer record)
+{
+    StructuredBuffer<MeshInstanceClodOffsets> clodOffsets =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
+    return clodOffsets[record.clodOffsetIndex];
+}
+
+MeshInstanceClodOffsets LoadCLodOffsetsForDraw(uint drawRecordIndex)
+{
+    return LoadCLodOffsetsForDrawRecord(LoadInstanceDrawRecord(drawRecordIndex));
+}
+
 struct CLodMeshMetadata
 {
     uint groupsBase;

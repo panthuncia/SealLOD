@@ -7,6 +7,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
 #include "PerPassRootConstants/clodWorkGraphRootConstants.h"
@@ -97,14 +98,10 @@ void WG_PageJobBuild(
         hdr.descriptorOffset, localMeshletIndex);
     const uint vertCount = CLodDescVertexCount(desc);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
@@ -352,14 +349,10 @@ void WG_PageJobRasterPage(
     const uint vertCount = CLodDescVertexCount(desc);
     const uint triCount = CLodDescTriangleCount(desc);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];

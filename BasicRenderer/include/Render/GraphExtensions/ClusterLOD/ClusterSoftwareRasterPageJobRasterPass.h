@@ -78,6 +78,8 @@ public:
         builder->WithShaderResource(
                 Builtin::PerMeshBuffer,
                 Builtin::PerMeshInstanceBuffer,
+                Builtin::InstanceDrawRecordBuffer,
+                Builtin::PerInstanceTransformBuffer,
                 Builtin::PerObjectBuffer,
                 Builtin::CullingCameraBuffer,
                 Builtin::SkeletonResources::InverseBindMatrices,

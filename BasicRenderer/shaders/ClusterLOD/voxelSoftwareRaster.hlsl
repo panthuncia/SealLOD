@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/visibilityPacking.hlsli"
 #include "include/visibleClusterPacking.hlsli"
@@ -248,9 +249,6 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         return;
     }
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstances = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    StructuredBuffer<PerObjectBuffer> objects = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    StructuredBuffer<MeshInstanceClodOffsets> meshInstanceClodOffsets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
     StructuredBuffer<CLodMeshMetadata> metadataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
@@ -260,9 +258,9 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
     const uint localVoxelClusterIndex = CLodVisibleClusterVoxelClusterIndex(packedCluster);
 
-    const PerMeshInstanceBuffer meshInstance = meshInstances[instanceIndex];
-    const PerObjectBuffer objectData = objects[meshInstance.perObjectBufferIndex];
-    const MeshInstanceClodOffsets offsets = meshInstanceClodOffsets[instanceIndex];
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceIndex);
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(instanceIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
     const CullingCameraInfo camera = cameras[viewId];
     const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[viewId];

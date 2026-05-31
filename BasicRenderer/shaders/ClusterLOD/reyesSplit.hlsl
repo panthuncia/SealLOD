@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 #include "include/clodPageAccess.hlsli"
 #include "include/clodStructs.hlsli"
@@ -404,9 +405,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint maxSplitPassCount = CLOD_REYES_SPLIT_MAX_PASS_COUNT;
     ByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_REYES_SPLIT_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodReyesSplitQueueEntry> splitQueue = ResourceDescriptorHeap[CLOD_REYES_SPLIT_INPUT_QUEUE_DESCRIPTOR_INDEX];
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstances = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
     StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> perObjects = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<Camera> sceneCameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -458,9 +457,9 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     md.compressedPositionQuantExp = hdr.compressedPositionQuantExp;
     md.pagePoolSlabDescriptorIndex = pageSlabDescriptorIndex;
 
-    const PerMeshInstanceBuffer meshInstance = perMeshInstances[splitEntry.instanceID];
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(splitEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    const PerObjectBuffer objectData = perObjects[meshInstance.perObjectBufferIndex];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(splitEntry.instanceID);
     const CullingCameraInfo camera = cameras[splitEntry.viewID];
     const Camera sceneCamera = sceneCameras[splitEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];

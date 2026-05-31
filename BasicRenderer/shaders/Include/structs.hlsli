@@ -534,6 +534,22 @@ struct PerMeshInstanceBuffer {
     BoundingSphere boundingSphere;
 };
 
+struct PerInstanceTransformBuffer {
+    row_major matrix model;
+    row_major matrix prevModel;
+    row_major matrix modelInverse;
+    uint normalMatrixBufferIndex;
+    uint objectFlags;
+    uint pad[2];
+};
+
+struct InstanceDrawRecordBuffer {
+    uint meshTemplateIndex;
+    uint instanceTransformIndex;
+    uint clodOffsetIndex;
+    uint flags;
+};
+
 #define LIGHTS_PER_PAGE 12
 #define LIGHT_PAGE_ADDRESS_NULL 0xFFFFFFFF
 struct LightPage {

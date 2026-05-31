@@ -117,19 +117,11 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     StructuredBuffer<uint> activeDrawSetIndicesBuffer =
         ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX];
-    StructuredBuffer<DispatchMeshIndirectCommand> indirectCommandBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::IndirectCommandBuffers::Master)];
-
-    const uint drawcallIndex = activeDrawSetIndicesBuffer[drawIndex];
-    const uint perMeshInstanceBufferIndex = indirectCommandBuffer[drawcallIndex].perMeshInstanceBufferIndex;
-
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[perMeshInstanceBufferIndex];
-
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    const row_major matrix objectModelMatrix = perObjectBuffer[instanceData.perObjectBufferIndex].model;
+    const uint drawRecordIndex = activeDrawSetIndicesBuffer[drawIndex];
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+    const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
+    const row_major matrix objectModelMatrix = instanceTransform.model;
 
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -164,12 +156,10 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
-    StructuredBuffer<MeshInstanceClodOffsets> meshInstanceClodOffsets =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
     StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
 
-    const MeshInstanceClodOffsets off = meshInstanceClodOffsets[perMeshInstanceBufferIndex];
+    const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
 
     RWStructuredBuffer<TraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
@@ -182,7 +172,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     }
 
     outFrontier[outputIndex].viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
-    outFrontier[outputIndex].instanceIndex = perMeshInstanceBufferIndex;
+    outFrontier[outputIndex].instanceIndex = drawRecordIndex;
     outFrontier[outputIndex].nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
@@ -213,24 +203,19 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     }
     const bool replaySource = (UnpackSourceTag(rec.nodeIdPacked) == CLOD_RECORD_SOURCE_REPLAY);
 
-    StructuredBuffer<MeshInstanceClodOffsets> clodOffsets =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
     StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    const MeshInstanceClodOffsets off = clodOffsets[rec.instanceIndex];
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(rec.instanceIndex);
+    const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
     const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[rec.instanceIndex];
-    const uint objectBufferIndex = instanceData.perObjectBufferIndex;
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+    const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
     const bool isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    const row_major matrix objectModelMatrix = perObjectBuffer[objectBufferIndex].model;
+    const row_major matrix objectModelMatrix = instanceTransform.model;
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     const uint cullViewId = rec.viewId;
@@ -454,7 +439,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                     nodeRadiusWorld,
                     depthMapDescriptorIndex);
             } else {
-                const row_major matrix prevModelMatrix = perObjectBuffer[objectBufferIndex].prevModel;
+                const row_major matrix prevModelMatrix = instanceTransform.prevModel;
                 const float prevNodeCullScale = MaxAxisScale_RowVector(prevModelMatrix);
                 const float3 prevNodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, prevModelMatrix, cullCamera.prevView);
                 const float prevNodeRadiusWorld = nodeCullRadiusObjectSpace * prevNodeCullScale;

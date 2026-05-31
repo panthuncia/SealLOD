@@ -59,6 +59,8 @@ void VirtualShadowMapInvalidatePagesPass::DeclareResourceUsages(ComputePassBuild
     builder->WithShaderResource(
             Builtin::Shadows::CLodCompactShadowCameras,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             m_invalidationInputsBuffer,
             m_invalidationCountBuffer,
@@ -83,12 +85,12 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
     inputs.reserve(1024);
     std::vector<uint32_t> invalidatedInstancesBitset(CLodVirtualShadowMovedInstanceBitWordCount(), 0u);
 
-    auto markInvalidatedInstance = [&invalidatedInstancesBitset](uint32_t perMeshInstanceBufferIndex) {
-        if (perMeshInstanceBufferIndex >= CLodVirtualShadowMovedInstanceBitCapacity) {
+    auto markInvalidatedInstance = [&invalidatedInstancesBitset](uint32_t drawRecordIndex) {
+        if (drawRecordIndex >= CLodVirtualShadowMovedInstanceBitCapacity) {
             return;
         }
 
-        invalidatedInstancesBitset[perMeshInstanceBufferIndex >> 5u] |= 1u << (perMeshInstanceBufferIndex & 31u);
+        invalidatedInstancesBitset[drawRecordIndex >> 5u] |= 1u << (drawRecordIndex & 31u);
     };
 
     m_transformChangedQuery.each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
@@ -96,29 +98,29 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
         flags |= CLodVirtualShadowInvalidationFlagUsePreviousBounds;
         flags |= CLodVirtualShadowInvalidationFlagUseCurrentBounds;
 
-        for (uint32_t perMeshInstanceBufferIndex : drawInfo.perMeshInstanceBufferIndices) {
+        for (uint32_t drawRecordIndex : drawInfo.instanceDrawRecordIndices) {
             if (inputs.size() >= CLodVirtualShadowMaxInvalidationInputs) {
                 break;
             }
 
             CLodVirtualShadowInvalidationInput input{};
-            input.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
+            input.perMeshInstanceBufferIndex = drawRecordIndex;
             input.flags = flags;
             inputs.push_back(input);
-            markInvalidatedInstance(perMeshInstanceBufferIndex);
+            markInvalidatedInstance(drawRecordIndex);
         }
     });
 
     m_skinnedObjectsQuery.each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
-        for (uint32_t perMeshInstanceBufferIndex : drawInfo.perMeshInstanceBufferIndices) {
+        for (uint32_t drawRecordIndex : drawInfo.instanceDrawRecordIndices) {
             if (inputs.size() >= CLodVirtualShadowMaxInvalidationInputs) {
                 break;
             }
             CLodVirtualShadowInvalidationInput input{};
-            input.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
+            input.perMeshInstanceBufferIndex = drawRecordIndex;
             input.flags = CLodVirtualShadowInvalidationFlagUseCurrentBounds | CLodVirtualShadowInvalidationFlagSkinned;
             inputs.push_back(input);
-            markInvalidatedInstance(perMeshInstanceBufferIndex);
+            markInvalidatedInstance(drawRecordIndex);
         }
     });
 

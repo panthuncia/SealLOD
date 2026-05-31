@@ -89,6 +89,8 @@ void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_tessTableVerticesBuffer,
             m_tessTableTrianglesBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,

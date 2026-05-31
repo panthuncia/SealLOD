@@ -32,6 +32,20 @@ public:
 		const Components::InstanceTransforms* instanceTransforms = nullptr;
 	};
 
+	struct Stats {
+		std::uint64_t bulkAddCalls = 0;
+		std::uint64_t objectsSubmitted = 0;
+		std::uint64_t perObjectRowsAllocated = 0;
+		std::uint64_t perInstanceTransformRowsAllocated = 0;
+		std::uint64_t normalMatrixRowsAllocated = 0;
+		std::uint64_t meshTemplateRowsReferenced = 0;
+		std::uint64_t instanceDrawRecordsAllocated = 0;
+		std::uint64_t activeDrawSetInsertCalls = 0;
+		std::uint64_t activeDrawSetInsertIndices = 0;
+		std::uint64_t activeDrawSetInsertUs = 0;
+		std::uint64_t maxDrawRecordIndex = 0;
+	};
+
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
@@ -40,6 +54,8 @@ public:
 
 	rg::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
+	rg::runtime::BulkWriteHandle BeginPerInstanceTransformBulkWrite();
+	void EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t dirtySize);
 	rg::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite();
 	void EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySize);
 
@@ -64,16 +80,20 @@ public:
         return GetActiveDrawSetIndices(DrawWorkloadKey { flags, renderPhase, clodOnly });
     }
     uint64_t GetDrawSetDeclarationRevision() const { return m_drawSetDeclarationRevision; }
+	Stats GetStats() const { return m_stats; }
 
 private:
 	ObjectManager();
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
+	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
+	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
 	std::shared_ptr<LazyDynamicStructuredBuffer<DirectX::XMFLOAT4X4>> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
+	Stats m_stats{};
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
 

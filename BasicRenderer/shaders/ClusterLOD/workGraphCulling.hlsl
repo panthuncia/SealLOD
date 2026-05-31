@@ -1,6 +1,7 @@
 // Compile with DXC target: lib_6_8 (Shader Model 6.8)
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/indirectCommands.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "include/occlusionCulling.hlsli"
@@ -1816,23 +1817,16 @@ void WG_ObjectCull(
         StructuredBuffer<uint> activeDrawSetIndicesBuffer =
                     ResourceDescriptorHeap[hdr.activeDrawSetIndicesSRVIndex];
 
-        StructuredBuffer<DispatchMeshIndirectCommand> indirectCommandBuffer =
-                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::IndirectCommandBuffers::Master)];
-
-        const uint drawcallIndex = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
-        const uint perMeshInstanceBufferIndex = indirectCommandBuffer[drawcallIndex].perMeshInstanceBufferIndex;
-
-        StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-        const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[perMeshInstanceBufferIndex];
+        const uint drawRecordIndex = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
+        const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
 
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
                     ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
 
-        StructuredBuffer<PerObjectBuffer> perObjectBuffer =
-                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-        const row_major matrix objectModelMatrix = perObjectBuffer[instanceData.perObjectBufferIndex].model;
+        const row_major matrix objectModelMatrix = instanceTransform.model;
 
         StructuredBuffer<Camera> cameras =
                     ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -1863,16 +1857,14 @@ void WG_ObjectCull(
             }
         }
         if (!culled) {
-            StructuredBuffer<MeshInstanceClodOffsets> meshInstanceClodOffsets =
-                            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
             StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
                             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
 
-            const MeshInstanceClodOffsets off = meshInstanceClodOffsets[perMeshInstanceBufferIndex];
+            const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
             const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
 
             outRecord.viewId = hdr.viewDataIndex;
-            outRecord.instanceIndex =perMeshInstanceBufferIndex;
+            outRecord.instanceIndex = drawRecordIndex;
             outRecord.nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
             outCount = 1;
 
@@ -1940,24 +1932,19 @@ void WG_TraverseNodes(
         }
         const bool replaySource = (UnpackSourceTag(rec.nodeIdPacked) == CLOD_RECORD_SOURCE_REPLAY);
 
-        StructuredBuffer<MeshInstanceClodOffsets> clodOffsets =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-        const MeshInstanceClodOffsets off = clodOffsets[rec.instanceIndex];
+        const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(rec.instanceIndex);
+        const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
         const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-        StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-        const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[rec.instanceIndex];
-        const uint objectBufferIndex = instanceData.perObjectBufferIndex;
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
         const bool isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
-        StructuredBuffer<PerObjectBuffer> perObjectBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-        const row_major matrix objectModelMatrix = perObjectBuffer[objectBufferIndex].model;
+        const row_major matrix objectModelMatrix = instanceTransform.model;
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
         const uint cullViewId = rec.viewId;
@@ -2214,7 +2201,7 @@ void WG_TraverseNodes(
                                 } else {
                                     // Phase 1: HZB is from previous frame's depth,
                                     // so reproject bounding sphere into previous frame's camera space.
-                                    const row_major matrix prevModelMatrix = perObjectBuffer[objectBufferIndex].prevModel;
+                                    const row_major matrix prevModelMatrix = instanceTransform.prevModel;
                                     const float prevNodeCullScale = MaxAxisScale_RowVector(prevModelMatrix);
                                     const float3 prevNodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, prevModelMatrix, cullCamera.prevView);
                                     const float prevNodeRadiusWorld = nodeCullRadiusObjectSpace * prevNodeCullScale;
@@ -2467,7 +2454,7 @@ void ClusterCullBody(
     uint meshBufferIndex = 0;
     uint activeGroupScanCount = 0;
     float ownGroupErrorOverDistance = 0.0f;
-    uint objectBufferIndex = 0;
+    PerObjectBuffer instanceTransform = (PerObjectBuffer)0;
     bool isSkinned = false;
     bool reyesDisplacementCandidate = false;
     bool isAlphaTestedMaterial = false;
@@ -2483,14 +2470,11 @@ void ClusterCullBody(
         pageSlabDesc = b.pageSlabDescriptorIndex;
         pageSlabOff = b.pageSlabByteOffset;
 
-        StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-        const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[b.instanceIndex];
-        objectBufferIndex = instanceData.perObjectBufferIndex;
+        const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(b.instanceIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
         skinningInstanceSlot = instanceData.skinningInstanceSlot;
-        StructuredBuffer<PerObjectBuffer> perObjectBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-        objectModelMatrix = perObjectBuffer[objectBufferIndex].model;
+        objectModelMatrix = instanceTransform.model;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(b.instanceIndex);
 #endif
@@ -2549,11 +2533,9 @@ void ClusterCullBody(
         cullCam = cameraInfos[b.viewId];
         lodCam = cameraInfos[lodViewId];
 
-        StructuredBuffer<MeshInstanceClodOffsets> clodOffsets =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-        const MeshInstanceClodOffsets clodOff = clodOffsets[b.instanceIndex];
+        const MeshInstanceClodOffsets clodOff = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[clodOff.clodMeshMetadataIndex];
         groupsBase = clodMeshMetadata.groupsBase;
         forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
@@ -2730,9 +2712,7 @@ void ClusterCullBody(
                     } else {
                         // Phase 1: HZB is from previous frame's depth,
                         // so reproject bounding sphere into previous frame's camera space.
-                        StructuredBuffer<PerObjectBuffer> prevObjBuf =
-                            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-                        const row_major matrix prevModelMatrix = prevObjBuf[objectBufferIndex].prevModel;
+                        const row_major matrix prevModelMatrix = instanceTransform.prevModel;
                         const float prevMeshletScale = MaxAxisScale_RowVector(prevModelMatrix);
                         const float3 prevMeshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, prevModelMatrix, occCameras[b.viewId].prevView);
                         const float prevMeshletRadiusWorld = meshletBounds.sphere.w * prevMeshletScale;

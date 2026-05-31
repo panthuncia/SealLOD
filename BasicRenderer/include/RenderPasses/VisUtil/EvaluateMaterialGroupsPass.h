@@ -80,6 +80,8 @@ public:
             Builtin::PrimaryCamera::VisibilityTexture,
             //Builtin::PrimaryCamera::VisibleClusterTable,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::PerMeshBuffer,
             Builtin::CameraBuffer,

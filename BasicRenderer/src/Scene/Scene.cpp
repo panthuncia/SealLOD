@@ -667,19 +667,16 @@ flecs::entity Scene::CreateInstancedRenderableEntityECS(
 		instanceTransforms.transforms.push_back({ matrix });
 	}
 
-	for (std::size_t transformIndex = 0; transformIndex < instanceMatrices.size(); ++transformIndex) {
-		for (auto& mesh : meshes) {
-			if (mesh == nullptr) {
-				continue;
-			}
-			if (mesh->HasBaseSkin()) {
-				entity.add<Components::Skinned>();
-			}
-			const auto meshInstanceBegin = std::chrono::steady_clock::now();
-			meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
-			instanceTransforms.meshInstanceTransformIndices.push_back(static_cast<uint32_t>(transformIndex));
-			m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
+	for (auto& mesh : meshes) {
+		if (mesh == nullptr) {
+			continue;
 		}
+		if (mesh->HasBaseSkin()) {
+			entity.add<Components::Skinned>();
+		}
+		const auto meshInstanceBegin = std::chrono::steady_clock::now();
+		meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
+		m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
 	}
 
 	if (!meshInstances.meshInstances.empty()) {

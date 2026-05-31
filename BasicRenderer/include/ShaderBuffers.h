@@ -136,6 +136,15 @@ struct PerMeshInstanceCB {
     BoundingSphere boundingSphere = {};
 };
 
+using PerInstanceTransformCB = PerObjectCB;
+
+struct InstanceDrawRecordCB {
+    unsigned int meshTemplateIndex;
+    unsigned int instanceTransformIndex;
+    unsigned int clodOffsetIndex;
+    unsigned int flags;
+};
+
 struct PerMaterialCB {
     unsigned int materialFlags;
     unsigned int baseColorTextureIndex;

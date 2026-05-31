@@ -64,12 +64,15 @@ namespace Components {
     struct ObjectDrawInfo {
         IndirectDrawInfo drawInfo;
         std::vector<uint32_t> perMeshInstanceBufferIndices;
+        std::vector<uint32_t> instanceDrawRecordIndices;
         std::shared_ptr<BufferView> perObjectCBView;
         uint32_t perObjectCBIndex;
         std::shared_ptr<BufferView> normalMatrixView;
         uint32_t normalMatrixIndex;
         std::vector<std::shared_ptr<BufferView>> perObjectCBViews;
+        std::vector<std::shared_ptr<BufferView>> perInstanceTransformViews;
         std::vector<std::shared_ptr<BufferView>> normalMatrixViews;
+        std::vector<std::shared_ptr<BufferView>> instanceDrawRecordViews;
     };
 
     struct PerPassMeshes {

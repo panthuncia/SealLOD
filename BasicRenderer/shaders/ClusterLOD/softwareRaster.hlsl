@@ -10,6 +10,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
 #include "include/materialFlags.hlsli"
@@ -310,16 +311,12 @@ void SWRasterCluster(
     const uint triCount  = CLodDescTriangleCount(desc);
 
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const uint materialDataIndex = perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex;
 
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];

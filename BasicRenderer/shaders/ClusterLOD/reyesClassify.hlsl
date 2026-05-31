@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/vertexFlags.hlsli"
 #include "include/visibleClusterPacking.hlsli"
 #include "include/clodStructs.hlsli"
@@ -72,11 +73,10 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
 
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstances = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
     StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
 
-    const PerMeshInstanceBuffer meshInstance = perMeshInstances[instanceID];
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
     const uint materialIndex = perMesh.materialDataIndex;
     const MaterialInfo materialInfo = materialDataBuffer[materialIndex];

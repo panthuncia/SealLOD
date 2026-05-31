@@ -54,7 +54,9 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
             m_diceQueueCounterBuffer,
             m_tessTableConfigsBuffer,
             Builtin::PerMeshBuffer,
-            Builtin::PerMeshInstanceBuffer)
+            Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(
             m_rasterWorkBuffer,

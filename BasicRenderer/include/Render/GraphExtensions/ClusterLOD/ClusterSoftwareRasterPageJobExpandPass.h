@@ -95,6 +95,8 @@ public:
                 Builtin::PerMaterialDataBuffer,
                 Builtin::Material::TextureGroup,
                 Builtin::PerMeshInstanceBuffer,
+                Builtin::InstanceDrawRecordBuffer,
+                Builtin::PerInstanceTransformBuffer,
                 Builtin::PerObjectBuffer,
                 Builtin::CullingCameraBuffer,
                 Builtin::SkeletonResources::InverseBindMatrices,

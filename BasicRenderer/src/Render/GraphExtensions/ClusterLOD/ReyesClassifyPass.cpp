@@ -62,6 +62,8 @@ void ReyesClassifyPass::DeclareResourceUsages(ComputePassBuilder* builder)
         .WithShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,

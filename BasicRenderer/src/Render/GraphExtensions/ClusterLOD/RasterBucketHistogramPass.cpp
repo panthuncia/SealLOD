@@ -61,6 +61,8 @@ void RasterBucketHistogramPass::DeclareResourceUsages(ComputePassBuilder* builde
             m_visibleClustersCounterBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer)

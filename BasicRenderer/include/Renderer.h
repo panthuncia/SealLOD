@@ -85,12 +85,14 @@ public:
     void SetCurrentScene(std::shared_ptr<Scene> newScene);
     InputManager& GetInputManager();
     void SetInputMode(InputMode mode);
+    void SetCameraSpeed(float speed);
     void SetEnvironment(std::string name);
     std::shared_ptr<Scene> AppendScene(std::shared_ptr<Scene> scene);
 	bool IsInitialized() const { return m_isInitialized; }
     void SetExternalSceneMode(bool enabled);
     void SetSceneRenderOverlapEnabled(bool enabled);
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
+    ObjectManager::Stats GetObjectManagerStats() const;
 
 private:
 	bool m_isInitialized = false;

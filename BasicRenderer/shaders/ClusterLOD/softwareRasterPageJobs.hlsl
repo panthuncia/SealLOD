@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
 #include "PerPassRootConstants/clodWorkGraphRootConstants.h"
@@ -77,12 +78,8 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer objData = objBuf[meshInst.perObjectBufferIndex];
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
 
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
@@ -379,14 +376,9 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint weightArrayOffset = hdr.weightArrayOffset;
     const int3 minQ = int3(desc.minQx, desc.minQy, desc.minQz);
 
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    const PerMeshInstanceBuffer meshInst = meshInstBuf[instanceID];
+    const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     const uint perMeshBufferIndex = meshInst.perMeshBufferIndex;
-    const uint perObjectBufferIndex = meshInst.perObjectBufferIndex;
     const uint skinningInstanceSlot = meshInst.skinningInstanceSlot;
-    StructuredBuffer<PerObjectBuffer> objBuf =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
@@ -395,7 +387,7 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     float4 modelViewZ;
     bool reverseWinding = false;
     {
-        const PerObjectBuffer objData = objBuf[perObjectBufferIndex];
+        const PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
         const CullingCameraInfo cam = cullingCameras[viewID];
         reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u;
         modelViewProjection = mul(objData.model, cam.viewProjection);

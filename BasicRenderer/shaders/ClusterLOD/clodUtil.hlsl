@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "PerPassRootConstants/clodClearUintBufferRootConstants.h"
@@ -2170,8 +2171,6 @@ void CLodVirtualShadowInvalidatePagesCSMain(uint3 dispatchThreadId : SV_Dispatch
 {
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> compactShadowCameraBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<CLodVirtualShadowInvalidationInput> invalidationInputs = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUTS_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> invalidationCountBuffer = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_INPUT_COUNT_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_INFO_DESCRIPTOR_INDEX];
@@ -2189,8 +2188,8 @@ void CLodVirtualShadowInvalidatePagesCSMain(uint3 dispatchThreadId : SV_Dispatch
     }
 
     const CLodVirtualShadowInvalidationInput input = invalidationInputs[inputIndex];
-    const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[input.perMeshInstanceBufferIndex];
-    const PerObjectBuffer objectData = perObjectBuffer[instanceData.perObjectBufferIndex];
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(input.perMeshInstanceBufferIndex);
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(input.perMeshInstanceBufferIndex);
     const float baseRadius = instanceData.boundingSphere.sphere.w;
     const float skinnedScale = ((input.flags & kCLodVirtualShadowInvalidationFlagSkinned) != 0u)
         ? max(instanceData.skinnedBoundsScale, 1.0f)
@@ -2659,8 +2658,7 @@ void ClusterRasterBucketsHistogramCSMain(uint3 DTid : SV_DispatchThreadID)
 
     // TODO: Remove load chain
     uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstance = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    uint perMeshIndex = perMeshInstance[instanceIndex].perMeshBufferIndex;
+    uint perMeshIndex = LoadMeshTemplateForDraw(instanceIndex).perMeshBufferIndex;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     uint rasterBucketIndex = perMeshBuffer[perMeshIndex].rasterBucketIndex;
     if (rasterBucketIndex >= CLOD_HISTOGRAM_NUM_RASTER_BUCKETS)
@@ -2850,10 +2848,9 @@ void RasterBucketsBlockOffsetsCS(uint3 groupThreadId : SV_GroupThreadID,
 
 uint GetRasterBucketIndexFromInstance(uint instanceID)
 {
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstance = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
-    PerMeshInstanceBuffer instanceData = perMeshInstance[instanceID];
+    PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceID);
     PerMeshBuffer meshBuffer = perMeshBuffer[instanceData.perMeshBufferIndex];
     return meshBuffer.rasterBucketIndex;
 }

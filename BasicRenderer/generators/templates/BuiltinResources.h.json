@@ -48,6 +48,8 @@
     "PerObjectBuffer": {},
     "PerMeshBuffer": {},
     "PerMeshInstanceBuffer": {},
+    "PerInstanceTransformBuffer": {},
+    "InstanceDrawRecordBuffer": {},
     "NormalMatrixBuffer": {},
     "SkeletonResources": {
       "BoneTransforms": {},

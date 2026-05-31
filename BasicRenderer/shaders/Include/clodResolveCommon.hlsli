@@ -3,6 +3,7 @@
 
 //#include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/meshletCommon.hlsli"
 #include "include/utilities.hlsli"
@@ -761,8 +762,6 @@ MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
     if (isLeader)
     {
         ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-        StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
@@ -770,8 +769,8 @@ MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
         d.drawcallAndMeshlet.x = CLodVisibleClusterInstanceID(packedCluster);
         d.drawcallAndMeshlet.y = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
-        PerMeshInstanceBuffer inst = perMeshInstanceBuffer[d.drawcallAndMeshlet.x];
-        d.objAndMesh = uint2(inst.perObjectBufferIndex, inst.perMeshBufferIndex);
+        PerMeshInstanceBuffer inst = LoadMeshTemplateForDraw(d.drawcallAndMeshlet.x);
+        d.objAndMesh = uint2(d.drawcallAndMeshlet.x, inst.perMeshBufferIndex);
         d.skinningInstanceSlot = inst.skinningInstanceSlot;
 
         PerMeshBuffer mesh = perMeshBuffer[d.objAndMesh.y];
@@ -1223,21 +1222,17 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
 {
     sample = (ClodResolvedCommonSample)0;
 
-    StructuredBuffer<PerMeshInstanceBuffer> perMeshInstanceBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<MeshInstanceClodOffsets> meshInstanceClodOffsets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
     StructuredBuffer<CLodMeshMetadata> metadataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
 
     const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
     const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
     const uint localVoxelClusterIndex = CLodVisibleClusterVoxelClusterIndex(packedCluster);
 
-    const PerMeshInstanceBuffer instanceData = perMeshInstanceBuffer[instanceIndex];
-    const PerObjectBuffer obj = perObjectBuffer[instanceData.perObjectBufferIndex];
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
+    const PerObjectBuffer obj = LoadInstanceTransformForDraw(instanceIndex);
     const PerMeshBuffer mesh = perMeshBuffer[instanceData.perMeshBufferIndex];
-    const MeshInstanceClodOffsets offsets = meshInstanceClodOffsets[instanceIndex];
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     CLodVoxelGroupDescriptor descriptor;
@@ -1574,8 +1569,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     ApplyClodSkinningToFrame(triIdx.y, md, p1, n1, t1);
     ApplyClodSkinningToFrame(triIdx.z, md, p2, n2, t2);
 
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
-    PerObjectBuffer obj = perObjectBuffer[md.objAndMesh.x];
+    PerObjectBuffer obj = LoadInstanceTransformForDraw(md.objAndMesh.x);
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     StructuredBuffer<MaterialEvalInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
     MaterialEvalInfo materialInfo = materialDataBuffer[md.materialDataIndex];

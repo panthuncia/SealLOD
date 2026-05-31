@@ -513,6 +513,10 @@ void Renderer::IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snap
     m_lastCommittedSceneSourceFrame = snapshot.sourceFrameNumber;
 }
 
+ObjectManager::Stats Renderer::GetObjectManagerStats() const {
+    return m_pObjectManager ? m_pObjectManager->GetStats() : ObjectManager::Stats{};
+}
+
 void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapshot& snapshot) {
     if (!m_pMeshManager || !m_pMaterialManager || !m_pIndirectCommandBufferManager) {
         return;
@@ -878,8 +882,10 @@ void Renderer::RunRenderResourceSyncStage() {
 
     auto* objectManager = m_managerInterface.GetObjectManager();
     std::vector<std::pair<size_t, size_t>> perObjectDirtyRanges;
+    std::vector<std::pair<size_t, size_t>> perInstanceTransformDirtyRanges;
     std::vector<std::pair<size_t, size_t>> normalMatrixDirtyRanges;
     perObjectDirtyRanges.reserve(objectItems.size());
+    perInstanceTransformDirtyRanges.reserve(objectItems.size());
     normalMatrixDirtyRanges.reserve(objectItems.size());
 
     {
@@ -887,6 +893,14 @@ void Renderer::RunRenderResourceSyncStage() {
         for (const auto& item : objectItems) {
             const size_t perObjectBegin = item.drawInfo->perObjectCBView->GetOffset();
             const size_t perObjectEnd = perObjectBegin + sizeof(PerObjectCB);
+            const auto instanceTransformView = !item.drawInfo->perInstanceTransformViews.empty()
+                ? item.drawInfo->perInstanceTransformViews.front()
+                : nullptr;
+            if (instanceTransformView) {
+                const size_t instanceBegin = instanceTransformView->GetOffset();
+                const size_t instanceEnd = instanceBegin + sizeof(PerInstanceTransformCB);
+                perInstanceTransformDirtyRanges.emplace_back(instanceBegin, instanceEnd);
+            }
             const size_t normalMatrixBegin = item.drawInfo->normalMatrixView->GetOffset();
             const size_t normalMatrixEnd = normalMatrixBegin + sizeof(DirectX::XMFLOAT4X4);
             perObjectDirtyRanges.emplace_back(perObjectBegin, perObjectEnd);
@@ -897,12 +911,13 @@ void Renderer::RunRenderResourceSyncStage() {
     // Pre-size scratch buffers single-threaded so the parallel loop can
     // memcpy into non-overlapping regions without any synchronization.
     auto perObjectHandle = objectManager->BeginPerObjectBulkWrite();
+    auto perInstanceTransformHandle = objectManager->BeginPerInstanceTransformBulkWrite();
     auto normalMatrixHandle = objectManager->BeginNormalMatrixBulkWrite();
 
     {
         ZoneScopedN("Renderer::Update::RenderResourceSync::ObjectSync");
         TaskSchedulerManager::GetInstance().ParallelFor("ObjectSync", objectItems.size(),
-            [&objectItems, &perObjectHandle, &normalMatrixHandle](size_t idx) {
+            [&objectItems, &perObjectHandle, &perInstanceTransformHandle, &normalMatrixHandle](size_t idx) {
                 auto& item = objectItems[idx];
                 auto* worldMatrix = item.worldMatrix;
                 auto* object = item.object;
@@ -919,6 +934,11 @@ void Renderer::RunRenderResourceSyncStage() {
                     const size_t offset = drawInfo->perObjectCBView->GetOffset();
                     const size_t sz = sizeof(PerObjectCB);
                     std::memcpy(perObjectHandle.data + offset, &object->perObjectCB, sz);
+                }
+                if (!drawInfo->perInstanceTransformViews.empty()) {
+                    const size_t offset = drawInfo->perInstanceTransformViews.front()->GetOffset();
+                    const size_t sz = sizeof(PerInstanceTransformCB);
+                    std::memcpy(perInstanceTransformHandle.data + offset, &object->perObjectCB, sz);
                 }
 
                 const auto& modelMatrix = object->perObjectCB.modelMatrix;
@@ -971,6 +991,12 @@ void Renderer::RunRenderResourceSyncStage() {
             ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerObjectRanges");
             commitRanges(perObjectDirtyRanges, [objectManager](size_t offset, size_t size) {
                 objectManager->EndPerObjectBulkWrite(offset, size);
+            });
+        }
+        {
+            ZoneScopedN("Renderer::Update::RenderResourceSync::CommitPerInstanceTransformRanges");
+            commitRanges(perInstanceTransformDirtyRanges, [objectManager](size_t offset, size_t size) {
+                objectManager->EndPerInstanceTransformBulkWrite(offset, size);
             });
         }
         {
@@ -2503,6 +2529,12 @@ void Renderer::SetInputMode(InputMode mode) {
         break;
     }
     SetupInputHandlers();
+}
+
+void Renderer::SetCameraSpeed(float speed) {
+    if (setCameraSpeed) {
+        setCameraSpeed(speed);
+    }
 }
 
 void Renderer::MoveForward() {

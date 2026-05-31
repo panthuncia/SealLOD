@@ -2,6 +2,7 @@
 #include "include/utilities.hlsli"
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/loadingUtils.hlsli"
 #include "Common/defines.h"
@@ -92,15 +93,13 @@ void CLodRecordSourceGroupMismatch(
         return;
     }
 
-    StructuredBuffer<MeshInstanceClodOffsets> meshInstanceClodOffsets =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Offsets)];
     StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     StructuredBuffer<ClusterLODGroup> clodGroups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     StructuredBuffer<ClusterLODGroupSegment> clodSegments =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-    const MeshInstanceClodOffsets offsets = meshInstanceClodOffsets[instanceId];
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceId);
     const CLodMeshMetadata metadata = clodMeshMetadataBuffer[offsets.clodMeshMetadataIndex];
     const ClusterLODGroup expectedGroup = clodGroups[metadata.groupsBase + expectedGroupLocalIndex];
 
@@ -1079,22 +1078,21 @@ void VisibilityBufferMSMain(
 
 bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup setup, out uint failureReason, out bool sourceGroupMismatch, out uint foundSourceGroupLocalIndex, in uint bucketMeshletIndex, in uint bucketCount)
 {
-    StructuredBuffer<PerMeshInstanceBuffer> meshInstanceBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshInstanceBuffer)];
     failureReason = CLOD_RASTER_INIT_FAILURE_NONE;
     sourceGroupMismatch = false;
     foundSourceGroupLocalIndex = 0xFFFFFFFFu;
 
     setup.meshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
-    setup.meshInstanceBuffer = meshInstanceBuffer[CLodVisibleClusterInstanceID(packedCluster)];
+    const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
+    setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
     setup.viewID = CLodVisibleClusterViewID(packedCluster);
     setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
     setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);
 
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<PerObjectBuffer> perObjectBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
 
     setup.meshBuffer = perMeshBuffer[setup.meshInstanceBuffer.perMeshBufferIndex];
-    setup.objectBuffer = perObjectBuffer[setup.meshInstanceBuffer.perObjectBufferIndex];
+    setup.objectBuffer = LoadInstanceTransformForDraw(drawRecordIndex);
 
     // Use pre-resolved page address from VisibleCluster
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);

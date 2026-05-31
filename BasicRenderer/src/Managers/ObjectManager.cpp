@@ -17,6 +17,7 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 
+#include <chrono>
 #include <spdlog/spdlog.h>
 
 namespace {
@@ -37,16 +38,22 @@ DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMat
 ObjectManager::ObjectManager() {
 	auto& resourceManager = ResourceManager::GetInstance();
 	m_perObjectBuffers = DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
+	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
+	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
 	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
 	m_normalMatrixBuffer = LazyDynamicStructuredBuffer<DirectX::XMFLOAT4X4>::CreateShared(10000, "normalMatrixBuffer");
 
 	rg::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
+	rg::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
+	rg::memory::SetResourceUsageHint(*m_instanceDrawRecordBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
 	rg::memory::SetResourceUsageHint(*m_normalMatrixBuffer, "PerMesh, PerMeshInstance, PerObject");
 
 	rg::memory::SetResourceUsageHint(*m_masterIndirectCommandsBuffer, "Indirect command buffers");
 
 	m_resources[Builtin::PerObjectBuffer] = m_perObjectBuffers;
+	m_resources[Builtin::PerInstanceTransformBuffer] = m_perInstanceTransformBuffers;
+	m_resources[Builtin::InstanceDrawRecordBuffer] = m_instanceDrawRecordBuffers;
 	m_resources[Builtin::NormalMatrixBuffer] = m_normalMatrixBuffer;
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
 }
@@ -91,9 +98,11 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		return drawInfos;
 	}
 
-	struct PendingCommand {
+	++m_stats.bulkAddCalls;
+	m_stats.objectsSubmitted += objects.size();
+
+	struct PendingDrawRecord {
 		size_t objectIndex = 0;
-		uint32_t perMeshInstanceBufferIndex = 0;
 		std::vector<DrawWorkloadKey> workloadKeys;
 	};
 
@@ -132,24 +141,33 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		transformRanges.push_back(range);
 	}
 
+	m_stats.perObjectRowsAllocated += perObjectCBs.size();
+	m_stats.perInstanceTransformRowsAllocated += perObjectCBs.size();
+	m_stats.normalMatrixRowsAllocated += normalMatrices.size();
+
 	auto normalMatrixViews = m_normalMatrixBuffer->AddMany(normalMatrices.data(), normalMatrices.size());
 	for (size_t i = 0; i < perObjectCBs.size() && i < normalMatrixViews.size(); ++i) {
 		perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(normalMatrixViews[i]->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
 	}
 	auto perObjectViews = m_perObjectBuffers->AddDataBatch(perObjectCBs.data(), perObjectCBs.size(), sizeof(PerObjectCB));
+	auto instanceTransformViews = m_perInstanceTransformBuffers->AddDataBatch(perObjectCBs.data(), perObjectCBs.size(), sizeof(PerInstanceTransformCB));
 
-	std::vector<DispatchMeshIndirectCommand> commands;
-	std::vector<PendingCommand> pendingCommands;
+	std::vector<InstanceDrawRecordCB> drawRecords;
+	std::vector<PendingDrawRecord> pendingDrawRecords;
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 
 	size_t expectedDraws = 0;
 	for (const auto& object : objects) {
 		if (object.meshInstances) {
-			expectedDraws += object.meshInstances->meshInstances.size();
+			const size_t instanceCount = (object.instanceTransforms && !object.instanceTransforms->transforms.empty())
+				? object.instanceTransforms->transforms.size()
+				: 1u;
+			m_stats.meshTemplateRowsReferenced += object.meshInstances->meshInstances.size();
+			expectedDraws += object.meshInstances->meshInstances.size() * instanceCount;
 		}
 	}
-	commands.reserve(expectedDraws);
-	pendingCommands.reserve(expectedDraws);
+	drawRecords.reserve(expectedDraws);
+	pendingDrawRecords.reserve(expectedDraws);
 
 	for (size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex) {
 		const auto& object = objects[objectIndex];
@@ -174,11 +192,15 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		drawInfo.normalMatrixView = normalMatrixView;
 		drawInfo.normalMatrixIndex = static_cast<uint32_t>(normalMatrixView->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
 		drawInfo.perObjectCBViews.reserve(transformRange.count);
+		drawInfo.perInstanceTransformViews.reserve(transformRange.count);
 		drawInfo.normalMatrixViews.reserve(transformRange.count);
 		for (size_t i = 0; i < transformRange.count; ++i) {
 			const auto transformViewIndex = transformRange.first + i;
 			if (transformViewIndex < perObjectViews.size()) {
 				drawInfo.perObjectCBViews.push_back(perObjectViews[transformViewIndex]);
+			}
+			if (transformViewIndex < instanceTransformViews.size()) {
+				drawInfo.perInstanceTransformViews.push_back(instanceTransformViews[transformViewIndex]);
 			}
 			if (transformViewIndex < normalMatrixViews.size()) {
 				drawInfo.normalMatrixViews.push_back(normalMatrixViews[transformViewIndex]);
@@ -193,72 +215,82 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		drawInfo.drawInfo.views.reserve(object.meshInstances->meshInstances.size());
 		drawInfo.drawInfo.drawWorkloadKeysPerDraw.reserve(object.meshInstances->meshInstances.size());
 		drawInfo.perMeshInstanceBufferIndices.reserve(object.meshInstances->meshInstances.size());
+		drawInfo.instanceDrawRecordIndices.reserve(object.meshInstances->meshInstances.size() * transformRange.count);
+		drawInfo.instanceDrawRecordViews.reserve(object.meshInstances->meshInstances.size() * transformRange.count);
 
-		for (size_t meshInstanceIndex = 0; meshInstanceIndex < object.meshInstances->meshInstances.size(); ++meshInstanceIndex) {
-			auto& meshInstance = object.meshInstances->meshInstances[meshInstanceIndex];
-			if (!meshInstance) {
-				continue;
-			}
-			uint32_t transformIndex = 0;
-			if (object.instanceTransforms &&
-				meshInstanceIndex < object.instanceTransforms->meshInstanceTransformIndices.size()) {
-				transformIndex = object.instanceTransforms->meshInstanceTransformIndices[meshInstanceIndex];
-			}
-			if (transformIndex >= transformRange.count) {
-				transformIndex = 0;
-			}
+		for (size_t transformIndex = 0; transformIndex < transformRange.count; ++transformIndex) {
 			const auto transformViewIndex = transformRange.first + transformIndex;
-			if (transformViewIndex >= perObjectViews.size()) {
+			if (transformViewIndex >= perObjectViews.size() || transformViewIndex >= instanceTransformViews.size()) {
 				continue;
 			}
 			const uint32_t meshPerObjectIndex = static_cast<uint32_t>(perObjectViews[transformViewIndex]->GetOffset() / sizeof(PerObjectCB));
-			meshInstance->SetPerObjectBufferIndex(meshPerObjectIndex);
-			auto& mesh = meshInstance->GetMesh();
-			const uint32_t perMeshInstanceBufferIndex = static_cast<uint32_t>(meshInstance->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
-			DispatchMeshIndirectCommand command = {};
-			command.perObjectBufferIndex = meshPerObjectIndex;
-			command.perMeshBufferIndex = meshInstance->GetPerMeshBufferIndex();
-			command.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
-			command.dispatchMeshArguments.ThreadGroupCountX = 0; //DivRoundUp(mesh->GetMeshletCount(), AS_GROUP_SIZE);
-			command.dispatchMeshArguments.ThreadGroupCountY = 1;
-			command.dispatchMeshArguments.ThreadGroupCountZ = 1;
-
-			commands.push_back(command);
-			drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
-			PendingCommand pendingCommand;
-			pendingCommand.objectIndex = objectIndex;
-			pendingCommand.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
-			auto material = meshInstance->GetEffectiveMaterial();
-			if (!material) {
-				material = mesh->material;
+			const uint32_t instanceTransformIndex = static_cast<uint32_t>(instanceTransformViews[transformViewIndex]->GetOffset() / sizeof(PerInstanceTransformCB));
+			for (size_t meshInstanceIndex = 0; meshInstanceIndex < object.meshInstances->meshInstances.size(); ++meshInstanceIndex) {
+				auto& meshInstance = object.meshInstances->meshInstances[meshInstanceIndex];
+				if (!meshInstance) {
+					continue;
+				}
+				auto& mesh = meshInstance->GetMesh();
+				const uint32_t perMeshInstanceBufferIndex = static_cast<uint32_t>(meshInstance->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
+				if (transformIndex == 0) {
+					meshInstance->SetPerObjectBufferIndex(meshPerObjectIndex);
+				}
+				InstanceDrawRecordCB drawRecord{};
+				drawRecord.meshTemplateIndex = perMeshInstanceBufferIndex;
+				drawRecord.instanceTransformIndex = instanceTransformIndex;
+				drawRecord.clodOffsetIndex = perMeshInstanceBufferIndex;
+				drawRecord.flags = 0u;
+				drawRecords.push_back(drawRecord);
+				if (transformIndex == 0) {
+					drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
+				}
+				PendingDrawRecord pendingDrawRecord;
+				pendingDrawRecord.objectIndex = objectIndex;
+				auto material = meshInstance->GetEffectiveMaterial();
+				if (!material) {
+					material = mesh->material;
+				}
+				ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
+					pendingDrawRecord.workloadKeys.push_back(workloadKey);
+				});
+				pendingDrawRecords.push_back(std::move(pendingDrawRecord));
 			}
-			ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
-				pendingCommand.workloadKeys.push_back(workloadKey);
-            });
-			pendingCommands.push_back(std::move(pendingCommand));
 		}
 	}
 
-	if (!commands.empty()) {
-		auto commandViews = m_masterIndirectCommandsBuffer->AddDataBatch(commands.data(), commands.size(), sizeof(DispatchMeshIndirectCommand));
-		for (size_t commandIndex = 0; commandIndex < commandViews.size() && commandIndex < pendingCommands.size(); ++commandIndex) {
-			const auto& pendingCommand = pendingCommands[commandIndex];
-			auto& drawInfo = drawInfos[pendingCommand.objectIndex];
-			auto& view = commandViews[commandIndex];
-			const auto indirectIndex = static_cast<unsigned int>(view->GetOffset() / sizeof(DispatchMeshIndirectCommand));
+	if (!drawRecords.empty()) {
+		auto drawRecordViews = m_instanceDrawRecordBuffers->AddDataBatch(drawRecords.data(), drawRecords.size(), sizeof(InstanceDrawRecordCB));
+		m_stats.instanceDrawRecordsAllocated += drawRecordViews.size();
+		for (size_t drawRecordViewIndex = 0; drawRecordViewIndex < drawRecordViews.size() && drawRecordViewIndex < pendingDrawRecords.size(); ++drawRecordViewIndex) {
+			const auto& pendingDrawRecord = pendingDrawRecords[drawRecordViewIndex];
+			auto& drawInfo = drawInfos[pendingDrawRecord.objectIndex];
+			auto& view = drawRecordViews[drawRecordViewIndex];
+			const auto drawRecordIndex = static_cast<unsigned int>(view->GetOffset() / sizeof(InstanceDrawRecordCB));
+			if (drawRecordIndex > 0xFFFFFFu) {
+				spdlog::warn("ObjectManager::AddObjectsBulk: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
+			}
+			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 
-			drawInfo.drawInfo.indices.push_back(indirectIndex);
+			drawInfo.drawInfo.indices.push_back(drawRecordIndex);
 			drawInfo.drawInfo.views.push_back(view);
-			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pendingCommand.workloadKeys);
-			for (const auto& workloadKey : pendingCommand.workloadKeys) {
-				activeDrawSetInserts[workloadKey].push_back(indirectIndex);
+			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pendingDrawRecord.workloadKeys);
+			drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
+			drawInfo.instanceDrawRecordViews.push_back(view);
+			for (const auto& workloadKey : pendingDrawRecord.workloadKeys) {
+				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
 			}
 		}
 	}
 
 	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
 		if (!indices.empty()) {
+			const auto insertBegin = std::chrono::steady_clock::now();
 			EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+			const auto insertEnd = std::chrono::steady_clock::now();
+			m_stats.activeDrawSetInsertCalls += 1;
+			m_stats.activeDrawSetInsertIndices += indices.size();
+			m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(insertEnd - insertBegin).count());
 		}
 	}
 
@@ -280,12 +312,15 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 	} else {
 		m_perObjectBuffers->Deallocate(drawInfo->perObjectCBView.get());
 	}
+	for (const auto& view : drawInfo->perInstanceTransformViews) {
+		m_perInstanceTransformBuffers->Deallocate(view.get());
+	}
 
 	// Remove the object's draw set commands from the draw set buffers
 	auto& views = drawInfo;
 	unsigned int i = 0;
 	for (auto view : views->drawInfo.views) {
-		unsigned int index = static_cast<uint32_t>(view->GetOffset() / sizeof(DispatchMeshIndirectCommand));
+		unsigned int index = static_cast<uint32_t>(view->GetOffset() / sizeof(InstanceDrawRecordCB));
         for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
             auto activeDrawSetIt = m_activeDrawSetIndices.find(workloadKey);
             if (activeDrawSetIt == m_activeDrawSetIndices.end() || !activeDrawSetIt->second) {
@@ -299,7 +334,7 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
             }
 		    activeDrawSetIt->second->Remove(index);
         }
-		m_masterIndirectCommandsBuffer->Deallocate(view.get());
+		m_instanceDrawRecordBuffers->Deallocate(view.get());
 		++i;
 	}
 
@@ -328,6 +363,14 @@ rg::runtime::BulkWriteHandle ObjectManager::BeginPerObjectBulkWrite() {
 
 void ObjectManager::EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize) {
 	m_perObjectBuffers->EndBulkWrite(dirtyOffset, dirtySize);
+}
+
+rg::runtime::BulkWriteHandle ObjectManager::BeginPerInstanceTransformBulkWrite() {
+	return m_perInstanceTransformBuffers->BeginBulkWrite();
+}
+
+void ObjectManager::EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t dirtySize) {
+	m_perInstanceTransformBuffers->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
 rg::runtime::BulkWriteHandle ObjectManager::BeginNormalMatrixBulkWrite() {

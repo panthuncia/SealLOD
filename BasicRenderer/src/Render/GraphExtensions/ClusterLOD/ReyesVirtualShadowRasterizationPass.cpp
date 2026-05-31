@@ -86,6 +86,8 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             m_virtualShadowClipmapInfoBuffer,
             Builtin::PerMeshBuffer,
             Builtin::PerMeshInstanceBuffer,
+            Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
             Builtin::PerMaterialDataBuffer,

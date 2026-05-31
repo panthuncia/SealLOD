@@ -42,6 +42,7 @@ public:
         b->WithShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
+                              Builtin::InstanceDrawRecordBuffer,
                               Builtin::PerMeshBuffer,
                                                             Builtin::PerMaterialDataBuffer,
                                                             Builtin::Material::TextureGroup)

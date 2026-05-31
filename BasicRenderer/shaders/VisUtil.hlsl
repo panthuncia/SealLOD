@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "include/visUtilCommon.hlsli"
 #include "PerPassRootConstants/visUtilRootConstants.h"
@@ -23,8 +24,8 @@ uint GetMaterialIdFromCluster(uint clusterIndex,
         return VISBUF_VOXEL_MATERIAL_BIN_INDEX;
     }
 
-    uint perMeshInstanceBufferIndex = CLodVisibleClusterInstanceID(packedCluster);
-    PerMeshInstanceBuffer instanceData = perMeshInstance[perMeshInstanceBufferIndex];
+    uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
+    PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
     PerMeshBuffer meshBuffer = perMeshBuffer[instanceData.perMeshBufferIndex];
 
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
