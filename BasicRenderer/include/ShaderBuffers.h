@@ -665,9 +665,12 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
 
 
 enum RootSignatureLayout {
-    MiscUintRootParameterIndex,
-    ResourceDescriptorIndicesRootParameterIndex,
-	IndirectCommandSignatureRootSignatureIndex,
+    // Keep these explicit: the real root signature has descriptor tables before
+    // the root constants, and indirect command signatures target the absolute
+    // root-parameter index.
+    MiscUintRootParameterIndex = 4,
+    ResourceDescriptorIndicesRootParameterIndex = 5,
+	IndirectCommandSignatureRootSignatureIndex = 6,
 	NumRootSignatureParameters
 };
 

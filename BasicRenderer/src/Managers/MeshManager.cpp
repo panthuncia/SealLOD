@@ -101,7 +101,7 @@ MeshManager::MeshManager() {
 		PagePool::Config ppConfig;
 		ppConfig.pageSize     = 256 * 1024;         // 256 KB
 		ppConfig.slabSize     = 256 * 1024 * 1024;  // 256 MB
-		ppConfig.numStreamingSlabs = 4;
+		ppConfig.numStreamingSlabs = 16;
 		ppConfig.debugName    = "CLodPagePool";
 		m_clodPagePool = std::make_unique<PagePool>(ppConfig);
 	}
@@ -603,17 +603,13 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 					const uint32_t removedTraversalDepth = sharedMeshState->mesh
 						? sharedMeshState->mesh->GetCLodMaxTraversalDepth()
 						: 0u;
-					ReleaseAllCLodGroupChunkAllocations(*sharedMeshState);
-					if (sharedMeshState->ownedMeshMetadataView != nullptr) {
-						m_clodMeshMetadata->Deallocate(sharedMeshState->ownedMeshMetadataView.get());
-						sharedMeshState->ownedMeshMetadataView = nullptr;
-					}
-					if (sharedMeshState->ownedGroupChunksView != nullptr) {
-						m_clodSharedGroupChunks->Deallocate(sharedMeshState->ownedGroupChunksView.get());
-						sharedMeshState->groupChunksView = nullptr;
-						sharedMeshState->ownedGroupChunksView = nullptr;
-					}
-					m_clodSharedStreamingStateByMesh.erase(mesh->GetMesh().get());
+					// Keep shared CLod template/range state alive after the last
+					// instance leaves. CLodStreamingSystem owns delayed page
+					// residency and page-map clearing for these global group
+					// indices; deleting the range here can strand stale streaming
+					// state until a later allocation reuses the same indices.
+					// TODO: add an explicit streaming-system retire callback if
+					// the asset cache starts evicting shared Mesh objects.
 					m_clodSharedStreamingRangesDirty = true;
 					m_clodStreamingStructureDirty = true;
 					if (removedTraversalDepth >= m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire)) {
