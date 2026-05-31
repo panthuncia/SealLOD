@@ -6,21 +6,11 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
-#include <mutex>
 #include <sstream>
 #include <vector>
 #include <cwctype>
 
 #include <boost/container_hash/hash.hpp>
-#include <pxr/base/vt/array.h>
-#include <pxr/base/vt/value.h>
-#include <pxr/usd/sdf/path.h>
-#include <pxr/usd/sdf/types.h>
-#include <pxr/usd/usd/attribute.h>
-#include <pxr/usd/usd/payloads.h>
-#include <pxr/usd/usd/prim.h>
-#include <pxr/usd/usd/stage.h>
-
 #include <spdlog/spdlog.h>
 
 #if BASICRENDERER_HAS_DIRECTSTORAGE
@@ -33,9 +23,6 @@
 namespace CLodCache {
 
 	namespace {
-		static constexpr const char* kRootPrimPath = "/CLodCache";
-		static constexpr const char* kGroupsPrimPath = "/CLodCache/Groups";
-
 		std::wstring SanitizeFolderName(const std::wstring& input)
 		{
 			if (input.empty()) {
@@ -84,12 +71,6 @@ namespace CLodCache {
 		std::wstring GetCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
 		{
 			return GetCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
-		}
-
-		std::mutex& GetUsdStageIoMutex()
-		{
-			static std::mutex mutex;
-			return mutex;
 		}
 
 		template<typename T>
@@ -257,6 +238,8 @@ namespace CLodCache {
 		}
 
 		static constexpr uint32_t kContainerMagic = 0x444F4C43u; // CLOD
+		static constexpr uint32_t kMetadataMagic = 0x4D4C4F43u; // COLM
+		static constexpr uint32_t kMetadataVersion = 1u;
 
 		struct ContainerHeader {
 			uint32_t magic = kContainerMagic;
@@ -306,6 +289,73 @@ namespace CLodCache {
 			}
 			outSizeBytes = static_cast<uint32_t>(sizeBytes64);
 			return true;
+		}
+
+		bool WriteMetadataBlob(const std::wstring& cachePath, const std::vector<std::byte>& blob)
+		{
+			const auto tempPath = cachePath + L".tmp";
+			{
+				std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
+				if (!file.is_open()) {
+					return false;
+				}
+
+				if (blob.size() > static_cast<std::size_t>((std::numeric_limits<std::streamsize>::max)())) {
+					return false;
+				}
+				const uint32_t magic = kMetadataMagic;
+				const uint32_t version = kMetadataVersion;
+				const uint64_t blobSize = static_cast<uint64_t>(blob.size());
+				file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+				file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+				file.write(reinterpret_cast<const char*>(&blobSize), sizeof(blobSize));
+				if (!blob.empty()) {
+					file.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+				}
+				if (!file.good()) {
+					return false;
+				}
+			}
+
+			std::error_code ec;
+			std::filesystem::remove(cachePath, ec);
+			ec.clear();
+			std::filesystem::rename(tempPath, cachePath, ec);
+			if (ec) {
+				std::filesystem::remove(tempPath);
+				return false;
+			}
+			return true;
+		}
+
+		bool ReadMetadataBlob(const std::wstring& cachePath, std::vector<std::byte>& blob)
+		{
+			std::ifstream file(cachePath, std::ios::binary);
+			if (!file.is_open()) {
+				return false;
+			}
+
+			uint32_t magic = 0;
+			uint32_t version = 0;
+			uint64_t blobSize = 0;
+			file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+			file.read(reinterpret_cast<char*>(&version), sizeof(version));
+			file.read(reinterpret_cast<char*>(&blobSize), sizeof(blobSize));
+			if (!file.good() || magic != kMetadataMagic || version != kMetadataVersion) {
+				return false;
+			}
+			if (blobSize > static_cast<uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+				return false;
+			}
+			if (blobSize > static_cast<uint64_t>((std::numeric_limits<std::streamsize>::max)())) {
+				return false;
+			}
+
+			blob.resize(static_cast<std::size_t>(blobSize));
+			if (!blob.empty()) {
+				file.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+			}
+			return file.good();
 		}
 
 		template<typename T>
@@ -395,132 +445,11 @@ namespace CLodCache {
 			return file.good();
 		}
 
-		std::vector<std::byte> ToBytes(const pxr::VtArray<unsigned char>& data)
-		{
-			std::vector<std::byte> bytes(data.size());
-			for (size_t i = 0; i < data.size(); ++i) {
-				bytes[i] = static_cast<std::byte>(data[i]);
-			}
-			return bytes;
-		}
-
-		pxr::VtArray<unsigned char> ToVtUChar(const std::vector<std::byte>& bytes)
-		{
-			pxr::VtArray<unsigned char> out;
-			out.resize(bytes.size());
-			for (size_t i = 0; i < bytes.size(); ++i) {
-				out[i] = static_cast<unsigned char>(bytes[i]);
-			}
-			return out;
-		}
-
-		std::wstring BuildGroupPayloadFileName(const CacheKey& key, uint64_t buildConfigHash, uint32_t groupIndex)
-		{
-			size_t hashSeed = 0;
-			boost::hash_combine(hashSeed, key.sourceIdentifier);
-			boost::hash_combine(hashSeed, key.primPath);
-			boost::hash_combine(hashSeed, key.subsetName);
-			boost::hash_combine(hashSeed, buildConfigHash);
-			boost::hash_combine(hashSeed, groupIndex);
-
-			std::stringstream ss;
-			ss << "clod_" << std::hex << hashSeed << "_g" << std::dec << groupIndex << ".usdc";
-			return s2ws(ss.str());
-		}
-
-		std::string GroupPrimPathString(uint32_t groupIndex)
-		{
-			return std::string(kGroupsPrimPath) + "/g_" + std::to_string(groupIndex);
-		}
-
-		bool SaveGroupPayloadLayer(
-			const CacheKey& key,
-			uint64_t buildConfigHash,
-			uint32_t groupIndex,
-			const std::vector<std::byte>& vertexChunk,
-			const std::vector<std::byte>& skinningChunk,
-			const std::vector<uint32_t>& meshletVertexChunk,
-			const std::vector<uint32_t>& compressedPositionWordChunk,
-			const std::vector<uint32_t>& compressedNormalWordChunk,
-			const std::vector<uint32_t>& compressedMeshletVertexWordChunk,
-			const std::vector<meshopt_Meshlet>& meshletChunk,
-			const std::vector<uint8_t>& meshletTriangleChunk,
-			const std::vector<BoundingSphere>& meshletBoundsChunk)
-		{
-			const std::wstring groupFileName = BuildGroupPayloadFileName(key, buildConfigHash, groupIndex);
-			const std::wstring groupCachePath = GetCacheFilePathBySource(groupFileName, key.sourceIdentifier);
-
-			std::lock_guard<std::mutex> usdStageLock(GetUsdStageIoMutex());
-			auto groupStage = pxr::UsdStage::CreateNew(ws2s(groupCachePath), pxr::UsdStage::LoadNone);
-			if (!groupStage) {
-				return false;
-			}
-
-			auto groupRoot = groupStage->DefinePrim(pxr::SdfPath("/GroupPayload"), pxr::TfToken("Scope"));
-			if (!groupRoot) {
-				return false;
-			}
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupIndex"), pxr::SdfValueTypeNames->UInt, true)
-				.Set(groupIndex);
-			groupRoot.CreateAttribute(pxr::TfToken("groupVertexChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(vertexChunk));
-			groupRoot.CreateAttribute(pxr::TfToken("groupSkinningVertexChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(skinningChunk));
-
-			pxr::VtArray<uint32_t> meshletVertices;
-			meshletVertices.assign(meshletVertexChunk.begin(), meshletVertexChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletVertexChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(meshletVertices);
-
-			pxr::VtArray<uint32_t> compressedPositionWords;
-			compressedPositionWords.assign(compressedPositionWordChunk.begin(), compressedPositionWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedPositionWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedPositionWords);
-
-			pxr::VtArray<uint32_t> compressedNormalWords;
-			compressedNormalWords.assign(compressedNormalWordChunk.begin(), compressedNormalWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedNormalWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedNormalWords);
-
-			pxr::VtArray<uint32_t> compressedMeshletVertexWords;
-			compressedMeshletVertexWords.assign(compressedMeshletVertexWordChunk.begin(), compressedMeshletVertexWordChunk.end());
-			groupRoot.CreateAttribute(pxr::TfToken("groupCompressedMeshletVertexWordChunk"), pxr::SdfValueTypeNames->UIntArray, true)
-				.Set(compressedMeshletVertexWords);
-
-			std::vector<std::byte> meshletChunkBytes(meshletChunk.size() * sizeof(meshopt_Meshlet));
-			if (!meshletChunkBytes.empty()) {
-				std::memcpy(meshletChunkBytes.data(), meshletChunk.data(), meshletChunkBytes.size());
-			}
-
-			std::vector<std::byte> meshletTriangleChunkBytes(meshletTriangleChunk.size() * sizeof(uint8_t));
-			if (!meshletTriangleChunkBytes.empty()) {
-				std::memcpy(meshletTriangleChunkBytes.data(), meshletTriangleChunk.data(), meshletTriangleChunkBytes.size());
-			}
-
-			std::vector<std::byte> meshletBoundsChunkBytes(meshletBoundsChunk.size() * sizeof(BoundingSphere));
-			if (!meshletBoundsChunkBytes.empty()) {
-				std::memcpy(meshletBoundsChunkBytes.data(), meshletBoundsChunk.data(), meshletBoundsChunkBytes.size());
-			}
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletChunkBytes));
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletTriangleChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletTriangleChunkBytes));
-
-			groupRoot.CreateAttribute(pxr::TfToken("groupMeshletBoundsChunk"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(ToVtUChar(meshletBoundsChunkBytes));
-
-			return groupStage->GetRootLayer()->Save();
-		}
 	}
 
 	namespace {
 		bool SaveImpl(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 		{
-			std::lock_guard<std::mutex> usdStageLock(GetUsdStageIoMutex());
-
 			const std::wstring fileName = BuildCacheFileName(key, buildConfigHash);
 			const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
 			const std::wstring containerFileName = BuildGroupContainerFileName(key, buildConfigHash);
@@ -541,27 +470,6 @@ namespace CLodCache {
 				return false;
 			}
 
-			auto stage = pxr::UsdStage::CreateNew(ws2s(cachePath), pxr::UsdStage::LoadNone);
-			if (!stage) {
-				spdlog::warn("Failed to create CLod cache stage: {}", ws2s(cachePath));
-				return false;
-			}
-
-			auto prim = stage->DefinePrim(pxr::SdfPath(kRootPrimPath), pxr::TfToken("Scope"));
-			if (!prim) {
-				return false;
-			}
-
-			auto groupsPrim = stage->DefinePrim(pxr::SdfPath(kGroupsPrimPath), pxr::TfToken("Scope"));
-			if (!groupsPrim) {
-				return false;
-			}
-
-			prim.CreateAttribute(pxr::TfToken("clodSchemaVersion"), pxr::SdfValueTypeNames->Int, true)
-				.Set(static_cast<int>(kSchemaVersion));
-			prim.CreateAttribute(pxr::TfToken("clodBuildConfigHash"), pxr::SdfValueTypeNames->Int64, true)
-				.Set(static_cast<int64_t>(buildConfigHash));
-
 			ClusterLODCacheSource cacheSource = prebuiltData.cacheSource;
 			cacheSource.sourceIdentifier = key.sourceIdentifier;
 			cacheSource.primPath = key.primPath;
@@ -570,22 +478,8 @@ namespace CLodCache {
 			cacheSource.containerFileName = containerFileName;
 
 			auto blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
-			auto vtBlob = ToVtUChar(blob);
-			prim.CreateAttribute(pxr::TfToken("clodBlob"), pxr::SdfValueTypeNames->UCharArray, true)
-				.Set(vtBlob);
-
-			const size_t groupCount = prebuiltData.groups.size();
-			for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groupCount); ++groupIndex) {
-				const pxr::SdfPath groupPrimPath(GroupPrimPathString(groupIndex));
-				auto groupPrim = stage->DefinePrim(groupPrimPath, pxr::TfToken("Scope"));
-				if (!groupPrim) {
-					return false;
-				}
-				groupPrim.CreateAttribute(pxr::TfToken("groupIndex"), pxr::SdfValueTypeNames->UInt, true)
-					.Set(groupIndex);
-			}
-
-			if (!stage->GetRootLayer()->Save()) {
+			if (!WriteMetadataBlob(cachePath, blob)) {
+				spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(cachePath));
 				return false;
 			}
 
@@ -645,7 +539,7 @@ namespace CLodCache {
 		boost::hash_combine(hashSeed, buildConfigHash);
 
 		std::stringstream ss;
-		ss << "clod_" << std::hex << hashSeed << ".usdc";
+		ss << "clod_" << std::hex << hashSeed << ".clodmeta";
 		return s2ws(ss.str());
 	}
 
@@ -662,42 +556,9 @@ namespace CLodCache {
 			return std::nullopt;
 		}
 
-		std::lock_guard<std::mutex> usdStageLock(GetUsdStageIoMutex());
-		auto stage = pxr::UsdStage::Open(ws2s(cachePath), pxr::UsdStage::LoadNone);
-		if (!stage) {
-			spdlog::warn("CLod cache exists but failed to open: {}", ws2s(cachePath));
-			return std::nullopt;
-		}
-
-		pxr::UsdPrim root = stage->GetPrimAtPath(pxr::SdfPath(kRootPrimPath));
-		if (!root) {
-			return std::nullopt;
-		}
-
 		CacheData out;
-		int authoredSchema = 0;
-		if (!root.GetAttribute(pxr::TfToken("clodSchemaVersion")).Get(&authoredSchema)) {
-			return std::nullopt;
-		}
-		if (authoredSchema != static_cast<int>(kSchemaVersion)) {
-			return std::nullopt;
-		}
-
-		int64_t authoredBuildHash = 0;
-		if (!root.GetAttribute(pxr::TfToken("clodBuildConfigHash")).Get(&authoredBuildHash)) {
-			return std::nullopt;
-		}
-		if (static_cast<uint64_t>(authoredBuildHash) != expectedBuildConfigHash) {
-			return std::nullopt;
-		}
-
-		pxr::VtArray<unsigned char> blobData;
-		if (!root.GetAttribute(pxr::TfToken("clodBlob")).Get(&blobData)) {
-			return std::nullopt;
-		}
-
-		auto bytes = ToBytes(blobData);
-		if (!DeserializeMetadata(bytes, out)) {
+		std::vector<std::byte> bytes;
+		if (!ReadMetadataBlob(cachePath, bytes) || !DeserializeMetadata(bytes, out)) {
 			spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(cachePath));
 			return std::nullopt;
 		}

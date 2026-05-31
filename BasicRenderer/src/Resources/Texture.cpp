@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -62,6 +63,23 @@ const char* ToString(TextureLoadPathTelemetry path) {
 	default:
 		return "unknown";
 	}
+}
+
+bool IsTruthyEnvironmentFlag(const char* name) {
+	char* value = nullptr;
+	size_t len = 0;
+	if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+		return false;
+	}
+
+	const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+	free(value);
+	return enabled;
+}
+
+bool IsDirectStorageGpuTextureUploadDisabled() {
+	static const bool disabled = IsTruthyEnvironmentFlag("BASICRENDERER_DISABLE_DIRECTSTORAGE_TEXTURE_UPLOAD");
+	return disabled;
 }
 
 const char* ToString(TextureUploadPathTelemetry path) {
@@ -426,6 +444,7 @@ bool TryBuildConditionedCacheResidentUpload(
 	outDesc.hasRTV = allowRTV;
 	outDesc.hasUAV = allowUAV;
 	outDesc.generateMipMaps = false;
+	outDesc.initialLayout = rhi::ResourceLayout::Common;
 	outDesc.imageDimensions.reserve(residentMipCount);
 	for (uint32_t subresourceIndex = outClampedTopMip; subresourceIndex < header.mipLevels; ++subresourceIndex) {
 		const size_t mipWidth = (std::max)(size_t(1), static_cast<size_t>(header.baseWidth) >> subresourceIndex);
@@ -662,7 +681,9 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() || !DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty() ||
+		IsDirectStorageGpuTextureUploadDisabled() ||
+		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
 		return {};
 	}
 
@@ -706,6 +727,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	desc.hasRTV = allowRTV;
 	desc.hasUAV = allowUAV;
 	desc.generateMipMaps = false;
+	desc.initialLayout = rhi::ResourceLayout::Common;
 
 	const uint32_t fullMipCount = static_cast<uint32_t>((std::max)(size_t(1), metadata.mipLevels));
 	const uint32_t clampedTopMip = (std::min)(topMip, fullMipCount - 1u);
@@ -777,7 +799,9 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() || !DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty() ||
+		IsDirectStorageGpuTextureUploadDisabled() ||
+		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
 		return {};
 	}
 
@@ -819,7 +843,9 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() || !DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty() ||
+		IsDirectStorageGpuTextureUploadDisabled() ||
+		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
 		return {};
 	}
 
@@ -875,6 +901,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			desc.hasRTV = allowRTV;
 			desc.hasUAV = allowUAV;
 			desc.generateMipMaps = false;
+			desc.initialLayout = rhi::ResourceLayout::Common;
 
 			const uint32_t fullMipCount = static_cast<uint32_t>((std::max)(size_t(1), metadata.mipLevels));
 			const uint32_t clampedTopMip = (std::min)(topMip, fullMipCount - 1u);
@@ -979,7 +1006,9 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() || !DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty() ||
+		IsDirectStorageGpuTextureUploadDisabled() ||
+		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
 		return {};
 	}
 

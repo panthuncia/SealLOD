@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <codecvt>
+#include <cstdlib>
 #include <future>
 #include <functional>
 #include <filesystem>
@@ -343,6 +344,23 @@ namespace detail {
 
     constexpr bool kForceCpuTextureLoadPath = false;
 
+    bool IsTruthyEnvironmentFlag(const char* name) {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+            return false;
+        }
+
+        const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+        free(value);
+        return enabled;
+    }
+
+    bool IsDirectStorageGpuTextureUploadDisabled() {
+        static const bool disabled = IsTruthyEnvironmentFlag("BASICRENDERER_DISABLE_DIRECTSTORAGE_TEXTURE_UPLOAD");
+        return disabled;
+    }
+
     struct ReadFileBytesResult {
         std::vector<std::byte> data;
         bool usedDirectStorage = false;
@@ -397,6 +415,13 @@ namespace detail {
             outFailureReason->clear();
         }
 
+        if (IsDirectStorageGpuTextureUploadDisabled()) {
+            if (outFailureReason) {
+                *outFailureReason = "DirectStorage GPU texture upload disabled";
+            }
+            return {};
+        }
+
         if (!DirectStorageManager::GetInstance().CanServiceQueue(br::DirectStorageQueueKind::Gpu)) {
             if (outFailureReason) {
                 *outFailureReason = "DirectStorage GPU queue unavailable";
@@ -421,6 +446,7 @@ namespace detail {
         desc.hasRTV = allowRTV;
         desc.hasUAV = allowUAV;
         desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
 
         if (header.baseWidth == 0 || header.baseHeight == 0 || header.mipLevels == 0 ||
             header.subresourceCount == 0 || header.totalArraySlices == 0 ||
@@ -515,6 +541,10 @@ namespace detail {
         bool allowRTV,
         bool allowUAV)
     {
+        if (IsDirectStorageGpuTextureUploadDisabled()) {
+            return {};
+        }
+
         if (!DirectStorageManager::GetInstance().CanServiceQueue(br::DirectStorageQueueKind::Gpu)) {
             return {};
         }
@@ -564,6 +594,7 @@ namespace detail {
         desc.hasRTV = allowRTV;
         desc.hasUAV = allowUAV;
         desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
 
         const uint32_t arraySlices = static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
         const uint32_t mipLevels = static_cast<uint32_t>((std::max)(size_t(1), metadata.mipLevels));

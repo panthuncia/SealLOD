@@ -35,9 +35,28 @@ struct CachedAssetLoadResult {
 	std::string contentHash;
 };
 
+struct PreprocessResult {
+	bool success = false;
+	bool skipped = false;
+	bool cacheHit = false;
+	bool payloadCacheHit = false;
+	bool assetCacheWritten = false;
+	std::filesystem::path assetCachePath;
+	std::string sourceIdentifier;
+	std::string contentHash;
+	std::string failureReason;
+	std::uint64_t submeshes = 0;
+	std::uint64_t clodCacheHits = 0;
+	std::uint64_t clodCacheMisses = 0;
+	std::uint64_t clodBuildMs = 0;
+	std::uint64_t clodSaveMs = 0;
+	std::uint64_t clodReloadMs = 0;
+};
+
 std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
+PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::shared_ptr<Scene> LoadModel(std::string filePath, const USDLoader::ImportSettings& settings = {});
 

@@ -27,6 +27,7 @@
 
 #include "Import/BRNiflyClient.h"
 #include "Import/CLodCache.h"
+#include "Import/USDGeometryExtractor.h"
 #include "Animation/Skeleton.h"
 #include "Materials/Material.h"
 #include "Mesh/Mesh.h"
@@ -440,6 +441,7 @@ std::optional<AssetCacheWriteResult> WriteAssetCache(
             normalizedCacheKey,
             cachePath.string(),
             reason.empty() ? "asset cache validation failed" : reason);
+        existingStage.Reset();
     }
 
     SdfLayerRefPtr sourceLayer = SdfLayer::CreateAnonymous("brnifly_asset_cache_source.usda");
@@ -1359,6 +1361,46 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         stats->usdLoadMs += elapsed;
     }
     return payload;
+}
+
+PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
+{
+    PreprocessResult result{};
+    LoadTimingStats localStats{};
+    LoadTimingStats* timing = stats ? stats : std::addressof(localStats);
+
+    const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey.empty() ? filePath : cacheKey);
+    if (normalizedCacheKey.empty()) {
+        result.failureReason = "empty cache key";
+        return result;
+    }
+    if (IsKnownNonRenderableNif(normalizedCacheKey)) {
+        result.skipped = true;
+        result.success = true;
+        result.failureReason = "known non-renderable NIF";
+        return result;
+    }
+
+    auto payload = TryLoadCachedImportedAsset(normalizedCacheKey, settings, timing);
+    if (!payload) {
+        payload = LoadImportedAssetWithCacheKey(std::move(filePath), normalizedCacheKey, settings, timing);
+    }
+
+    result.cacheHit = timing->cacheHit;
+    result.payloadCacheHit = timing->payloadCacheHit;
+    result.assetCacheWritten = timing->assetCacheWritten;
+    result.assetCachePath = timing->cachePath;
+    result.sourceIdentifier = timing->sourceIdentifier;
+    result.contentHash = timing->contentHash;
+
+    if (!payload) {
+        result.failureReason = "NIF import/cache preprocessing failed";
+        return result;
+    }
+
+    result.submeshes = payload->meshes.size();
+    result.success = true;
+    return result;
 }
 
 std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)

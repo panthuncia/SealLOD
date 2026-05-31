@@ -76,6 +76,18 @@ bool IsDirectStorageDisabledByEnvironment() {
     return disabled;
 }
 
+bool IsDirectStorageBreakOnErrorEnabledByEnvironment() {
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "BASICRENDERER_DIRECTSTORAGE_BREAK_ON_ERROR") != 0 || value == nullptr) {
+        return false;
+    }
+
+    const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+    free(value);
+    return enabled;
+}
+
 constexpr uint32_t kDefaultDirectStorageStagingBufferSizeBytes = 128u * 1024u * 1024u;
 
 }
@@ -240,7 +252,11 @@ void DirectStorageManager::Initialize() {
     }
 
 #if BUILD_TYPE == BUILD_TYPE_DEBUG || BUILD_TYPE == BUILD_TYPE_RELEASE_DEBUG
-    impl->factory->SetDebugFlags(DSTORAGE_DEBUG_SHOW_ERRORS | DSTORAGE_DEBUG_BREAK_ON_ERROR);
+    UINT32 debugFlags = DSTORAGE_DEBUG_SHOW_ERRORS;
+    if (IsDirectStorageBreakOnErrorEnabledByEnvironment()) {
+        debugFlags |= DSTORAGE_DEBUG_BREAK_ON_ERROR;
+    }
+    impl->factory->SetDebugFlags(debugFlags);
 #endif
 
     m_stagingBufferSizeBytes = kDefaultDirectStorageStagingBufferSizeBytes;

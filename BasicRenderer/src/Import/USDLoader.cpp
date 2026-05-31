@@ -12,6 +12,8 @@
 #include <unordered_set>
 #include <cmath>
 
+#include <nlohmann/json.hpp>
+
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/defaultResolver.h>
@@ -75,6 +77,7 @@
 namespace USDLoader {
 
 	using namespace pxr;
+	using json = nlohmann::json;
 
 	namespace {
 
@@ -804,6 +807,84 @@ namespace USDLoader {
 		result.geometricDisplacementMax = std::max(result.geometricDisplacementMax, displacementScale);
 	}
 
+	bool TryGetCustomString(const UsdPrim& prim, const TfToken& key, std::string& out)
+	{
+		const VtValue value = prim.GetCustomDataByKey(key);
+		if (!value.IsHolding<std::string>()) {
+			return false;
+		}
+		out = value.UncheckedGet<std::string>();
+		return !out.empty();
+	}
+
+	void ApplyBrniflyMaterialMetadata(MaterialDescription& result, const json& metadata)
+	{
+		const json* shader = nullptr;
+		const json* alpha = nullptr;
+		if (metadata.contains("shader") && metadata["shader"].is_object()) {
+			shader = &metadata["shader"];
+		} else if (metadata.contains("shaderFlags2") || metadata.contains("lightingShader")) {
+			shader = &metadata;
+		}
+		if (metadata.contains("alpha") && metadata["alpha"].is_object()) {
+			alpha = &metadata["alpha"];
+		} else if (metadata.contains("flags") && metadata.contains("threshold")) {
+			alpha = &metadata;
+		}
+
+		if (shader) {
+			const uint32_t shaderFlags2 = shader->value("shaderFlags2", 0u);
+			if ((shaderFlags2 & (1u << 4)) != 0u) {
+				result.forceDoubleSided = true;
+			}
+			if (shader->contains("lightingShader") && (*shader)["lightingShader"].is_object()) {
+				const auto& lighting = (*shader)["lightingShader"];
+				if (lighting.contains("alpha") && lighting["alpha"].is_number()) {
+					const float alphaValue = lighting["alpha"].get<float>();
+					result.opacity.factor = alphaValue;
+					if (alphaValue < 1.0f) {
+						result.blendState = BlendState::BLEND_STATE_BLEND;
+					}
+				}
+			}
+		}
+
+		if (alpha) {
+			const uint32_t alphaFlags = alpha->value("flags", 0u);
+			const bool alphaBlend = (alphaFlags & 0x0001u) != 0u;
+			const bool alphaTest = (alphaFlags & 0x0200u) != 0u;
+			if (alphaTest) {
+				result.blendState = BlendState::BLEND_STATE_MASK;
+				result.alphaCutoff = std::clamp(alpha->value("threshold", 128u) / 255.0f, 0.0f, 1.0f);
+			} else if (alphaBlend) {
+				result.blendState = BlendState::BLEND_STATE_BLEND;
+			}
+		}
+	}
+
+	void ApplyBrniflyMaterialMetadata(MaterialDescription& result, const UsdPrim& prim)
+	{
+		auto applyCustomJson = [&](const TfToken& key) {
+			std::string metadataJson;
+			if (!TryGetCustomString(prim, key, metadataJson)) {
+				return;
+			}
+			try {
+				ApplyBrniflyMaterialMetadata(result, json::parse(metadataJson));
+			}
+			catch (const std::exception& ex) {
+				spdlog::warn(
+					"Failed to parse BRNifly material metadata '{}' on '{}': {}",
+					key.GetString(),
+					prim.GetPath().GetString(),
+					ex.what());
+			}
+		};
+		applyCustomJson(TfToken("brnifly:material"));
+		applyCustomJson(TfToken("brnifly:shader"));
+		applyCustomJson(TfToken("brnifly:alphaProperty"));
+	}
+
 	TextureSemantic GetTextureSemanticForUsdInput(const TfToken& name)
 	{
 		if (name == TfToken("diffuseColor") || name == TfToken("baseColor") || name == TfToken("coatColor") || name == TfToken("fuzzColor")) {
@@ -1212,6 +1293,8 @@ namespace USDLoader {
 			}
 		});
 
+		ApplyBrniflyMaterialMetadata(result, material.GetPrim());
+
         spdlog::info(
             "USD material '{}' displacement: enabled={}, hasHeightMap={}, scale={}, range=[{}, {}]",
             result.name,
@@ -1274,7 +1357,10 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.openPBRTextures.fuzzColor.uvSetIndex) + "|" +
 			std::to_string(resolvedDesc.openPBRTextures.fuzzWeight.uvSetIndex) + "|" +
 			std::to_string(resolvedDesc.openPBRTextures.fuzzRoughness.uvSetIndex) + "|" +
-            std::to_string(resolvedDesc.forceDoubleSided ? 1 : 0);
+            std::to_string(resolvedDesc.forceDoubleSided ? 1 : 0) + "|" +
+			std::to_string(static_cast<int>(resolvedDesc.blendState)) + "|" +
+			std::to_string(resolvedDesc.alphaCutoff) + "|" +
+			std::to_string(resolvedDesc.opacity.factor.Get());
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {
@@ -1445,7 +1531,11 @@ namespace USDLoader {
 		return matrices;
 	}
 
-    std::shared_ptr<Material> ResolveMaterialForMesh(const UsdShadeMaterial& material, const std::vector<MeshUvSetData>& uvSets, bool forceDoubleSided = false) {
+    std::shared_ptr<Material> ResolveMaterialForMesh(
+		const UsdShadeMaterial& material,
+		const std::vector<MeshUvSetData>& uvSets,
+		bool forceDoubleSided = false,
+		const UsdPrim& meshPrim = UsdPrim()) {
         if (!material) {
             return ResolveDefaultUsdMaterial(forceDoubleSided);
         }
@@ -1471,7 +1561,10 @@ namespace USDLoader {
 		resolvedDesc.openPBRTextures.fuzzColor.uvSetIndex = ResolveUvSetIndexForBinding(resolvedDesc.openPBRTextures.fuzzColor, uvSets, materialPath, "fuzzColor");
 		resolvedDesc.openPBRTextures.fuzzWeight.uvSetIndex = ResolveUvSetIndexForBinding(resolvedDesc.openPBRTextures.fuzzWeight, uvSets, materialPath, "fuzzWeight");
 		resolvedDesc.openPBRTextures.fuzzRoughness.uvSetIndex = ResolveUvSetIndexForBinding(resolvedDesc.openPBRTextures.fuzzRoughness, uvSets, materialPath, "fuzzRoughness");
-        resolvedDesc.forceDoubleSided = forceDoubleSided;
+        if (meshPrim) {
+            ApplyBrniflyMaterialMetadata(resolvedDesc, meshPrim);
+        }
+        resolvedDesc.forceDoubleSided = resolvedDesc.forceDoubleSided || forceDoubleSided;
 
         const std::string cacheKey = BuildResolvedMaterialCacheKey(materialPath, resolvedDesc);
         auto resolvedIt = loadingCache.resolvedMaterialCache.find(cacheKey);
@@ -1686,7 +1779,8 @@ namespace USDLoader {
 			auto material = ResolveMaterialForMesh(
 				subset.material,
 				result.ingest.GetUvSets(),
-				record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview);
+				record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
+				mesh.GetPrim());
 			auto mPtr = result.ingest.Build(material, std::move(result.prebuiltData), MeshCpuDataPolicy::ReleaseAfterUpload);
 			if (mPtr != nullptr) {
 				auto jointNames = GetBrNiflyJointNames(mesh.GetPrim());
