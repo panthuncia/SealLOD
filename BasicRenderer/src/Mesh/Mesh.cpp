@@ -446,7 +446,7 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 			}
 		}
 		if (voxelGroupCount != 0u) {
-			spdlog::info(
+			spdlog::debug(
 				"ClusterLOD runtime adoption: groups={} voxel_groups={} nodes={} cache_hash=0x{:016X}",
 				m_clodGroups.size(),
 				voxelGroupCount,

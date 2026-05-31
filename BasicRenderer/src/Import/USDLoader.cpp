@@ -1384,6 +1384,11 @@ namespace USDLoader {
 		return false;
 	}
 
+	bool IsBrNiflyCollisionMesh(const UsdGeomMesh& mesh)
+	{
+		return mesh && !mesh.GetPrim().GetCustomDataByKey(TfToken("brnifly:collision")).IsEmpty();
+	}
+
 	std::vector<std::string> ParseJsonStringArray(std::string_view text)
 	{
 		std::vector<std::string> values;
@@ -1614,6 +1619,11 @@ namespace USDLoader {
 
 			UsdGeomMesh mesh(prim);
 			if (mesh) {
+				if (IsBrNiflyCollisionMesh(mesh)) {
+					spdlog::info("Skipping BRNifly collision mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+					return;
+				}
+
 				if (IsUnsupportedBrNiflySkinnedMesh(mesh)) {
 					spdlog::info(
 						"Skipping BRNifly skinned mesh '{}' until NIF skeleton pose updates are supported.",
@@ -2044,6 +2054,11 @@ namespace USDLoader {
 		UsdGeomMesh mesh(prim);
 		if (!mesh) {
 			return; // Not a mesh prim
+		}
+
+		if (IsBrNiflyCollisionMesh(mesh)) {
+			spdlog::info("Skipping BRNifly collision mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+			return;
 		}
 
 		if (IsUnsupportedBrNiflySkinnedMesh(mesh)) {

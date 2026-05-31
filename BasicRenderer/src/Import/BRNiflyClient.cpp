@@ -1,12 +1,17 @@
 #include "Import/BRNiflyClient.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -21,6 +26,11 @@ namespace {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin)
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count());
+}
 
 std::string QuoteArgument(const std::string& arg)
 {
@@ -77,6 +87,15 @@ struct ProcessResult {
     std::string stdoutText;
     std::string stderrText;
 };
+
+void ReadPipeToString(HANDLE readHandle, std::string& outText)
+{
+    char buffer[4096];
+    DWORD bytesRead = 0;
+    while (ReadFile(readHandle, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
+        outText.append(buffer, buffer + bytesRead);
+    }
+}
 
 std::optional<ProcessResult> RunProcessCapture(
     const std::string& executable,
@@ -150,12 +169,18 @@ std::optional<ProcessResult> RunProcessCapture(
     ProcessResult result{};
     std::string stdoutText;
     std::string stderrText;
-    char buffer[4096];
-    DWORD bytesRead = 0;
+    std::thread stdoutReader(ReadPipeToString, stdoutRead, std::ref(stdoutText));
+    std::thread stderrReader(ReadPipeToString, stderrRead, std::ref(stderrText));
 
     const DWORD waitResult = WaitForSingleObject(processInfo.hProcess, static_cast<DWORD>(timeoutMilliseconds));
     if (waitResult == WAIT_TIMEOUT) {
         TerminateProcess(processInfo.hProcess, 0xFFFF);
+        if (stdoutReader.joinable()) {
+            stdoutReader.join();
+        }
+        if (stderrReader.joinable()) {
+            stderrReader.join();
+        }
         if (errorMessage) {
             *errorMessage = "BRNifly timed out.";
         }
@@ -166,11 +191,11 @@ std::optional<ProcessResult> RunProcessCapture(
         return std::nullopt;
     }
 
-    while (ReadFile(stdoutRead, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
-        stdoutText.append(buffer, buffer + bytesRead);
+    if (stdoutReader.joinable()) {
+        stdoutReader.join();
     }
-    while (ReadFile(stderrRead, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0) {
-        stderrText.append(buffer, buffer + bytesRead);
+    if (stderrReader.joinable()) {
+        stderrReader.join();
     }
 
     GetExitCodeProcess(processInfo.hProcess, &result.exitCode);
@@ -268,6 +293,41 @@ std::vector<Diagnostic> JsonDiagnostics(const json& value)
     return diagnostics;
 }
 
+std::string FormatResponseError(const json& response)
+{
+    std::string message = response.value("message", "BRNifly conversion failed.");
+    auto diagnostics = JsonDiagnostics(response["diagnostics"]);
+    bool appendedNonInfoDiagnostic = false;
+    for (const auto& diagnostic : diagnostics) {
+        if (diagnostic.message.empty() || diagnostic.level == "info") {
+            continue;
+        }
+        if (!message.empty()) {
+            message += " ";
+        }
+        message += "[";
+        message += diagnostic.level.empty() ? "info" : diagnostic.level;
+        message += "] ";
+        message += diagnostic.message;
+        appendedNonInfoDiagnostic = true;
+    }
+    if (!appendedNonInfoDiagnostic) {
+        for (const auto& diagnostic : diagnostics) {
+            if (diagnostic.message.empty()) {
+                continue;
+            }
+            if (!message.empty()) {
+                message += " ";
+            }
+            message += "[";
+            message += diagnostic.level.empty() ? "info" : diagnostic.level;
+            message += "] ";
+            message += diagnostic.message;
+        }
+    }
+    return message.empty() ? std::string("BRNifly conversion failed.") : message;
+}
+
 std::optional<json> RunJsonCommand(
     const ClientOptions& options,
     const std::vector<std::string>& arguments,
@@ -321,8 +381,12 @@ std::optional<json> RunJsonFileCommand(
     std::string* executablePath,
     std::string* errorMessage)
 {
+    static std::atomic<std::uint64_t> responseCounter{ 0 };
     const fs::path responsePath = fs::temp_directory_path() /
-        ("brnifly_response_" + std::to_string(reinterpret_cast<std::uintptr_t>(errorMessage)) + ".json");
+        ("brnifly_response_" +
+            std::to_string(GetCurrentProcessId()) + "_" +
+            std::to_string(GetCurrentThreadId()) + "_" +
+            std::to_string(responseCounter.fetch_add(1, std::memory_order_relaxed)) + ".json");
 
     const std::string resolvedNifPath = ResolveInputFilePath(nifPath);
     auto envelope = RunJsonCommand(options, { "--convert-usd-json-file", resolvedNifPath, responsePath.string() }, executablePath, errorMessage);
@@ -408,9 +472,51 @@ std::optional<ServiceInfo> DescribeServices(const ClientOptions& options, std::s
     return info;
 }
 
-std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const ClientOptions& options, std::string* errorMessage)
+std::optional<ServiceInfo> CachedDescribeServices(const ClientOptions& options, std::string* errorMessage, TimingStats* timingStats)
 {
-    auto services = DescribeServices(options, errorMessage);
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, ServiceInfo> servicesByExecutable;
+
+    std::string executablePath;
+    auto executable = DiscoverExecutable(options);
+    if (!executable) {
+        if (errorMessage) {
+            *errorMessage = "BRNifly executable was not found. Set BRNIFLY_EXE or place BRNifly.exe next to BasicRenderer/CLodCacheTool.";
+        }
+        return std::nullopt;
+    }
+    executablePath = *executable;
+
+    {
+        std::scoped_lock lock(cacheMutex);
+        auto it = servicesByExecutable.find(executablePath);
+        if (it != servicesByExecutable.end()) {
+            return it->second;
+        }
+    }
+
+    ClientOptions resolvedOptions = options;
+    resolvedOptions.executablePath = executablePath;
+    const auto begin = std::chrono::steady_clock::now();
+    auto services = DescribeServices(resolvedOptions, errorMessage);
+    if (timingStats) {
+        timingStats->describeServicesMs += ElapsedMs(begin);
+    }
+    if (!services) {
+        return std::nullopt;
+    }
+
+    {
+        std::scoped_lock lock(cacheMutex);
+        auto [it, inserted] = servicesByExecutable.emplace(executablePath, *services);
+        (void)inserted;
+        return it->second;
+    }
+}
+
+std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const ClientOptions& options, std::string* errorMessage, TimingStats* timingStats)
+{
+    auto services = CachedDescribeServices(options, errorMessage, timingStats);
     if (!services) {
         return std::nullopt;
     }
@@ -424,14 +530,18 @@ std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const
     }
 
     std::string executablePath;
+    const auto convertBegin = std::chrono::steady_clock::now();
     auto response = RunJsonFileCommand(options, nifPath, &executablePath, errorMessage);
+    if (timingStats) {
+        timingStats->convertProcessMs += ElapsedMs(convertBegin);
+    }
     if (!response) {
         return std::nullopt;
     }
 
     if (response->value("status", "") != "ok") {
         if (errorMessage) {
-            *errorMessage = response->value("message", "BRNifly conversion failed.");
+            *errorMessage = FormatResponseError(*response);
         }
         return std::nullopt;
     }

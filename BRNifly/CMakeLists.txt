@@ -29,6 +29,9 @@ target_link_libraries(BRNifly PRIVATE
     vt
     arch
 )
+if(WIN32)
+    target_link_libraries(BRNifly PRIVATE DbgHelp)
+endif()
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 if(DEFINED BASICRENDERER_USD_ROOT)
@@ -42,6 +45,7 @@ target_include_directories(BRNifly BEFORE PRIVATE
 
 if (MSVC)
     target_compile_options(BRNifly PRIVATE
+        /Zi
         /Zc:preprocessor
         /EHsc
         /bigobj
@@ -51,6 +55,7 @@ if (MSVC)
         /wd4061 /wd4623 /wd4710 /wd4324 /wd5267
         /wd5045
     )
+    target_link_options(BRNifly PRIVATE /DEBUG:FULL)
     target_compile_options(BRNifly PRIVATE /external:anglebrackets /external:W0)
 endif()
 

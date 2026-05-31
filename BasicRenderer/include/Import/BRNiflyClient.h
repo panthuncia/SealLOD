@@ -36,8 +36,13 @@ struct ClientOptions {
     int timeoutMilliseconds = 120000;
 };
 
+struct TimingStats {
+    std::uint64_t describeServicesMs = 0;
+    std::uint64_t convertProcessMs = 0;
+};
+
 std::optional<std::string> DiscoverExecutable(const ClientOptions& options = {});
 std::optional<ServiceInfo> DescribeServices(const ClientOptions& options = {}, std::string* errorMessage = nullptr);
-std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const ClientOptions& options = {}, std::string* errorMessage = nullptr);
+std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const ClientOptions& options = {}, std::string* errorMessage = nullptr, TimingStats* timingStats = nullptr);
 
 } // namespace BRNiflyClient

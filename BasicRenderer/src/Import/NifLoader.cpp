@@ -106,11 +106,17 @@ bool IsKnownNonRenderableNif(const std::string& normalizedCacheKey)
 {
     fs::path path(s2ws(normalizedCacheKey));
     const std::string stem = ws2s(path.stem().wstring());
+    const bool isCameraPath = normalizedCacheKey.starts_with("meshes\\cameras\\");
+    const bool isEditorOrCollisionHelper =
+        stem.find("trigger") != std::string::npos ||
+        stem.find("extracollision") != std::string::npos;
     return stem == "skeleton" ||
         stem == "skeleton_female" ||
         stem == "skeletonbeast" ||
         stem == "skeletonbeast_female" ||
-        stem == "camerashake";
+        stem == "camerashake" ||
+        isCameraPath ||
+        isEditorOrCollisionHelper;
 }
 
 std::string MakeStableSourceIdentifier(const std::string& normalizedCacheKey, const std::string& contentHash)
@@ -176,6 +182,8 @@ fs::path AssetManifestPath()
 {
     return AssetPathIndexRoot() / "manifest.tsv";
 }
+
+constexpr std::uint32_t kPayloadCacheVersion = 3u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -665,7 +673,7 @@ bool WritePayloadCache(
     }
 
     const std::uint32_t magic = 0x50524153u; // SARP
-    const std::uint32_t version = 2u;
+    const std::uint32_t version = kPayloadCacheVersion;
     writer.Pod(magic);
     writer.Pod(version);
     writer.String(normalizedCacheKey);
@@ -752,7 +760,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     std::string filePathHash;
     std::string fileContentHash;
     if (!reader.Pod(magic) || !reader.Pod(version) ||
-        magic != 0x50524153u || version != 2u ||
+        magic != 0x50524153u || version != kPayloadCacheVersion ||
         !reader.String(fileKey) || !reader.String(filePathHash) || !reader.String(fileContentHash) ||
         fileKey != normalizedCacheKey || filePathHash != pathHash || fileContentHash != contentHash) {
         return std::nullopt;
@@ -904,7 +912,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     auto candidates = FindCachedAssets(pathHash);
     if (candidates.empty()) {
-        spdlog::info("nif_meta_cache=miss game='{}' path_hash='{}' reason='no nif metadata found'", normalizedCacheKey, pathHash);
+        spdlog::debug("nif_meta_cache=miss game='{}' path_hash='{}' reason='no nif metadata found'", normalizedCacheKey, pathHash);
         if (stats) {
             stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
         }
@@ -915,7 +923,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
 
         if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash)) {
-            spdlog::info(
+            spdlog::debug(
                 "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
                 PayloadCachePathForAssetCache(cachePath).string(),
@@ -949,12 +957,23 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
 
     std::string errorMessage;
     const auto brniflyBegin = std::chrono::steady_clock::now();
-    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage);
+    BRNiflyClient::TimingStats brniflyTiming{};
+    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
     if (stats) {
         stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
+        stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
+        stats->brniflyConvertMs += brniflyTiming.convertProcessMs;
     }
     if (!package) {
-        spdlog::error("NIF import failed for '{}': {}", filePath, errorMessage);
+        if (stats) {
+            stats->importFailureReason = errorMessage;
+        }
+        if (errorMessage.find("No USD-representable data was emitted from the NIF") != std::string::npos) {
+            spdlog::info("NIF import skipped for '{}': {}", filePath, errorMessage);
+        }
+        else {
+            spdlog::error("NIF import failed for '{}': {}", filePath, errorMessage);
+        }
         return std::nullopt;
     }
 
@@ -1040,7 +1059,14 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     result.contentHash = timing->contentHash;
 
     if (!payload) {
-        result.failureReason = "NIF import/cache preprocessing failed";
+        result.failureReason = timing->importFailureReason.empty() ?
+            "NIF import/cache preprocessing failed" :
+            timing->importFailureReason;
+        if (result.failureReason.find("No USD-representable data was emitted from the NIF") != std::string::npos) {
+            result.failureReason = "no renderable geometry: " + result.failureReason;
+            result.skipped = true;
+            result.success = true;
+        }
         return result;
     }
 
@@ -1059,9 +1085,12 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
 
     std::string errorMessage;
     const auto brniflyBegin = std::chrono::steady_clock::now();
-    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage);
+    BRNiflyClient::TimingStats brniflyTiming{};
+    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
     if (stats) {
         stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
+        stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
+        stats->brniflyConvertMs += brniflyTiming.convertProcessMs;
     }
     if (!package) {
         spdlog::error("NIF import failed for '{}': {}", filePath, errorMessage);

@@ -1,11 +1,15 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <cstdlib>
+#include <csignal>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -13,7 +17,9 @@
 #include <set>
 #include <span>
 #include <sstream>
+#include <stacktrace>
 #include <string>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
 
@@ -42,6 +48,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <DbgHelp.h>
 #endif
 
 using json = nlohmann::json;
@@ -49,6 +56,177 @@ namespace fs = std::filesystem;
 using namespace pxr;
 
 namespace {
+
+#ifdef _WIN32
+namespace CrashLog {
+thread_local std::string t_action;
+thread_local std::string t_inputPath;
+
+struct Context {
+    std::string action;
+    std::string inputPath;
+};
+
+void SetContext(std::string action, std::string inputPath = {})
+{
+    t_action = std::move(action);
+    t_inputPath = std::move(inputPath);
+}
+
+Context SnapshotContext()
+{
+    return { t_action, t_inputPath };
+}
+
+fs::path MakeCrashPath(std::string_view extension)
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    (void)localtime_s(std::addressof(localTime), std::addressof(time));
+
+    std::ostringstream name;
+    name << "BRNifly-"
+         << std::put_time(std::addressof(localTime), "%Y%m%d-%H%M%S")
+         << "-pid" << GetCurrentProcessId()
+         << extension;
+
+    std::error_code ec;
+    fs::create_directories("crashes", ec);
+    return fs::current_path() / "crashes" / name.str();
+}
+
+std::string StacktraceString()
+{
+#if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
+    try {
+        std::ostringstream output;
+        output << std::stacktrace::current();
+        return output.str();
+    } catch (...) {
+        return "(stacktrace capture failed)";
+    }
+#else
+    return "(no <stacktrace> support in this build)";
+#endif
+}
+
+fs::path WriteMiniDump(EXCEPTION_POINTERS* exceptionPointers)
+{
+    const auto dumpPath = MakeCrashPath(".dmp");
+    const auto file = CreateFileW(
+        dumpPath.wstring().c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+
+    MINIDUMP_EXCEPTION_INFORMATION exceptionInfo{};
+    exceptionInfo.ThreadId = GetCurrentThreadId();
+    exceptionInfo.ExceptionPointers = exceptionPointers;
+    exceptionInfo.ClientPointers = FALSE;
+
+    const auto dumpType = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithIndirectlyReferencedMemory |
+        MiniDumpScanMemory |
+        MiniDumpWithThreadInfo |
+        MiniDumpWithUnloadedModules);
+
+    const BOOL ok = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        file,
+        dumpType,
+        exceptionPointers ? std::addressof(exceptionInfo) : nullptr,
+        nullptr,
+        nullptr);
+    CloseHandle(file);
+
+    return ok ? dumpPath : fs::path{};
+}
+
+void WriteCrashTextReport(const char* title, DWORD exceptionCode, void* exceptionAddress, const fs::path& minidumpPath)
+{
+    const auto reportPath = MakeCrashPath(".txt");
+    std::ofstream report(reportPath, std::ios::trunc);
+    if (!report) {
+        return;
+    }
+
+    const auto context = SnapshotContext();
+    report << title << "\n";
+    report << "exception_code=0x" << std::hex << std::uppercase << exceptionCode << std::dec << "\n";
+    report << "exception_address=" << exceptionAddress << "\n";
+    report << "minidump='" << minidumpPath.string() << "'\n";
+    report << "action='" << context.action << "'\n";
+    report << "input_path='" << context.inputPath << "'\n\n";
+    report << "Stacktrace:\n" << StacktraceString() << "\n";
+}
+
+LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS* exceptionPointers)
+{
+    const auto exceptionRecord = exceptionPointers ? exceptionPointers->ExceptionRecord : nullptr;
+    const auto code = exceptionRecord ? exceptionRecord->ExceptionCode : 0;
+    void* const address = exceptionRecord ? exceptionRecord->ExceptionAddress : nullptr;
+    const auto context = SnapshotContext();
+    const auto dumpPath = WriteMiniDump(exceptionPointers);
+
+    try {
+        std::cerr << "BRNifly crashed: exception=0x"
+                  << std::hex << std::uppercase << code << std::dec
+                  << " address=" << address
+                  << " action='" << context.action
+                  << "' input='" << context.inputPath
+                  << "' dump='" << (dumpPath.empty() ? std::string("(dump failed)") : dumpPath.string())
+                  << "'\n";
+    } catch (...) {}
+
+    WriteCrashTextReport("BRNifly unhandled exception", code, address, dumpPath);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+[[noreturn]] void TerminateHandler() noexcept
+{
+    try {
+        if (auto exception = std::current_exception()) {
+            try {
+                std::rethrow_exception(exception);
+            } catch (const std::exception& e) {
+                std::cerr << "BRNifly terminated by uncaught exception: " << typeid(e).name() << " what(): " << e.what() << "\n";
+            } catch (...) {
+                std::cerr << "BRNifly terminated by uncaught non-std exception\n";
+            }
+        } else {
+            std::cerr << "BRNifly terminated without an active exception\n";
+        }
+
+        const auto context = SnapshotContext();
+        const auto dumpPath = WriteMiniDump(nullptr);
+        std::cerr << "Terminate context: action='" << context.action
+                  << "' input='" << context.inputPath
+                  << "' dump='" << (dumpPath.empty() ? std::string("(dump failed)") : dumpPath.string())
+                  << "'\n";
+        WriteCrashTextReport("BRNifly terminate", 0, nullptr, dumpPath);
+    } catch (...) {}
+
+    std::_Exit(EXIT_FAILURE);
+}
+
+void Install()
+{
+    SetUnhandledExceptionFilter(UnhandledExceptionFilter);
+    std::set_terminate(TerminateHandler);
+    std::signal(SIGABRT, [](int) {
+        TerminateHandler();
+    });
+}
+}
+#endif
 
 constexpr std::string_view kUsdContentIdentityVersion = "brnifly-usd-content-v8";
 
@@ -275,8 +453,7 @@ std::vector<std::string> ServiceList()
         "nif.stream.materials",
         "nif.stream.skeleton",
         "nif.stream.animation",
-        "nif.stream.morphs",
-        "nif.stream.collision"
+        "nif.stream.morphs"
     };
 }
 
@@ -1828,7 +2005,11 @@ std::optional<std::string> ConvertShapesToUsd(
     // Keep generated USD independent from the absolute path BRNifly was handed.
     // The renderer cache is keyed by the game path; baking MO2/temp/loose-file
     // paths into the layer makes one asset produce multiple content hashes.
-    root.GetPrim().SetCustomDataByKey(TfToken("brnifly:sourcePath"), VtValue(nifPath.filename().string()));
+    std::string sourceFileName = nifPath.filename().string();
+    std::transform(sourceFileName.begin(), sourceFileName.end(), sourceFileName.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    root.GetPrim().SetCustomDataByKey(TfToken("brnifly:sourcePath"), VtValue(sourceFileName));
     root.GetPrim().SetCustomDataByKey(TfToken("brnifly:gameName"), VtValue(gameName));
     root.GetPrim().SetCustomDataByKey(TfToken("brnifly:unsupportedDataPolicy"), VtValue(std::string("preserve-as-usd-custom-data")));
     if (!rootExtraData.empty()) {
@@ -2032,7 +2213,7 @@ std::optional<std::string> ConvertShapesToUsd(
         }
 
         if (UsdShadeMaterial material = materialForShape(shape)) {
-            UsdShadeMaterialBindingAPI(mesh.GetPrim()).Bind(material);
+            UsdShadeMaterialBindingAPI::Apply(mesh.GetPrim()).Bind(material);
         }
 
         ++emittedMeshes;
@@ -2130,7 +2311,7 @@ json ConvertUsdJson(const char* argv0, const fs::path& nifPath)
     std::vector<NodeData> nodes = ReadNodes(*api, nifHandle);
     std::vector<ShapeData> shapes = ReadShapes(*api, nifHandle, diagnostics);
     json rootExtraData = ReadExtraDataList(*api, nifHandle, nullptr);
-    std::vector<CollisionProxyData> collisionProxies = ReadCollisionProxies(*api, nifHandle, nodes);
+    std::vector<CollisionProxyData> collisionProxies;
     api->destroy(nifHandle);
 
     auto usdText = ConvertShapesToUsd(shapes, std::move(nodes), rootExtraData, collisionProxies, nifPath, gameName, diagnostics);
@@ -2179,24 +2360,45 @@ int PrintUsage()
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    CrashLog::Install();
+    if (argc >= 2) {
+        CrashLog::SetContext(argv[1], argc >= 3 ? argv[2] : "");
+    } else {
+        CrashLog::SetContext("startup");
+    }
+#endif
+
     spdlog::set_level(spdlog::level::warn);
 
     if (argc == 2 && std::string(argv[1]) == "--describe-services") {
+#ifdef _WIN32
+        CrashLog::SetContext("--describe-services");
+#endif
         std::cout << DescribeServicesJson(argv[0]).dump(2) << std::endl;
         return 0;
     }
 
     if (argc == 3 && std::string(argv[1]) == "--convert-usd-json") {
+#ifdef _WIN32
+        CrashLog::SetContext("--convert-usd-json", argv[2]);
+#endif
         std::cout << ConvertUsdJson(argv[0], fs::path(argv[2])).dump(2) << std::endl;
         return 0;
     }
 
     if (argc == 3 && std::string(argv[1]) == "--shader-flags-json") {
+#ifdef _WIN32
+        CrashLog::SetContext("--shader-flags-json", argv[2]);
+#endif
         std::cout << ShaderFlagsJson(argv[0], fs::path(argv[2])).dump(2) << std::endl;
         return 0;
     }
 
     if (argc == 4 && std::string(argv[1]) == "--shader-flags-json-file") {
+#ifdef _WIN32
+        CrashLog::SetContext("--shader-flags-json-file", argv[2]);
+#endif
         json response = ShaderFlagsJson(argv[0], fs::path(argv[2]));
         std::ofstream out(argv[3], std::ios::binary);
         if (!out) {
@@ -2209,6 +2411,9 @@ int main(int argc, char** argv)
     }
 
     if (argc == 4 && std::string(argv[1]) == "--convert-usd-json-file") {
+#ifdef _WIN32
+        CrashLog::SetContext("--convert-usd-json-file", argv[2]);
+#endif
         json response = ConvertUsdJson(argv[0], fs::path(argv[2]));
         std::ofstream out(argv[3], std::ios::binary);
         if (!out) {
@@ -2221,6 +2426,9 @@ int main(int argc, char** argv)
     }
 
     if (argc == 5 && std::string(argv[1]) == "--convert" && std::string(argv[3]) == "--out") {
+#ifdef _WIN32
+        CrashLog::SetContext("--convert", argv[2]);
+#endif
         json response = ConvertUsdJson(argv[0], fs::path(argv[2]));
         if (response.value("status", "") != "ok") {
             std::cerr << response.dump(2) << std::endl;

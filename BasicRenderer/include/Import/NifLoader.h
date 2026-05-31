@@ -18,6 +18,8 @@ struct LoadTimingStats {
 	bool assetCacheWritten = false;
 	std::uint64_t cacheProbeMs = 0;
 	std::uint64_t brniflyMs = 0;
+	std::uint64_t brniflyDescribeMs = 0;
+	std::uint64_t brniflyConvertMs = 0;
 	std::uint64_t assetWriteMs = 0;
 	std::uint64_t usdLoadMs = 0;
 	std::uint64_t usdOpenMs = 0;
@@ -26,6 +28,7 @@ struct LoadTimingStats {
 	std::filesystem::path cachePath;
 	std::string sourceIdentifier;
 	std::string contentHash;
+	std::string importFailureReason;
 };
 
 struct CachedAssetLoadResult {

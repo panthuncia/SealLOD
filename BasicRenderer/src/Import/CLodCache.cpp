@@ -1,12 +1,16 @@
 #include "Import/CLodCache.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <vector>
 #include <cwctype>
 
@@ -293,14 +297,30 @@ namespace CLodCache {
 
 		bool WriteMetadataBlob(const std::wstring& cachePath, const std::vector<std::byte>& blob)
 		{
-			const auto tempPath = cachePath + L".tmp";
+			static std::atomic<uint64_t> tempCounter{ 0 };
+			static std::array<std::mutex, 64> replacementLocks;
+
+			const std::filesystem::path finalPath(cachePath);
+			std::wstringstream tempName;
+			tempName << L".clodmeta."
+					 << std::hash<std::thread::id>{}(std::this_thread::get_id())
+					 << L"." << tempCounter.fetch_add(1, std::memory_order_relaxed)
+					 << L".tmp";
+			const auto tempPath = (finalPath.parent_path() / tempName.str()).wstring();
+			auto cleanupTemp = [&tempPath]()
+			{
+				std::error_code cleanupEc;
+				std::filesystem::remove(tempPath, cleanupEc);
+			};
 			{
 				std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
 				if (!file.is_open()) {
+					spdlog::warn("Failed to open temporary CLod metadata file: {}", ws2s(tempPath));
 					return false;
 				}
 
 				if (blob.size() > static_cast<std::size_t>((std::numeric_limits<std::streamsize>::max)())) {
+					cleanupTemp();
 					return false;
 				}
 				const uint32_t magic = kMetadataMagic;
@@ -313,17 +333,39 @@ namespace CLodCache {
 					file.write(reinterpret_cast<const char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
 				}
 				if (!file.good()) {
+					cleanupTemp();
 					return false;
 				}
 			}
 
 			std::error_code ec;
-			std::filesystem::remove(cachePath, ec);
-			ec.clear();
-			std::filesystem::rename(tempPath, cachePath, ec);
-			if (ec) {
-				std::filesystem::remove(tempPath);
-				return false;
+			const auto lockIndex = std::hash<std::wstring>{}(cachePath) % replacementLocks.size();
+			{
+				std::scoped_lock lock(replacementLocks[lockIndex]);
+				for (int attempt = 0; attempt < 16; ++attempt) {
+					std::filesystem::remove(cachePath, ec);
+					ec.clear();
+					std::filesystem::rename(tempPath, cachePath, ec);
+					if (!ec) {
+						return true;
+					}
+					std::error_code existsEc;
+					if (std::filesystem::exists(cachePath, existsEc)) {
+						spdlog::debug("CLod metadata already exists after replace race: {}", ws2s(cachePath));
+						cleanupTemp();
+						return true;
+					}
+
+					if (attempt < 15) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+					}
+				}
+				if (ec) {
+					spdlog::warn("Failed to replace CLod metadata '{}' with '{}': {}",
+						ws2s(cachePath), ws2s(tempPath), ec.message());
+					cleanupTemp();
+					return false;
+				}
 			}
 			return true;
 		}
