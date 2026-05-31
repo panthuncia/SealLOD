@@ -22,6 +22,3 @@
 [submodule "FidelityFX-SDK"]
 	path = FidelityFX-SDK
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
-[submodule "PyNifly"]
-	path = PyNifly
-	url = https://github.com/BadDogSkyrim/PyNifly.git
