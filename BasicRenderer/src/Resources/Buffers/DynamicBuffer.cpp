@@ -4,7 +4,6 @@
 
 #include "Resources/Buffers/BufferView.h"
 #include "Managers/Singletons/DeviceManager.h"
-#include "Resources/ExternalBackingResource.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
@@ -313,17 +312,6 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         "DynamicBuffer '{}' id={} GrowBuffer created new GPU backing",
         m_name,
         GetGlobalResourceID());
-    if (m_dataBuffer) {
-        spdlog::info(
-            "DynamicBuffer '{}' id={} GrowBuffer queueing copy from old backing bytes={}",
-            m_name,
-            GetGlobalResourceID(),
-            m_capacity);
-        auto oldBackingResource = ExternalBackingResource::CreateShared(std::move(m_dataBuffer));
-        if (auto* uploadService = rg::runtime::GetActiveUploadService()) {
-            uploadService->QueueResourceCopy(shared_from_this(), oldBackingResource, m_capacity);
-        }
-    }
 	spdlog::info(
 		"DynamicBuffer '{}' id={} GrowBuffer SetBacking begin",
 		m_name,
@@ -336,6 +324,17 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         GetBufferSize(),
         GetBackingGeneration());
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
+    const size_t previousCapacity = m_capacity;
+    if (previousCapacity > 0u) {
+        // DynamicBuffer now uses CoalescedRetained staging. Preserve the logical
+        // byte contents through grow by dirtying the retained CPU shadow instead
+        // of queueing a GPU copy from an old backing that may not include this
+        // frame's staged writes yet.
+        m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
+        if (m_uploadPolicyState.HasPendingWork()) {
+            MarkUploadPolicyDirty();
+        }
+    }
 
     m_capacity = newSize;
 

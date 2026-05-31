@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <vector>
 #include <functional>
 #include <string>
@@ -215,11 +216,6 @@ private:
 
 
     void CreateBuffer(size_t capacity, size_t previousCapacity = 0) {
-        if (m_dataBuffer != nullptr) {
-			// If shrinking, copy only up to new capacity. If growing, copy up to previous capacity.
-            auto sizeToCopy = capacity < previousCapacity ? capacity : previousCapacity;
-            QueueResourceCopyFromOldBacking(sizeToCopy * sizeof(T));
-        }
 		CreateAndSetBacking(rhi::HeapType::DeviceLocal, sizeof(T) * capacity, m_UAV);
         m_uploadPolicyState.OnBufferResized(GetBufferSize());
         SetName(name);
@@ -229,6 +225,15 @@ private:
         }
 
         AssignDescriptorSlots(static_cast<uint32_t>(capacity));
+
+        // DynamicStructuredBuffer keeps a CPU-side authoritative copy in m_data.
+        // Re-upload it after backing growth instead of queueing a GPU copy from
+        // the old backing; pending material uploads and repeated cell-streaming
+        // grows otherwise create fragile copy/upload ordering dependencies.
+        const size_t elementsToUpload = (std::min)(m_data.size(), capacity);
+        if (elementsToUpload > 0u) {
+            StageOrUpload(m_data.data(), elementsToUpload * sizeof(T), 0u);
+        }
     }
 
     void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {

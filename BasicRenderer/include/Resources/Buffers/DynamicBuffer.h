@@ -86,7 +86,7 @@ public:
 private:
     DynamicBuffer(bool byteAddress, size_t elementSize, size_t capacity, std::string name = "", bool UAV = false)
         : m_byteAddress(byteAddress), m_elementSize(elementSize), m_UAV(UAV), m_needsUpdate(false) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
 
         size_t bufferSize = AlignBufferCapacity(elementSize * capacity, m_byteAddress);
 		m_capacity = bufferSize;

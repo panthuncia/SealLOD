@@ -281,6 +281,11 @@ struct PerMaterialEvalCB {
     unsigned int opacityStreamingTextureID;
 };
 
+static_assert(sizeof(PerMaterialEvalCB) == 256, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
+static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
+
 struct PerMaterialOpenPBRCB {
     float baseWeight;
     DirectX::XMFLOAT3 baseColor;

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include "Resources/ExternalBackingResource.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
@@ -168,15 +167,11 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     auto device = DeviceManager::GetInstance().GetDevice();
     auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * sizeof(unsigned int), GetGlobalResourceID(), m_UAV);
-	// Copy existing data to new buffer and discard old buffer after copy
-    if (m_dataBuffer) {
-        auto oldBackingResource = ExternalBackingResource::CreateShared(std::move(m_dataBuffer));
-        if (auto* uploadService = rg::runtime::GetActiveUploadService()) {
-            uploadService->QueueResourceCopy(shared_from_this(), oldBackingResource, m_capacity * sizeof(unsigned int));
-        }
-    }
     SetBacking(std::move(newDataBuffer), newSize * sizeof(unsigned int));
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
+    if (!m_data.empty()) {
+        StageOrUpload(m_data.data(), m_data.size() * sizeof(unsigned int), 0u);
+    }
 
     m_capacity = newSize;
     AssignDescriptorSlots();

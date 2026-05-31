@@ -262,11 +262,18 @@ private:
     }
 
     void CreateBuffer(uint64_t capacity, size_t previousCapacity = 0) {
-        if (m_dataBuffer != nullptr) {
-            QueueResourceCopyFromOldBacking(previousCapacity * static_cast<size_t>(m_elementSize));
-        }
 		CreateAndSetBacking(rhi::HeapType::DeviceLocal, m_elementSize * capacity, m_UAV);
         m_uploadPolicyState.OnBufferResized(GetBufferSize());
+        const size_t previousBytes = previousCapacity * static_cast<size_t>(m_elementSize);
+        if (previousBytes > 0u) {
+            // CoalescedRetained keeps the CPU-side bytes authoritative. On grow,
+            // mark the preserved range dirty so the next upload-policy flush
+            // repopulates the new backing before any render pass observes it.
+            m_uploadPolicyState.CommitBulkRegion(0u, previousBytes);
+            if (m_uploadPolicyState.HasPendingWork()) {
+                MarkUploadPolicyDirty();
+            }
+        }
 
         for (const auto& bundle : m_metadataBundles) {
             ApplyMetadataToBacking(bundle);
