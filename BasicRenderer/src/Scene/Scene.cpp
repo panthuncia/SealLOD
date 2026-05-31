@@ -631,6 +631,73 @@ flecs::entity Scene::CreateRenderableEntityECS(
     return entity;
 }
 
+flecs::entity Scene::CreateInstancedRenderableEntityECS(
+	const std::vector<std::shared_ptr<Mesh>>& meshes,
+	std::wstring name,
+	std::optional<std::uint64_t> stableSceneID,
+	const std::vector<DirectX::XMMATRIX>& instanceMatrices,
+	bool assignNames) {
+	const auto initialMatrix = instanceMatrices.empty() ? DirectX::XMMatrixIdentity() : instanceMatrices.front();
+	const auto acquireBegin = std::chrono::steady_clock::now();
+	flecs::entity entity = m_renderableEntityPool.Acquire();
+	m_renderableEntityAcquireUs += ElapsedUs(acquireBegin);
+
+	const auto setupBegin = std::chrono::steady_clock::now();
+	entity.child_of(ECSSceneRoot)
+		.set<Components::Rotation>({})
+		.set<Components::Position>({})
+		.set<Components::Scale>({})
+		.set<Components::Matrix>(DirectX::XMMatrixIdentity());
+	if (assignNames) {
+		const auto narrowName = ws2s(name);
+		entity
+			.set_name((narrowName + "_" + std::to_string(entity.id())).c_str())
+			.set<Components::Name>(narrowName);
+	}
+	if (stableSceneID && *stableSceneID != 0) {
+		entity.set<Components::StableSceneID>({ *stableSceneID });
+	} else {
+		AssignStableSceneID(entity);
+	}
+
+	Components::MeshInstances meshInstances;
+	Components::InstanceTransforms instanceTransforms;
+	instanceTransforms.transforms.reserve(instanceMatrices.size());
+	for (const auto& matrix : instanceMatrices) {
+		instanceTransforms.transforms.push_back({ matrix });
+	}
+
+	for (std::size_t transformIndex = 0; transformIndex < instanceMatrices.size(); ++transformIndex) {
+		for (auto& mesh : meshes) {
+			if (mesh == nullptr) {
+				continue;
+			}
+			if (mesh->HasBaseSkin()) {
+				entity.add<Components::Skinned>();
+			}
+			const auto meshInstanceBegin = std::chrono::steady_clock::now();
+			meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
+			instanceTransforms.meshInstanceTransformIndices.push_back(static_cast<uint32_t>(transformIndex));
+			m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
+		}
+	}
+
+	if (!meshInstances.meshInstances.empty()) {
+		entity.set<Components::MeshInstances>(meshInstances);
+		entity.set<Components::InstanceTransforms>(instanceTransforms);
+	}
+
+	if (ECSSceneRoot.has<Components::ActiveScene>()) {
+		const auto activateBegin = std::chrono::steady_clock::now();
+		ActivateRenderable(entity);
+		m_renderableEntityActivateUs += ElapsedUs(activateBegin);
+		entity.add<Components::Active>();
+	}
+
+	m_renderableEntitySetupUs += ElapsedUs(setupBegin);
+	return entity;
+}
+
 void Scene::ReleaseRenderableEntityECS(flecs::entity entity) {
 	const auto releaseBegin = std::chrono::steady_clock::now();
 	m_renderableEntityPool.Release(entity, [](flecs::entity e) {
@@ -638,6 +705,7 @@ void Scene::ReleaseRenderableEntityECS(flecs::entity entity) {
 		if (e.has<Components::MeshInstances>()) {
 			e.remove<Components::MeshInstances>();
 		}
+		e.remove<Components::InstanceTransforms>();
 		e.remove<Components::Skinned>();
 		e.remove<Components::SkinningPassEligible>();
 		e.remove<Components::SkipShadowPass>();

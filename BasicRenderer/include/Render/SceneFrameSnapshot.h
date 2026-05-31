@@ -16,8 +16,10 @@ struct SnapshotRenderable {
     StableSceneID stableID = 0;
     Components::Matrix matrix;
     Components::MeshInstances meshInstances;
+    Components::InstanceTransforms instanceTransforms;
     std::string name;
     bool transformChanged = false;
+    bool hasInstanceTransforms = false;
     bool skinned = false;
     bool skipShadowPass = false;
 };

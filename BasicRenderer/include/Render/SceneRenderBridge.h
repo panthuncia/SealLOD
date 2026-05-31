@@ -20,6 +20,7 @@ public:
         uint64_t renderEntityId = 0;
         uint64_t lastSeenFrame = 0;
         uint64_t meshGeneration = 0;
+        uint64_t instanceTransformGeneration = 0;
         DirectX::XMMATRIX lastMatrix = DirectX::XMMatrixIdentity();
     };
 

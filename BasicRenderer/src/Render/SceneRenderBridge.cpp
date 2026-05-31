@@ -191,6 +191,7 @@ void SyncPassMembership(flecs::entity dst, const Components::MeshInstances* mesh
 bool SyncRenderableDerivedStateForBulk(
     flecs::entity dst,
     const Components::MeshInstances* meshInstances,
+    const Components::InstanceTransforms* instanceTransforms,
     ObjectManager& objectManager,
     ObjectManager::ObjectBuildInfo& objectBuildInfo) {
     const auto newSignature = BuildRenderableSignature(meshInstances);
@@ -206,6 +207,11 @@ bool SyncRenderableDerivedStateForBulk(
         dst.remove<Components::MeshInstances>();
         dst.remove<Components::PerPassMeshes>();
     }
+    if (instanceTransforms) {
+        dst.set<Components::InstanceTransforms>(*instanceTransforms);
+    } else {
+        dst.remove<Components::InstanceTransforms>();
+    }
 
     if (!dst.has<Components::RenderableObject>()) {
         Components::RenderableObject renderable{};
@@ -220,7 +226,7 @@ bool SyncRenderableDerivedStateForBulk(
     if (signatureChanged) {
         DestroyRendererObject(dst, objectManager);
         auto renderable = dst.get<Components::RenderableObject>();
-        objectBuildInfo = { renderable.perObjectCB, meshInstances };
+        objectBuildInfo = { renderable.perObjectCB, meshInstances, instanceTransforms };
         dst.set<RenderableSignature>(newSignature);
     }
 
@@ -371,7 +377,7 @@ flecs::entity GetOrCreateBridgedEntity(
     if (sceneRoot.is_alive()) {
         dst.child_of(sceneRoot);
     }
-    bridgedEntities[stableSceneID] = { dst.id(), currentFrame, 0, DirectX::XMMatrixIdentity() };
+    bridgedEntities[stableSceneID] = { dst.id(), currentFrame, 0, 0, DirectX::XMMatrixIdentity() };
     return dst;
 }
 
@@ -537,7 +543,11 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
             const bool transformChanged = src.has<Components::TransformUpdatedThisFrame>();
             const bool wasAlive = m_lastExportedAliveRenderableIDs.contains(stableSceneID.value);
             auto genIt = m_lastExportedMeshGeneration.find(stableSceneID.value);
-            const bool meshChanged = !wasAlive || genIt == m_lastExportedMeshGeneration.end() || genIt->second != meshInstances.generation;
+            const auto* instanceTransforms = src.try_get<Components::InstanceTransforms>();
+            const uint64_t combinedGeneration =
+                meshInstances.generation ^
+                (instanceTransforms ? (instanceTransforms->generation + 0x9E3779B97F4A7C15ull) : 0ull);
+            const bool meshChanged = !wasAlive || genIt == m_lastExportedMeshGeneration.end() || genIt->second != combinedGeneration;
             const bool isNew = !wasAlive;
 
             if (!emittedRenderableIDs.insert(stableSceneID.value).second) {
@@ -554,6 +564,10 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
                 renderable.stableID = stableSceneID.value;
                 renderable.matrix = matrix;
                 renderable.meshInstances = meshInstances;
+                if (instanceTransforms) {
+                    renderable.instanceTransforms = *instanceTransforms;
+                    renderable.hasInstanceTransforms = true;
+                }
                 renderable.transformChanged = transformChanged;
                 if (const auto* name = src.try_get<Components::Name>()) {
                     renderable.name = name->name;
@@ -561,7 +575,7 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
                 renderable.skinned = src.has<Components::Skinned>();
                 renderable.skipShadowPass = src.has<Components::SkipShadowPass>();
                 snapshot.changedRenderables.push_back(std::move(renderable));
-                m_lastExportedMeshGeneration[stableSceneID.value] = meshInstances.generation;
+                m_lastExportedMeshGeneration[stableSceneID.value] = combinedGeneration;
             }
         };
 
@@ -802,7 +816,9 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
 
             const bool isNew = !dst.has<BridgedSceneEntity>();
             auto& entityState = m_bridgedEntities[renderable.stableID];
-            const bool meshChanged = entityState.meshGeneration != renderable.meshInstances.generation;
+            const bool meshChanged =
+                entityState.meshGeneration != renderable.meshInstances.generation ||
+                entityState.instanceTransformGeneration != renderable.instanceTransforms.generation;
 
             // Entity is in the changed list, so always update common components
             CopyCommonComponents(dst, renderable.stableID, renderable.name, renderable.matrix);
@@ -815,11 +831,13 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
 
             if (isNew || meshChanged) {
                 ObjectManager::ObjectBuildInfo objectBuildInfo;
-                if (SyncRenderableDerivedStateForBulk(dst, &renderable.meshInstances, *objectManager, objectBuildInfo)) {
+                const auto* instanceTransforms = renderable.hasInstanceTransforms ? &renderable.instanceTransforms : nullptr;
+                if (SyncRenderableDerivedStateForBulk(dst, &renderable.meshInstances, instanceTransforms, *objectManager, objectBuildInfo)) {
                     objectBuildInfos.push_back(objectBuildInfo);
                     pendingObjectDraws.push_back({ dst });
                 }
                 entityState.meshGeneration = renderable.meshInstances.generation;
+                entityState.instanceTransformGeneration = renderable.instanceTransforms.generation;
             }
 
             if (isNew || meshChanged) {

@@ -36,6 +36,12 @@ public:
         std::optional<std::uint64_t> stableSceneID,
         DirectX::XMMATRIX initialMatrix,
         bool assignNames = true);
+    flecs::entity CreateInstancedRenderableEntityECS(
+        const std::vector<std::shared_ptr<Mesh>>& meshes,
+        std::wstring name,
+        std::optional<std::uint64_t> stableSceneID,
+        const std::vector<DirectX::XMMATRIX>& instanceMatrices,
+        bool assignNames = true);
     void ReserveRenderableEntityPool(std::size_t count);
     void ReleaseRenderableEntityECS(flecs::entity entity);
     void BeginRenderableActivationBatch();

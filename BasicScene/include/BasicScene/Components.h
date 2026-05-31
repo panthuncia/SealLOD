@@ -183,4 +183,12 @@ namespace Components {
         void BumpGeneration() { ++generation; }
     };
 
+    struct InstanceTransforms {
+        std::vector<Matrix> transforms;
+        std::vector<uint32_t> meshInstanceTransformIndices;
+        uint64_t generation = 0;
+
+        void BumpGeneration() { ++generation; }
+    };
+
 } // namespace Components

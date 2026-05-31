@@ -80,7 +80,7 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 
 Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
 	std::vector<ObjectBuildInfo> objects;
-	objects.push_back({ perObjectCB, meshInstances });
+	objects.push_back({ perObjectCB, meshInstances, nullptr });
 	auto drawInfos = AddObjectsBulk(objects);
 	return drawInfos.empty() ? Components::ObjectDrawInfo{} : std::move(drawInfos.front());
 }
@@ -99,17 +99,44 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 
 	drawInfos.resize(objects.size());
 
+	struct ObjectTransformRange {
+		size_t first = 0;
+		size_t count = 0;
+	};
+
 	std::vector<PerObjectCB> perObjectCBs;
 	std::vector<DirectX::XMFLOAT4X4> normalMatrices;
-	perObjectCBs.reserve(objects.size());
-	normalMatrices.reserve(objects.size());
+	std::vector<ObjectTransformRange> transformRanges;
+	transformRanges.reserve(objects.size());
+
 	for (const auto& object : objects) {
-		perObjectCBs.push_back(object.perObjectCB);
-		normalMatrices.push_back(ComputeNormalMatrixStorage(object.perObjectCB.modelMatrix));
+		ObjectTransformRange range;
+		range.first = perObjectCBs.size();
+		if (object.instanceTransforms && !object.instanceTransforms->transforms.empty()) {
+			range.count = object.instanceTransforms->transforms.size();
+			for (const auto& transform : object.instanceTransforms->transforms) {
+				auto perObject = object.perObjectCB;
+				perObject.modelMatrix = transform.matrix;
+				perObject.prevModelMatrix = transform.matrix;
+				perObject.modelInverseMatrix = DirectX::XMMatrixInverse(nullptr, transform.matrix);
+				const auto determinant = DirectX::XMMatrixDeterminant(transform.matrix);
+				perObject.objectFlags = (DirectX::XMVectorGetX(determinant) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+				perObjectCBs.push_back(perObject);
+				normalMatrices.push_back(ComputeNormalMatrixStorage(transform.matrix));
+			}
+		} else {
+			range.count = 1;
+			perObjectCBs.push_back(object.perObjectCB);
+			normalMatrices.push_back(ComputeNormalMatrixStorage(object.perObjectCB.modelMatrix));
+		}
+		transformRanges.push_back(range);
 	}
 
-	auto perObjectViews = m_perObjectBuffers->AddDataBatch(perObjectCBs.data(), perObjectCBs.size(), sizeof(PerObjectCB));
 	auto normalMatrixViews = m_normalMatrixBuffer->AddMany(normalMatrices.data(), normalMatrices.size());
+	for (size_t i = 0; i < perObjectCBs.size() && i < normalMatrixViews.size(); ++i) {
+		perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(normalMatrixViews[i]->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
+	}
+	auto perObjectViews = m_perObjectBuffers->AddDataBatch(perObjectCBs.data(), perObjectCBs.size(), sizeof(PerObjectCB));
 
 	std::vector<DispatchMeshIndirectCommand> commands;
 	std::vector<PendingCommand> pendingCommands;
@@ -128,18 +155,35 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		const auto& object = objects[objectIndex];
 		auto& drawInfo = drawInfos[objectIndex];
 
-		if (objectIndex >= perObjectViews.size() || objectIndex >= normalMatrixViews.size()) {
+		if (objectIndex >= transformRanges.size()) {
+			continue;
+		}
+		const auto transformRange = transformRanges[objectIndex];
+		if (transformRange.count == 0 ||
+			transformRange.first >= perObjectViews.size() ||
+			transformRange.first >= normalMatrixViews.size()) {
 			continue;
 		}
 
-		auto& perObjectCBview = perObjectViews[objectIndex];
-		auto& normalMatrixView = normalMatrixViews[objectIndex];
+		auto& perObjectCBview = perObjectViews[transformRange.first];
+		auto& normalMatrixView = normalMatrixViews[transformRange.first];
 		const uint32_t perObjectIndex = static_cast<uint32_t>(perObjectCBview->GetOffset() / sizeof(PerObjectCB));
 
 		drawInfo.perObjectCBView = perObjectCBview;
 		drawInfo.perObjectCBIndex = perObjectIndex;
 		drawInfo.normalMatrixView = normalMatrixView;
 		drawInfo.normalMatrixIndex = static_cast<uint32_t>(normalMatrixView->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
+		drawInfo.perObjectCBViews.reserve(transformRange.count);
+		drawInfo.normalMatrixViews.reserve(transformRange.count);
+		for (size_t i = 0; i < transformRange.count; ++i) {
+			const auto transformViewIndex = transformRange.first + i;
+			if (transformViewIndex < perObjectViews.size()) {
+				drawInfo.perObjectCBViews.push_back(perObjectViews[transformViewIndex]);
+			}
+			if (transformViewIndex < normalMatrixViews.size()) {
+				drawInfo.normalMatrixViews.push_back(normalMatrixViews[transformViewIndex]);
+			}
+		}
 
 		if (object.meshInstances == nullptr) {
 			continue;
@@ -150,15 +194,29 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		drawInfo.drawInfo.drawWorkloadKeysPerDraw.reserve(object.meshInstances->meshInstances.size());
 		drawInfo.perMeshInstanceBufferIndices.reserve(object.meshInstances->meshInstances.size());
 
-		for (auto& meshInstance : object.meshInstances->meshInstances) {
+		for (size_t meshInstanceIndex = 0; meshInstanceIndex < object.meshInstances->meshInstances.size(); ++meshInstanceIndex) {
+			auto& meshInstance = object.meshInstances->meshInstances[meshInstanceIndex];
 			if (!meshInstance) {
 				continue;
 			}
-			meshInstance->SetPerObjectBufferIndex(perObjectIndex);
+			uint32_t transformIndex = 0;
+			if (object.instanceTransforms &&
+				meshInstanceIndex < object.instanceTransforms->meshInstanceTransformIndices.size()) {
+				transformIndex = object.instanceTransforms->meshInstanceTransformIndices[meshInstanceIndex];
+			}
+			if (transformIndex >= transformRange.count) {
+				transformIndex = 0;
+			}
+			const auto transformViewIndex = transformRange.first + transformIndex;
+			if (transformViewIndex >= perObjectViews.size()) {
+				continue;
+			}
+			const uint32_t meshPerObjectIndex = static_cast<uint32_t>(perObjectViews[transformViewIndex]->GetOffset() / sizeof(PerObjectCB));
+			meshInstance->SetPerObjectBufferIndex(meshPerObjectIndex);
 			auto& mesh = meshInstance->GetMesh();
 			const uint32_t perMeshInstanceBufferIndex = static_cast<uint32_t>(meshInstance->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
 			DispatchMeshIndirectCommand command = {};
-			command.perObjectBufferIndex = perObjectIndex;
+			command.perObjectBufferIndex = meshPerObjectIndex;
 			command.perMeshBufferIndex = meshInstance->GetPerMeshBufferIndex();
 			command.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
 			command.dispatchMeshArguments.ThreadGroupCountX = 0; //DivRoundUp(mesh->GetMeshletCount(), AS_GROUP_SIZE);
@@ -215,7 +273,13 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 	}
 #endif // _DEBUG
 
-	m_perObjectBuffers->Deallocate(drawInfo->perObjectCBView.get());
+	if (!drawInfo->perObjectCBViews.empty()) {
+		for (const auto& view : drawInfo->perObjectCBViews) {
+			m_perObjectBuffers->Deallocate(view.get());
+		}
+	} else {
+		m_perObjectBuffers->Deallocate(drawInfo->perObjectCBView.get());
+	}
 
 	// Remove the object's draw set commands from the draw set buffers
 	auto& views = drawInfo;
@@ -239,7 +303,13 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 		++i;
 	}
 
-	m_normalMatrixBuffer->Remove(drawInfo->normalMatrixView.get());
+	if (!drawInfo->normalMatrixViews.empty()) {
+		for (const auto& view : drawInfo->normalMatrixViews) {
+			m_normalMatrixBuffer->Remove(view.get());
+		}
+	} else {
+		m_normalMatrixBuffer->Remove(drawInfo->normalMatrixView.get());
+	}
 }
 
 void ObjectManager::UpdatePerObjectBuffer(BufferView* view, PerObjectCB& data) {

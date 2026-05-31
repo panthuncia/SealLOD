@@ -29,6 +29,7 @@ public:
 	struct ObjectBuildInfo {
 		PerObjectCB perObjectCB{};
 		const Components::MeshInstances* meshInstances = nullptr;
+		const Components::InstanceTransforms* instanceTransforms = nullptr;
 	};
 
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);

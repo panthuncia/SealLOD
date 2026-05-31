@@ -68,6 +68,8 @@ namespace Components {
         uint32_t perObjectCBIndex;
         std::shared_ptr<BufferView> normalMatrixView;
         uint32_t normalMatrixIndex;
+        std::vector<std::shared_ptr<BufferView>> perObjectCBViews;
+        std::vector<std::shared_ptr<BufferView>> normalMatrixViews;
     };
 
     struct PerPassMeshes {
