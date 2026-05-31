@@ -17,12 +17,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include <pxr/base/tf/token.h>
-#include <pxr/base/vt/value.h>
-#include <pxr/usd/sdf/layer.h>
-#include <pxr/usd/sdf/path.h>
-#include <pxr/usd/usd/prim.h>
-#include <pxr/usd/usd/stage.h>
 #include <spdlog/spdlog.h>
 
 #include "Import/BRNiflyClient.h"
@@ -39,11 +33,7 @@ namespace NifLoader {
 namespace {
 
 namespace fs = std::filesystem;
-using namespace pxr;
-
-constexpr int kAssetCacheSchemaVersion = 6;
-constexpr std::string_view kAssetCacheSuffix = ".asset.usdc";
-constexpr std::string_view kRootPrimPath = "/BRNifly";
+constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -132,14 +122,14 @@ std::string MakeStableSourceIdentifier(const std::string& normalizedCacheKey, co
 
 std::string MakeAssetFileName(const std::string& normalizedCacheKey, const std::string& pathHash, const std::string& contentHash)
 {
-    return NifStemFromCacheKey(normalizedCacheKey) + "__p" + pathHash + "__c" + contentHash + std::string(kAssetCacheSuffix);
+    return NifStemFromCacheKey(normalizedCacheKey) + "__p" + pathHash + "__c" + contentHash + std::string(kNifMetaCacheSuffix);
 }
 
 bool HasAssetCacheSuffix(const fs::path& path)
 {
     const auto fileName = path.filename().string();
-    return fileName.size() >= kAssetCacheSuffix.size() &&
-        fileName.ends_with(kAssetCacheSuffix);
+    return fileName.size() >= kNifMetaCacheSuffix.size() &&
+        fileName.ends_with(kNifMetaCacheSuffix);
 }
 
 std::string ExtractContentHashFromFileName(const fs::path& path)
@@ -150,7 +140,7 @@ std::string ExtractContentHashFromFileName(const fs::path& path)
         return {};
     }
     const auto begin = marker + 3;
-    const auto end = fileName.find(std::string(kAssetCacheSuffix), begin);
+    const auto end = fileName.find(std::string(kNifMetaCacheSuffix), begin);
     if (end == std::string::npos || end <= begin) {
         return {};
     }
@@ -179,7 +169,7 @@ fs::path CLodCacheRoot()
 
 fs::path AssetPathIndexRoot()
 {
-    return CLodCacheRoot() / "nif_asset_index";
+    return CLodCacheRoot() / "nif_meta_index";
 }
 
 fs::path AssetManifestPath()
@@ -309,69 +299,6 @@ void RegisterCachedAsset(const std::string& pathHash, const fs::path& cachePath)
     }
 }
 
-bool ReadStringMetadata(const UsdPrim& prim, const TfToken& key, std::string& out)
-{
-    VtValue value = prim.GetCustomDataByKey(key);
-    if (!value.IsHolding<std::string>()) {
-        return false;
-    }
-    out = value.UncheckedGet<std::string>();
-    return true;
-}
-
-bool ValidateAssetStage(
-    const UsdStageRefPtr& stage,
-    const std::string& normalizedCacheKey,
-    const std::string& pathHash,
-    const std::string& fallbackContentHash,
-    std::string& outSourceIdentifier,
-    std::string& outContentHash,
-    std::string& outReason)
-{
-    if (!stage) {
-        outReason = "stage open failed";
-        return false;
-    }
-
-    const UsdPrim root = stage->GetPrimAtPath(SdfPath(std::string(kRootPrimPath)));
-    if (!root) {
-        outReason = "missing /BRNifly root";
-        return false;
-    }
-
-    int schemaVersion = 0;
-    VtValue versionValue = root.GetCustomDataByKey(TfToken("sarp:nifAssetCache:schemaVersion"));
-    if (!versionValue.IsHolding<int>() ||
-        (schemaVersion = versionValue.UncheckedGet<int>()) != kAssetCacheSchemaVersion) {
-        outReason = "asset cache schema mismatch";
-        return false;
-    }
-
-    std::string metadataCacheKey;
-    std::string metadataPathHash;
-    if (!ReadStringMetadata(root, TfToken("sarp:nifAssetCache:normalizedGamePath"), metadataCacheKey) ||
-        !ReadStringMetadata(root, TfToken("sarp:nifAssetCache:pathHash"), metadataPathHash) ||
-        metadataCacheKey != normalizedCacheKey ||
-        metadataPathHash != pathHash) {
-        outReason = "asset cache key mismatch";
-        return false;
-    }
-
-    if (!ReadStringMetadata(root, TfToken("sarp:nifAssetCache:contentHash"), outContentHash)) {
-        outContentHash = fallbackContentHash;
-    }
-    if (!ReadStringMetadata(root, TfToken("sarp:nifAssetCache:sourceIdentifier"), outSourceIdentifier)) {
-        outSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, outContentHash);
-    }
-
-    if (outContentHash.empty() || outSourceIdentifier.empty()) {
-        outReason = "asset cache identity metadata is incomplete";
-        return false;
-    }
-
-    return true;
-}
-
 USDLoader::InMemoryStageOptions MakeStageOptions(
     const std::string& sourceIdentifier,
     const std::string& sourceDirectory,
@@ -385,170 +312,15 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     return options;
 }
 
-void SetStringMetadata(const UsdPrim& prim, const char* key, const std::string& value)
-{
-    prim.SetCustomDataByKey(TfToken(key), VtValue(value));
-}
-
-void SetAssetCacheMetadata(
-    const UsdPrim& root,
-    const std::string& normalizedCacheKey,
-    const std::string& pathHash,
-    const std::string& contentHash,
-    const std::string& sourceIdentifier,
-    const std::string& sourcePath)
-{
-    root.SetCustomDataByKey(TfToken("sarp:nifAssetCache:schemaVersion"), VtValue(kAssetCacheSchemaVersion));
-    SetStringMetadata(root, "sarp:nifAssetCache:normalizedGamePath", normalizedCacheKey);
-    SetStringMetadata(root, "sarp:nifAssetCache:pathHash", pathHash);
-    SetStringMetadata(root, "sarp:nifAssetCache:contentHash", contentHash);
-    SetStringMetadata(root, "sarp:nifAssetCache:sourceIdentifier", sourceIdentifier);
-    SetStringMetadata(root, "sarp:nifAssetCache:sourcePath", sourcePath);
-}
-
 struct AssetCacheWriteResult
 {
     fs::path path;
     bool wrote{ false };
 };
 
-std::optional<AssetCacheWriteResult> WriteAssetCache(
-    const BRNiflyClient::UsdAssetPackage& package,
-    const std::string& normalizedCacheKey,
-    const std::string& pathHash,
-    const std::string& stableSourceIdentifier,
-    const std::string& sourceDirectory)
-{
-    static std::mutex usdAssetCacheWriteMutex;
-    std::lock_guard<std::mutex> usdAssetCacheWriteLock(usdAssetCacheWriteMutex);
-
-    const std::string fileName = MakeAssetFileName(normalizedCacheKey, pathHash, package.contentHash);
-    const fs::path cachePath = CLodCache::GetCacheFilePathForSource(s2ws(fileName), stableSourceIdentifier);
-    std::error_code existsEc;
-    if (fs::is_regular_file(cachePath, existsEc)) {
-        const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
-        std::string sourceIdentifier;
-        std::string contentHash;
-        std::string reason;
-        UsdStageRefPtr existingStage = UsdStage::Open(cachePath.string(), UsdStage::LoadNone);
-        if (ValidateAssetStage(existingStage, normalizedCacheKey, pathHash, fileContentHash, sourceIdentifier, contentHash, reason)) {
-            RegisterCachedAsset(pathHash, cachePath);
-            return AssetCacheWriteResult{ .path = cachePath, .wrote = false };
-        }
-
-        spdlog::info(
-            "nif_asset_cache=replace_stale game='{}' path='{}' reason='{}'",
-            normalizedCacheKey,
-            cachePath.string(),
-            reason.empty() ? "asset cache validation failed" : reason);
-        existingStage.Reset();
-    }
-
-    SdfLayerRefPtr sourceLayer = SdfLayer::CreateAnonymous("brnifly_asset_cache_source.usda");
-    if (!sourceLayer || !sourceLayer->ImportFromString(package.rootLayerText)) {
-        spdlog::warn(
-            "nif_asset_cache=write_failed game='{}' content_hash='{}' reason='failed to import BRNifly USDA'",
-            normalizedCacheKey,
-            package.contentHash);
-        return std::nullopt;
-    }
-
-    UsdStageRefPtr stage = UsdStage::Open(sourceLayer);
-    if (!stage) {
-        spdlog::warn(
-            "nif_asset_cache=write_failed game='{}' content_hash='{}' reason='failed to open BRNifly stage'",
-            normalizedCacheKey,
-            package.contentHash);
-        return std::nullopt;
-    }
-
-    UsdPrim root = stage->GetPrimAtPath(SdfPath(std::string(kRootPrimPath)));
-    if (!root) {
-        spdlog::warn(
-            "nif_asset_cache=write_failed game='{}' content_hash='{}' reason='missing /BRNifly root'",
-            normalizedCacheKey,
-            package.contentHash);
-        return std::nullopt;
-    }
-
-    SetAssetCacheMetadata(root, normalizedCacheKey, pathHash, package.contentHash, stableSourceIdentifier, package.sourcePath);
-
-    std::error_code ec;
-    fs::create_directories(cachePath.parent_path(), ec);
-    if (ec) {
-        spdlog::warn(
-            "nif_asset_cache=write_failed game='{}' path='{}' reason='{}'",
-            normalizedCacheKey,
-            cachePath.string(),
-            ec.message());
-        return std::nullopt;
-    }
-
-    if (!stage->GetRootLayer()->Export(cachePath.string())) {
-        spdlog::warn(
-            "nif_asset_cache=write_failed game='{}' path='{}' reason='USD export failed'",
-            normalizedCacheKey,
-            cachePath.string());
-        return std::nullopt;
-    }
-
-    spdlog::info(
-        "nif_asset_cache=write game='{}' path='{}' content_hash='{}' source_identifier='{}'",
-        normalizedCacheKey,
-        cachePath.string(),
-        package.contentHash,
-        stableSourceIdentifier);
-    RegisterCachedAsset(pathHash, cachePath);
-    return AssetCacheWriteResult{ .path = cachePath, .wrote = true };
-}
-
-std::shared_ptr<Scene> LoadCachedStage(
-    const fs::path& cachePath,
-    const std::string& sourceIdentifier,
-    const std::string& contentHash,
-    const USDLoader::ImportSettings& settings)
-{
-    const auto options = MakeStageOptions(
-        sourceIdentifier,
-        cachePath.parent_path().string(),
-        "brnifly_" + contentHash + ".asset.usdc");
-    return USDLoader::LoadModelFromFile(cachePath.string(), options, settings);
-}
-
-std::optional<USDLoader::ImportedAssetPayload> LoadCachedAssetPayload(
-    const fs::path& cachePath,
-    const std::string& sourceIdentifier,
-    const std::string& contentHash,
-    const USDLoader::ImportSettings& settings,
-    LoadTimingStats* stats)
-{
-    const auto options = MakeStageOptions(
-        sourceIdentifier,
-        cachePath.parent_path().string(),
-        "brnifly_" + contentHash + ".asset.usdc");
-    const auto openBegin = std::chrono::steady_clock::now();
-    UsdStageRefPtr stage = UsdStage::Open(cachePath.string(), UsdStage::LoadNone);
-    if (stats) {
-        stats->usdOpenMs += ElapsedMs(openBegin, std::chrono::steady_clock::now());
-    }
-    if (!stage) {
-        return std::nullopt;
-    }
-
-    const auto extractBegin = std::chrono::steady_clock::now();
-    auto payload = USDLoader::LoadImportedAssetFromStage(stage, options, settings);
-    if (stats) {
-        const auto elapsed = ElapsedMs(extractBegin, std::chrono::steady_clock::now());
-        stats->usdExtractMs += elapsed;
-        stats->meshBuildMs += elapsed;
-        stats->usdLoadMs += elapsed;
-    }
-    return payload;
-}
-
 fs::path PayloadCachePathForAssetCache(const fs::path& cachePath)
 {
-    return fs::path(cachePath.string() + ".sarpbin");
+    return cachePath;
 }
 
 class BinaryWriter
@@ -1108,78 +880,9 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
 
 std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
+    (void)cacheKey;
+    (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
-    const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
-    if (normalizedCacheKey.empty()) {
-        if (stats) {
-            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-        }
-        return std::nullopt;
-    }
-
-    const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
-    auto candidates = FindCachedAssets(pathHash);
-    if (candidates.empty()) {
-        spdlog::info("nif_asset_cache=miss game='{}' path_hash='{}' reason='no asset usdc found'", normalizedCacheKey, pathHash);
-        if (stats) {
-            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-        }
-        return std::nullopt;
-    }
-
-    for (const auto& cachePath : candidates) {
-        const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
-        std::string sourceIdentifier;
-        std::string contentHash;
-        std::string reason;
-
-        UsdStageRefPtr stage = UsdStage::Open(cachePath.string(), UsdStage::LoadNone);
-        if (!ValidateAssetStage(stage, normalizedCacheKey, pathHash, fileContentHash, sourceIdentifier, contentHash, reason)) {
-            spdlog::warn(
-                "nif_asset_cache=fallback game='{}' path='{}' reason='{}'",
-                normalizedCacheKey,
-                cachePath.string(),
-                reason);
-            continue;
-        }
-
-        if (stats) {
-            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-        }
-        const auto usdLoadBegin = std::chrono::steady_clock::now();
-        auto scene = LoadCachedStage(cachePath, sourceIdentifier, contentHash, settings);
-        if (stats) {
-            stats->usdLoadMs += ElapsedMs(usdLoadBegin, std::chrono::steady_clock::now());
-        }
-        if (!scene) {
-            spdlog::warn(
-                "nif_asset_cache=fallback game='{}' path='{}' content_hash='{}' reason='cached USD load failed'",
-                normalizedCacheKey,
-                cachePath.string(),
-                contentHash);
-            continue;
-        }
-
-        spdlog::info(
-            "nif_asset_cache=hit game='{}' path='{}' content_hash='{}' source_identifier='{}'",
-            normalizedCacheKey,
-            cachePath.string(),
-                contentHash,
-                sourceIdentifier);
-        if (stats) {
-            stats->cacheHit = true;
-            stats->cachePath = cachePath;
-            stats->sourceIdentifier = sourceIdentifier;
-            stats->contentHash = contentHash;
-        }
-        return CachedAssetLoadResult{
-            .scene = std::move(scene),
-            .cachePath = cachePath,
-            .sourceIdentifier = std::move(sourceIdentifier),
-            .contentHash = std::move(contentHash)
-        };
-    }
-
     if (stats) {
         stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
     }
@@ -1188,6 +891,7 @@ std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, co
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
+    (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
     if (normalizedCacheKey.empty()) {
@@ -1200,7 +904,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     auto candidates = FindCachedAssets(pathHash);
     if (candidates.empty()) {
-        spdlog::info("nif_asset_cache=miss game='{}' path_hash='{}' reason='no asset usdc found'", normalizedCacheKey, pathHash);
+        spdlog::info("nif_meta_cache=miss game='{}' path_hash='{}' reason='no nif metadata found'", normalizedCacheKey, pathHash);
         if (stats) {
             stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
         }
@@ -1209,13 +913,10 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
 
     for (const auto& cachePath : candidates) {
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
-        std::string sourceIdentifier;
-        std::string contentHash;
-        std::string reason;
 
         if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash)) {
             spdlog::info(
-                "nif_asset_payload_cache=hit game='{}' path='{}' content_hash='{}'",
+                "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
                 PayloadCachePathForAssetCache(cachePath).string(),
                 fileContentHash);
@@ -1229,60 +930,6 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
             }
             return payload;
         }
-
-        const auto openBegin = std::chrono::steady_clock::now();
-        UsdStageRefPtr stage = UsdStage::Open(cachePath.string(), UsdStage::LoadNone);
-        if (stats) {
-            stats->usdOpenMs += ElapsedMs(openBegin, std::chrono::steady_clock::now());
-        }
-        if (!ValidateAssetStage(stage, normalizedCacheKey, pathHash, fileContentHash, sourceIdentifier, contentHash, reason)) {
-            spdlog::warn(
-                "nif_asset_cache=fallback game='{}' path='{}' reason='{}'",
-                normalizedCacheKey,
-                cachePath.string(),
-                reason);
-            continue;
-        }
-
-        if (stats) {
-            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-        }
-
-        const auto options = MakeStageOptions(
-            sourceIdentifier,
-            cachePath.parent_path().string(),
-            "brnifly_" + contentHash + ".asset.usdc");
-        const auto extractBegin = std::chrono::steady_clock::now();
-        auto payload = USDLoader::LoadImportedAssetFromStage(stage, options, settings);
-        if (stats) {
-            const auto elapsed = ElapsedMs(extractBegin, std::chrono::steady_clock::now());
-            stats->usdExtractMs += elapsed;
-            stats->meshBuildMs += elapsed;
-            stats->usdLoadMs += elapsed;
-        }
-        if (!payload) {
-            spdlog::warn(
-                "nif_asset_cache=fallback game='{}' path='{}' content_hash='{}' reason='cached USD payload load failed'",
-                normalizedCacheKey,
-                cachePath.string(),
-                contentHash);
-            continue;
-        }
-        WritePayloadCache(cachePath, normalizedCacheKey, pathHash, contentHash, *payload);
-
-        spdlog::info(
-            "nif_asset_cache=hit game='{}' path='{}' content_hash='{}' source_identifier='{}'",
-            normalizedCacheKey,
-            cachePath.string(),
-            contentHash,
-            sourceIdentifier);
-        if (stats) {
-            stats->cacheHit = true;
-            stats->cachePath = cachePath;
-            stats->sourceIdentifier = sourceIdentifier;
-            stats->contentHash = contentHash;
-        }
-        return payload;
     }
 
     if (stats) {
@@ -1325,29 +972,6 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
 
     const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, package->contentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
-    const auto assetWriteBegin = std::chrono::steady_clock::now();
-    const auto cachePath = WriteAssetCache(package.value(), normalizedCacheKey, pathHash, stableSourceIdentifier, sourceDirectory);
-    if (stats) {
-        stats->assetWriteMs += ElapsedMs(assetWriteBegin, std::chrono::steady_clock::now());
-    }
-    if (cachePath) {
-        if (stats) {
-            stats->assetCacheWritten = cachePath->wrote;
-            stats->cachePath = cachePath->path;
-            stats->sourceIdentifier = stableSourceIdentifier;
-            stats->contentHash = package->contentHash;
-        }
-        if (auto payload = LoadCachedAssetPayload(cachePath->path, stableSourceIdentifier, package->contentHash, settings, stats)) {
-            WritePayloadCache(cachePath->path, normalizedCacheKey, pathHash, package->contentHash, *payload);
-            return payload;
-        }
-        spdlog::warn(
-            "nif_asset_cache=fallback game='{}' path='{}' content_hash='{}' reason='fresh cached USD payload load failed; loading in-memory USD'",
-            normalizedCacheKey,
-            cachePath->path.string(),
-            package->contentHash);
-    }
-
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
@@ -1359,6 +983,28 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         stats->usdExtractMs += elapsed;
         stats->meshBuildMs += elapsed;
         stats->usdLoadMs += elapsed;
+    }
+    if (payload) {
+        const fs::path cachePath = CLodCache::GetCacheFilePathForSource(
+            s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, package->contentHash)),
+            stableSourceIdentifier);
+        const auto cacheWriteBegin = std::chrono::steady_clock::now();
+        const bool wrote = WritePayloadCache(cachePath, normalizedCacheKey, pathHash, package->contentHash, *payload);
+        if (stats) {
+            stats->assetWriteMs += ElapsedMs(cacheWriteBegin, std::chrono::steady_clock::now());
+            stats->assetCacheWritten = wrote;
+            stats->cachePath = cachePath;
+            stats->sourceIdentifier = stableSourceIdentifier;
+            stats->contentHash = package->contentHash;
+        }
+        if (wrote) {
+            RegisterCachedAsset(pathHash, cachePath);
+            spdlog::info(
+                "nif_meta_cache=write game='{}' path='{}' content_hash='{}'",
+                normalizedCacheKey,
+                cachePath.string(),
+                package->contentHash);
+        }
     }
     return payload;
 }
@@ -1406,7 +1052,6 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
 std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey.empty() ? filePath : cacheKey);
-    const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     if (IsKnownNonRenderableNif(normalizedCacheKey)) {
         spdlog::info("Skipping known non-renderable NIF '{}'", normalizedCacheKey);
         return nullptr;
@@ -1437,33 +1082,6 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
 
     const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, package->contentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
-    const auto assetWriteBegin = std::chrono::steady_clock::now();
-    const auto cachePath = WriteAssetCache(package.value(), normalizedCacheKey, pathHash, stableSourceIdentifier, sourceDirectory);
-    if (stats) {
-        stats->assetWriteMs += ElapsedMs(assetWriteBegin, std::chrono::steady_clock::now());
-    }
-    if (cachePath) {
-        if (stats) {
-            stats->assetCacheWritten = cachePath->wrote;
-            stats->cachePath = cachePath->path;
-            stats->sourceIdentifier = stableSourceIdentifier;
-            stats->contentHash = package->contentHash;
-        }
-        const auto usdLoadBegin = std::chrono::steady_clock::now();
-        auto scene = LoadCachedStage(cachePath->path, stableSourceIdentifier, package->contentHash, settings);
-        if (stats) {
-            stats->usdLoadMs += ElapsedMs(usdLoadBegin, std::chrono::steady_clock::now());
-        }
-        if (scene) {
-            return scene;
-        }
-        spdlog::warn(
-            "nif_asset_cache=fallback game='{}' path='{}' content_hash='{}' reason='fresh cached USD load failed; loading in-memory USD'",
-            normalizedCacheKey,
-            cachePath->path.string(),
-            package->contentHash);
-    }
-
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
