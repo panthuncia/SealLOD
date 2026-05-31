@@ -21,6 +21,7 @@ public:
 
     // Insert an element while maintaining sorted order (deduped)
     void Insert(unsigned int element);
+    void InsertMany(const std::vector<unsigned int>& elements);
 
     // Remove an element (and shift the tail on GPU)
     void Remove(unsigned int element);

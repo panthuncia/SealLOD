@@ -24,6 +24,7 @@ public:
     }
 
     std::unique_ptr<BufferView> Allocate(size_t size, size_t elementSize);
+    void ReserveBytes(size_t size);
     void Deallocate(const BufferView* view);
 	std::unique_ptr<BufferView> AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize = 0);
 	void UpdateView(BufferView* view, const void* data) override;

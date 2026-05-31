@@ -48,6 +48,55 @@ void SortedUnsignedIntBuffer::Insert(unsigned int element) {
     StageOrUpload(src, sizeof(unsigned int) * count, index * sizeof(unsigned int));
 }
 
+void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elements) {
+    if (elements.empty()) {
+        return;
+    }
+
+    std::vector<unsigned int> sortedElements = elements;
+    std::sort(sortedElements.begin(), sortedElements.end());
+    sortedElements.erase(std::unique(sortedElements.begin(), sortedElements.end()), sortedElements.end());
+
+    if (m_data.empty()) {
+        while (sortedElements.size() > m_capacity) {
+            GrowBuffer(m_capacity * 2);
+        }
+        m_data = std::move(sortedElements);
+        StageOrUpload(m_data.data(), sizeof(unsigned int) * m_data.size(), 0);
+        m_earliestModifiedIndex = 0;
+        return;
+    }
+
+    std::vector<unsigned int> merged;
+    merged.reserve(m_data.size() + sortedElements.size());
+    std::set_union(
+        m_data.begin(),
+        m_data.end(),
+        sortedElements.begin(),
+        sortedElements.end(),
+        std::back_inserter(merged));
+
+    if (merged.size() == m_data.size()) {
+        return;
+    }
+
+    while (merged.size() > m_capacity) {
+        GrowBuffer(m_capacity * 2);
+    }
+
+    auto firstDiff = std::mismatch(m_data.begin(), m_data.end(), merged.begin(), merged.end());
+    const auto dirtyIndex = static_cast<std::size_t>(std::distance(m_data.begin(), firstDiff.first));
+    m_data = std::move(merged);
+
+    const unsigned int* src = m_data.data() + dirtyIndex;
+    const auto count = m_data.size() - dirtyIndex;
+    StageOrUpload(src, sizeof(unsigned int) * count, dirtyIndex * sizeof(unsigned int));
+
+    if (dirtyIndex < m_earliestModifiedIndex) {
+        m_earliestModifiedIndex = dirtyIndex;
+    }
+}
+
 void SortedUnsignedIntBuffer::Remove(unsigned int element) {
     // Find the element
     auto it = std::lower_bound(m_data.begin(), m_data.end(), element);

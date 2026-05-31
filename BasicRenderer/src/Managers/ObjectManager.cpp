@@ -50,6 +50,71 @@ ObjectManager::ObjectManager() {
 	m_resources[Builtin::NormalMatrixBuffer] = m_normalMatrixBuffer;
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
 }
+
+std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
+	auto it = m_activeDrawSetIndices.find(workloadKey);
+	if (it != m_activeDrawSetIndices.end()) {
+		return it->second;
+	}
+
+	auto debugName =
+		"activeDrawSetIndices(flags=" + std::to_string(static_cast<uint64_t>(workloadKey.compileFlags))
+		+ ", phase=" + std::to_string(workloadKey.renderPhase.hash)
+		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
+	auto buffer = SortedUnsignedIntBuffer::CreateShared(1, debugName);
+	rg::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
+	buffer->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
+	buffer->GetECSEntity().set<Components::Resource>({ buffer });
+	buffer->GetECSEntity().add<Components::ParticipatesInPass>(
+		RendererECSManager::GetInstance().GetRenderPhaseEntity(workloadKey.renderPhase));
+	if (workloadKey.clodOnly) {
+		buffer->GetECSEntity().add<Components::CLodOnlyDrawWorkload>();
+	}
+	else {
+		buffer->GetECSEntity().add<Components::GeneralDrawWorkload>();
+	}
+	m_activeDrawSetIndices[workloadKey] = buffer;
+	++m_drawSetDeclarationRevision;
+	return buffer;
+}
+
+void ObjectManager::BeginAddObjectBatch() {
+	BeginAddObjectBatch(0, 0);
+}
+
+void ObjectManager::BeginAddObjectBatch(std::size_t expectedObjects, std::size_t expectedDraws) {
+	if (m_addObjectBatchDepth == 0u) {
+		m_batchedActiveDrawSetInserts.clear();
+		if (expectedObjects > 0u) {
+			m_perObjectBuffers->ReserveBytes(expectedObjects * sizeof(PerObjectCB));
+			const auto normalMatrixTarget = static_cast<uint32_t>(m_normalMatrixBuffer->Size() + expectedObjects);
+			m_normalMatrixBuffer->Resize(normalMatrixTarget);
+		}
+		if (expectedDraws > 0u) {
+			m_masterIndirectCommandsBuffer->ReserveBytes(expectedDraws * sizeof(DispatchMeshIndirectCommand));
+		}
+	}
+	++m_addObjectBatchDepth;
+}
+
+void ObjectManager::EndAddObjectBatch() {
+	if (m_addObjectBatchDepth == 0u) {
+		return;
+	}
+	--m_addObjectBatchDepth;
+	if (m_addObjectBatchDepth != 0u) {
+		return;
+	}
+
+	for (const auto& [workloadKey, indices] : m_batchedActiveDrawSetInserts) {
+		if (indices.empty()) {
+			continue;
+		}
+		EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+	}
+	m_batchedActiveDrawSetInserts.clear();
+}
+
 Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
 
 	Components::ObjectDrawInfo drawInfo;
@@ -89,28 +154,14 @@ Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObject
 			if (!material) {
 				material = mesh->material;
 			}
-            ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
-                if (!m_activeDrawSetIndices.contains(workloadKey)) {
-                    auto debugName =
-                        "activeDrawSetIndices(flags=" + std::to_string(static_cast<uint64_t>(workloadKey.compileFlags))
-                        + ", phase=" + std::to_string(workloadKey.renderPhase.hash)
-                        + ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
-                    m_activeDrawSetIndices[workloadKey] = SortedUnsignedIntBuffer::CreateShared(1, debugName);
-                    rg::memory::SetResourceUsageHint(*m_activeDrawSetIndices[workloadKey], "PerMesh, PerMeshInstance, PerObject");
-                    auto& buf = m_activeDrawSetIndices[workloadKey];
-                    buf->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
-                    buf->GetECSEntity().set<Components::Resource>({ buf });
-                    buf->GetECSEntity().add<Components::ParticipatesInPass>(
-                        RendererECSManager::GetInstance().GetRenderPhaseEntity(workloadKey.renderPhase));
-                    if (workloadKey.clodOnly) {
-                        buf->GetECSEntity().add<Components::CLodOnlyDrawWorkload>();
-                    }
-                    else {
-                        buf->GetECSEntity().add<Components::GeneralDrawWorkload>();
-                    }
-                    ++m_drawSetDeclarationRevision;
-                }
-                m_activeDrawSetIndices[workloadKey]->Insert(index);
+			ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
+				if (m_addObjectBatchDepth != 0u) {
+					EnsureActiveDrawSetIndices(workloadKey);
+					m_batchedActiveDrawSetInserts[workloadKey].push_back(index);
+				}
+				else {
+					EnsureActiveDrawSetIndices(workloadKey)->Insert(index);
+				}
                 workloadKeysForDraw.push_back(workloadKey);
             });
             drawWorkloadKeysPerDraw.push_back(std::move(workloadKeysForDraw));

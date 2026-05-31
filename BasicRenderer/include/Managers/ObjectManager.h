@@ -4,6 +4,8 @@
 #include <optional>
 #include <mutex>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
 
 #include "Resources/Buffers/LazyDynamicStructuredBuffer.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
@@ -24,6 +26,9 @@ public:
 		return std::unique_ptr<ObjectManager>(new ObjectManager());
 	}
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
+	void BeginAddObjectBatch();
+	void BeginAddObjectBatch(std::size_t expectedObjects, std::size_t expectedDraws);
+	void EndAddObjectBatch();
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
@@ -64,6 +69,10 @@ private:
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
+	uint32_t m_addObjectBatchDepth = 0;
+	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> m_batchedActiveDrawSetInserts;
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
+
+	std::shared_ptr<SortedUnsignedIntBuffer> EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey);
 };

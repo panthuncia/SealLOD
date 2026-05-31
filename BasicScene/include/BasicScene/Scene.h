@@ -5,14 +5,18 @@
 #include <memory>
 #include <ctime>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <flecs.h>
 #include <atomic>
+#include "BasicScene/EcsEntityPool.h"
 #include "Animation/Skeleton.h"
 #include "Managers/LightManager.h"
 #include "Import/MeshData.h"
 #include "Managers/ManagerInterface.h"
 #include "Managers/Singletons/SettingsManager.h"
+#include "Render/RasterBucketFlags.h"
 
 class DynamicGloballyIndexedResource;
 class Material;
@@ -26,6 +30,31 @@ public:
     flecs::entity CreateSpotLightECS(std::wstring name, DirectX::XMFLOAT3 position, DirectX::XMFLOAT3 color, float intensity, DirectX::XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, float constantAttenuation = 0, float linearAttenuation = 0, float quadraticAttenuation = 0, bool shadowCasting = true);
     flecs::entity CreateNodeECS(std::wstring name = L"");
     flecs::entity CreateRenderableEntityECS(const std::vector<std::shared_ptr<Mesh>>& meshes, std::wstring name);
+    flecs::entity CreateRenderableEntityECS(
+        const std::vector<std::shared_ptr<Mesh>>& meshes,
+        std::wstring name,
+        std::optional<std::uint64_t> stableSceneID,
+        DirectX::XMMATRIX initialMatrix,
+        bool assignNames = true);
+    void ReserveRenderableEntityPool(std::size_t count);
+    void ReleaseRenderableEntityECS(flecs::entity entity);
+    void BeginRenderableActivationBatch();
+    void EndRenderableActivationBatch();
+    struct RenderableEntityPoolStats {
+        br::ecs::EcsEntityPoolStats pool;
+        std::uint64_t entityAcquireUs = 0;
+        std::uint64_t entitySetupUs = 0;
+        std::uint64_t entityActivateUs = 0;
+        std::uint64_t activationSkinUs = 0;
+        std::uint64_t activationMaterialUs = 0;
+        std::uint64_t activationGlobalMeshUs = 0;
+        std::uint64_t activationMeshInstanceUs = 0;
+        std::uint64_t activationWorkloadUs = 0;
+        std::uint64_t activationIndirectFlushUs = 0;
+        std::uint64_t meshInstanceCreateUs = 0;
+        std::uint64_t entityReleaseUs = 0;
+    };
+    RenderableEntityPoolStats GetRenderableEntityPoolStats() const;
     flecs::entity GetRoot() const;
     uint64_t GetSceneID() const;
     void Update(float elapsedSeconds);
@@ -55,6 +84,32 @@ private:
     UINT numObjects = 0;
 
     flecs::entity ECSSceneRoot;
+    br::ecs::EcsEntityPool m_renderableEntityPool;
+    bool m_renderableActivationBatchActive = false;
+    std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_batchedActivationWorkloads;
+    struct BatchedMaterialUsage {
+        Material* material = nullptr;
+        unsigned int slot = 0;
+        unsigned int deferredCount = 0;
+    };
+    struct BatchedRasterBucketUsage {
+        MaterialRasterFlags flags = MaterialRasterFlagsNone;
+        unsigned int slot = 0;
+        unsigned int deferredCount = 0;
+    };
+    std::unordered_map<uint32_t, BatchedMaterialUsage> m_batchedMaterialUsages;
+    std::unordered_map<uint32_t, BatchedRasterBucketUsage> m_batchedRasterBucketUsages;
+    std::uint64_t m_renderableEntityAcquireUs = 0;
+    std::uint64_t m_renderableEntitySetupUs = 0;
+    std::uint64_t m_renderableEntityActivateUs = 0;
+    std::uint64_t m_renderableActivationSkinUs = 0;
+    std::uint64_t m_renderableActivationMaterialUs = 0;
+    std::uint64_t m_renderableActivationGlobalMeshUs = 0;
+    std::uint64_t m_renderableActivationMeshInstanceUs = 0;
+    std::uint64_t m_renderableActivationWorkloadUs = 0;
+    std::uint64_t m_renderableActivationIndirectFlushUs = 0;
+    std::uint64_t m_renderableMeshInstanceCreateUs = 0;
+    std::uint64_t m_renderableEntityReleaseUs = 0;
 
     ManagerInterface m_managerInterface;
 

@@ -335,6 +335,8 @@ private:
 
     uint64_t m_selectedSceneNodeStableId = 0;
     bool m_sceneExplorerSnapshotAvailable = false;
+    bool m_sceneExplorerSnapshotTruncated = false;
+    size_t m_sceneExplorerSnapshotNodeBudget = 0;
     SceneExplorerNodeSnapshot m_sceneExplorerRootSnapshot{};
     std::unordered_map<uint64_t, SceneExplorerPendingEdit> m_sceneExplorerPendingEdits;
 
@@ -470,10 +472,10 @@ private:
     void DrawTonemapTypeDropdown();
     void DrawBrowseButton(const std::wstring& targetDirectory);
     void DrawLoadModelButton();
-    SceneExplorerNodeSnapshot BuildSceneExplorerSnapshot(flecs::entity node);
+    SceneExplorerNodeSnapshot BuildSceneExplorerSnapshot(flecs::entity node, size_t& remainingNodes, bool& truncated);
     const SceneExplorerNodeSnapshot* FindSceneExplorerSnapshotNode(const SceneExplorerNodeSnapshot& node, uint64_t stableId) const;
     SceneExplorerNodeSnapshot* FindSceneExplorerSnapshotNode(SceneExplorerNodeSnapshot& node, uint64_t stableId);
-    void RefreshSceneExplorerSnapshot();
+    void RefreshSceneExplorerSnapshot(size_t maxNodes);
     void OverlayPendingSceneExplorerEdits();
     void QueueSceneNodePositionChange(uint64_t stableId, const DirectX::XMFLOAT3& position);
     void QueueSceneNodeUniformScaleChange(uint64_t stableId, float uniformScale);
@@ -1465,8 +1467,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         return;
     }
 
-    RefreshSceneExplorerSnapshot();
-
 	{
 		static float f = 0.0f;
 		static int counter = 0;
@@ -2221,11 +2221,17 @@ inline void Menu::DrawLoadModelButton() {
     }
 }
 
-inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::entity node) {
+inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::entity node, size_t& remainingNodes, bool& truncated) {
     SceneExplorerNodeSnapshot snapshot;
     if (!node.is_alive()) {
         return snapshot;
     }
+
+    if (remainingNodes == 0) {
+        truncated = true;
+        return snapshot;
+    }
+    --remainingNodes;
 
     if (const auto* stableSceneID = node.try_get<Components::StableSceneID>()) {
         snapshot.stableId = stableSceneID->value;
@@ -2264,9 +2270,24 @@ inline Menu::SceneExplorerNodeSnapshot Menu::BuildSceneExplorerSnapshot(flecs::e
         snapshot.skinned = node.has<Components::Skinned>();
     }
 
-    node.children([&](flecs::entity child) {
-        snapshot.children.push_back(BuildSceneExplorerSnapshot(child));
-    });
+    auto* world = node.world().c_ptr();
+    ecs_iter_t it = ecs_children(world, node.id());
+    while (ecs_children_next(&it)) {
+        for (int32_t i = 0; i < it.count; ++i) {
+            if (remainingNodes == 0) {
+                truncated = true;
+                ecs_iter_fini(&it);
+                return snapshot;
+            }
+
+            snapshot.children.push_back(BuildSceneExplorerSnapshot(flecs::entity(world, it.entities[i]), remainingNodes, truncated));
+            if (remainingNodes == 0) {
+                truncated = true;
+                ecs_iter_fini(&it);
+                return snapshot;
+            }
+        }
+    }
 
     return snapshot;
 }
@@ -2339,7 +2360,7 @@ inline void Menu::OverlayPendingSceneExplorerEdits() {
     }
 }
 
-inline void Menu::RefreshSceneExplorerSnapshot() {
+inline void Menu::RefreshSceneExplorerSnapshot(size_t maxNodes) {
     if (m_sceneOverlapStatus.taskInFlight) {
         return;
     }
@@ -2347,12 +2368,17 @@ inline void Menu::RefreshSceneExplorerSnapshot() {
     auto root = getSceneRoot();
     if (!root) {
         m_sceneExplorerSnapshotAvailable = false;
+        m_sceneExplorerSnapshotTruncated = false;
+        m_sceneExplorerSnapshotNodeBudget = 0;
         m_selectedSceneNodeStableId = 0;
         m_sceneExplorerPendingEdits.clear();
         return;
     }
 
-    m_sceneExplorerRootSnapshot = BuildSceneExplorerSnapshot(root);
+    size_t remainingNodes = std::max<size_t>(1, maxNodes);
+    m_sceneExplorerSnapshotTruncated = false;
+    m_sceneExplorerSnapshotNodeBudget = remainingNodes;
+    m_sceneExplorerRootSnapshot = BuildSceneExplorerSnapshot(root, remainingNodes, m_sceneExplorerSnapshotTruncated);
     m_sceneExplorerSnapshotAvailable = true;
     OverlayPendingSceneExplorerEdits();
 
@@ -2418,9 +2444,20 @@ inline void Menu::DisplaySceneNode(const SceneExplorerNodeSnapshot& node, bool i
 }
 
 inline void Menu::DisplaySceneGraph() {
+    const float lineHeight = std::max(1.0f, ImGui::GetTextLineHeightWithSpacing());
+    const float availableHeight = std::max(0.0f, ImGui::GetContentRegionAvail().y);
+    const size_t visibleRows = static_cast<size_t>(std::ceil(availableHeight / lineHeight));
+    RefreshSceneExplorerSnapshot(std::max<size_t>(1, visibleRows + 8));
+
     if (!m_sceneExplorerSnapshotAvailable) {
         ImGui::TextDisabled("No scene snapshot available.");
         return;
+    }
+
+    if (m_sceneExplorerSnapshotTruncated) {
+        ImGui::TextDisabled(
+            "Scene graph limited to %llu visible nodes.",
+            static_cast<unsigned long long>(m_sceneExplorerSnapshotNodeBudget));
     }
 
     DisplaySceneNode(m_sceneExplorerRootSnapshot, true);

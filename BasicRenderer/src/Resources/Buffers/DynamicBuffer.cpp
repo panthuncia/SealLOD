@@ -83,6 +83,19 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
     return Allocate(size, elementSize);
 }
 
+void DynamicBuffer::ReserveBytes(size_t size) {
+    if (size == 0) {
+        return;
+    }
+
+    if (m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end()) {
+        return;
+    }
+
+    auto view = Allocate(size, m_elementSize);
+    Deallocate(view.get());
+}
+
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
 	size_t actualSize = size;
     if (fullAllocationSize != 0) {

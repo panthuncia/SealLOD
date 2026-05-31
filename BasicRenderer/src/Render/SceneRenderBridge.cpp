@@ -21,6 +21,24 @@
 
 namespace {
 
+class ObjectAddBatchScope {
+public:
+    explicit ObjectAddBatchScope(ObjectManager& objectManager, std::size_t expectedObjects = 0, std::size_t expectedDraws = 0)
+        : m_objectManager(objectManager) {
+        m_objectManager.BeginAddObjectBatch(expectedObjects, expectedDraws);
+    }
+
+    ~ObjectAddBatchScope() {
+        m_objectManager.EndAddObjectBatch();
+    }
+
+    ObjectAddBatchScope(const ObjectAddBatchScope&) = delete;
+    ObjectAddBatchScope& operator=(const ObjectAddBatchScope&) = delete;
+
+private:
+    ObjectManager& m_objectManager;
+};
+
 struct BridgedSceneEntity {};
 struct CameraResourceSignature {
     uint32_t depthResX = 0;
@@ -786,6 +804,19 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
     // Process only renderables that actually changed (transform, mesh, or new)
     {
         ZoneScopedN("SceneRenderBridge::IngestSnapshot::ChangedRenderables");
+        std::size_t expectedObjects = 0;
+        std::size_t expectedDraws = 0;
+        for (const auto& renderable : snapshot.changedRenderables) {
+            auto stateIt = m_bridgedEntities.find(renderable.stableID);
+            const bool meshChanged =
+                stateIt == m_bridgedEntities.end()
+                || stateIt->second.meshGeneration != renderable.meshInstances.generation;
+            if (meshChanged && !renderable.meshInstances.meshInstances.empty()) {
+                ++expectedObjects;
+                expectedDraws += renderable.meshInstances.meshInstances.size();
+            }
+        }
+        ObjectAddBatchScope objectAddBatch{ *objectManager, expectedObjects, expectedDraws };
         for (const auto& renderable : snapshot.changedRenderables) {
             auto dst = GetOrCreateBridgedEntity(renderWorld, m_bridgedEntities, renderable.stableID, m_currentIngestionFrame, sceneRoot);
 

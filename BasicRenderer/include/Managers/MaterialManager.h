@@ -37,10 +37,10 @@ public:
 	}
 	unsigned int GetCompileFlagsSlot(MaterialCompileFlags flags);
 	unsigned int GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data = std::nullopt);
-	unsigned int AcquireRasterBucket(MaterialRasterFlags rasterFlags);
+	unsigned int AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count = 1u);
 	void ReleaseRasterBucket(MaterialRasterFlags rasterFlags);
 
-	void IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory = nullptr);
+	unsigned int IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory = nullptr, unsigned int count = 1u);
 	void DecrementMaterialUsageCount(const Material& material);
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
 	void ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory);

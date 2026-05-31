@@ -816,21 +816,34 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, Texture
 	}
 }
 
-void MaterialManager::IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory) {
+unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory, unsigned int count) {
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
+	if (count == 0u) {
+		return GetMaterialSlot(material.GetMaterialID());
+	}
+
 	auto& flags = material.Technique().compileFlags;
 	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
-	m_compileFlagsUsageCounts[flagsSlot]++;
-	if (textureFactory) {
+	m_compileFlagsUsageCounts[flagsSlot] += count;
+
+	uint32_t materialID = material.GetMaterialID();
+	auto existingSlotIt = m_materialIDSlotMapping.find(materialID);
+	const bool alreadyResident =
+		existingSlotIt != m_materialIDSlotMapping.end()
+		&& existingSlotIt->second < m_materialUsageCounts.size()
+		&& m_materialUsageCounts[existingSlotIt->second] > 0u;
+
+	if (!alreadyResident && textureFactory) {
 		material.EnsureTexturesUploaded(*textureFactory);
 	}
-	uint32_t materialID = material.GetMaterialID();
 	material.SetCompileFlagsID(flagsSlot);
-	unsigned int materialSlot = GetMaterialSlot(materialID, textureFactory ? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
+	unsigned int materialSlot = alreadyResident
+		? existingSlotIt->second
+		: GetMaterialSlot(materialID, textureFactory ? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
 	m_activeMaterialsByID[materialID] = &material;
 
-	m_materialUsageCounts[materialSlot]++;
+	m_materialUsageCounts[materialSlot] += count;
 	if (m_materialUsageCounts[materialSlot] == 1u) {
 		if (textureFactory) {
 			FlushDirtyMaterial(material, textureFactory);
@@ -840,6 +853,7 @@ void MaterialManager::IncrementMaterialUsageCount(Material& material, TextureFac
 			MarkMaterialDirty(material);
 		}
 	}
+	return materialSlot;
 }
 
 void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
@@ -1275,24 +1289,28 @@ unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
 	return slot;
 }
 
-unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags) {
+unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count) {
+	if (count == 0u) {
+		return GetRasterBucketForFlags(rasterFlags);
+	}
+
 	unsigned int slot;
 	auto it = m_rasterFlagToBucketMapping.find(static_cast<uint32_t>(rasterFlags));
 	if (it != m_rasterFlagToBucketMapping.end()) {
 		slot = it->second;
-		m_rasterBucketUsageCounts[slot]++;
+		m_rasterBucketUsageCounts[slot] += count;
 		return slot;
 	}
 	if (!m_freeRasterBuckets.empty()) {
 		slot = m_freeRasterBuckets.back();
 		m_freeRasterBuckets.pop_back();
 		m_bucketToRasterFlagMapping[slot] = rasterFlags;
-		m_rasterBucketUsageCounts[slot] = 1u;
+		m_rasterBucketUsageCounts[slot] = count;
 	}
 	else {
 		slot = m_rasterBucketsUsed++;
 		m_bucketToRasterFlagMapping.push_back(rasterFlags);
-		m_rasterBucketUsageCounts.push_back(1u);
+		m_rasterBucketUsageCounts.push_back(count);
 	}
 
 	m_rasterFlagToBucketMapping[static_cast<uint32_t>(rasterFlags)] = slot;

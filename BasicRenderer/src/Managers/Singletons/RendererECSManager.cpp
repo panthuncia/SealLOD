@@ -15,10 +15,12 @@ void RendererECSManager::Initialize() {
     world.component<Components::GlobalMeshLibrary>().add(flecs::Exclusive);
     world.component<Components::DrawStats>("DrawStats").add(flecs::Exclusive);
     world.set<Components::DrawStats>({ 0, {} });
+    m_entityPool.Attach(world, "Renderer ECS Entity Pool");
 }
 
 void RendererECSManager::Cleanup() {
     FlushDeferredWorldOperations();
+    m_entityPool.Clear();
     m_renderPhaseEntities.clear();
     m_world.reset();
     std::scoped_lock lock(m_deferredWorldOperationsMutex);
@@ -58,6 +60,22 @@ void RendererECSManager::CreateRenderPhaseEntity(const RenderPhase& phase) {
     }
 
     m_renderPhaseEntities[phase] = GetWorld().entity(phase.name.c_str());
+}
+
+void RendererECSManager::ReserveEntityPool(std::size_t count) {
+    m_entityPool.Reserve(count);
+}
+
+flecs::entity RendererECSManager::AcquirePooledEntity() {
+    return m_entityPool.Acquire();
+}
+
+void RendererECSManager::ReleasePooledEntity(flecs::entity entity, const std::function<void(flecs::entity)>& cleanup) {
+    m_entityPool.Release(entity, cleanup);
+}
+
+br::ecs::EcsEntityPoolStats RendererECSManager::GetEntityPoolStats() const {
+    return m_entityPool.GetStats();
 }
 
 void RendererECSManager::EnqueueDeferredWorldOperation(std::function<void(flecs::world&)>&& op) {

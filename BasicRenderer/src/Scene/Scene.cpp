@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
 #include <execution>
 #include <flecs.h>
 #include <BasicScene/SceneWorldManager.h>
@@ -139,6 +140,11 @@ namespace {
 		return { globalStableSceneId.fetch_add(1, std::memory_order_relaxed) + 1 };
 	}
 
+	std::uint64_t ElapsedUs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now()) {
+		return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
+	}
+
 	MaterialRasterFlags ComposeRuntimeRasterFlags(Mesh& mesh, const Material& material) {
 		MaterialRasterFlags rasterFlags = material.Technique().rasterFlags;
 		if ((mesh.GetPerMeshCBData().vertexFlags & VERTEX_SKINNED) != 0u) {
@@ -208,6 +214,7 @@ Scene::Scene(){
 	AssignStableSceneID(ECSSceneRoot);
 	ECSSceneRoot = ECSSceneRoot;
     world.set_pipeline(world.get<Components::GameScene>().pipeline);
+	m_renderableEntityPool.Attach(world, "Scene Renderable Entity Pool");
 }
 
 flecs::entity Scene::CreateDirectionalLightECS(std::wstring name, XMFLOAT3 color, float intensity, XMFLOAT3 direction, bool shadowCasting){
@@ -332,6 +339,7 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 		for (auto& meshInstance : meshInstances->meshInstances) {
 
 			if (meshInstance->HasSkin()) {
+				const auto skinBegin = std::chrono::steady_clock::now();
 				meshInstance->SetCurrentSkeletonManager(m_managerInterface.GetSkeletonManager());
 				auto skinInst = meshInstance->GetSkin();
 				m_managerInterface.GetSkeletonManager()->AcquireSkinningInstance(skinInst);
@@ -340,8 +348,10 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 					skinInst->SetAnimation(0); // TODO: Animation selection
 				}
 				meshInstance->SyncSkinningStateFromSkeleton();
+				m_renderableActivationSkinUs += ElapsedUs(skinBegin);
 			}
 
+			const auto materialBegin = std::chrono::steady_clock::now();
 			auto effectiveMaterial = meshInstance->GetEffectiveMaterial();
 			if (!effectiveMaterial) {
 				effectiveMaterial = Material::GetDefaultMaterial();
@@ -349,13 +359,43 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 			}
 
 			// Register material residency. MaterialManager drains texture/material GPU updates from dirty queues.
-			m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
-				*effectiveMaterial,
-				m_managerInterface.GetTextureFactory());
-			auto materialDataIndex = m_managerInterface.GetMaterialManager()->GetMaterialSlot(effectiveMaterial->GetMaterialID());
+			unsigned int materialDataIndex = 0;
+			if (m_renderableActivationBatchActive) {
+				const auto materialID = effectiveMaterial->GetMaterialID();
+				auto materialIt = m_batchedMaterialUsages.find(materialID);
+				if (materialIt == m_batchedMaterialUsages.end()) {
+					materialDataIndex = m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
+						*effectiveMaterial,
+						m_managerInterface.GetTextureFactory());
+					m_batchedMaterialUsages.emplace(
+						materialID,
+						BatchedMaterialUsage{ effectiveMaterial.get(), materialDataIndex, 0u });
+				} else {
+					materialDataIndex = materialIt->second.slot;
+					++materialIt->second.deferredCount;
+				}
+			} else {
+				materialDataIndex = m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
+					*effectiveMaterial,
+					m_managerInterface.GetTextureFactory());
+			}
 			const MaterialRasterFlags runtimeRasterFlags = ComposeRuntimeRasterFlags(*meshInstance->GetMesh(), *effectiveMaterial);
-			const unsigned int rasterBucketIndex =
-				m_managerInterface.GetMaterialManager()->AcquireRasterBucket(runtimeRasterFlags);
+			unsigned int rasterBucketIndex = 0;
+			if (m_renderableActivationBatchActive) {
+				const auto rasterKey = static_cast<uint32_t>(runtimeRasterFlags);
+				auto rasterIt = m_batchedRasterBucketUsages.find(rasterKey);
+				if (rasterIt == m_batchedRasterBucketUsages.end()) {
+					rasterBucketIndex = m_managerInterface.GetMaterialManager()->AcquireRasterBucket(runtimeRasterFlags);
+					m_batchedRasterBucketUsages.emplace(
+						rasterKey,
+						BatchedRasterBucketUsage{ runtimeRasterFlags, rasterBucketIndex, 0u });
+				} else {
+					rasterBucketIndex = rasterIt->second.slot;
+					++rasterIt->second.deferredCount;
+				}
+			} else {
+				rasterBucketIndex = m_managerInterface.GetMaterialManager()->AcquireRasterBucket(runtimeRasterFlags);
+			}
 			if (meshInstance->HasMaterialOverride()) {
 				auto meshData = meshInstance->GetMesh()->GetPerMeshCBData();
 				meshData.materialDataIndex = materialDataIndex;
@@ -365,16 +405,22 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 				meshInstance->GetMesh()->SetMaterialDataIndex(materialDataIndex);
 				meshInstance->GetMesh()->SetRasterBucketIndex(rasterBucketIndex);
 			}
+			m_renderableActivationMaterialUs += ElapsedUs(materialBegin);
 
 			// Register mesh if not already present
+			const auto globalMeshBegin = std::chrono::steady_clock::now();
 			if (!globalMeshLibrary.meshes.contains(meshInstance->GetMesh()->GetGlobalID())) {
 				globalMeshLibrary.meshes[meshInstance->GetMesh()->GetGlobalID()] = meshInstance->GetMesh();
 				++globalMeshLibrary.generation;
 				m_managerInterface.GetMeshManager()->AddMesh(meshInstance->GetMesh(), useMeshletReorderedVertices);
 			}
+			m_renderableActivationGlobalMeshUs += ElapsedUs(globalMeshBegin);
+			const auto meshInstanceBegin = std::chrono::steady_clock::now();
 			m_managerInterface.GetMeshManager()->AddMeshInstance(meshInstance.get(), useMeshletReorderedVertices);
+			m_renderableActivationMeshInstanceUs += ElapsedUs(meshInstanceBegin);
 
 			// Update draw stats and indirect workload counts
+			const auto workloadBegin = std::chrono::steady_clock::now();
             auto& mesh = *meshInstance->GetMesh();
             ForEachMeshDrawWorkload(mesh, *effectiveMaterial, [&](const DrawWorkloadKey& workloadKey) {
                 if (drawStats.numDrawsPerTechnique.find(workloadKey) == drawStats.numDrawsPerTechnique.end()) {
@@ -382,11 +428,16 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
                 }
                 drawStats.numDrawsPerTechnique[workloadKey]++;
 
-                m_managerInterface.GetIndirectCommandBufferManager()->RegisterWorkload(workloadKey);
-                m_managerInterface.GetIndirectCommandBufferManager()->UpdateBuffersForWorkload(
-                    workloadKey,
-                    drawStats.numDrawsPerTechnique[workloadKey]);
+				if (m_renderableActivationBatchActive) {
+					m_batchedActivationWorkloads.insert(workloadKey);
+				} else {
+					m_managerInterface.GetIndirectCommandBufferManager()->RegisterWorkload(workloadKey);
+					m_managerInterface.GetIndirectCommandBufferManager()->UpdateBuffersForWorkload(
+						workloadKey,
+						drawStats.numDrawsPerTechnique[workloadKey]);
+				}
             });
+			m_renderableActivationWorkloadUs += ElapsedUs(workloadBegin);
 			drawStats.numDrawsInScene++;
 		
 		}
@@ -438,17 +489,114 @@ void Scene::ProcessEntitySkins(bool overrideExistingSkins) {
 	world.defer_end();
 }
 
+void Scene::ReserveRenderableEntityPool(std::size_t count) {
+	m_renderableEntityPool.Reserve(count);
+}
+
+Scene::RenderableEntityPoolStats Scene::GetRenderableEntityPoolStats() const {
+	RenderableEntityPoolStats stats;
+	stats.pool = m_renderableEntityPool.GetStats();
+	stats.entityAcquireUs = m_renderableEntityAcquireUs;
+	stats.entitySetupUs = m_renderableEntitySetupUs;
+	stats.entityActivateUs = m_renderableEntityActivateUs;
+	stats.activationSkinUs = m_renderableActivationSkinUs;
+	stats.activationMaterialUs = m_renderableActivationMaterialUs;
+	stats.activationGlobalMeshUs = m_renderableActivationGlobalMeshUs;
+	stats.activationMeshInstanceUs = m_renderableActivationMeshInstanceUs;
+	stats.activationWorkloadUs = m_renderableActivationWorkloadUs;
+	stats.activationIndirectFlushUs = m_renderableActivationIndirectFlushUs;
+	stats.meshInstanceCreateUs = m_renderableMeshInstanceCreateUs;
+	stats.entityReleaseUs = m_renderableEntityReleaseUs;
+	return stats;
+}
+
+void Scene::BeginRenderableActivationBatch() {
+	m_renderableActivationBatchActive = true;
+	m_batchedActivationWorkloads.clear();
+	m_batchedMaterialUsages.clear();
+	m_batchedRasterBucketUsages.clear();
+}
+
+void Scene::EndRenderableActivationBatch() {
+	if (!m_renderableActivationBatchActive) {
+		return;
+	}
+
+	m_renderableActivationBatchActive = false;
+	const auto materialFlushBegin = std::chrono::steady_clock::now();
+	if (auto* materialManager = m_managerInterface.GetMaterialManager()) {
+		for (const auto& [_, usage] : m_batchedMaterialUsages) {
+			if (usage.material && usage.deferredCount > 0u) {
+				materialManager->IncrementMaterialUsageCount(
+					*usage.material,
+					m_managerInterface.GetTextureFactory(),
+					usage.deferredCount);
+			}
+		}
+		for (const auto& [_, usage] : m_batchedRasterBucketUsages) {
+			if (usage.deferredCount > 0u) {
+				materialManager->AcquireRasterBucket(usage.flags, usage.deferredCount);
+			}
+		}
+	}
+	m_renderableActivationMaterialUs += ElapsedUs(materialFlushBegin);
+	m_batchedMaterialUsages.clear();
+	m_batchedRasterBucketUsages.clear();
+
+	auto* indirectCommandBufferManager = m_managerInterface.GetIndirectCommandBufferManager();
+	if (!indirectCommandBufferManager || m_batchedActivationWorkloads.empty()) {
+		m_batchedActivationWorkloads.clear();
+		return;
+	}
+
+	auto& drawStats = GetSceneWorld().get_mut<Components::DrawStats>();
+	const auto flushBegin = std::chrono::steady_clock::now();
+	for (const auto& workloadKey : m_batchedActivationWorkloads) {
+		const auto it = drawStats.numDrawsPerTechnique.find(workloadKey);
+		indirectCommandBufferManager->RegisterWorkload(workloadKey);
+		indirectCommandBufferManager->UpdateBuffersForWorkload(
+			workloadKey,
+			it != drawStats.numDrawsPerTechnique.end() ? it->second : 0u);
+	}
+	m_renderableActivationIndirectFlushUs += ElapsedUs(flushBegin);
+	m_batchedActivationWorkloads.clear();
+}
+
 flecs::entity Scene::CreateRenderableEntityECS(const std::vector<std::shared_ptr<Mesh>>& meshes, std::wstring name) {
-	auto& world = GetSceneWorld();
-	flecs::entity entity = world.entity();
+	return CreateRenderableEntityECS(meshes, std::move(name), std::nullopt, DirectX::XMMatrixIdentity());
+}
+
+flecs::entity Scene::CreateRenderableEntityECS(
+	const std::vector<std::shared_ptr<Mesh>>& meshes,
+	std::wstring name,
+	std::optional<std::uint64_t> stableSceneID,
+	DirectX::XMMATRIX initialMatrix,
+	bool assignNames) {
+	const auto acquireBegin = std::chrono::steady_clock::now();
+	flecs::entity entity = m_renderableEntityPool.Acquire();
+	m_renderableEntityAcquireUs += ElapsedUs(acquireBegin);
+
+	const auto setupBegin = std::chrono::steady_clock::now();
+	DirectX::XMVECTOR scale{ DirectX::XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f) };
+	DirectX::XMVECTOR rotation{ DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f) };
+	DirectX::XMVECTOR translation{ DirectX::XMVectorZero() };
+	DirectX::XMMatrixDecompose(std::addressof(scale), std::addressof(rotation), std::addressof(translation), initialMatrix);
 	entity.child_of(ECSSceneRoot)
-		.set_name((ws2s(name) + "_" + std::to_string(entity.id())).c_str())
-		.set<Components::Rotation>({ 0, 0, 0, 1 })
-		.set<Components::Position>({ 0, 0, 0 })
-		.set<Components::Scale>({ 1, 1, 1 })
-		.set<Components::Matrix>(DirectX::XMMatrixIdentity())
-		.set<Components::Name>(ws2s(name));
-	AssignStableSceneID(entity);
+		.set<Components::Rotation>({ rotation })
+		.set<Components::Position>({ translation })
+		.set<Components::Scale>({ scale })
+		.set<Components::Matrix>(initialMatrix);
+	if (assignNames) {
+		const auto narrowName = ws2s(name);
+		entity
+			.set_name((narrowName + "_" + std::to_string(entity.id())).c_str())
+			.set<Components::Name>(narrowName);
+	}
+	if (stableSceneID && *stableSceneID != 0) {
+		entity.set<Components::StableSceneID>({ *stableSceneID });
+	} else {
+		AssignStableSceneID(entity);
+	}
 	Components::MeshInstances meshInstances;
     for (auto& mesh : meshes) {
 		if (mesh == nullptr) {
@@ -458,7 +606,9 @@ flecs::entity Scene::CreateRenderableEntityECS(const std::vector<std::shared_ptr
 		if (skinned) {
 			entity.add<Components::Skinned>();
 		}
+		const auto meshInstanceBegin = std::chrono::steady_clock::now();
 		meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
+		m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
 		if (skinned) {
 			auto skeleton = mesh->GetBaseSkin()->CopySkeleton();
 			meshInstances.meshInstances.back()->SetSkeleton(skeleton);
@@ -471,11 +621,37 @@ flecs::entity Scene::CreateRenderableEntityECS(const std::vector<std::shared_ptr
 
 	// If scene is active, add object & manage meshes
 	if (ECSSceneRoot.has<Components::ActiveScene>()) {
+		const auto activateBegin = std::chrono::steady_clock::now();
 		ActivateRenderable(entity);
+		m_renderableEntityActivateUs += ElapsedUs(activateBegin);
 		entity.add<Components::Active>();
 	}
 
+	m_renderableEntitySetupUs += ElapsedUs(setupBegin);
     return entity;
+}
+
+void Scene::ReleaseRenderableEntityECS(flecs::entity entity) {
+	const auto releaseBegin = std::chrono::steady_clock::now();
+	m_renderableEntityPool.Release(entity, [](flecs::entity e) {
+		e.remove<Components::Active>();
+		if (e.has<Components::MeshInstances>()) {
+			e.remove<Components::MeshInstances>();
+		}
+		e.remove<Components::Skinned>();
+		e.remove<Components::SkinningPassEligible>();
+		e.remove<Components::SkipShadowPass>();
+		e.remove<Components::RenderBridgeContentDirty>();
+		e.remove<Components::TransformDirty>();
+		e.remove<Components::TransformUpdatedThisFrame>();
+		e.remove<Components::StableSceneID>();
+		e.remove<Components::Name>();
+		e.remove<Components::Matrix>();
+		e.remove<Components::Position>();
+		e.remove<Components::Rotation>();
+		e.remove<Components::Scale>();
+	});
+	m_renderableEntityReleaseUs += ElapsedUs(releaseBegin);
 }
 
 flecs::entity Scene::CreateNodeECS(std::wstring name) {
@@ -548,11 +724,11 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 		auto& overrideView = meshInstance->GetPerMeshOverrideBufferView();
 		m_managerInterface.GetMeshManager()->ReleasePerMeshOverrideBuffer(overrideView);
 
-		m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
+		const auto materialDataIndex = m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
 			*material,
 			m_managerInterface.GetTextureFactory());
 		auto meshData = mesh->GetPerMeshCBData();
-		meshData.materialDataIndex = m_managerInterface.GetMaterialManager()->GetMaterialSlot(material->GetMaterialID());
+		meshData.materialDataIndex = materialDataIndex;
 		meshData.rasterBucketIndex = m_managerInterface.GetMaterialManager()->AcquireRasterBucket(ComposeRuntimeRasterFlags(*mesh, *material));
 
 		if (material != mesh->material) {
@@ -851,6 +1027,7 @@ Scene::~Scene() {
 	m_dirtyQuery = {};
 	m_propagateQueriesBuilt = false;
 	Deactivate();
+	m_renderableEntityPool.Clear();
 }
 
 void activate_hierarchy(flecs::entity src) {
