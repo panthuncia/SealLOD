@@ -78,108 +78,133 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 	return buffer;
 }
 
-void ObjectManager::BeginAddObjectBatch() {
-	BeginAddObjectBatch(0, 0);
+Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
+	std::vector<ObjectBuildInfo> objects;
+	objects.push_back({ perObjectCB, meshInstances });
+	auto drawInfos = AddObjectsBulk(objects);
+	return drawInfos.empty() ? Components::ObjectDrawInfo{} : std::move(drawInfos.front());
 }
 
-void ObjectManager::BeginAddObjectBatch(std::size_t expectedObjects, std::size_t expectedDraws) {
-	if (m_addObjectBatchDepth == 0u) {
-		m_batchedActiveDrawSetInserts.clear();
-		if (expectedObjects > 0u) {
-			m_perObjectBuffers->ReserveBytes(expectedObjects * sizeof(PerObjectCB));
-			const auto normalMatrixTarget = static_cast<uint32_t>(m_normalMatrixBuffer->Size() + expectedObjects);
-			m_normalMatrixBuffer->Resize(normalMatrixTarget);
-		}
-		if (expectedDraws > 0u) {
-			m_masterIndirectCommandsBuffer->ReserveBytes(expectedDraws * sizeof(DispatchMeshIndirectCommand));
-		}
-	}
-	++m_addObjectBatchDepth;
-}
-
-void ObjectManager::EndAddObjectBatch() {
-	if (m_addObjectBatchDepth == 0u) {
-		return;
-	}
-	--m_addObjectBatchDepth;
-	if (m_addObjectBatchDepth != 0u) {
-		return;
+std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects) {
+	std::vector<Components::ObjectDrawInfo> drawInfos;
+	if (objects.empty()) {
+		return drawInfos;
 	}
 
-	for (const auto& [workloadKey, indices] : m_batchedActiveDrawSetInserts) {
-		if (indices.empty()) {
+	struct PendingCommand {
+		size_t objectIndex = 0;
+		uint32_t perMeshInstanceBufferIndex = 0;
+		std::vector<DrawWorkloadKey> workloadKeys;
+	};
+
+	drawInfos.resize(objects.size());
+
+	std::vector<PerObjectCB> perObjectCBs;
+	std::vector<DirectX::XMFLOAT4X4> normalMatrices;
+	perObjectCBs.reserve(objects.size());
+	normalMatrices.reserve(objects.size());
+	for (const auto& object : objects) {
+		perObjectCBs.push_back(object.perObjectCB);
+		normalMatrices.push_back(ComputeNormalMatrixStorage(object.perObjectCB.modelMatrix));
+	}
+
+	auto perObjectViews = m_perObjectBuffers->AddDataBatch(perObjectCBs.data(), perObjectCBs.size(), sizeof(PerObjectCB));
+	auto normalMatrixViews = m_normalMatrixBuffer->AddMany(normalMatrices.data(), normalMatrices.size());
+
+	std::vector<DispatchMeshIndirectCommand> commands;
+	std::vector<PendingCommand> pendingCommands;
+	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+
+	size_t expectedDraws = 0;
+	for (const auto& object : objects) {
+		if (object.meshInstances) {
+			expectedDraws += object.meshInstances->meshInstances.size();
+		}
+	}
+	commands.reserve(expectedDraws);
+	pendingCommands.reserve(expectedDraws);
+
+	for (size_t objectIndex = 0; objectIndex < objects.size(); ++objectIndex) {
+		const auto& object = objects[objectIndex];
+		auto& drawInfo = drawInfos[objectIndex];
+
+		if (objectIndex >= perObjectViews.size() || objectIndex >= normalMatrixViews.size()) {
 			continue;
 		}
-		EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
-	}
-	m_batchedActiveDrawSetInserts.clear();
-}
 
-Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
+		auto& perObjectCBview = perObjectViews[objectIndex];
+		auto& normalMatrixView = normalMatrixViews[objectIndex];
+		const uint32_t perObjectIndex = static_cast<uint32_t>(perObjectCBview->GetOffset() / sizeof(PerObjectCB));
 
-	Components::ObjectDrawInfo drawInfo;
+		drawInfo.perObjectCBView = perObjectCBview;
+		drawInfo.perObjectCBIndex = perObjectIndex;
+		drawInfo.normalMatrixView = normalMatrixView;
+		drawInfo.normalMatrixIndex = static_cast<uint32_t>(normalMatrixView->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
 
-	std::shared_ptr<BufferView> perObjectCBview = m_perObjectBuffers->AddData(&perObjectCB, sizeof(PerObjectCB), sizeof(PerObjectCB));
-
-	// Patch all mesh instances with their perObject index
-	uint32_t perObjectIndex = static_cast<uint32_t>(perObjectCBview->GetOffset() / sizeof(PerObjectCB));
-	if (meshInstances) {
-		for (auto& inst : meshInstances->meshInstances) {
-			inst->SetPerObjectBufferIndex(perObjectIndex);
+		if (object.meshInstances == nullptr) {
+			continue;
 		}
-	}
 
-	if (meshInstances != nullptr) {
-		std::vector<unsigned int> indices;
-		std::vector<std::shared_ptr<BufferView>> views;
-		std::vector<std::vector<DrawWorkloadKey>> drawWorkloadKeysPerDraw;
-		// For each mesh, add an indirect command to the draw set buffer
-		for (auto& meshInstance : meshInstances->meshInstances) {
+		drawInfo.drawInfo.indices.reserve(object.meshInstances->meshInstances.size());
+		drawInfo.drawInfo.views.reserve(object.meshInstances->meshInstances.size());
+		drawInfo.drawInfo.drawWorkloadKeysPerDraw.reserve(object.meshInstances->meshInstances.size());
+		drawInfo.perMeshInstanceBufferIndices.reserve(object.meshInstances->meshInstances.size());
+
+		for (auto& meshInstance : object.meshInstances->meshInstances) {
+			if (!meshInstance) {
+				continue;
+			}
+			meshInstance->SetPerObjectBufferIndex(perObjectIndex);
 			auto& mesh = meshInstance->GetMesh();
 			const uint32_t perMeshInstanceBufferIndex = static_cast<uint32_t>(meshInstance->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
 			DispatchMeshIndirectCommand command = {};
-			command.perObjectBufferIndex = static_cast<uint32_t>(perObjectCBview->GetOffset() / sizeof(PerObjectCB));
+			command.perObjectBufferIndex = perObjectIndex;
 			command.perMeshBufferIndex = meshInstance->GetPerMeshBufferIndex();
 			command.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
 			command.dispatchMeshArguments.ThreadGroupCountX = 0; //DivRoundUp(mesh->GetMeshletCount(), AS_GROUP_SIZE);
 			command.dispatchMeshArguments.ThreadGroupCountY = 1;
 			command.dispatchMeshArguments.ThreadGroupCountZ = 1;
-			std::shared_ptr<BufferView> view = m_masterIndirectCommandsBuffer->AddData(&command, sizeof(DispatchMeshIndirectCommand), sizeof(DispatchMeshIndirectCommand));
-			views.push_back(view);
-			unsigned int index = static_cast<uint32_t>(view->GetOffset() / sizeof(DispatchMeshIndirectCommand));
-			indices.push_back(index);
+
+			commands.push_back(command);
 			drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
-            std::vector<DrawWorkloadKey> workloadKeysForDraw;
+			PendingCommand pendingCommand;
+			pendingCommand.objectIndex = objectIndex;
+			pendingCommand.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
 			auto material = meshInstance->GetEffectiveMaterial();
 			if (!material) {
 				material = mesh->material;
 			}
 			ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
-				if (m_addObjectBatchDepth != 0u) {
-					EnsureActiveDrawSetIndices(workloadKey);
-					m_batchedActiveDrawSetInserts[workloadKey].push_back(index);
-				}
-				else {
-					EnsureActiveDrawSetIndices(workloadKey)->Insert(index);
-				}
-                workloadKeysForDraw.push_back(workloadKey);
+				pendingCommand.workloadKeys.push_back(workloadKey);
             });
-            drawWorkloadKeysPerDraw.push_back(std::move(workloadKeysForDraw));
+			pendingCommands.push_back(std::move(pendingCommand));
 		}
-
-		Components::IndirectDrawInfo info;
-		info.indices = indices;
-		info.views = views;
-		info.drawWorkloadKeysPerDraw = drawWorkloadKeysPerDraw;
-		drawInfo.drawInfo = info;
 	}
 
-	auto normalMatrixView = m_normalMatrixBuffer->Add(ComputeNormalMatrixStorage(perObjectCB.modelMatrix));
-	drawInfo.normalMatrixView = normalMatrixView;
-	drawInfo.perObjectCBView = perObjectCBview;
-	drawInfo.normalMatrixIndex = static_cast<uint32_t>(normalMatrixView->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
-	drawInfo.perObjectCBIndex = static_cast<uint32_t>(perObjectCBview->GetOffset() / sizeof(PerObjectCB));
-	return drawInfo;
+	if (!commands.empty()) {
+		auto commandViews = m_masterIndirectCommandsBuffer->AddDataBatch(commands.data(), commands.size(), sizeof(DispatchMeshIndirectCommand));
+		for (size_t commandIndex = 0; commandIndex < commandViews.size() && commandIndex < pendingCommands.size(); ++commandIndex) {
+			const auto& pendingCommand = pendingCommands[commandIndex];
+			auto& drawInfo = drawInfos[pendingCommand.objectIndex];
+			auto& view = commandViews[commandIndex];
+			const auto indirectIndex = static_cast<unsigned int>(view->GetOffset() / sizeof(DispatchMeshIndirectCommand));
+
+			drawInfo.drawInfo.indices.push_back(indirectIndex);
+			drawInfo.drawInfo.views.push_back(view);
+			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pendingCommand.workloadKeys);
+			for (const auto& workloadKey : pendingCommand.workloadKeys) {
+				activeDrawSetInserts[workloadKey].push_back(indirectIndex);
+			}
+		}
+	}
+
+	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
+		if (!indices.empty()) {
+			EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+		}
+	}
+
+	return drawInfos;
 }
 
 void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {

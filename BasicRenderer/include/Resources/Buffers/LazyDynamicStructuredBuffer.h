@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <deque>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <rhi.h>
 
@@ -49,6 +50,54 @@ public:
 		UpdateView(view.get(), &data);
 		return view;
 	}
+
+    std::vector<std::shared_ptr<BufferView>> AddMany(const T* data, size_t count) {
+        std::vector<std::shared_ptr<BufferView>> views;
+        if (count == 0) {
+            return views;
+        }
+
+        auto viewedWeak = std::weak_ptr<ViewedDynamicBufferBase>(
+            std::dynamic_pointer_cast<ViewedDynamicBufferBase>(Resource::weak_from_this().lock())
+        );
+        views.reserve(count);
+
+        size_t copiedFromFreeList = 0;
+        while (!m_freeIndices.empty() && copiedFromFreeList < count) {
+            const uint64_t index = m_freeIndices.front();
+            m_freeIndices.pop_front();
+            views.push_back(BufferView::CreateShared(viewedWeak, index * m_elementSize, m_elementSize, sizeof(T)));
+            if (data != nullptr) {
+                StageOrUpload(&data[copiedFromFreeList], sizeof(T), index * m_elementSize);
+            }
+            ++copiedFromFreeList;
+        }
+
+        const size_t newCount = count - copiedFromFreeList;
+        if (newCount != 0) {
+            const uint64_t firstIndex = m_usedCapacity;
+            const uint64_t requiredCapacity = m_usedCapacity + newCount;
+            if (requiredCapacity > m_capacity) {
+                uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+                while (requiredCapacity > newCapacity) {
+                    newCapacity *= 2u;
+                }
+                Resize(newCapacity);
+            }
+
+            for (size_t i = 0; i < newCount; ++i) {
+                const uint64_t index = firstIndex + i;
+                views.push_back(BufferView::CreateShared(viewedWeak, index * m_elementSize, m_elementSize, sizeof(T)));
+            }
+            m_usedCapacity = requiredCapacity;
+
+            if (data != nullptr) {
+                StageOrUpload(data + copiedFromFreeList, sizeof(T) * newCount, firstIndex * m_elementSize);
+            }
+        }
+
+        return views;
+    }
 
     void Remove(BufferView* view) {
         if (!view) {

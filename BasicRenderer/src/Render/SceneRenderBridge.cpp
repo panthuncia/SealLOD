@@ -1,5 +1,6 @@
 #include "Render/SceneRenderBridge.h"
 
+#include <algorithm>
 #include <unordered_set>
 #include <vector>
 
@@ -20,24 +21,6 @@
 #include "Utilities/Utilities.h"
 
 namespace {
-
-class ObjectAddBatchScope {
-public:
-    explicit ObjectAddBatchScope(ObjectManager& objectManager, std::size_t expectedObjects = 0, std::size_t expectedDraws = 0)
-        : m_objectManager(objectManager) {
-        m_objectManager.BeginAddObjectBatch(expectedObjects, expectedDraws);
-    }
-
-    ~ObjectAddBatchScope() {
-        m_objectManager.EndAddObjectBatch();
-    }
-
-    ObjectAddBatchScope(const ObjectAddBatchScope&) = delete;
-    ObjectAddBatchScope& operator=(const ObjectAddBatchScope&) = delete;
-
-private:
-    ObjectManager& m_objectManager;
-};
 
 struct BridgedSceneEntity {};
 struct CameraResourceSignature {
@@ -205,7 +188,11 @@ void SyncPassMembership(flecs::entity dst, const Components::MeshInstances* mesh
     }
 }
 
-void SyncRenderableDerivedState(flecs::entity dst, const Components::MeshInstances* meshInstances, ObjectManager& objectManager) {
+bool SyncRenderableDerivedStateForBulk(
+    flecs::entity dst,
+    const Components::MeshInstances* meshInstances,
+    ObjectManager& objectManager,
+    ObjectManager::ObjectBuildInfo& objectBuildInfo) {
     const auto newSignature = BuildRenderableSignature(meshInstances);
     const auto perPassMeshes = BuildPerPassMeshes(meshInstances);
     const auto* oldSignature = dst.try_get<RenderableSignature>();
@@ -233,14 +220,12 @@ void SyncRenderableDerivedState(flecs::entity dst, const Components::MeshInstanc
     if (signatureChanged) {
         DestroyRendererObject(dst, objectManager);
         auto renderable = dst.get<Components::RenderableObject>();
-        auto drawInfo = objectManager.AddObject(renderable.perObjectCB, meshInstances);
-        renderable.perObjectCB.normalMatrixBufferIndex = drawInfo.normalMatrixIndex;
-        dst.set<Components::RenderableObject>(renderable);
-        dst.set<Components::ObjectDrawInfo>(drawInfo);
+        objectBuildInfo = { renderable.perObjectCB, meshInstances };
         dst.set<RenderableSignature>(newSignature);
     }
 
     SyncPassMembership(dst, meshInstances);
+    return signatureChanged;
 }
 
 Components::Camera BuildRendererCamera(const Components::Camera& sceneCamera, const Components::DepthMap& depthMap, uint32_t width, uint32_t height) {
@@ -804,19 +789,14 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
     // Process only renderables that actually changed (transform, mesh, or new)
     {
         ZoneScopedN("SceneRenderBridge::IngestSnapshot::ChangedRenderables");
-        std::size_t expectedObjects = 0;
-        std::size_t expectedDraws = 0;
-        for (const auto& renderable : snapshot.changedRenderables) {
-            auto stateIt = m_bridgedEntities.find(renderable.stableID);
-            const bool meshChanged =
-                stateIt == m_bridgedEntities.end()
-                || stateIt->second.meshGeneration != renderable.meshInstances.generation;
-            if (meshChanged && !renderable.meshInstances.meshInstances.empty()) {
-                ++expectedObjects;
-                expectedDraws += renderable.meshInstances.meshInstances.size();
-            }
-        }
-        ObjectAddBatchScope objectAddBatch{ *objectManager, expectedObjects, expectedDraws };
+        struct PendingObjectDraw {
+            flecs::entity entity;
+        };
+        std::vector<ObjectManager::ObjectBuildInfo> objectBuildInfos;
+        std::vector<PendingObjectDraw> pendingObjectDraws;
+        objectBuildInfos.reserve(snapshot.changedRenderables.size());
+        pendingObjectDraws.reserve(snapshot.changedRenderables.size());
+
         for (const auto& renderable : snapshot.changedRenderables) {
             auto dst = GetOrCreateBridgedEntity(renderWorld, m_bridgedEntities, renderable.stableID, m_currentIngestionFrame, sceneRoot);
 
@@ -834,7 +814,11 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
             }
 
             if (isNew || meshChanged) {
-                SyncRenderableDerivedState(dst, &renderable.meshInstances, *objectManager);
+                ObjectManager::ObjectBuildInfo objectBuildInfo;
+                if (SyncRenderableDerivedStateForBulk(dst, &renderable.meshInstances, *objectManager, objectBuildInfo)) {
+                    objectBuildInfos.push_back(objectBuildInfo);
+                    pendingObjectDraws.push_back({ dst });
+                }
                 entityState.meshGeneration = renderable.meshInstances.generation;
             }
 
@@ -854,6 +838,22 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
                 } else {
                     dst.remove<Components::SkipShadowPass>();
                 }
+            }
+        }
+
+        if (!objectBuildInfos.empty()) {
+            ZoneScopedN("SceneRenderBridge::IngestSnapshot::ChangedRenderables::AddObjectsBulk");
+            auto drawInfos = objectManager->AddObjectsBulk(objectBuildInfos);
+            const auto count = std::min(drawInfos.size(), pendingObjectDraws.size());
+            for (size_t i = 0; i < count; ++i) {
+                auto dst = pendingObjectDraws[i].entity;
+                if (!dst.is_alive()) {
+                    continue;
+                }
+                auto renderable = dst.get<Components::RenderableObject>();
+                renderable.perObjectCB.normalMatrixBufferIndex = drawInfos[i].normalMatrixIndex;
+                dst.set<Components::RenderableObject>(renderable);
+                dst.set<Components::ObjectDrawInfo>(drawInfos[i]);
             }
         }
     }

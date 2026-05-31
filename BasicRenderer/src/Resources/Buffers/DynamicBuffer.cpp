@@ -96,6 +96,62 @@ void DynamicBuffer::ReserveBytes(size_t size) {
     Deallocate(view.get());
 }
 
+std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void* data, size_t count, size_t elementSize) {
+    std::vector<std::shared_ptr<BufferView>> views;
+    if (count == 0 || elementSize == 0) {
+        return views;
+    }
+
+    const size_t totalSize = count * elementSize;
+    if (!m_weakPtrCached) {
+        m_cachedWeakPtr = std::weak_ptr(
+            std::dynamic_pointer_cast<DynamicBuffer>(Resource::weak_from_this().lock())
+        );
+        m_weakPtrCached = true;
+    }
+
+    auto allocateFromBlock = [&](size_t blockOffset) {
+        views.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const size_t itemOffset = blockOffset + i * elementSize;
+            m_blocksByOffset[itemOffset] = { itemOffset, elementSize, false };
+            views.push_back(BufferView::CreateShared(m_cachedWeakPtr, itemOffset, elementSize, elementSize));
+        }
+    };
+
+    auto freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    if (freeIt == m_freeBlocks.end()) {
+        ReserveBytes(totalSize);
+        freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    }
+    if (freeIt == m_freeBlocks.end()) {
+        return views;
+    }
+
+    const size_t blockOffset = freeIt->second;
+    m_freeBlocks.erase(freeIt);
+    auto blockIt = m_blocksByOffset.find(blockOffset);
+    const size_t blockSize = blockIt != m_blocksByOffset.end() ? blockIt->second.size : totalSize;
+    if (blockIt != m_blocksByOffset.end()) {
+        m_blocksByOffset.erase(blockIt);
+    }
+
+    allocateFromBlock(blockOffset);
+
+    if (blockSize > totalSize) {
+        const size_t remainingOffset = blockOffset + totalSize;
+        const size_t remainingSize = blockSize - totalSize;
+        m_blocksByOffset[remainingOffset] = { remainingOffset, remainingSize, true };
+        m_freeBlocks.insert({ remainingSize, remainingOffset });
+    }
+
+    if (data != nullptr) {
+        StageOrUpload(data, totalSize, blockOffset);
+    }
+
+    return views;
+}
+
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
 	size_t actualSize = size;
     if (fullAllocationSize != 0) {

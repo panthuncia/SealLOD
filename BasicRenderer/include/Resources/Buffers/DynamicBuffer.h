@@ -27,6 +27,7 @@ public:
     void ReserveBytes(size_t size);
     void Deallocate(const BufferView* view);
 	std::unique_ptr<BufferView> AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize = 0);
+	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
 
     rg::runtime::BulkWriteHandle BeginBulkWrite() {
