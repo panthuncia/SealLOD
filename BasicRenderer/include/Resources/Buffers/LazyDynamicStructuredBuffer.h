@@ -99,6 +99,29 @@ public:
         return views;
     }
 
+    void ReserveAdditional(size_t count) {
+        if (count == 0) {
+            return;
+        }
+
+        const size_t reusableCount = std::min(count, m_freeIndices.size());
+        const size_t newCount = count - reusableCount;
+        if (newCount == 0) {
+            return;
+        }
+
+        const uint64_t requiredCapacity = m_usedCapacity + newCount;
+        if (requiredCapacity <= m_capacity) {
+            return;
+        }
+
+        uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+        while (requiredCapacity > newCapacity) {
+            newCapacity *= 2u;
+        }
+        Resize(newCapacity);
+    }
+
     void Remove(BufferView* view) {
         if (!view) {
             return;

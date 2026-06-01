@@ -145,6 +145,21 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	m_stats.perInstanceTransformRowsAllocated += perObjectCBs.size();
 	m_stats.normalMatrixRowsAllocated += normalMatrices.size();
 
+	std::uint64_t reserveUs = 0;
+	if (!perObjectCBs.empty()) {
+		const auto reserveBegin = std::chrono::steady_clock::now();
+		const auto perObjectBytes = perObjectCBs.size() * sizeof(PerObjectCB);
+		const auto instanceTransformBytes = perObjectCBs.size() * sizeof(PerInstanceTransformCB);
+		m_perObjectBuffers->ReserveBytes(perObjectBytes);
+		m_perInstanceTransformBuffers->ReserveBytes(instanceTransformBytes);
+		m_normalMatrixBuffer->ReserveAdditional(normalMatrices.size());
+		m_stats.bulkReservedPerObjectBytes += perObjectBytes;
+		m_stats.bulkReservedInstanceTransformBytes += instanceTransformBytes;
+		m_stats.bulkReservedNormalMatrixRows += normalMatrices.size();
+		reserveUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - reserveBegin).count());
+	}
+
 	auto normalMatrixViews = m_normalMatrixBuffer->AddMany(normalMatrices.data(), normalMatrices.size());
 	for (size_t i = 0; i < perObjectCBs.size() && i < normalMatrixViews.size(); ++i) {
 		perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(normalMatrixViews[i]->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
@@ -259,6 +274,12 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	}
 
 	if (!drawRecords.empty()) {
+		const auto reserveBegin = std::chrono::steady_clock::now();
+		const auto drawRecordBytes = drawRecords.size() * sizeof(InstanceDrawRecordCB);
+		m_instanceDrawRecordBuffers->ReserveBytes(drawRecordBytes);
+		m_stats.bulkReservedDrawRecordBytes += drawRecordBytes;
+		reserveUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - reserveBegin).count());
 		auto drawRecordViews = m_instanceDrawRecordBuffers->AddDataBatch(drawRecords.data(), drawRecords.size(), sizeof(InstanceDrawRecordCB));
 		m_stats.instanceDrawRecordsAllocated += drawRecordViews.size();
 		for (size_t drawRecordViewIndex = 0; drawRecordViewIndex < drawRecordViews.size() && drawRecordViewIndex < pendingDrawRecords.size(); ++drawRecordViewIndex) {
@@ -281,6 +302,9 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			}
 		}
 	}
+
+	++m_stats.bulkReserveCalls;
+	m_stats.bulkReserveUs += reserveUs;
 
 	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
 		if (!indices.empty()) {

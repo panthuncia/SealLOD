@@ -125,7 +125,7 @@ private:
 
 	static constexpr unsigned int kBufferGrowthSize = 100;
 	static constexpr unsigned int kInitialMaterialBufferCapacity = 4096;
-	static constexpr bool kForceMaterialBufferResizeEveryMaterial = true;
+	static constexpr bool kForceMaterialBufferResizeEveryMaterial = false;
 
 	static constexpr unsigned int kScanBlockSize = 1024;
 

@@ -44,6 +44,12 @@ public:
 		std::uint64_t activeDrawSetInsertIndices = 0;
 		std::uint64_t activeDrawSetInsertUs = 0;
 		std::uint64_t maxDrawRecordIndex = 0;
+		std::uint64_t bulkReserveCalls = 0;
+		std::uint64_t bulkReserveUs = 0;
+		std::uint64_t bulkReservedPerObjectBytes = 0;
+		std::uint64_t bulkReservedInstanceTransformBytes = 0;
+		std::uint64_t bulkReservedDrawRecordBytes = 0;
+		std::uint64_t bulkReservedNormalMatrixRows = 0;
 	};
 
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
