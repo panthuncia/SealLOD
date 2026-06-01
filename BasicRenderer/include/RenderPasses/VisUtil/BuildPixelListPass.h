@@ -54,6 +54,11 @@ public:
     }
 
     void Setup() override {
+        RefreshResourcePointers();
+        RefreshDescriptorIndices();
+    }
+
+    void RefreshResourcePointers() {
 		std::vector<GloballyIndexedResource*> visibleClusterResources;
         m_visibleClustersQuery.each([&](flecs::entity e) {
 			auto& res = e.get<Components::Resource>();
@@ -69,7 +74,8 @@ public:
 			throw std::runtime_error("BuildPixelListPass: Expected exactly one visible cluster buffer resource.");
 		}
 
-		m_visibleClusterBufferSRVIndex = visibleClusterResources[0]->GetSRVInfo(0).slot.index;
+		m_visibleClusterResource = visibleClusterResources[0];
+        m_reyesDiceQueueResource = nullptr;
         m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
 
         std::vector<GloballyIndexedResource*> reyesDiceQueueResources;
@@ -81,8 +87,17 @@ public:
             }
             });
         if (reyesDiceQueueResources.size() == 1) {
-            m_reyesDiceQueueBufferSRVIndex = reyesDiceQueueResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesDiceQueueResource = reyesDiceQueueResources[0];
         }
+    }
+
+    void RefreshDescriptorIndices() {
+        if (m_visibleClusterResource) {
+            m_visibleClusterBufferSRVIndex = m_visibleClusterResource->GetSRVInfo(0).slot.index;
+        }
+        m_reyesDiceQueueBufferSRVIndex = m_reyesDiceQueueResource
+            ? m_reyesDiceQueueResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -95,6 +110,7 @@ public:
         cl.BindLayout(pm.GetComputeRootSignature().GetHandle());
         cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
+        RefreshDescriptorIndices();
 
 		// Set per-pass root constants
         unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
@@ -121,6 +137,8 @@ private:
     PipelineState m_pso;
 	flecs::query<> m_visibleClustersQuery;
     flecs::query<> m_reyesDiceQueueQuery;
+    GloballyIndexedResource* m_visibleClusterResource = nullptr;
+    GloballyIndexedResource* m_reyesDiceQueueResource = nullptr;
     uint32_t m_visibleClusterBufferSRVIndex = 0;
 	uint32_t m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
 	uint32_t m_patchVisibilityIndexBase = 0u;

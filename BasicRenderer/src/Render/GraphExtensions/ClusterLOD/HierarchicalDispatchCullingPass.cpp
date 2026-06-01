@@ -892,27 +892,27 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         context.viewManager->ForEachFiltered(filter, [&](uint64_t view) {
             auto viewInfo = context.viewManager->Get(view);
             auto cameraBufferIndex = viewInfo->gpu.cameraBufferIndex;
-            auto workloads = context.indirectCommandBufferManager->GetViewIndirectBuffersForRenderPhase(
-                view,
-                m_renderPhase,
-                m_clodOnlyWorkloads);
-            for (auto& wl : workloads) {
-                auto count = wl.workload.count;
-                if (count == 0) {
-                    continue;
-                }
-                const auto activeDrawSetIndices = context.objectManager->TryGetActiveDrawSetIndices(wl.key);
-                if (!activeDrawSetIndices) {
-                    spdlog::warn(
-                        "HierarchicalDispatchCullingPass: skipping stale workload without active draw set indices flags={} phase={} clodOnly={} count={}",
-                        static_cast<std::uint64_t>(wl.key.compileFlags),
-                        wl.key.renderPhase.hash,
-                        wl.key.clodOnly,
-                        count);
-                    continue;
-                }
+			auto workloads = context.indirectCommandBufferManager->GetViewIndirectBuffersForRenderPhase(
+				view,
+				m_renderPhase,
+				m_clodOnlyWorkloads);
+			for (auto& wl : workloads) {
+				const auto activeDrawSetIndices = context.objectManager->TryGetActiveDrawSetIndices(wl.key);
+				if (!activeDrawSetIndices) {
+					spdlog::warn(
+						"HierarchicalDispatchCullingPass: skipping stale workload without active draw set indices flags={} phase={} clodOnly={} count={}",
+						static_cast<std::uint64_t>(wl.key.compileFlags),
+						wl.key.renderPhase.hash,
+						wl.key.clodOnly,
+						wl.workload.count);
+					continue;
+				}
+				const auto count = activeDrawSetIndices->Size();
+				if (count == 0) {
+					continue;
+				}
 
-                ObjectCullRecord record{};
+				ObjectCullRecord record{};
                 record.viewDataIndex = cameraBufferIndex;
                 record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;

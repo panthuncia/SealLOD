@@ -284,10 +284,16 @@ MaterialManager::MaterialManager() {
 	auto& rm = ResourceManager::GetInstance();
 	m_activeMaterialTextureGroup = std::make_shared<ResourceGroup>("ActiveMaterialTextures");
 
-	// Primary material data buffer
-	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialDataBuffer", true);
-	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialEvalDataBuffer", true);
-	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(m_compileFlagsSlotsUsed, "Builtin::PerMaterialOpenPBRDataBuffer", true);
+	// Primary material data buffer. Normally streamed scenes should reserve enough
+	// slots to avoid reallocating GPU backing resources while frames are executing.
+	// The forced-resize path is intentionally left on while validating upload and
+	// descriptor lifetime safety under worst-case cell-streaming pressure.
+	m_materialBufferCapacity = kForceMaterialBufferResizeEveryMaterial
+		? m_compileFlagsSlotsUsed
+		: kInitialMaterialBufferCapacity;
+	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialDataBuffer", true);
+	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialEvalDataBuffer", true);
+	m_perMaterialOpenPBRDataBuffer = DynamicStructuredBuffer<PerMaterialOpenPBRCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialOpenPBRDataBuffer", true);
 	m_textureStreamingMetadataBuffer = DynamicStructuredBuffer<TextureStreamingGPUInfo>::CreateShared(m_textureStreamingMetadataCapacity, "Builtin::Material::TextureStreamingMetadataBuffer", true);
 	m_textureStreamingFeedbackBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_textureStreamingMetadataCapacity, "Builtin::Material::TextureStreamingFeedbackBuffer", true);
 	rg::memory::SetResourceUsageHint(*m_perMaterialDataBuffer, "Material buffers");
@@ -1206,7 +1212,6 @@ std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIden
 	return it->second;
 }
 
-// TODO: Don't grow buffers one slot at a time
 // TODO: C++26 will allow optional references
 unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data) {
 	unsigned int slot;
@@ -1234,10 +1239,14 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 	else {
 		slot = m_materialSlotsUsed++;
 		m_materialUsageCounts.push_back(0);
-		// Resize resources to accommodate new material slot
-		m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
-		m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
-		m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
+		if constexpr (kForceMaterialBufferResizeEveryMaterial) {
+			m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
+			m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
+			m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
+			m_materialBufferCapacity = m_materialSlotsUsed;
+		} else {
+			EnsureMaterialBufferCapacity(m_materialSlotsUsed);
+		}
 		m_materialUploadSignatures.resize(m_materialSlotsUsed);
 		m_materialUploadSignatures[slot].valid = false;
 		if (data.has_value()) {
@@ -1251,6 +1260,27 @@ unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::opti
 	}
 	m_materialIDSlotMapping[materialID] = slot;
 	return slot;
+}
+
+void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
+	if (requiredSlots <= m_materialBufferCapacity) {
+		return;
+	}
+
+	unsigned int newCapacity = std::max(kInitialMaterialBufferCapacity, m_materialBufferCapacity);
+	while (newCapacity < requiredSlots) {
+		newCapacity *= 2u;
+	}
+
+	spdlog::info("MaterialManager: growing material buffers oldCapacity={} newCapacity={} requiredSlots={}",
+		m_materialBufferCapacity,
+		newCapacity,
+		requiredSlots);
+
+	m_perMaterialDataBuffer->Resize(newCapacity);
+	m_perMaterialEvalDataBuffer->Resize(newCapacity);
+	m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
+	m_materialBufferCapacity = newCapacity;
 }
 
 unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {

@@ -725,6 +725,15 @@ void Mesh::EnsureAnimatedBoundingSpheresBuilt_() const
 }
 
 void Mesh::SetMaterialDataIndex(unsigned int index) {
+	const unsigned int previousIndex = m_perMeshBufferData.materialDataIndex;
+	if (previousIndex != index && previousIndex != 0u && m_perMeshBufferView != nullptr) {
+		spdlog::warn(
+			"Mesh material slot changed for resident mesh globalID={} oldSlot={} newSlot={} perMeshOffset={}",
+			GetGlobalID(),
+			previousIndex,
+			index,
+			m_perMeshBufferView->GetOffset());
+	}
 	m_perMeshBufferData.materialDataIndex = index;
 	if (m_pCurrentMeshManager != nullptr) {
 		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);

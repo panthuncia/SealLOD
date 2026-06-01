@@ -114,6 +114,12 @@ public:
     }
 
     void Setup() override {
+        RefreshResourcePointers();
+        RefreshDescriptorIndices();
+        m_materialEvalCmds = m_resourceRegistryView->RequestPtr<Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+    }
+
+    void RefreshResourcePointers() {
         std::vector<GloballyIndexedResource*> visibleClusterResources;
         m_visibleClustersQuery.each([&](flecs::entity e) {
             auto& res = e.get<Components::Resource>();
@@ -129,11 +135,11 @@ public:
             throw std::runtime_error("BuildPixelListPass: Expected exactly one visible cluster buffer resource.");
         }
 
-        m_visibleClusterBufferSRVIndex = visibleClusterResources[0]->GetSRVInfo(0).slot.index;
-        m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
-        m_reyesTessTableConfigsBufferSRVIndex = 0xFFFFFFFFu;
-        m_reyesTessTableVerticesBufferSRVIndex = 0xFFFFFFFFu;
-        m_reyesTessTableTrianglesBufferSRVIndex = 0xFFFFFFFFu;
+        m_visibleClusterResource = visibleClusterResources[0];
+        m_reyesDiceQueueResource = nullptr;
+        m_reyesTessTableConfigsResource = nullptr;
+        m_reyesTessTableVerticesResource = nullptr;
+        m_reyesTessTableTrianglesResource = nullptr;
 
         std::vector<GloballyIndexedResource*> reyesDiceQueueResources;
         m_reyesDiceQueueQuery.each([&](flecs::entity e) {
@@ -144,7 +150,7 @@ public:
             }
             });
         if (reyesDiceQueueResources.size() == 1) {
-            m_reyesDiceQueueBufferSRVIndex = reyesDiceQueueResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesDiceQueueResource = reyesDiceQueueResources[0];
         }
 
         std::vector<GloballyIndexedResource*> reyesTessTableConfigResources;
@@ -156,7 +162,7 @@ public:
             }
         });
         if (reyesTessTableConfigResources.size() == 1) {
-            m_reyesTessTableConfigsBufferSRVIndex = reyesTessTableConfigResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesTessTableConfigsResource = reyesTessTableConfigResources[0];
         }
 
         std::vector<GloballyIndexedResource*> reyesTessTableVertexResources;
@@ -168,7 +174,7 @@ public:
             }
         });
         if (reyesTessTableVertexResources.size() == 1) {
-            m_reyesTessTableVerticesBufferSRVIndex = reyesTessTableVertexResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesTessTableVerticesResource = reyesTessTableVertexResources[0];
         }
 
         std::vector<GloballyIndexedResource*> reyesTessTableTriangleResources;
@@ -180,10 +186,26 @@ public:
             }
         });
         if (reyesTessTableTriangleResources.size() == 1) {
-            m_reyesTessTableTrianglesBufferSRVIndex = reyesTessTableTriangleResources[0]->GetSRVInfo(0).slot.index;
+            m_reyesTessTableTrianglesResource = reyesTessTableTriangleResources[0];
         }
+    }
 
-        m_materialEvalCmds = m_resourceRegistryView->RequestPtr<Resource>("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
+    void RefreshDescriptorIndices() {
+        if (m_visibleClusterResource) {
+            m_visibleClusterBufferSRVIndex = m_visibleClusterResource->GetSRVInfo(0).slot.index;
+        }
+        m_reyesDiceQueueBufferSRVIndex = m_reyesDiceQueueResource
+            ? m_reyesDiceQueueResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
+        m_reyesTessTableConfigsBufferSRVIndex = m_reyesTessTableConfigsResource
+            ? m_reyesTessTableConfigsResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
+        m_reyesTessTableVerticesBufferSRVIndex = m_reyesTessTableVerticesResource
+            ? m_reyesTessTableVerticesResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
+        m_reyesTessTableTrianglesBufferSRVIndex = m_reyesTessTableTrianglesResource
+            ? m_reyesTessTableTrianglesResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -201,6 +223,7 @@ public:
 
         const uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
         auto argBuf = m_materialEvalCmds->GetAPIResource();
+        RefreshDescriptorIndices();
 
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes, avoid in-frame compile
 			unsigned int slot = ctx.materialManager->GetCompileFlagsSlot(flags);
@@ -270,6 +293,11 @@ private:
     flecs::query<> m_reyesTessTableVerticesQuery;
     flecs::query<> m_reyesTessTableTrianglesQuery;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
+    GloballyIndexedResource* m_visibleClusterResource = nullptr;
+    GloballyIndexedResource* m_reyesDiceQueueResource = nullptr;
+    GloballyIndexedResource* m_reyesTessTableConfigsResource = nullptr;
+    GloballyIndexedResource* m_reyesTessTableVerticesResource = nullptr;
+    GloballyIndexedResource* m_reyesTessTableTrianglesResource = nullptr;
     uint32_t m_visibleClusterBufferSRVIndex = 0;
     uint32_t m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
     uint32_t m_patchVisibilityIndexBase = 0u;

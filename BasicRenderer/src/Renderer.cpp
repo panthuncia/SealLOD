@@ -48,6 +48,7 @@
 #include "Resources/TextureDescription.h"
 #include "Menu/Menu.h"
 #include "Managers/Singletons/DeletionManager.h"
+#include "Managers/Singletons/DescriptorHeapManager.h"
 #include "Managers/Singletons/CommandSignatureManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Managers/IndirectCommandBufferManager.h"
@@ -1524,14 +1525,24 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("reshapeSynchronousRecording", [this](const bool& newValue) {
         auto result = rhi::debug::SetSynchronousRecording(m_device, newValue);
+        if (rhi::IsOk(result)) {
+            spdlog::info("GPU-Reshape: runtime synchronous recording set to {}", newValue);
+        }
         if (!rhi::IsOk(result) && result != rhi::Result::Unsupported) {
             spdlog::warn("Failed to update runtime instrumentation synchronous recording state: {}", static_cast<uint32_t>(result));
+        } else if (result == rhi::Result::Unsupported) {
+            spdlog::warn("GPU-Reshape: runtime synchronous recording update is unsupported by the active device/backend");
         }
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint64_t>("reshapeGlobalFeatureMask", [this](const uint64_t& newValue) {
         auto result = rhi::debug::SetGlobalInstrumentationMask(m_device, newValue);
+        if (rhi::IsOk(result)) {
+            spdlog::info("GPU-Reshape: runtime global feature mask set to 0x{:016X}", newValue);
+        }
         if (!rhi::IsOk(result) && result != rhi::Result::Unsupported) {
             spdlog::warn("Failed to update runtime instrumentation feature mask: {}", static_cast<uint32_t>(result));
+        } else if (result == rhi::Result::Unsupported) {
+            spdlog::warn("GPU-Reshape: runtime global feature mask update is unsupported by the active device/backend");
         }
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint8_t>("numDirectionalLightCascades", [](const uint8_t& newValue) {
@@ -1976,6 +1987,7 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("WaitForFrame", [&]() {
         ZoneScopedN("Renderer::Update::WaitForFrame");
         WaitForFrame(m_frameIndex);
+        DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_frameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
         });
 

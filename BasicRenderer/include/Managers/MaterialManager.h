@@ -91,6 +91,7 @@ private:
 	void FlushDirtyMaterial(Material& material, TextureFactory* textureFactory = nullptr);
 	void FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture);
 	void EnsureTextureUploadAdvanced(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
+	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
 
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
@@ -120,8 +121,11 @@ private:
 		bool valid = false;
 	};
 	std::vector<MaterialGpuUploadSignature> m_materialUploadSignatures;
+	unsigned int m_materialBufferCapacity = 0u;
 
 	static constexpr unsigned int kBufferGrowthSize = 100;
+	static constexpr unsigned int kInitialMaterialBufferCapacity = 4096;
+	static constexpr bool kForceMaterialBufferResizeEveryMaterial = true;
 
 	static constexpr unsigned int kScanBlockSize = 1024;
 

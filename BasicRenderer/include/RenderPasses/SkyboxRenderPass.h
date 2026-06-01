@@ -18,11 +18,6 @@ public:
     }
 
     void Setup() override {
-        m_linearDepthMapDescriptorIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::LinearDepthMap)->GetSRVInfo(0).slot.index;
-        m_cameraBufferDescriptorIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
-        m_environmentInfoDescriptorIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Environment::InfoBuffer)->GetSRVInfo(0).slot.index;
-        m_hdrTargetDescriptorIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget)->GetUAVShaderVisibleInfo(0).slot.index;
-        m_motionVectorsDescriptorIndex = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MotionVectors)->GetUAVShaderVisibleInfo(0).slot.index;
         m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Color::HDRColorTarget);
     }
 
@@ -40,11 +35,11 @@ public:
         BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
 
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
-        rootConstants[0] = m_linearDepthMapDescriptorIndex;
-        rootConstants[1] = m_cameraBufferDescriptorIndex;
-        rootConstants[2] = m_environmentInfoDescriptorIndex;
-        rootConstants[3] = m_hdrTargetDescriptorIndex;
-        rootConstants[4] = m_motionVectorsDescriptorIndex;
+        rootConstants[0] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::LinearDepthMap)->GetSRVInfo(0).slot.index;
+        rootConstants[1] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
+        rootConstants[2] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Environment::InfoBuffer)->GetSRVInfo(0).slot.index;
+        rootConstants[3] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget)->GetUAVShaderVisibleInfo(0).slot.index;
+        rootConstants[4] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MotionVectors)->GetUAVShaderVisibleInfo(0).slot.index;
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
 
         const uint32_t w = m_pHDRTarget->GetWidth();
@@ -67,11 +62,6 @@ private:
     PipelineState m_pso;
 
     PixelBuffer* m_pHDRTarget = nullptr;
-    uint32_t m_linearDepthMapDescriptorIndex = 0;
-    uint32_t m_cameraBufferDescriptorIndex = 0;
-    uint32_t m_environmentInfoDescriptorIndex = 0;
-    uint32_t m_hdrTargetDescriptorIndex = 0;
-    uint32_t m_motionVectorsDescriptorIndex = 0;
     void CreatePSO() {
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
