@@ -1389,6 +1389,59 @@ namespace USDLoader {
 		return mesh && !mesh.GetPrim().GetCustomDataByKey(TfToken("brnifly:collision")).IsEmpty();
 	}
 
+	bool BrNiflyLODShapeImportEnabled()
+	{
+		if (const char* value = std::getenv("BASICRENDERER_IMPORT_BRNIFLY_LOD_SHAPES")) {
+			return _stricmp(value, "1") == 0 ||
+				_stricmp(value, "true") == 0 ||
+				_stricmp(value, "yes") == 0 ||
+				_stricmp(value, "on") == 0;
+		}
+		return false;
+	}
+
+	std::string GetPrimCustomString(const UsdPrim& prim, const TfToken& key)
+	{
+		const VtValue value = prim.GetCustomDataByKey(key);
+		if (value.IsEmpty() || !value.IsHolding<std::string>()) {
+			return {};
+		}
+		return value.UncheckedGet<std::string>();
+	}
+
+	bool IsBrNiflyLODRenderMesh(const UsdGeomMesh& mesh)
+	{
+		if (!mesh || BrNiflyLODShapeImportEnabled()) {
+			return false;
+		}
+
+		const auto& prim = mesh.GetPrim();
+		const std::string blockName = GetPrimCustomString(prim, TfToken("brnifly:blockName"));
+		if (blockName == "BSLODTriShape") {
+			return true;
+		}
+
+		const std::string shaderText = GetPrimCustomString(prim, TfToken("brnifly:shader"));
+		if (shaderText.empty()) {
+			return false;
+		}
+
+		try {
+			const auto shader = json::parse(shaderText);
+			if (shader.value("blockName", std::string{}) == "DistantLODShaderProperty") {
+				return true;
+			}
+			if (shader.value("shaderTypeName", std::string{}) == "LODOBJECTS" ||
+				shader.value("shaderTypeName", std::string{}) == "LODOBJECTSHD") {
+				return true;
+			}
+		}
+		catch (const std::exception&) {
+		}
+
+		return false;
+	}
+
 	std::vector<std::string> ParseJsonStringArray(std::string_view text)
 	{
 		std::vector<std::string> values;
@@ -1999,6 +2052,13 @@ namespace USDLoader {
 		if (!mesh || IsUnsupportedBrNiflySkinnedMesh(mesh)) {
 			return {};
 		}
+		if (IsBrNiflyCollisionMesh(mesh)) {
+			return {};
+		}
+		if (IsBrNiflyLODRenderMesh(mesh)) {
+			spdlog::info("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+			return {};
+		}
 
 		auto skinningQuery = USDGeometryExtractor::GetSkinningQuery(mesh, skelCache);
 		UsdSkelBindingAPI bindingAPI(prim);
@@ -2058,6 +2118,10 @@ namespace USDLoader {
 
 		if (IsBrNiflyCollisionMesh(mesh)) {
 			spdlog::info("Skipping BRNifly collision mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+			return;
+		}
+		if (IsBrNiflyLODRenderMesh(mesh)) {
+			spdlog::info("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
 			return;
 		}
 

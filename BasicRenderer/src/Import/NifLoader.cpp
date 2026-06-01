@@ -183,7 +183,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 3u;
+constexpr std::uint32_t kPayloadCacheVersion = 4u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
