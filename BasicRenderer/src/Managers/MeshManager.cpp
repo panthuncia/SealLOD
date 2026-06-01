@@ -26,6 +26,17 @@
 #include "../../generated/BuiltinResources.h"
 #include "Render/MemoryIntrospectionAPI.h"
 
+namespace {
+
+size_t ReserveBytesWithImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
+	if (requestedBytes == 0) {
+		return 0;
+	}
+	return requestedBytes + std::max(requestedBytes * 3u, minimumHeadroomBytes);
+}
+
+}
+
 MeshManager::MeshManager() {
 	auto& resourceManager = ResourceManager::GetInstance();
 
@@ -511,6 +522,167 @@ void MeshManager::RemoveMesh(Mesh* mesh) {
 
 	mesh->SetPerMeshBufferView(nullptr);
 	mesh->SetCurrentMeshManager(nullptr);
+}
+
+void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices) {
+	if (meshes.empty()) {
+		return;
+	}
+
+	size_t meshRowsToAdd = 0;
+	size_t clodGroupsBytes = 0;
+	size_t clodSegmentsBytes = 0;
+	size_t clodNodesBytes = 0;
+	size_t clodSharedGroupChunkBytes = 0;
+	size_t clodHierarchyLevelInfoBytes = 0;
+	size_t clodMeshMetadataBytes = 0;
+	size_t clodPageMapBytes = 0;
+
+	for (const auto& mesh : meshes) {
+		if (!mesh || mesh->GetPerMeshBufferView()) {
+			continue;
+		}
+		++meshRowsToAdd;
+		clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
+		clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
+		clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+		clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
+		clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
+		clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
+
+		uint32_t totalPageMapEntries = 0;
+		for (const auto& group : mesh->GetCLodGroups()) {
+			totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+		}
+		clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
+	}
+
+	if (meshRowsToAdd == 0) {
+		return;
+	}
+
+	m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
+	m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
+	m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
+	m_clusterLODNodes->ReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+	m_clodSharedGroupChunks->ReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
+	m_clodHierarchyLevelInfos->ReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
+	m_clodMeshMetadata->ReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
+	m_clodGroupPageMap->ReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+
+	for (auto mesh : meshes) {
+		if (!mesh || mesh->GetPerMeshBufferView()) {
+			continue;
+		}
+		AddMesh(mesh, useMeshletReorderedVertices);
+	}
+}
+
+std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
+	std::vector<StaticMeshTemplateRegistration> registrations(requests.size());
+	if (requests.empty()) {
+		return registrations;
+	}
+
+	std::vector<PerMeshInstanceCB> perMeshInstanceRows;
+	std::vector<MeshInstanceClodOffsets> clodOffsetRows;
+	std::vector<size_t> validRequestIndices;
+	std::vector<std::shared_ptr<CLodSharedStreamingState>> sharedStates;
+	perMeshInstanceRows.reserve(requests.size());
+	clodOffsetRows.reserve(requests.size());
+	validRequestIndices.reserve(requests.size());
+	sharedStates.reserve(requests.size());
+
+	for (size_t requestIndex = 0; requestIndex < requests.size(); ++requestIndex) {
+		const auto& request = requests[requestIndex];
+		if (!request.mesh || !request.mesh->GetPerMeshBufferView()) {
+			continue;
+		}
+
+		PerMeshInstanceCB row{};
+		row.boundingSphere = request.mesh->GetPerMeshCBData().boundingSphere;
+		row.skinningInstanceSlot = 0xFFFFFFFFu;
+		row.skinnedBoundsScale = 1.0f;
+		row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
+
+		std::shared_ptr<CLodSharedStreamingState> sharedState;
+		if (auto sharedIt = m_clodSharedStreamingStateByMesh.find(request.mesh.get()); sharedIt != m_clodSharedStreamingStateByMesh.end()) {
+			sharedState = sharedIt->second;
+		}
+
+		MeshInstanceClodOffsets clodOffsets{};
+		clodOffsets.clodMeshMetadataIndex = sharedState ? sharedState->clodMeshMetadataIndex : 0u;
+
+		validRequestIndices.push_back(requestIndex);
+		perMeshInstanceRows.push_back(row);
+		clodOffsetRows.push_back(clodOffsets);
+		sharedStates.push_back(std::move(sharedState));
+	}
+
+	if (perMeshInstanceRows.empty()) {
+		return registrations;
+	}
+
+	const auto perMeshInstanceBytes = perMeshInstanceRows.size() * sizeof(PerMeshInstanceCB);
+	const auto clodOffsetBytes = clodOffsetRows.size() * sizeof(MeshInstanceClodOffsets);
+	m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
+	m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
+
+	const auto perMeshInstanceRange = m_perMeshInstanceBuffers->AddDataRange(
+		perMeshInstanceRows.data(),
+		perMeshInstanceRows.size(),
+		sizeof(PerMeshInstanceCB));
+	const auto clodOffsetRange = m_perMeshInstanceClodOffsets->AddDataRange(
+		clodOffsetRows.data(),
+		clodOffsetRows.size(),
+		sizeof(MeshInstanceClodOffsets));
+
+	for (size_t rowIndex = 0; rowIndex < validRequestIndices.size(); ++rowIndex) {
+		const auto requestIndex = validRequestIndices[rowIndex];
+		const auto& request = requests[requestIndex];
+		const auto meshTemplateIndex = static_cast<uint32_t>(
+			(perMeshInstanceRange.first + rowIndex * sizeof(PerMeshInstanceCB)) / sizeof(PerMeshInstanceCB));
+		const auto clodOffsetIndex = static_cast<uint32_t>(
+			(clodOffsetRange.first + rowIndex * sizeof(MeshInstanceClodOffsets)) / sizeof(MeshInstanceClodOffsets));
+
+		registrations[requestIndex].meshTemplateIndex = meshTemplateIndex;
+		registrations[requestIndex].clodOffsetIndex = clodOffsetIndex;
+		registrations[requestIndex].valid = true;
+
+		if (request.mesh) {
+			m_activeMeshletCount += request.mesh->GetCLodMeshletCount();
+		}
+
+		auto& sharedState = sharedStates[rowIndex];
+		if (sharedState) {
+			const bool wasInactive = sharedState->activeInstanceCount == 0u;
+			sharedState->activeInstanceCount++;
+			if (wasInactive && sharedState->mesh != nullptr) {
+				const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
+				uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
+				while (meshTraversalDepth > cachedDepth
+					&& !m_clodActiveMaxTraversalDepth.compare_exchange_weak(
+						cachedDepth,
+						meshTraversalDepth,
+						std::memory_order_release,
+						std::memory_order_acquire)) {
+				}
+			}
+
+			if (sharedState->groupCount > 0u) {
+				CLodStreamingInstanceState state{};
+				state.instance = nullptr;
+				state.meshInstanceIndex = meshTemplateIndex;
+				state.groupsBase = sharedState->groupsBase;
+				state.groupCount = sharedState->groupCount;
+				state.sharedMeshState = sharedState;
+				m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
+			}
+		}
+	}
+
+	m_clodStreamingStructureDirty = true;
+	return registrations;
 }
 
 void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices) {

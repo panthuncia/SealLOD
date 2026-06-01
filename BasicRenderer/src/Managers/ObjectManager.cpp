@@ -18,9 +18,20 @@
 #include "Render/MemoryIntrospectionAPI.h"
 
 #include <chrono>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 
 namespace {
+
+constexpr size_t kStaticTransformPageElements = 256;
+constexpr size_t kStaticDrawRecordPageElements = 1024;
+
+size_t ReserveBytesWithStreamingHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
+	if (requestedBytes == 0) {
+		return 0;
+	}
+	return requestedBytes + std::max(requestedBytes * 3u, minimumHeadroomBytes);
+}
 
 DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMatrix) {
 	const DirectX::XMMATRIX upperLeft3x3 = DirectX::XMMatrixSet(
@@ -33,6 +44,42 @@ DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMat
 	return stored;
 }
 
+Components::ObjectDrawInfo::BufferRange ToBufferRange(const DynamicBuffer::PagedAllocation& page) {
+	return Components::ObjectDrawInfo::BufferRange{
+		page.offset,
+		page.allocationSize,
+		page.stride,
+		page.allocationSize != 0 && page.stride != 0 ? page.allocationSize / page.stride : 0
+	};
+}
+
+std::vector<Components::ObjectDrawInfo::BufferRange> ToBufferRanges(const std::vector<DynamicBuffer::PagedAllocation>& pages) {
+	std::vector<Components::ObjectDrawInfo::BufferRange> ranges;
+	ranges.reserve(pages.size());
+	for (const auto& page : pages) {
+		if (page.IsValid()) {
+			ranges.push_back(ToBufferRange(page));
+		}
+	}
+	return ranges;
+}
+
+size_t PagedElementOffset(
+	const std::vector<DynamicBuffer::PagedAllocation>& pages,
+	size_t elementIndex,
+	size_t pageElementCount)
+{
+	if (pages.empty() || pageElementCount == 0) {
+		return 0;
+	}
+	const size_t pageIndex = elementIndex / pageElementCount;
+	const size_t indexInPage = elementIndex % pageElementCount;
+	if (pageIndex >= pages.size()) {
+		return 0;
+	}
+	return pages[pageIndex].offset + indexInPage * pages[pageIndex].stride;
+}
+
 }
 
 ObjectManager::ObjectManager() {
@@ -42,7 +89,7 @@ ObjectManager::ObjectManager() {
 	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
 	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
-	m_normalMatrixBuffer = LazyDynamicStructuredBuffer<DirectX::XMFLOAT4X4>::CreateShared(10000, "normalMatrixBuffer");
+	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
 
 	rg::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
 	rg::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
@@ -150,9 +197,10 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 		const auto reserveBegin = std::chrono::steady_clock::now();
 		const auto perObjectBytes = perObjectCBs.size() * sizeof(PerObjectCB);
 		const auto instanceTransformBytes = perObjectCBs.size() * sizeof(PerInstanceTransformCB);
+		const auto normalMatrixBytes = normalMatrices.size() * sizeof(DirectX::XMFLOAT4X4);
 		m_perObjectBuffers->ReserveBytes(perObjectBytes);
 		m_perInstanceTransformBuffers->ReserveBytes(instanceTransformBytes);
-		m_normalMatrixBuffer->ReserveAdditional(normalMatrices.size());
+		m_normalMatrixBuffer->ReserveBytes(normalMatrixBytes);
 		m_stats.bulkReservedPerObjectBytes += perObjectBytes;
 		m_stats.bulkReservedInstanceTransformBytes += instanceTransformBytes;
 		m_stats.bulkReservedNormalMatrixRows += normalMatrices.size();
@@ -160,7 +208,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - reserveBegin).count());
 	}
 
-	auto normalMatrixViews = m_normalMatrixBuffer->AddMany(normalMatrices.data(), normalMatrices.size());
+	auto normalMatrixViews = m_normalMatrixBuffer->AddDataBatch(normalMatrices.data(), normalMatrices.size(), sizeof(DirectX::XMFLOAT4X4));
 	for (size_t i = 0; i < perObjectCBs.size() && i < normalMatrixViews.size(); ++i) {
 		perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(normalMatrixViews[i]->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
 	}
@@ -321,6 +369,298 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	return drawInfos;
 }
 
+std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups) {
+	std::vector<Components::ObjectDrawInfo> drawInfos;
+	if (groups.empty()) {
+		return drawInfos;
+	}
+
+	const auto importBegin = std::chrono::steady_clock::now();
+	++m_stats.staticDirectBulkAddCalls;
+	m_stats.staticDirectGroupsSubmitted += groups.size();
+
+	struct GroupTransformRange {
+		size_t first = 0;
+		size_t count = 0;
+	};
+
+	struct PendingDrawRecord {
+		size_t groupIndex = 0;
+		std::vector<DrawWorkloadKey> workloadKeys;
+	};
+
+	drawInfos.resize(groups.size());
+
+	struct ScopeBuild {
+		std::uint64_t id = 0;
+		std::vector<size_t> groupIndices;
+		std::vector<PerObjectCB> perObjectCBs;
+		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
+		std::vector<DynamicBuffer::PagedAllocation> perObjectPages;
+		std::vector<DynamicBuffer::PagedAllocation> instanceTransformPages;
+		std::vector<DynamicBuffer::PagedAllocation> normalMatrixPages;
+		std::vector<InstanceDrawRecordCB> drawRecords;
+		std::vector<PendingDrawRecord> pendingDrawRecords;
+		std::vector<DynamicBuffer::PagedAllocation> drawRecordPages;
+	};
+
+	std::vector<GroupTransformRange> transformRanges(groups.size());
+	std::vector<ScopeBuild> scopes;
+	std::unordered_map<std::uint64_t, size_t> scopeIndices;
+	scopes.reserve(groups.size());
+
+	size_t expectedDrawRecords = 0;
+	for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
+		const auto& group = groups[groupIndex];
+		const std::uint64_t scopeID = group.allocationScopeID != 0 ? group.allocationScopeID : group.stableGroupID;
+		auto [scopeIt, inserted] = scopeIndices.emplace(scopeID, scopes.size());
+		if (inserted) {
+			ScopeBuild scope;
+			scope.id = scopeID;
+			scopes.push_back(std::move(scope));
+		}
+		auto& scope = scopes[scopeIt->second];
+		scope.groupIndices.push_back(groupIndex);
+
+		GroupTransformRange range;
+		range.first = scope.perObjectCBs.size();
+		range.count = group.instanceTransforms.size();
+		transformRanges[groupIndex] = range;
+		expectedDrawRecords += group.instanceTransforms.size() * group.meshTemplates.size();
+
+		for (const auto& matrix : group.instanceTransforms) {
+			PerObjectCB perObject{};
+			perObject.modelMatrix = matrix;
+			perObject.prevModelMatrix = matrix;
+			perObject.modelInverseMatrix = DirectX::XMMatrixInverse(nullptr, matrix);
+			const auto determinant = DirectX::XMMatrixDeterminant(matrix);
+			perObject.objectFlags = (DirectX::XMVectorGetX(determinant) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+			scope.perObjectCBs.push_back(perObject);
+			scope.normalMatrices.push_back(ComputeNormalMatrixStorage(matrix));
+		}
+	}
+
+	size_t totalTransformRows = 0;
+	for (const auto& scope : scopes) {
+		totalTransformRows += scope.perObjectCBs.size();
+	}
+
+	m_stats.staticDirectTransformRows += totalTransformRows;
+	m_stats.perObjectRowsAllocated += totalTransformRows;
+	m_stats.perInstanceTransformRowsAllocated += totalTransformRows;
+	m_stats.normalMatrixRowsAllocated += totalTransformRows;
+	for (const auto& group : groups) {
+		m_stats.meshTemplateRowsReferenced += group.meshTemplates.size();
+	}
+
+	std::uint64_t reserveUs = 0;
+	for (auto& scope : scopes) {
+		if (scope.perObjectCBs.empty()) {
+			continue;
+		}
+		scope.normalMatrixPages = m_normalMatrixBuffer->AddDataPaged(
+			scope.normalMatrices.data(),
+			scope.normalMatrices.size(),
+			sizeof(DirectX::XMFLOAT4X4),
+			kStaticTransformPageElements);
+		for (size_t i = 0; i < scope.perObjectCBs.size(); ++i) {
+			scope.perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(
+				PagedElementOffset(scope.normalMatrixPages, i, kStaticTransformPageElements) / sizeof(DirectX::XMFLOAT4X4));
+		}
+		scope.perObjectPages = m_perObjectBuffers->AddDataPaged(
+			scope.perObjectCBs.data(),
+			scope.perObjectCBs.size(),
+			sizeof(PerObjectCB),
+			kStaticTransformPageElements);
+		scope.instanceTransformPages = m_perInstanceTransformBuffers->AddDataPaged(
+			scope.perObjectCBs.data(),
+			scope.perObjectCBs.size(),
+			sizeof(PerInstanceTransformCB),
+			kStaticTransformPageElements);
+		m_stats.bulkReservedPerObjectBytes += scope.perObjectCBs.size() * sizeof(PerObjectCB);
+		m_stats.bulkReservedInstanceTransformBytes += scope.perObjectCBs.size() * sizeof(PerInstanceTransformCB);
+		m_stats.bulkReservedNormalMatrixRows += scope.normalMatrices.size();
+	}
+
+	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+	std::vector<std::vector<std::vector<DrawWorkloadKey>>> cachedWorkloadKeysByGroup;
+	cachedWorkloadKeysByGroup.reserve(groups.size());
+
+	for (const auto& group : groups) {
+		auto& cachedGroupWorkloads = cachedWorkloadKeysByGroup.emplace_back();
+		cachedGroupWorkloads.reserve(group.meshTemplates.size());
+		for (const auto& meshTemplate : group.meshTemplates) {
+			auto& workloadKeys = cachedGroupWorkloads.emplace_back();
+			if (!meshTemplate.mesh || !meshTemplate.material) {
+				continue;
+			}
+			ForEachMeshDrawWorkload(*meshTemplate.mesh, *meshTemplate.material, [&](const DrawWorkloadKey& workloadKey) {
+				workloadKeys.push_back(workloadKey);
+			});
+			++m_stats.staticDirectWorkloadCacheMisses;
+		}
+	}
+
+	for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
+		const auto& group = groups[groupIndex];
+		auto& drawInfo = drawInfos[groupIndex];
+		const std::uint64_t scopeID = group.allocationScopeID != 0 ? group.allocationScopeID : group.stableGroupID;
+		auto scopeIndexIt = scopeIndices.find(scopeID);
+		if (scopeIndexIt == scopeIndices.end()) {
+			continue;
+		}
+		auto& scope = scopes[scopeIndexIt->second];
+		if (groupIndex >= transformRanges.size()) {
+			continue;
+		}
+		const auto range = transformRanges[groupIndex];
+		if (range.count == 0 || group.meshTemplates.empty()) {
+			continue;
+		}
+
+		drawInfo.perObjectCBRange = {
+			PagedElementOffset(scope.perObjectPages, range.first, kStaticTransformPageElements),
+			range.count * sizeof(PerObjectCB),
+			sizeof(PerObjectCB),
+			range.count
+		};
+		drawInfo.perInstanceTransformRange = {
+			PagedElementOffset(scope.instanceTransformPages, range.first, kStaticTransformPageElements),
+			range.count * sizeof(PerInstanceTransformCB),
+			sizeof(PerInstanceTransformCB),
+			range.count
+		};
+		drawInfo.normalMatrixRange = {
+			PagedElementOffset(scope.normalMatrixPages, range.first, kStaticTransformPageElements),
+			range.count * sizeof(DirectX::XMFLOAT4X4),
+			sizeof(DirectX::XMFLOAT4X4),
+			range.count
+		};
+		drawInfo.perObjectCBIndex = static_cast<uint32_t>(drawInfo.perObjectCBRange.offset / sizeof(PerObjectCB));
+		drawInfo.normalMatrixIndex = static_cast<uint32_t>(drawInfo.normalMatrixRange.offset / sizeof(DirectX::XMFLOAT4X4));
+
+		drawInfo.perMeshInstanceBufferIndices.reserve(group.meshTemplates.size());
+		drawInfo.instanceDrawRecordIndices.reserve(range.count * group.meshTemplates.size());
+		drawInfo.instanceDrawRecordViews.reserve(range.count * group.meshTemplates.size());
+		drawInfo.drawInfo.indices.reserve(range.count * group.meshTemplates.size());
+		drawInfo.drawInfo.views.reserve(range.count * group.meshTemplates.size());
+		drawInfo.drawInfo.drawWorkloadKeysPerDraw.reserve(range.count * group.meshTemplates.size());
+		for (const auto& meshTemplate : group.meshTemplates) {
+			drawInfo.perMeshInstanceBufferIndices.push_back(meshTemplate.meshTemplateIndex);
+		}
+
+		for (size_t transformIndex = 0; transformIndex < range.count; ++transformIndex) {
+			const auto transformOrdinal = range.first + transformIndex;
+			const uint32_t instanceTransformIndex = static_cast<uint32_t>(
+				PagedElementOffset(scope.instanceTransformPages, transformOrdinal, kStaticTransformPageElements) / sizeof(PerInstanceTransformCB));
+			for (size_t meshTemplateIndex = 0; meshTemplateIndex < group.meshTemplates.size(); ++meshTemplateIndex) {
+				const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
+				if (!meshTemplate.mesh || !meshTemplate.material) {
+					continue;
+				}
+				InstanceDrawRecordCB drawRecord{};
+				drawRecord.meshTemplateIndex = meshTemplate.meshTemplateIndex;
+				drawRecord.instanceTransformIndex = instanceTransformIndex;
+				drawRecord.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+				drawRecord.flags = 0u;
+				scope.drawRecords.push_back(drawRecord);
+
+				PendingDrawRecord pending;
+				pending.groupIndex = groupIndex;
+				if (groupIndex < cachedWorkloadKeysByGroup.size()
+					&& meshTemplateIndex < cachedWorkloadKeysByGroup[groupIndex].size()) {
+					pending.workloadKeys = cachedWorkloadKeysByGroup[groupIndex][meshTemplateIndex];
+					++m_stats.staticDirectWorkloadCacheHits;
+				}
+				scope.pendingDrawRecords.push_back(std::move(pending));
+			}
+		}
+	}
+
+	for (auto& scope : scopes) {
+		if (scope.drawRecords.empty()) {
+			continue;
+		}
+		const auto reserveBegin = std::chrono::steady_clock::now();
+		const auto drawRecordBytes = scope.drawRecords.size() * sizeof(InstanceDrawRecordCB);
+		m_stats.bulkReservedDrawRecordBytes += drawRecordBytes;
+		reserveUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - reserveBegin).count());
+
+		scope.drawRecordPages = m_instanceDrawRecordBuffers->AddDataPaged(
+			scope.drawRecords.data(),
+			scope.drawRecords.size(),
+			sizeof(InstanceDrawRecordCB),
+			kStaticDrawRecordPageElements);
+		m_stats.instanceDrawRecordsAllocated += scope.drawRecords.size();
+		m_stats.staticDirectDrawRecords += scope.drawRecords.size();
+		for (size_t drawRecordViewIndex = 0; drawRecordViewIndex < scope.drawRecords.size() && drawRecordViewIndex < scope.pendingDrawRecords.size(); ++drawRecordViewIndex) {
+			const auto& pending = scope.pendingDrawRecords[drawRecordViewIndex];
+			auto& drawInfo = drawInfos[pending.groupIndex];
+			const auto drawRecordOffset = PagedElementOffset(scope.drawRecordPages, drawRecordViewIndex, kStaticDrawRecordPageElements);
+			const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
+			if (drawRecordIndex > 0xFFFFFFu) {
+				spdlog::warn("ObjectManager::AddStaticGroupsBulk: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
+			}
+			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
+
+			drawInfo.drawInfo.indices.push_back(drawRecordIndex);
+			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pending.workloadKeys);
+			drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
+			for (const auto& workloadKey : pending.workloadKeys) {
+				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
+			}
+		}
+
+		for (const auto groupIndex : scope.groupIndices) {
+			auto& drawInfo = drawInfos[groupIndex];
+			const auto drawCount = drawInfo.instanceDrawRecordIndices.size();
+			if (drawCount == 0) {
+				continue;
+			}
+			drawInfo.instanceDrawRecordRange = {
+				static_cast<uint64_t>(drawInfo.instanceDrawRecordIndices.front()) * sizeof(InstanceDrawRecordCB),
+				drawCount * sizeof(InstanceDrawRecordCB),
+				sizeof(InstanceDrawRecordCB),
+				drawCount
+			};
+		}
+
+		if (!scope.groupIndices.empty()) {
+			auto& ownerDrawInfo = drawInfos[scope.groupIndices.front()];
+			ownerDrawInfo.ownedPerObjectCBPages = ToBufferRanges(scope.perObjectPages);
+			ownerDrawInfo.ownedPerInstanceTransformPages = ToBufferRanges(scope.instanceTransformPages);
+			ownerDrawInfo.ownedNormalMatrixPages = ToBufferRanges(scope.normalMatrixPages);
+			ownerDrawInfo.ownedInstanceDrawRecordPages = ToBufferRanges(scope.drawRecordPages);
+		}
+	}
+
+	++m_stats.bulkReserveCalls;
+	m_stats.bulkReserveUs += reserveUs;
+
+	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
+		if (!indices.empty()) {
+			const auto insertBegin = std::chrono::steady_clock::now();
+			EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+			const auto insertEnd = std::chrono::steady_clock::now();
+			m_stats.activeDrawSetInsertCalls += 1;
+			m_stats.activeDrawSetInsertIndices += indices.size();
+			m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(insertEnd - insertBegin).count());
+		}
+	}
+
+	for (const auto& drawInfo : drawInfos) {
+		if (!drawInfo.instanceDrawRecordIndices.empty()) {
+			++m_stats.staticDirectGroupsImported;
+		}
+	}
+	m_stats.staticDirectImportUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - importBegin).count());
+
+	return drawInfos;
+}
+
 void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 #ifdef _DEBUG
 	if (drawInfo == nullptr) {
@@ -329,46 +669,115 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 	}
 #endif // _DEBUG
 
-	if (!drawInfo->perObjectCBViews.empty()) {
+	RemoveObjectsBulk({ drawInfo });
+}
+
+void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo*>& drawInfos) {
+	if (drawInfos.empty()) {
+		return;
+	}
+
+	const auto removeBegin = std::chrono::steady_clock::now();
+	++m_stats.bulkRemoveCalls;
+	m_stats.bulkRemoveObjects += drawInfos.size();
+
+	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetRemoves;
+	const auto deallocateOwnedRanges = [](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+		if (!buffer) {
+			return;
+		}
+		for (const auto& range : ranges) {
+			if (range.IsValid()) {
+				buffer->DeallocateRange(range.offset, range.size);
+			}
+		}
+	};
+
+	for (const auto* drawInfo : drawInfos) {
+		if (!drawInfo) {
+			continue;
+		}
+
+	if (!drawInfo->ownedPerObjectCBPages.empty()) {
+		deallocateOwnedRanges(m_perObjectBuffers, drawInfo->ownedPerObjectCBPages);
+	} else if (!drawInfo->perObjectCBViews.empty()) {
 		for (const auto& view : drawInfo->perObjectCBViews) {
 			m_perObjectBuffers->Deallocate(view.get());
 		}
-	} else {
+	} else if (drawInfo->perObjectCBView) {
 		m_perObjectBuffers->Deallocate(drawInfo->perObjectCBView.get());
+	} else if (drawInfo->perObjectCBRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+		m_perObjectBuffers->DeallocateRange(drawInfo->perObjectCBRange.offset, drawInfo->perObjectCBRange.size);
 	}
-	for (const auto& view : drawInfo->perInstanceTransformViews) {
-		m_perInstanceTransformBuffers->Deallocate(view.get());
-	}
-
-	// Remove the object's draw set commands from the draw set buffers
-	auto& views = drawInfo;
-	unsigned int i = 0;
-	for (auto view : views->drawInfo.views) {
-		unsigned int index = static_cast<uint32_t>(view->GetOffset() / sizeof(InstanceDrawRecordCB));
-        for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
-            auto activeDrawSetIt = m_activeDrawSetIndices.find(workloadKey);
-            if (activeDrawSetIt == m_activeDrawSetIndices.end() || !activeDrawSetIt->second) {
-                spdlog::warn(
-                    "ObjectManager::RemoveObject: missing active draw set while removing indirect index={} flags={} phase={} clodOnly={}",
-                    index,
-                    static_cast<std::uint64_t>(workloadKey.compileFlags),
-                    workloadKey.renderPhase.hash,
-                    workloadKey.clodOnly);
-                continue;
-            }
-		    activeDrawSetIt->second->Remove(index);
-        }
-		m_instanceDrawRecordBuffers->Deallocate(view.get());
-		++i;
-	}
-
-	if (!drawInfo->normalMatrixViews.empty()) {
-		for (const auto& view : drawInfo->normalMatrixViews) {
-			m_normalMatrixBuffer->Remove(view.get());
+	if (!drawInfo->ownedPerInstanceTransformPages.empty()) {
+		deallocateOwnedRanges(m_perInstanceTransformBuffers, drawInfo->ownedPerInstanceTransformPages);
+	} else if (!drawInfo->perInstanceTransformViews.empty()) {
+		for (const auto& view : drawInfo->perInstanceTransformViews) {
+			m_perInstanceTransformBuffers->Deallocate(view.get());
 		}
-	} else {
-		m_normalMatrixBuffer->Remove(drawInfo->normalMatrixView.get());
+	} else if (drawInfo->perInstanceTransformRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+		m_perInstanceTransformBuffers->DeallocateRange(drawInfo->perInstanceTransformRange.offset, drawInfo->perInstanceTransformRange.size);
 	}
+
+	auto& views = drawInfo;
+	for (size_t i = 0; i < views->drawInfo.indices.size(); ++i) {
+		const unsigned int index = views->drawInfo.indices[i];
+		if (i >= views->drawInfo.drawWorkloadKeysPerDraw.size()) {
+			continue;
+		}
+        for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
+			activeDrawSetRemoves[workloadKey].push_back(index);
+        }
+	}
+	if (!drawInfo->ownedInstanceDrawRecordPages.empty()) {
+		deallocateOwnedRanges(m_instanceDrawRecordBuffers, drawInfo->ownedInstanceDrawRecordPages);
+	} else {
+		for (auto view : views->drawInfo.views) {
+			m_instanceDrawRecordBuffers->Deallocate(view.get());
+		}
+		if (drawInfo->instanceDrawRecordRange.IsValid() && drawInfo->drawInfo.views.empty()) {
+			m_instanceDrawRecordBuffers->DeallocateRange(drawInfo->instanceDrawRecordRange.offset, drawInfo->instanceDrawRecordRange.size);
+		}
+	}
+
+	if (!drawInfo->ownedNormalMatrixPages.empty()) {
+		deallocateOwnedRanges(m_normalMatrixBuffer, drawInfo->ownedNormalMatrixPages);
+	} else if (!drawInfo->normalMatrixViews.empty()) {
+		for (const auto& view : drawInfo->normalMatrixViews) {
+			m_normalMatrixBuffer->Deallocate(view.get());
+		}
+	} else if (drawInfo->normalMatrixView) {
+		m_normalMatrixBuffer->Deallocate(drawInfo->normalMatrixView.get());
+	} else if (drawInfo->normalMatrixRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+		m_normalMatrixBuffer->DeallocateRange(drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
+	}
+	}
+
+	for (const auto& [workloadKey, indices] : activeDrawSetRemoves) {
+		if (indices.empty()) {
+			continue;
+		}
+		auto activeDrawSetIt = m_activeDrawSetIndices.find(workloadKey);
+		if (activeDrawSetIt == m_activeDrawSetIndices.end() || !activeDrawSetIt->second) {
+			spdlog::warn(
+				"ObjectManager::RemoveObjectsBulk: missing active draw set while removing {} indices flags={} phase={} clodOnly={}",
+				indices.size(),
+				static_cast<std::uint64_t>(workloadKey.compileFlags),
+				workloadKey.renderPhase.hash,
+				workloadKey.clodOnly);
+			continue;
+		}
+		const auto activeRemoveBegin = std::chrono::steady_clock::now();
+		activeDrawSetIt->second->RemoveMany(indices);
+		const auto activeRemoveEnd = std::chrono::steady_clock::now();
+		m_stats.activeDrawSetRemoveCalls += 1;
+		m_stats.activeDrawSetRemoveIndices += indices.size();
+		m_stats.activeDrawSetRemoveUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(activeRemoveEnd - activeRemoveBegin).count());
+	}
+
+	m_stats.bulkRemoveUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - removeBegin).count());
 }
 
 void ObjectManager::UpdatePerObjectBuffer(BufferView* view, PerObjectCB& data) {

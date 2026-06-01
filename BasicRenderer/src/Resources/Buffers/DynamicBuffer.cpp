@@ -1,5 +1,7 @@
 #include "Resources/Buffers/DynamicBuffer.h"
 
+#include <cstddef>
+
 #include <spdlog/spdlog.h>
 
 #include "Resources/Buffers/BufferView.h"
@@ -151,6 +153,94 @@ std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void*
     return views;
 }
 
+std::pair<size_t, size_t> DynamicBuffer::AddDataRange(const void* data, size_t count, size_t elementSize) {
+    if (count == 0 || elementSize == 0) {
+        return { 0, 0 };
+    }
+
+    const size_t totalSize = count * elementSize;
+    auto freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    if (freeIt == m_freeBlocks.end()) {
+        ReserveBytes(totalSize);
+        freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    }
+    if (freeIt == m_freeBlocks.end()) {
+        return { 0, 0 };
+    }
+
+    const size_t blockOffset = freeIt->second;
+    m_freeBlocks.erase(freeIt);
+    auto blockIt = m_blocksByOffset.find(blockOffset);
+    const size_t blockSize = blockIt != m_blocksByOffset.end() ? blockIt->second.size : totalSize;
+    if (blockIt != m_blocksByOffset.end()) {
+        m_blocksByOffset.erase(blockIt);
+    }
+
+    m_blocksByOffset[blockOffset] = { blockOffset, totalSize, false };
+
+    if (blockSize > totalSize) {
+        const size_t remainingOffset = blockOffset + totalSize;
+        const size_t remainingSize = blockSize - totalSize;
+        m_blocksByOffset[remainingOffset] = { remainingOffset, remainingSize, true };
+        m_freeBlocks.insert({ remainingSize, remainingOffset });
+    }
+
+    if (data != nullptr) {
+        StageOrUpload(data, totalSize, blockOffset);
+    }
+
+    return { blockOffset, totalSize };
+}
+
+std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
+    const void* data,
+    size_t count,
+    size_t elementSize,
+    size_t pageElementCount)
+{
+    std::vector<PagedAllocation> pages;
+    if (count == 0 || elementSize == 0) {
+        return pages;
+    }
+
+    if (pageElementCount == 0) {
+        pageElementCount = 1;
+    }
+
+    const auto* bytes = static_cast<const std::byte*>(data);
+    size_t remaining = count;
+    size_t elementCursor = 0;
+    pages.reserve((count + pageElementCount - 1) / pageElementCount);
+
+    while (remaining != 0) {
+        const size_t pageCount = (std::min)(remaining, pageElementCount);
+        const size_t allocationSize = pageElementCount * elementSize;
+        const size_t usedSize = pageCount * elementSize;
+        auto view = Allocate(allocationSize, elementSize);
+        if (!view) {
+            break;
+        }
+
+        const size_t offset = view->GetOffset();
+        if (bytes != nullptr) {
+            StageOrUpload(bytes + elementCursor * elementSize, usedSize, offset);
+        }
+
+        pages.push_back(PagedAllocation{
+            offset,
+            usedSize,
+            allocationSize,
+            elementSize,
+            pageCount
+        });
+
+        elementCursor += pageCount;
+        remaining -= pageCount;
+    }
+
+    return pages;
+}
+
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
 	size_t actualSize = size;
     if (fullAllocationSize != 0) {
@@ -201,8 +291,13 @@ void DynamicBuffer::Deallocate(const BufferView* view) {
         return;
     }
 
-    size_t offset = view->GetOffset();
-    size_t size = view->GetSize();
+    DeallocateRange(view->GetOffset(), view->GetSize());
+}
+
+void DynamicBuffer::DeallocateRange(size_t offset, size_t size) {
+    if (size == 0) {
+        return;
+    }
 
     // Find the block by offset - O(log n)
     auto it = m_blocksByOffset.find(offset);
@@ -237,6 +332,15 @@ void DynamicBuffer::Deallocate(const BufferView* view) {
 
     // Add the (possibly coalesced) block to the free index
     m_freeBlocks.insert({ it->second.size, it->second.offset });
+}
+
+void DynamicBuffer::DeallocatePages(const std::vector<PagedAllocation>& pages) {
+    for (const auto& page : pages) {
+        if (!page.IsValid()) {
+            continue;
+        }
+        DeallocateRange(page.offset, page.allocationSize);
+    }
 }
 
 void DynamicBuffer::AssignDescriptorSlots()

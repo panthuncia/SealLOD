@@ -25,6 +25,7 @@ public:
 
     // Remove an element (and shift the tail on GPU)
     void Remove(unsigned int element);
+    void RemoveMany(const std::vector<unsigned int>& elements);
 
     // Get element at index
     unsigned int& operator[](UINT index) {

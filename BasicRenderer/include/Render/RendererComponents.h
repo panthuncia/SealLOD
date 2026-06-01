@@ -62,6 +62,17 @@ namespace Components {
     };
 
     struct ObjectDrawInfo {
+        struct BufferRange {
+            uint64_t offset = 0;
+            uint64_t size = 0;
+            uint64_t stride = 0;
+            uint64_t count = 0;
+
+            bool IsValid() const {
+                return size != 0 && stride != 0 && count != 0;
+            }
+        };
+
         IndirectDrawInfo drawInfo;
         std::vector<uint32_t> perMeshInstanceBufferIndices;
         std::vector<uint32_t> instanceDrawRecordIndices;
@@ -73,6 +84,14 @@ namespace Components {
         std::vector<std::shared_ptr<BufferView>> perInstanceTransformViews;
         std::vector<std::shared_ptr<BufferView>> normalMatrixViews;
         std::vector<std::shared_ptr<BufferView>> instanceDrawRecordViews;
+        BufferRange perObjectCBRange;
+        BufferRange perInstanceTransformRange;
+        BufferRange normalMatrixRange;
+        BufferRange instanceDrawRecordRange;
+        std::vector<BufferRange> ownedPerObjectCBPages;
+        std::vector<BufferRange> ownedPerInstanceTransformPages;
+        std::vector<BufferRange> ownedNormalMatrixPages;
+        std::vector<BufferRange> ownedInstanceDrawRecordPages;
     };
 
     struct PerPassMeshes {

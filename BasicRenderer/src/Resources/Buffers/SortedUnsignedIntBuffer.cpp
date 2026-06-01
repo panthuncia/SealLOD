@@ -127,6 +127,49 @@ void SortedUnsignedIntBuffer::Remove(unsigned int element) {
     }
 }
 
+void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elements) {
+    if (elements.empty() || m_data.empty()) {
+        return;
+    }
+
+    std::vector<unsigned int> sortedElements = elements;
+    std::sort(sortedElements.begin(), sortedElements.end());
+    sortedElements.erase(std::unique(sortedElements.begin(), sortedElements.end()), sortedElements.end());
+
+    std::vector<unsigned int> remaining;
+    remaining.reserve(m_data.size());
+    std::set_difference(
+        m_data.begin(),
+        m_data.end(),
+        sortedElements.begin(),
+        sortedElements.end(),
+        std::back_inserter(remaining));
+
+    if (remaining.size() == m_data.size()) {
+        return;
+    }
+
+    const auto firstDiff = std::mismatch(m_data.begin(), m_data.end(), remaining.begin(), remaining.end());
+    const auto dirtyIndex = static_cast<std::size_t>(std::distance(m_data.begin(), firstDiff.first));
+    const auto oldSize = m_data.size();
+    m_data = std::move(remaining);
+
+    if (dirtyIndex < m_earliestModifiedIndex) {
+        m_earliestModifiedIndex = dirtyIndex;
+    }
+
+    if (!m_data.empty() && dirtyIndex < m_data.size()) {
+        const unsigned int* src = m_data.data() + dirtyIndex;
+        const auto count = m_data.size() - dirtyIndex;
+        StageOrUpload(src, sizeof(unsigned int) * count, dirtyIndex * sizeof(unsigned int));
+    }
+
+    if (m_data.size() < oldSize) {
+        const std::vector<unsigned int> zeros(oldSize - m_data.size(), 0u);
+        StageOrUpload(zeros.data(), sizeof(unsigned int) * zeros.size(), m_data.size() * sizeof(unsigned int));
+    }
+}
+
 void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
     if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::Immediate
         && rg::runtime::GetActiveUploadPolicyService() == nullptr) {

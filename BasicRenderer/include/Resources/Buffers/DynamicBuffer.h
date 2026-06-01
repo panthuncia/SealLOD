@@ -8,6 +8,7 @@
 #include <functional>
 #include <typeinfo>
 #include <string>
+#include <utility>
 
 #include "Resources/Resource.h"
 #include "Resources/Buffers/BufferView.h"
@@ -18,6 +19,17 @@
 
 class DynamicBuffer : public ViewedDynamicBufferBase, public IHasMemoryMetadata {
 public:
+    struct PagedAllocation {
+        size_t offset = 0;
+        size_t size = 0;
+        size_t allocationSize = 0;
+        size_t stride = 0;
+        size_t count = 0;
+
+        bool IsValid() const {
+            return allocationSize != 0 && stride != 0;
+        }
+    };
 
     static std::shared_ptr<DynamicBuffer> CreateShared(size_t elementSize, size_t capacity = 64, std::string name = "", bool byteAddress = false, bool UAV = false) {
         return std::shared_ptr<DynamicBuffer>(new DynamicBuffer(byteAddress, elementSize, capacity, name, UAV));
@@ -26,7 +38,11 @@ public:
     std::unique_ptr<BufferView> Allocate(size_t size, size_t elementSize);
     void ReserveBytes(size_t size);
     void Deallocate(const BufferView* view);
+    void DeallocateRange(size_t offset, size_t size);
+    void DeallocatePages(const std::vector<PagedAllocation>& pages);
 	std::unique_ptr<BufferView> AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize = 0);
+    std::pair<size_t, size_t> AddDataRange(const void* data, size_t count, size_t elementSize);
+    std::vector<PagedAllocation> AddDataPaged(const void* data, size_t count, size_t elementSize, size_t pageElementCount);
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
 

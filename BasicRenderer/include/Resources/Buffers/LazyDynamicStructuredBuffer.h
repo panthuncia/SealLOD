@@ -5,6 +5,7 @@
 #include <memory>
 #include <deque>
 #include <algorithm>
+#include <utility>
 #include <spdlog/spdlog.h>
 #include <rhi.h>
 
@@ -99,6 +100,29 @@ public:
         return views;
     }
 
+    std::pair<uint64_t, uint64_t> AddContiguousRange(const T* data, size_t count) {
+        if (count == 0) {
+            return { 0, 0 };
+        }
+
+        const uint64_t firstIndex = m_usedCapacity;
+        const uint64_t requiredCapacity = m_usedCapacity + count;
+        if (requiredCapacity > m_capacity) {
+            uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+            while (requiredCapacity > newCapacity) {
+                newCapacity *= 2u;
+            }
+            Resize(newCapacity);
+        }
+
+        m_usedCapacity = requiredCapacity;
+        if (data != nullptr) {
+            StageOrUpload(data, sizeof(T) * count, firstIndex * m_elementSize);
+        }
+
+        return { firstIndex * m_elementSize, count * m_elementSize };
+    }
+
     void ReserveAdditional(size_t count) {
         if (count == 0) {
             return;
@@ -138,6 +162,18 @@ public:
 
         const uint64_t index = view->GetOffset() / m_elementSize;
         m_freeIndices.push_back(index);
+    }
+
+    void RemoveRange(uint64_t offset, uint64_t size) {
+        if (size == 0) {
+            return;
+        }
+
+        const uint64_t firstIndex = offset / m_elementSize;
+        const uint64_t count = size / m_elementSize;
+        for (uint64_t i = 0; i < count; ++i) {
+            m_freeIndices.push_back(firstIndex + i);
+        }
     }
 
     void Resize(uint32_t newCapacity) {

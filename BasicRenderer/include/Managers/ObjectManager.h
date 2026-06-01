@@ -19,6 +19,8 @@
 
 class BufferView;
 class DynamicBuffer;
+class Material;
+class Mesh;
 
 class ObjectManager : public IResourceProvider {
 public:
@@ -32,9 +34,33 @@ public:
 		const Components::InstanceTransforms* instanceTransforms = nullptr;
 	};
 
+	struct StaticMeshTemplateRef {
+		std::uint32_t meshTemplateIndex = 0;
+		std::uint32_t clodOffsetIndex = 0;
+		std::shared_ptr<Mesh> mesh;
+		std::shared_ptr<Material> material;
+	};
+
+	struct StaticGroupBuildInfo {
+		std::uint64_t stableGroupID = 0;
+		std::uint64_t allocationScopeID = 0;
+		std::vector<DirectX::XMMATRIX> instanceTransforms;
+		std::vector<StaticMeshTemplateRef> meshTemplates;
+	};
+
 	struct Stats {
 		std::uint64_t bulkAddCalls = 0;
 		std::uint64_t objectsSubmitted = 0;
+		std::uint64_t staticDirectBulkAddCalls = 0;
+		std::uint64_t staticDirectGroupsSubmitted = 0;
+		std::uint64_t staticDirectGroupsImported = 0;
+		std::uint64_t staticDirectTransformRows = 0;
+		std::uint64_t staticDirectDrawRecords = 0;
+		std::uint64_t staticDirectImportUs = 0;
+		std::uint64_t staticDirectReserveHeadroomCalls = 0;
+		std::uint64_t staticDirectReservedHeadroomBytes = 0;
+		std::uint64_t staticDirectWorkloadCacheHits = 0;
+		std::uint64_t staticDirectWorkloadCacheMisses = 0;
 		std::uint64_t perObjectRowsAllocated = 0;
 		std::uint64_t perInstanceTransformRowsAllocated = 0;
 		std::uint64_t normalMatrixRowsAllocated = 0;
@@ -43,6 +69,12 @@ public:
 		std::uint64_t activeDrawSetInsertCalls = 0;
 		std::uint64_t activeDrawSetInsertIndices = 0;
 		std::uint64_t activeDrawSetInsertUs = 0;
+		std::uint64_t bulkRemoveCalls = 0;
+		std::uint64_t bulkRemoveObjects = 0;
+		std::uint64_t bulkRemoveUs = 0;
+		std::uint64_t activeDrawSetRemoveCalls = 0;
+		std::uint64_t activeDrawSetRemoveIndices = 0;
+		std::uint64_t activeDrawSetRemoveUs = 0;
 		std::uint64_t maxDrawRecordIndex = 0;
 		std::uint64_t bulkReserveCalls = 0;
 		std::uint64_t bulkReserveUs = 0;
@@ -54,7 +86,9 @@ public:
 
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
+	std::vector<Components::ObjectDrawInfo> AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups);
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
+	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo*>& drawInfos);
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 
@@ -95,7 +129,7 @@ private:
 	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
 	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
-	std::shared_ptr<LazyDynamicStructuredBuffer<DirectX::XMFLOAT4X4>> m_normalMatrixBuffer; // Normal matrices for each object
+	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;

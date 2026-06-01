@@ -93,6 +93,8 @@ public:
     void SetSceneRenderOverlapEnabled(bool enabled);
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
     ObjectManager::Stats GetObjectManagerStats() const;
+    ManagerInterface& GetManagerInterface() { return m_managerInterface; }
+    const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
 
 private:
 	bool m_isInitialized = false;

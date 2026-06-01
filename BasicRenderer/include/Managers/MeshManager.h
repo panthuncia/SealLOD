@@ -23,6 +23,7 @@
 
 class Mesh;
 class MeshInstance;
+class Material;
 class DynamicBuffer;
 class ResourceGroup;
 class BufferView;
@@ -93,6 +94,20 @@ public:
 	void AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices);
 	void RemoveMesh(Mesh* mesh);
 	void RemoveMeshInstance(MeshInstance* mesh);
+
+	struct StaticMeshTemplateRequest {
+		std::shared_ptr<Mesh> mesh;
+		std::shared_ptr<Material> material;
+	};
+
+	struct StaticMeshTemplateRegistration {
+		uint32_t meshTemplateIndex = 0;
+		uint32_t clodOffsetIndex = 0;
+		bool valid = false;
+	};
+
+	void AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices);
+	std::vector<StaticMeshTemplateRegistration> AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests);
 	uint32_t GetCLodMaxTraversalDepth() const { return m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire); }
 
 	void GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges, uint32_t& outMaxGroupIndex) const;
