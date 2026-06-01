@@ -230,12 +230,26 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 }
 
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
+    const uint64_t previousCapacity = m_capacity;
     auto device = DeviceManager::GetInstance().GetDevice();
     auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * sizeof(unsigned int), GetGlobalResourceID(), m_UAV);
     SetBacking(std::move(newDataBuffer), newSize * sizeof(unsigned int));
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
     if (!m_data.empty()) {
         StageOrUpload(m_data.data(), m_data.size() * sizeof(unsigned int), 0u);
+    }
+    if (previousCapacity != 0u && m_uploadPolicyState.HasPendingWork()) {
+        if (rg::runtime::GetActiveUploadService() != nullptr) {
+            m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+            const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
+            spdlog::info(
+                "SortedUnsignedIntBuffer '{}' GrowBuffer replayed retained bytes writes={} bytes={}",
+                GetName(),
+                replayStats.flushedWrites,
+                replayStats.flushedBytes);
+        } else {
+            MarkUploadPolicyDirty();
+        }
     }
 
     m_capacity = newSize;

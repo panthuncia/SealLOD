@@ -443,7 +443,18 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         // updates are immediate on DX12 and prior frames may still reference it.
         m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
         if (m_uploadPolicyState.HasPendingWork()) {
-            MarkUploadPolicyDirty();
+            if (rg::runtime::GetActiveUploadService() != nullptr) {
+                m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+                const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
+                spdlog::info(
+                    "DynamicBuffer '{}' id={} GrowBuffer replayed retained bytes writes={} bytes={}",
+                    m_name,
+                    GetGlobalResourceID(),
+                    replayStats.flushedWrites,
+                    replayStats.flushedBytes);
+            } else {
+                MarkUploadPolicyDirty();
+            }
         }
     }
 
