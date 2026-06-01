@@ -62,6 +62,11 @@ namespace Components {
     };
 
     struct ObjectDrawInfo {
+        struct ActiveDrawSetRemovalBucket {
+            DrawWorkloadKey workloadKey;
+            std::vector<unsigned int> indices;
+        };
+
         struct BufferRange {
             uint64_t offset = 0;
             uint64_t size = 0;
@@ -74,6 +79,7 @@ namespace Components {
         };
 
         IndirectDrawInfo drawInfo;
+        std::vector<ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
         std::vector<uint32_t> perMeshInstanceBufferIndices;
         std::vector<uint32_t> instanceDrawRecordIndices;
         std::shared_ptr<BufferView> perObjectCBView;

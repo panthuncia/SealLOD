@@ -164,10 +164,9 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
         StageOrUpload(src, sizeof(unsigned int) * count, dirtyIndex * sizeof(unsigned int));
     }
 
-    if (m_data.size() < oldSize) {
-        const std::vector<unsigned int> zeros(oldSize - m_data.size(), 0u);
-        StageOrUpload(zeros.data(), sizeof(unsigned int) * zeros.size(), m_data.size() * sizeof(unsigned int));
-    }
+    // Readers are given Size() separately, so stale values beyond the compacted
+    // active range are ignored. Avoid uploading a large zero tail during bulk
+    // streaming removals.
 }
 
 void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {

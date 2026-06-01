@@ -57,6 +57,12 @@ public:
 		std::uint64_t staticDirectTransformRows = 0;
 		std::uint64_t staticDirectDrawRecords = 0;
 		std::uint64_t staticDirectImportUs = 0;
+		std::uint64_t staticDirectTransformBuildUs = 0;
+		std::uint64_t staticDirectPageUploadUs = 0;
+		std::uint64_t staticDirectWorkloadBuildUs = 0;
+		std::uint64_t staticDirectDrawRecordBuildUs = 0;
+		std::uint64_t staticDirectDrawRecordUploadUs = 0;
+		std::uint64_t staticDirectFinalizeUs = 0;
 		std::uint64_t staticDirectReserveHeadroomCalls = 0;
 		std::uint64_t staticDirectReservedHeadroomBytes = 0;
 		std::uint64_t staticDirectWorkloadCacheHits = 0;
@@ -72,6 +78,8 @@ public:
 		std::uint64_t bulkRemoveCalls = 0;
 		std::uint64_t bulkRemoveObjects = 0;
 		std::uint64_t bulkRemoveUs = 0;
+		std::uint64_t bulkRemovePageDeallocUs = 0;
+		std::uint64_t bulkRemoveCollectUs = 0;
 		std::uint64_t activeDrawSetRemoveCalls = 0;
 		std::uint64_t activeDrawSetRemoveIndices = 0;
 		std::uint64_t activeDrawSetRemoveUs = 0;

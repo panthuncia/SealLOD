@@ -80,6 +80,22 @@ size_t PagedElementOffset(
 	return pages[pageIndex].offset + indexInPage * pages[pageIndex].stride;
 }
 
+void AppendActiveDrawSetRemoval(
+	Components::ObjectDrawInfo& drawInfo,
+	const DrawWorkloadKey& workloadKey,
+	unsigned int drawRecordIndex)
+{
+	for (auto& bucket : drawInfo.activeDrawSetRemovals) {
+		if (bucket.workloadKey == workloadKey) {
+			bucket.indices.push_back(drawRecordIndex);
+			return;
+		}
+	}
+	auto& bucket = drawInfo.activeDrawSetRemovals.emplace_back();
+	bucket.workloadKey = workloadKey;
+	bucket.indices.push_back(drawRecordIndex);
+}
+
 }
 
 ObjectManager::ObjectManager() {
@@ -347,6 +363,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			drawInfo.instanceDrawRecordViews.push_back(view);
 			for (const auto& workloadKey : pendingDrawRecord.workloadKeys) {
 				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
+				AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
 			}
 		}
 	}
@@ -409,6 +426,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 	std::unordered_map<std::uint64_t, size_t> scopeIndices;
 	scopes.reserve(groups.size());
 
+	const auto transformBuildBegin = std::chrono::steady_clock::now();
 	size_t expectedDrawRecords = 0;
 	for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
 		const auto& group = groups[groupIndex];
@@ -439,6 +457,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			scope.normalMatrices.push_back(ComputeNormalMatrixStorage(matrix));
 		}
 	}
+	m_stats.staticDirectTransformBuildUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - transformBuildBegin).count());
 
 	size_t totalTransformRows = 0;
 	for (const auto& scope : scopes) {
@@ -454,6 +474,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 	}
 
 	std::uint64_t reserveUs = 0;
+	const auto pageUploadBegin = std::chrono::steady_clock::now();
 	for (auto& scope : scopes) {
 		if (scope.perObjectCBs.empty()) {
 			continue;
@@ -481,11 +502,14 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 		m_stats.bulkReservedInstanceTransformBytes += scope.perObjectCBs.size() * sizeof(PerInstanceTransformCB);
 		m_stats.bulkReservedNormalMatrixRows += scope.normalMatrices.size();
 	}
+	m_stats.staticDirectPageUploadUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pageUploadBegin).count());
 
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 	std::vector<std::vector<std::vector<DrawWorkloadKey>>> cachedWorkloadKeysByGroup;
 	cachedWorkloadKeysByGroup.reserve(groups.size());
 
+	const auto workloadBuildBegin = std::chrono::steady_clock::now();
 	for (const auto& group : groups) {
 		auto& cachedGroupWorkloads = cachedWorkloadKeysByGroup.emplace_back();
 		cachedGroupWorkloads.reserve(group.meshTemplates.size());
@@ -500,7 +524,10 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			++m_stats.staticDirectWorkloadCacheMisses;
 		}
 	}
+	m_stats.staticDirectWorkloadBuildUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - workloadBuildBegin).count());
 
+	const auto drawRecordBuildBegin = std::chrono::steady_clock::now();
 	for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
 		const auto& group = groups[groupIndex];
 		auto& drawInfo = drawInfos[groupIndex];
@@ -576,7 +603,10 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			}
 		}
 	}
+	m_stats.staticDirectDrawRecordBuildUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawRecordBuildBegin).count());
 
+	const auto drawRecordUploadBegin = std::chrono::steady_clock::now();
 	for (auto& scope : scopes) {
 		if (scope.drawRecords.empty()) {
 			continue;
@@ -605,10 +635,10 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 
 			drawInfo.drawInfo.indices.push_back(drawRecordIndex);
-			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pending.workloadKeys);
 			drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
 			for (const auto& workloadKey : pending.workloadKeys) {
 				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
+				AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
 			}
 		}
 
@@ -634,6 +664,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			ownerDrawInfo.ownedInstanceDrawRecordPages = ToBufferRanges(scope.drawRecordPages);
 		}
 	}
+	m_stats.staticDirectDrawRecordUploadUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawRecordUploadBegin).count());
 
 	++m_stats.bulkReserveCalls;
 	m_stats.bulkReserveUs += reserveUs;
@@ -650,11 +682,14 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 		}
 	}
 
+	const auto finalizeBegin = std::chrono::steady_clock::now();
 	for (const auto& drawInfo : drawInfos) {
 		if (!drawInfo.instanceDrawRecordIndices.empty()) {
 			++m_stats.staticDirectGroupsImported;
 		}
 	}
+	m_stats.staticDirectFinalizeUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - finalizeBegin).count());
 	m_stats.staticDirectImportUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - importBegin).count());
 
@@ -682,15 +717,30 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 	m_stats.bulkRemoveObjects += drawInfos.size();
 
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetRemoves;
-	const auto deallocateOwnedRanges = [](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+	std::uint64_t pageDeallocUs = 0;
+	std::uint64_t collectUs = 0;
+	const auto deallocateOwnedRanges = [&pageDeallocUs](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
 		if (!buffer) {
 			return;
 		}
+		const auto begin = std::chrono::steady_clock::now();
+		std::vector<Components::ObjectDrawInfo::BufferRange> sortedRanges;
+		sortedRanges.reserve(ranges.size());
 		for (const auto& range : ranges) {
+			if (range.IsValid()) {
+				sortedRanges.push_back(range);
+			}
+		}
+		std::sort(sortedRanges.begin(), sortedRanges.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.offset < rhs.offset;
+		});
+		for (const auto& range : sortedRanges) {
 			if (range.IsValid()) {
 				buffer->DeallocateRange(range.offset, range.size);
 			}
 		}
+		pageDeallocUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
 	};
 
 	for (const auto* drawInfo : drawInfos) {
@@ -720,15 +770,25 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 	}
 
 	auto& views = drawInfo;
-	for (size_t i = 0; i < views->drawInfo.indices.size(); ++i) {
-		const unsigned int index = views->drawInfo.indices[i];
-		if (i >= views->drawInfo.drawWorkloadKeysPerDraw.size()) {
-			continue;
+	const auto collectBegin = std::chrono::steady_clock::now();
+	if (!drawInfo->activeDrawSetRemovals.empty()) {
+		for (const auto& bucket : drawInfo->activeDrawSetRemovals) {
+			auto& indices = activeDrawSetRemoves[bucket.workloadKey];
+			indices.insert(indices.end(), bucket.indices.begin(), bucket.indices.end());
 		}
-        for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
-			activeDrawSetRemoves[workloadKey].push_back(index);
-        }
+	} else {
+		for (size_t i = 0; i < views->drawInfo.indices.size(); ++i) {
+			const unsigned int index = views->drawInfo.indices[i];
+			if (i >= views->drawInfo.drawWorkloadKeysPerDraw.size()) {
+				continue;
+			}
+			for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
+				activeDrawSetRemoves[workloadKey].push_back(index);
+			}
+		}
 	}
+	collectUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
 	if (!drawInfo->ownedInstanceDrawRecordPages.empty()) {
 		deallocateOwnedRanges(m_instanceDrawRecordBuffers, drawInfo->ownedInstanceDrawRecordPages);
 	} else {
@@ -752,6 +812,9 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 		m_normalMatrixBuffer->DeallocateRange(drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
 	}
 	}
+
+	m_stats.bulkRemovePageDeallocUs += pageDeallocUs;
+	m_stats.bulkRemoveCollectUs += collectUs;
 
 	for (const auto& [workloadKey, indices] : activeDrawSetRemoves) {
 		if (indices.empty()) {

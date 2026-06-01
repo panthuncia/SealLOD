@@ -1385,7 +1385,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("useAsyncCompute", false);
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
 	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, false);
-	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
+	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", true);
     settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphDisableCaching", false);
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
