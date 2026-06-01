@@ -209,6 +209,7 @@ private:
         const std::chrono::steady_clock::time_point& stageStart,
         const std::chrono::steady_clock::time_point& stageEnd);
     void PublishFrameTaskGraphCapture();
+    void MaybeRequestCLodVisibilityTelemetry();
 
     void StallPipeline();
 
@@ -291,6 +292,10 @@ private:
     std::unordered_set<uint64_t> m_externalRegisteredMeshInstances;
 
     std::shared_ptr<rg::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
+    uint64_t m_lastCLodVisibilityTelemetryRequestFrame = UINT64_MAX;
+    bool m_clodTelemetryReadbackPending = false;
+    bool m_clodVisibleCounterReadbackPending = false;
+    bool m_loggedCLodVisibilityTelemetryEnabled = false;
 
     class CoreResourceProvider : public IResourceProvider {
 	public:

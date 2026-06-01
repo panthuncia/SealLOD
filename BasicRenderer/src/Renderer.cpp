@@ -66,10 +66,15 @@
 #include "Render/Runtime/OpenRenderGraphSettings.h"
 #include "Render/GraphExtensions/IOExtension.h"
 #include "Render/GraphExtensions/CLodExtension.h"
+#include "Render/GraphExtensions/CLodExtensionComponents.h"
+#include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "RenderPasses/DebugGridPass.h"
 #include "Render/GraphExtensions/ReadbackCaptureExtension.h"
+#include "Render/Runtime/IReadbackService.h"
 #include "Resources/Resource.h"
+#include "Resources/components.h"
+#include "Resources/ReadbackRequest.h"
 #include "Resources/DynamicResource.h"
 #include "Resources/ExternalTextureResource.h"
 #include "Render/MemoryIntrospectionBackend.h"
@@ -177,6 +182,17 @@ bool IsDirectStorageDisabledByEnvironment() {
     const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
     free(value);
     return disabled;
+}
+
+bool IsCLodVisibilityTelemetryEnabledByEnvironment() {
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "SARP_CLOD_VISIBILITY_TELEMETRY") != 0 || value == nullptr) {
+        return false;
+    }
+    const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+    free(value);
+    return enabled;
 }
 
 bool DefaultEnableReShapeForBuild() {
@@ -1845,6 +1861,7 @@ void Renderer::CreateTextures() {
 void Renderer::CreateRTVs() {
     auto device = DeviceManager::GetInstance().GetDevice();
     const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
+    const auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     // Recreate the render target views
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
         renderTargets[n] = m_swapChain->Image(n);
@@ -1857,6 +1874,7 @@ void Renderer::CreateRTVs() {
         // Keep external texture wrappers in sync after resize
         if (n < m_backbufferResources.size() && m_backbufferResources[n]) {
             m_backbufferResources[n]->SetHandle(renderTargets[n]);
+            m_backbufferResources[n]->SetDimensions(outputResolution.x, outputResolution.y);
             m_backbufferResources[n]->SetRTVSlot({ rtvHeap->GetHandle(), n });
             m_backbufferResources[n]->ResetToUndefined();
             if (renderGraphBatchTraceEnabled) {
@@ -1901,13 +1919,13 @@ void Renderer::OnResize(UINT newWidth, UINT newHeight) {
         return;
     }
 
+	SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ newWidth, newHeight });
+
     m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
 
     CreateRTVs();
     m_swapChainReady = true;
     m_loggedSwapChainNotReady = false;
-
-	SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ newWidth, newHeight });
 
     UpscalingManager::GetInstance().Shutdown();
     UpscalingManager::GetInstance().Setup();
@@ -2157,6 +2175,137 @@ void Renderer::PostUpdate() {
 	currentScene->PostUpdate();
 }
 
+void Renderer::MaybeRequestCLodVisibilityTelemetry() {
+    if (!currentRenderGraph || !IsCLodVisibilityTelemetryEnabledByEnvironment()) {
+        return;
+    }
+
+    SetCLodWorkGraphTelemetryEnabled(true);
+
+    if (!m_loggedCLodVisibilityTelemetryEnabled) {
+        spdlog::info("SARP CLOD visibility telemetry enabled.");
+        m_loggedCLodVisibilityTelemetryEnabled = true;
+    }
+
+    constexpr uint64_t kCaptureIntervalFrames = 30;
+    if (m_lastCLodVisibilityTelemetryRequestFrame != UINT64_MAX &&
+        m_totalFramesRendered - m_lastCLodVisibilityTelemetryRequestFrame < kCaptureIntervalFrames) {
+        return;
+    }
+    if (m_clodTelemetryReadbackPending || m_clodVisibleCounterReadbackPending) {
+        return;
+    }
+
+    auto* readbackService = currentRenderGraph->GetReadbackService();
+    if (!readbackService) {
+        return;
+    }
+
+    auto& world = RendererECSManager::GetInstance().GetWorld();
+    const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
+
+    std::shared_ptr<Resource> telemetryResource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodWorkGraphTelemetryBufferTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!telemetryResource) {
+                telemetryResource = component.resource.lock();
+            }
+        });
+
+    std::shared_ptr<Resource> visibleCounterResource;
+    world.query_builder<const Components::Resource>()
+        .with<VisibleClustersCounterTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!visibleCounterResource) {
+                visibleCounterResource = component.resource.lock();
+            }
+        });
+
+    if (!telemetryResource || !visibleCounterResource) {
+        return;
+    }
+
+    const uint64_t requestedFrame = m_totalFramesRendered;
+    m_lastCLodVisibilityTelemetryRequestFrame = requestedFrame;
+    m_clodTelemetryReadbackPending = true;
+    m_clodVisibleCounterReadbackPending = true;
+
+    readbackService->RequestReadbackCapture(
+        "CLodOpaque::RasterizeClustersPass2",
+        telemetryResource.get(),
+        RangeSpec{},
+        [this, requestedFrame](ReadbackCaptureResult&& result) {
+            m_clodTelemetryReadbackPending = false;
+
+            constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
+            if (result.data.size() < telemetryBytes) {
+                spdlog::warn(
+                    "SARP CLOD visibility telemetry: frame={} work-graph payload too small ({} bytes).",
+                    requestedFrame,
+                    result.data.size());
+                return;
+            }
+
+            CLodWorkGraphTelemetryCounters decoded{};
+            std::memcpy(decoded.counters.data(), result.data.data(), telemetryBytes);
+            auto counter = [&](CLodWorkGraphCounterIndex idx) -> uint32_t {
+                return decoded.counters[static_cast<size_t>(idx)];
+            };
+
+            spdlog::info(
+                "SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_frustum={} invalid_bounds={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} compact_tris={})",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
+                counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
+                counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
+                counter(CLodWorkGraphCounterIndex::ObjectCullRejectedFrustum),
+                counter(CLodWorkGraphCounterIndex::ObjectCullInvalidBounds),
+                counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
+                counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
+                counter(CLodWorkGraphCounterIndex::ClusterCullThreads),
+                counter(CLodWorkGraphCounterIndex::ClusterCullRejectedFrustum),
+                counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOcclusion),
+                counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOutOfRange),
+                counter(CLodWorkGraphCounterIndex::ClusterCullZeroSurvivorWaves),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderInRange),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderZeroTriangleOutputs),
+                counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
+        });
+
+    readbackService->RequestReadbackCapture(
+        "CLodOpaque::HierarchicalCullingPass2",
+        visibleCounterResource.get(),
+        RangeSpec{},
+        [this, requestedFrame](ReadbackCaptureResult&& result) {
+            m_clodVisibleCounterReadbackPending = false;
+
+            if (result.data.size() < sizeof(uint32_t)) {
+                spdlog::warn(
+                    "SARP CLOD visibility telemetry: frame={} visible-counter payload too small ({} bytes).",
+                    requestedFrame,
+                    result.data.size());
+                return;
+            }
+
+            uint32_t visibleClusters = 0;
+            std::memcpy(&visibleClusters, result.data.data(), sizeof(uint32_t));
+            spdlog::info(
+                "SARP CLOD visibility counter: frame={} visible_clusters={}",
+                requestedFrame,
+                visibleClusters);
+        });
+}
+
 void Renderer::Render() {
     ZoneScopedN("Renderer::Render");
 
@@ -2327,6 +2476,8 @@ void Renderer::Render() {
                 currentBackbufferResource->HasRTVSlot());
         }
     }
+
+    MaybeRequestCLodVisibilityTelemetry();
 
     runCapturedStage("RenderGraphExecute", [&]() {
         ZoneScopedN("Renderer::Render::RenderGraphExecute");

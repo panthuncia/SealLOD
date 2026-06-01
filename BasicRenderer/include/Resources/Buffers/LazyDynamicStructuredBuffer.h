@@ -356,8 +356,13 @@ private:
     }
 
     void StageOrUpload(const void* data, size_t size, size_t offset) {
-        if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::Immediate
-            && rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+        if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+            SyncUploadPolicyState();
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+            m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
+#else
+            m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
+#endif
             BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
             return;
         }

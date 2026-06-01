@@ -214,8 +214,8 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
 
     while (remaining != 0) {
         const size_t pageCount = (std::min)(remaining, pageElementCount);
-        const size_t allocationSize = pageElementCount * elementSize;
         const size_t usedSize = pageCount * elementSize;
+        const size_t allocationSize = usedSize;
         auto view = Allocate(allocationSize, elementSize);
         if (!view) {
             break;
@@ -264,8 +264,13 @@ void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
 }
 
 void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
-    if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::Immediate
-        && rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+    if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+        SyncUploadPolicyState();
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+        m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
+#else
+        m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
+#endif
         BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
         return;
     }
@@ -387,6 +392,7 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
 	m_capacity = capacity;
 	auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
 	SetBacking(std::move(newDataBuffer), capacity);
+    SyncUploadPolicyState();
 	m_uploadPolicyState.OnBufferResized(GetBufferSize());
 	m_blocksByOffset[0] = { 0, capacity, true };
 	m_freeBlocks.insert({ capacity, 0 });
@@ -399,11 +405,12 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
 }
 
 void DynamicBuffer::GrowBuffer(size_t newSize) {
+    const size_t previousCapacity = m_capacity;
     spdlog::info(
         "DynamicBuffer '{}' id={} GrowBuffer begin oldCapacity={} newCapacity={} hasBacking={}",
         m_name,
         GetGlobalResourceID(),
-        m_capacity,
+        previousCapacity,
         newSize,
         m_dataBuffer != nullptr);
     auto device = DeviceManager::GetInstance().GetDevice();
@@ -427,13 +434,13 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         GetGlobalResourceID(),
         GetBufferSize(),
         GetBackingGeneration());
+    SyncUploadPolicyState();
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
-    const size_t previousCapacity = m_capacity;
     if (previousCapacity > 0u) {
-        // DynamicBuffer now uses CoalescedRetained staging. Preserve the logical
-        // byte contents through grow by dirtying the retained CPU shadow instead
-        // of queueing a GPU copy from an old backing that may not include this
-        // frame's staged writes yet.
+        // DynamicBuffer is CPU-authoritative under CoalescedRetained. Preserve
+        // logical bytes through resize by uploading the retained mirror into the
+        // new backing; do not copy from the old GPU backing because descriptor
+        // updates are immediate on DX12 and prior frames may still reference it.
         m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
         if (m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();

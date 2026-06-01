@@ -1471,7 +1471,15 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		static float f = 0.0f;
 		static int counter = 0;
 
-		ImGui::Begin("Renderer Configuration", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        const ImGuiIO& io = ImGui::GetIO();
+        const float margin = 12.0f;
+        const float maxWindowWidth = (std::max)(360.0f, io.DisplaySize.x - margin * 2.0f);
+        const float maxWindowHeight = (std::max)(240.0f, io.DisplaySize.y - margin * 2.0f);
+        ImGui::SetNextWindowPos(ImVec2(margin, margin), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2((std::min)(520.0f, maxWindowWidth), (std::min)(720.0f, maxWindowHeight)), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 240.0f), ImVec2(maxWindowWidth, maxWindowHeight));
+
+		ImGui::Begin("Renderer Configuration", nullptr, ImGuiWindowFlags_NoCollapse);
 
         if (ImGui::Checkbox("Image-Based Lighting", &imageBasedLightingEnabled)) {
 			setImageBasedLightingEnabled(imageBasedLightingEnabled);

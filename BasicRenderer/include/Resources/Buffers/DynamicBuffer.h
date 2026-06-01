@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <map>
+#include <mutex>
 #include <set>
 #include <functional>
 #include <typeinfo>
@@ -71,6 +72,16 @@ public:
 
     bool HasPendingUploadPolicyWork() const override {
         return m_uploadPolicyState.HasPendingWork();
+    }
+
+    void RetainExternalUpload(const void* data, size_t size, size_t offset) {
+        if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::CoalescedRetained) {
+            return;
+        }
+
+        std::scoped_lock lock(m_uploadPolicyMirrorMutex);
+        SyncUploadPolicyState();
+        m_uploadPolicyState.RetainExternalWrite(data, size, offset, GetBufferSize());
     }
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
@@ -165,4 +176,5 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    std::mutex m_uploadPolicyMirrorMutex;
 };

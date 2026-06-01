@@ -341,7 +341,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
             continue;
         }
 
-        std::shared_ptr<DynamicBuffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
+        std::shared_ptr<Buffer> slab = m_snapshot.pagePool->GetSlab(source.slabIndex);
         if (!slab) {
             continue;
         }

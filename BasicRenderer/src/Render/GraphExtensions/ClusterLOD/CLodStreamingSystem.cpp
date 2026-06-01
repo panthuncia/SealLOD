@@ -26,6 +26,7 @@
 #include "Render/Runtime/OpenRenderGraphSettings.h"
 #include "RenderPasses/StreamingUploadPass.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
+#include "Resources/Buffers/DynamicBuffer.h"
 #include "Mesh/ClusterLODShaderTypes.h"
 #include "BuiltinResources.h"
 
@@ -1660,6 +1661,11 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
         auto uploadFn = [inst = m_uploadInstance.get()](
             const void* data, size_t size,
             rg::runtime::UploadTarget target, size_t offset) {
+            if (target.kind == rg::runtime::UploadTarget::Kind::PinnedShared) {
+                if (auto dynamicBuffer = std::dynamic_pointer_cast<DynamicBuffer>(target.pinned)) {
+                    dynamicBuffer->RetainExternalUpload(data, size, offset);
+                }
+            }
             inst->UploadData(data, size, target, offset);
         };
         pool->SetUploadFunction(uploadFn);

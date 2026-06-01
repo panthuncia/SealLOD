@@ -26,13 +26,6 @@ namespace {
 constexpr size_t kStaticTransformPageElements = 256;
 constexpr size_t kStaticDrawRecordPageElements = 1024;
 
-size_t ReserveBytesWithStreamingHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
-	if (requestedBytes == 0) {
-		return 0;
-	}
-	return requestedBytes + std::max(requestedBytes * 3u, minimumHeadroomBytes);
-}
-
 DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMatrix) {
 	const DirectX::XMMATRIX upperLeft3x3 = DirectX::XMMatrixSet(
 		DirectX::XMVectorGetX(modelMatrix.r[0]), DirectX::XMVectorGetY(modelMatrix.r[0]), DirectX::XMVectorGetZ(modelMatrix.r[0]), 0.0f,
@@ -635,6 +628,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 
 			drawInfo.drawInfo.indices.push_back(drawRecordIndex);
+			drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(pending.workloadKeys);
 			drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
 			for (const auto& workloadKey : pending.workloadKeys) {
 				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);

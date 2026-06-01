@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "Resources/Resource.h"
-#include "Resources/Buffers/DynamicBuffer.h"
+#include "Resources/Buffers/Buffer.h"
 #include "Resources/ResourceGroup.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "ShaderBuffers.h"
@@ -64,11 +64,11 @@ public:
 	// Number of slabs currently allocated.
 	uint32_t GetSlabCount() const;
 
-	// Get the DynamicBuffer backing slab `slabIndex` (for resource registration).
-	std::shared_ptr<DynamicBuffer> GetSlab(uint32_t slabIndex) const;
+	// Get the static Buffer backing slab `slabIndex` (for resource registration).
+	std::shared_ptr<Buffer> GetSlab(uint32_t slabIndex) const;
 
-	// Get the page-table DynamicBuffer (StructuredBuffer<PageTableEntry>).
-	std::shared_ptr<DynamicBuffer> GetPageTableBuffer() const;
+	// Get the page-table Buffer (StructuredBuffer<PageTableEntry>).
+	std::shared_ptr<Buffer> GetPageTableBuffer() const;
 
 	// Get the ResourceGroup tracking all slab buffers (for render graph declarations).
 	std::shared_ptr<ResourceGroup> GetSlabResourceGroup() const { return m_slabResourceGroup; }
@@ -130,7 +130,7 @@ private:
 	};
 
 	struct Slab {
-		std::shared_ptr<DynamicBuffer> buffer; // The GPU ByteAddressBuffer.
+		std::shared_ptr<Buffer> buffer; // The GPU ByteAddressBuffer.
 		SlabRole role = SlabRole::General;
 	};
 
@@ -147,7 +147,7 @@ private:
 	bool                        m_pageTableDirty = false;
 
 	// GPU-side StructuredBuffer<PageTableEntry>.
-	std::shared_ptr<DynamicBuffer> m_pageTableBuffer;
+	std::shared_ptr<Buffer> m_pageTableBuffer;
 
 	// ResourceGroup tracking all slab buffers for render graph auto-invalidation.
 	std::shared_ptr<ResourceGroup> m_slabResourceGroup;

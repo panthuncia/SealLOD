@@ -4,8 +4,45 @@
 #include <spdlog/spdlog.h>
 
 #include "Render/MemoryIntrospectionAPI.h"
-#include "Resources/Buffers/DynamicBuffer.h"
+#include "Resources/Buffers/Buffer.h"
 #include "Render/Runtime/UploadServiceAccess.h"
+
+namespace {
+	std::shared_ptr<Buffer> CreatePagePoolSlabBuffer(uint64_t byteSize, const std::string& name)
+	{
+		auto buffer = Buffer::CreateShared(rhi::HeapType::DeviceLocal, byteSize, false);
+		buffer->SetName(name);
+
+		BufferBase::DescriptorRequirements requirements{};
+		requirements.createSRV = true;
+		requirements.srvDesc = rhi::SrvDesc{
+			.dimension = rhi::SrvDim::Buffer,
+			.formatOverride = rhi::Format::R32_Typeless,
+			.buffer = {
+				.kind = rhi::BufferViewKind::Raw,
+				.firstElement = 0,
+				.numElements = static_cast<uint32_t>(byteSize / 4u),
+				.structureByteStride = 0,
+			},
+		};
+		buffer->SetDescriptorRequirements(requirements);
+		return buffer;
+	}
+
+	std::shared_ptr<Buffer> CreatePageTableBuffer(uint32_t pageCount, const std::string& name)
+	{
+		auto buffer = Buffer::CreateUnmaterializedStructuredBuffer(
+			pageCount,
+			static_cast<uint32_t>(sizeof(PageTableEntry)),
+			false,
+			false,
+			false,
+			rhi::HeapType::DeviceLocal);
+		buffer->SetName(name);
+		buffer->Materialize();
+		return buffer;
+	}
+}
 
 // PagePool implementation
 PagePool::PagePool(const Config& config)
@@ -19,11 +56,7 @@ PagePool::PagePool(const Config& config)
 	m_pagesPerSlab = static_cast<uint32_t>(m_config.slabSize / m_config.pageSize);
 
 	// Create the page table buffer (initially empty, grows as slabs are added).
-	m_pageTableBuffer = DynamicBuffer::CreateShared(
-		sizeof(PageTableEntry),
-		/*capacity=*/m_pagesPerSlab, // start with room for one slab
-		m_config.debugName + "::PageTable");
-	m_pageTableBuffer->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Immediate);
+	m_pageTableBuffer = CreatePageTableBuffer(m_pagesPerSlab, m_config.debugName + "::PageTable");
 	rg::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 
 	// Resource group for slab buffers (render graph auto-invalidation).
@@ -52,13 +85,9 @@ bool PagePool::AllocateNewSlab(SlabRole role) {
 	const uint32_t slabIndex = static_cast<uint32_t>(m_slabs.size());
 	Slab slab;
 	slab.role = role;
-	slab.buffer = DynamicBuffer::CreateShared(
-		/*elementSize=*/1,
-		/*capacity=*/m_config.slabSize,
-		m_config.debugName + "::" + (role == SlabRole::Pinned ? "PinnedSlab" : "Slab") + std::to_string(slabIndex),
-		/*byteAddress=*/true,
-		/*UAV=*/false);
-	slab.buffer->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Immediate);
+	slab.buffer = CreatePagePoolSlabBuffer(
+		m_config.slabSize,
+		m_config.debugName + "::" + (role == SlabRole::Pinned ? "PinnedSlab" : "Slab") + std::to_string(slabIndex));
 	rg::memory::SetResourceUsageHint(*slab.buffer, role == SlabRole::Pinned ? "Cluster LOD pinned page slabs" : "Cluster LOD page slabs");
 
 	m_slabs.push_back(std::move(slab));
@@ -123,21 +152,14 @@ void PagePool::FlushPageTableUpdates() {
 	if (!m_pageTableDirty || m_pageTableCpu.empty()) return;
 
 	// Ensure the GPU-side page table buffer is large enough.
-	// DynamicBuffer will grow as needed via AddData / UpdateView.
 	// We re-upload the entire table for simplicity.
 	const size_t tableBytes = m_pageTableCpu.size() * sizeof(PageTableEntry);
 
-	// If the buffer has no existing view, we need to allocate one.
-	// For simplicity we'll just upload the raw data. The page table buffer
-	// was created with structured element size = sizeof(PageTableEntry).
-	// We use the BUFFER_UPLOAD macro which uploads to an offset.
-	if (m_pageTableBuffer->Size() < tableBytes) {
+	if (m_pageTableBuffer->GetSize() < tableBytes) {
 		// Recreate with a larger capacity
-		m_pageTableBuffer = DynamicBuffer::CreateShared(
-			sizeof(PageTableEntry),
-			m_pageTableCpu.size(),
+		m_pageTableBuffer = CreatePageTableBuffer(
+			static_cast<uint32_t>(m_pageTableCpu.size()),
 			m_config.debugName + "::PageTable");
-		m_pageTableBuffer->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Immediate);
 		rg::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 	}
 
@@ -156,7 +178,7 @@ uint32_t PagePool::GetSlabCount() const {
 	return static_cast<uint32_t>(m_slabs.size());
 }
 
-std::shared_ptr<DynamicBuffer> PagePool::GetSlab(uint32_t slabIndex) const {
+std::shared_ptr<Buffer> PagePool::GetSlab(uint32_t slabIndex) const {
 	assert(slabIndex < m_slabs.size());
 	return m_slabs[slabIndex].buffer;
 }
@@ -168,7 +190,7 @@ uint32_t PagePool::GetSlabDescriptorIndex(const PageAllocation& alloc) const {
 	return m_slabs[si].buffer->GetSRVInfo(0).slot.index;
 }
 
-std::shared_ptr<DynamicBuffer> PagePool::GetPageTableBuffer() const {
+std::shared_ptr<Buffer> PagePool::GetPageTableBuffer() const {
 	return m_pageTableBuffer;
 }
 

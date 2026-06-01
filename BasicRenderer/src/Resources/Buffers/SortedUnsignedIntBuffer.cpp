@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <spdlog/spdlog.h>
+
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
@@ -146,12 +148,27 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
         std::back_inserter(remaining));
 
     if (remaining.size() == m_data.size()) {
+        spdlog::warn(
+            "SortedUnsignedIntBuffer::RemoveMany '{}' removed no indices requested={} size={}",
+            GetName(),
+            sortedElements.size(),
+            m_data.size());
         return;
     }
 
     const auto firstDiff = std::mismatch(m_data.begin(), m_data.end(), remaining.begin(), remaining.end());
     const auto dirtyIndex = static_cast<std::size_t>(std::distance(m_data.begin(), firstDiff.first));
     const auto oldSize = m_data.size();
+    const auto removed = oldSize - remaining.size();
+    if (removed != sortedElements.size()) {
+        spdlog::warn(
+            "SortedUnsignedIntBuffer::RemoveMany '{}' partial remove requested={} removed={} size_before={} size_after={}",
+            GetName(),
+            sortedElements.size(),
+            removed,
+            oldSize,
+            remaining.size());
+    }
     m_data = std::move(remaining);
 
     if (dirtyIndex < m_earliestModifiedIndex) {
@@ -164,14 +181,20 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
         StageOrUpload(src, sizeof(unsigned int) * count, dirtyIndex * sizeof(unsigned int));
     }
 
-    // Readers are given Size() separately, so stale values beyond the compacted
-    // active range are ignored. Avoid uploading a large zero tail during bulk
-    // streaming removals.
+    if (m_data.size() < oldSize) {
+        const std::vector<unsigned int> zeros(oldSize - m_data.size(), 0u);
+        StageOrUpload(zeros.data(), sizeof(unsigned int) * zeros.size(), m_data.size() * sizeof(unsigned int));
+    }
 }
 
 void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
-    if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::Immediate
-        && rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+    if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+        SyncUploadPolicyState();
+#if BUILD_TYPE == BUILD_TYPE_DEBUG
+        m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
+#else
+        m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
+#endif
         BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
         return;
     }
