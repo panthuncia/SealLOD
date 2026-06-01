@@ -856,6 +856,7 @@ void Renderer::RunRenderResourceSyncStage() {
         Components::RenderableObject* object;
         Components::ObjectDrawInfo* drawInfo;
         Components::MeshInstances* meshInstances;
+        const Components::InstanceTransforms* instanceTransforms;
     };
     std::vector<ObjectSyncItem> objectItems;
     {
@@ -867,7 +868,13 @@ void Renderer::RunRenderResourceSyncStage() {
                 auto drawInfos = it.field<Components::ObjectDrawInfo>(2);
                 auto meshInstances = it.field<Components::MeshInstances>(3);
                 for (auto i : it) {
-                    objectItems.push_back({ &matrices[i], &objects[i], &drawInfos[i], &meshInstances[i] });
+                    objectItems.push_back({
+                        &matrices[i],
+                        &objects[i],
+                        &drawInfos[i],
+                        &meshInstances[i],
+                        it.entity(i).try_get<Components::InstanceTransforms>()
+                    });
                 }
             }
         });
@@ -891,21 +898,29 @@ void Renderer::RunRenderResourceSyncStage() {
 
     {
         ZoneScopedN("Renderer::Update::RenderResourceSync::ScanObjectDirtyRanges");
-        for (const auto& item : objectItems) {
-            const size_t perObjectBegin = item.drawInfo->perObjectCBView->GetOffset();
-            const size_t perObjectEnd = perObjectBegin + sizeof(PerObjectCB);
-            const auto instanceTransformView = !item.drawInfo->perInstanceTransformViews.empty()
-                ? item.drawInfo->perInstanceTransformViews.front()
-                : nullptr;
-            if (instanceTransformView) {
-                const size_t instanceBegin = instanceTransformView->GetOffset();
-                const size_t instanceEnd = instanceBegin + sizeof(PerInstanceTransformCB);
-                perInstanceTransformDirtyRanges.emplace_back(instanceBegin, instanceEnd);
+        const auto appendRanges = [](std::vector<std::pair<size_t, size_t>>& ranges, const std::vector<std::shared_ptr<BufferView>>& views, size_t stride) {
+            for (const auto& view : views) {
+                if (!view) {
+                    continue;
+                }
+                const size_t begin = view->GetOffset();
+                ranges.emplace_back(begin, begin + stride);
             }
-            const size_t normalMatrixBegin = item.drawInfo->normalMatrixView->GetOffset();
-            const size_t normalMatrixEnd = normalMatrixBegin + sizeof(DirectX::XMFLOAT4X4);
-            perObjectDirtyRanges.emplace_back(perObjectBegin, perObjectEnd);
-            normalMatrixDirtyRanges.emplace_back(normalMatrixBegin, normalMatrixEnd);
+        };
+        for (const auto& item : objectItems) {
+            if (!item.drawInfo->perObjectCBViews.empty()) {
+                appendRanges(perObjectDirtyRanges, item.drawInfo->perObjectCBViews, sizeof(PerObjectCB));
+            } else if (item.drawInfo->perObjectCBView) {
+                const size_t perObjectBegin = item.drawInfo->perObjectCBView->GetOffset();
+                perObjectDirtyRanges.emplace_back(perObjectBegin, perObjectBegin + sizeof(PerObjectCB));
+            }
+            appendRanges(perInstanceTransformDirtyRanges, item.drawInfo->perInstanceTransformViews, sizeof(PerInstanceTransformCB));
+            if (!item.drawInfo->normalMatrixViews.empty()) {
+                appendRanges(normalMatrixDirtyRanges, item.drawInfo->normalMatrixViews, sizeof(DirectX::XMFLOAT4X4));
+            } else if (item.drawInfo->normalMatrixView) {
+                const size_t normalMatrixBegin = item.drawInfo->normalMatrixView->GetOffset();
+                normalMatrixDirtyRanges.emplace_back(normalMatrixBegin, normalMatrixBegin + sizeof(DirectX::XMFLOAT4X4));
+            }
         }
     }
 
@@ -923,39 +938,76 @@ void Renderer::RunRenderResourceSyncStage() {
                 auto* worldMatrix = item.worldMatrix;
                 auto* object = item.object;
                 auto* drawInfo = item.drawInfo;
-                object->perObjectCB.prevModelMatrix = object->perObjectCB.modelMatrix;
-                object->perObjectCB.modelMatrix = worldMatrix->matrix;
-                object->perObjectCB.modelInverseMatrix = XMMatrixInverse(nullptr, worldMatrix->matrix);
+                const auto computeNormalMatrix = [](const XMMATRIX& modelMatrix) {
+                    const XMMATRIX upperLeft3x3 = XMMatrixSet(
+                        XMVectorGetX(modelMatrix.r[0]), XMVectorGetY(modelMatrix.r[0]), XMVectorGetZ(modelMatrix.r[0]), 0.0f,
+                        XMVectorGetX(modelMatrix.r[1]), XMVectorGetY(modelMatrix.r[1]), XMVectorGetZ(modelMatrix.r[1]), 0.0f,
+                        XMVectorGetX(modelMatrix.r[2]), XMVectorGetY(modelMatrix.r[2]), XMVectorGetZ(modelMatrix.r[2]), 0.0f,
+                        0.0f, 0.0f, 0.0f, 1.0f);
+                    DirectX::XMFLOAT4X4 stored{};
+                    XMStoreFloat4x4(&stored, XMMatrixTranspose(XMMatrixInverse(nullptr, upperLeft3x3)));
+                    return stored;
+                };
+                const auto writeRow = [&](size_t rowIndex, PerObjectCB perObject) {
+                    const auto perObjectView = rowIndex < drawInfo->perObjectCBViews.size()
+                        ? drawInfo->perObjectCBViews[rowIndex]
+                        : drawInfo->perObjectCBView;
+                    const auto instanceTransformView = rowIndex < drawInfo->perInstanceTransformViews.size()
+                        ? drawInfo->perInstanceTransformViews[rowIndex]
+                        : nullptr;
+                    const auto normalMatrixView = rowIndex < drawInfo->normalMatrixViews.size()
+                        ? drawInfo->normalMatrixViews[rowIndex]
+                        : drawInfo->normalMatrixView;
 
-                const XMVECTOR det = XMMatrixDeterminant(worldMatrix->matrix);
-                object->perObjectCB.objectFlags = (XMVectorGetX(det) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+                    if (normalMatrixView) {
+                        perObject.normalMatrixBufferIndex = static_cast<uint32_t>(normalMatrixView->GetOffset() / sizeof(DirectX::XMFLOAT4X4));
+                    }
 
-                // Write per-object data into the scratch buffer
-                {
-                    const size_t offset = drawInfo->perObjectCBView->GetOffset();
-                    const size_t sz = sizeof(PerObjectCB);
-                    std::memcpy(perObjectHandle.data + offset, &object->perObjectCB, sz);
-                }
-                if (!drawInfo->perInstanceTransformViews.empty()) {
-                    const size_t offset = drawInfo->perInstanceTransformViews.front()->GetOffset();
-                    const size_t sz = sizeof(PerInstanceTransformCB);
-                    std::memcpy(perInstanceTransformHandle.data + offset, &object->perObjectCB, sz);
-                }
+                    if (perObjectView) {
+                        const size_t offset = perObjectView->GetOffset();
+                        std::memcpy(perObjectHandle.data + offset, &perObject, sizeof(PerObjectCB));
+                    }
+                    if (instanceTransformView) {
+                        const size_t offset = instanceTransformView->GetOffset();
+                        std::memcpy(perInstanceTransformHandle.data + offset, &perObject, sizeof(PerInstanceTransformCB));
+                    }
+                    if (normalMatrixView) {
+                        const size_t offset = normalMatrixView->GetOffset();
+                        const auto storedNormal = computeNormalMatrix(perObject.modelMatrix);
+                        std::memcpy(normalMatrixHandle.data + offset, &storedNormal, sizeof(DirectX::XMFLOAT4X4));
+                    }
+                };
 
-                const auto& modelMatrix = object->perObjectCB.modelMatrix;
-                const XMMATRIX upperLeft3x3 = XMMatrixSet(
-                    XMVectorGetX(modelMatrix.r[0]), XMVectorGetY(modelMatrix.r[0]), XMVectorGetZ(modelMatrix.r[0]), 0.0f,
-                    XMVectorGetX(modelMatrix.r[1]), XMVectorGetY(modelMatrix.r[1]), XMVectorGetZ(modelMatrix.r[1]), 0.0f,
-                    XMVectorGetX(modelMatrix.r[2]), XMVectorGetY(modelMatrix.r[2]), XMVectorGetZ(modelMatrix.r[2]), 0.0f,
-                    0.0f, 0.0f, 0.0f, 1.0f);
-                XMMATRIX normalMat = XMMatrixTranspose(XMMatrixInverse(nullptr, upperLeft3x3));
-
-                {
-                    const size_t offset = drawInfo->normalMatrixView->GetOffset();
-                    const size_t sz = sizeof(DirectX::XMFLOAT4X4);
-                    DirectX::XMFLOAT4X4 stored;
-                    XMStoreFloat4x4(&stored, normalMat);
-                    std::memcpy(normalMatrixHandle.data + offset, &stored, sz);
+                const bool hasInstanceTransforms = item.instanceTransforms && !item.instanceTransforms->transforms.empty();
+                if (hasInstanceTransforms) {
+                    const size_t rowCount = std::min({
+                        item.instanceTransforms->transforms.size(),
+                        drawInfo->perObjectCBViews.size(),
+                        drawInfo->perInstanceTransformViews.size(),
+                        drawInfo->normalMatrixViews.size()
+                    });
+                    for (size_t rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
+                        const auto& instanceTransform = item.instanceTransforms->transforms[rowIndex];
+                        auto perObject = object->perObjectCB;
+                        perObject.modelMatrix = instanceTransform.matrix;
+                        perObject.prevModelMatrix = instanceTransform.matrix;
+                        perObject.modelInverseMatrix = XMMatrixInverse(nullptr, instanceTransform.matrix);
+                        const XMVECTOR det = XMMatrixDeterminant(instanceTransform.matrix);
+                        perObject.objectFlags = (XMVectorGetX(det) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+                        writeRow(rowIndex, perObject);
+                    }
+                    if (!item.instanceTransforms->transforms.empty()) {
+                        object->perObjectCB.modelMatrix = item.instanceTransforms->transforms.front().matrix;
+                        object->perObjectCB.prevModelMatrix = item.instanceTransforms->transforms.front().matrix;
+                        object->perObjectCB.modelInverseMatrix = XMMatrixInverse(nullptr, object->perObjectCB.modelMatrix);
+                    }
+                } else {
+                    object->perObjectCB.prevModelMatrix = object->perObjectCB.modelMatrix;
+                    object->perObjectCB.modelMatrix = worldMatrix->matrix;
+                    object->perObjectCB.modelInverseMatrix = XMMatrixInverse(nullptr, worldMatrix->matrix);
+                    const XMVECTOR det = XMMatrixDeterminant(worldMatrix->matrix);
+                    object->perObjectCB.objectFlags = (XMVectorGetX(det) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+                    writeRow(0, object->perObjectCB);
                 }
             });
     }
