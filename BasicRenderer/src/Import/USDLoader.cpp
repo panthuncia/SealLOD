@@ -1483,6 +1483,9 @@ namespace USDLoader {
 		return name.starts_with("l1_") ||
 			name.starts_with("l2_") ||
 			name.starts_with("l3_") ||
+			name.contains("_l1_") ||
+			name.contains("_l2_") ||
+			name.contains("_l3_") ||
 			name.starts_with("lod_") ||
 			name.starts_with("billboard_") ||
 			name.ends_with("_lod") ||
@@ -1501,6 +1504,10 @@ namespace USDLoader {
 
 		const auto& prim = mesh.GetPrim();
 		if (IsBelowInactiveBrNiflyLOD0Branch(prim)) {
+			return true;
+		}
+		const std::optional<int> flags = GetPrimCustomInt(prim, TfToken("brnifly:flags"));
+		if (flags && (*flags & (1 << 27)) != 0) {
 			return true;
 		}
 		if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
@@ -1879,7 +1886,7 @@ namespace USDLoader {
 				workItem.skelJointOrderMapped,
 				workItem.authoredDoubleSided || workItem.inferredDoubleSided,
 				sourceIdentifierOverride,
-				/*importSettings.nifTessellationFactor*/1000);
+				importSettings.nifTessellationFactor);
 			});
 
 		for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {

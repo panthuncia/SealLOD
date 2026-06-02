@@ -1066,6 +1066,7 @@ struct ShapeData {
     int parentBlockId = -1;
     std::string name;
     std::string blockName;
+    uint32_t flags = 0;
     TransformBuf transform;
     std::vector<float> positions;
     std::vector<float> normals;
@@ -1745,6 +1746,7 @@ std::vector<ShapeData> ReadShapes(const NiflyApi& api, void* nifHandle, std::vec
         shape.blockName = api.getShapeBlockName
             ? ReadCString([&](char* buffer, int size) { return api.getShapeBlockName(shapeHandle, buffer, size); }).value_or("")
             : std::string();
+        shape.flags = api.getNodeFlags ? static_cast<uint32_t>(api.getNodeFlags(shapeHandle)) : 0u;
         if (api.getTransform) {
             api.getTransform(shapeHandle, &shape.transform);
         }
@@ -2138,6 +2140,7 @@ std::optional<std::string> ConvertShapesToUsd(
         if (!shape.blockName.empty()) {
             mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockName"), VtValue(shape.blockName));
         }
+        mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:flags"), VtValue(shape.flags));
         mesh.GetPrim().SetCustomDataByKey(TfToken("brnifly:transform"), VtValue(TransformJson(shape.transform).dump()));
 
         VtArray<GfVec3f> points;
