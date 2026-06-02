@@ -103,6 +103,10 @@ struct MaterialDescription {
 	bool invertNormalGreen = false; // For OpenGL compatibility
 	bool forceDoubleSided = false;
     bool enableGeometricDisplacement = false;
+	bool brniflyVertexAlpha = false;
+	bool brniflyZBufferWrite = true;
+	bool brniflyDecal = false;
+	bool brniflyDynamicDecal = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};
     TextureAndConstant  metallic = { nullptr, 0.0f };

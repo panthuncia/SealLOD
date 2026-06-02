@@ -602,7 +602,8 @@ static void LoadGeom(
 	const std::vector<std::string>& requiredUvSetNames,
 	const std::optional<UsdSkelSkinningQuery>& skinQ,
 	const VtTokenArray& skelJointOrderRaw,
-	const VtTokenArray& skelJointOrderMapped)
+	const VtTokenArray& skelJointOrderMapped,
+	const USDGeometryExtractor::ExtractOptions& options)
 {
 	rawData = std::make_unique<std::vector<std::byte>>();
 	skinningData.reset();
@@ -784,6 +785,25 @@ static void LoadGeom(
 		else {
 			spdlog::debug(
 				"Mesh '{}' authored primvars:displayColor but it could not be flattened at geometry sample time {}; ignoring vertex colors for preview extraction.",
+				primName,
+				geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
+		}
+	}
+
+	bool gotOpacity = false;
+	InterpolationType opacityInterp = InterpolationType::Vertex;
+	std::vector<float> rawOpacities;
+	UsdGeomPrimvar displayOpacityPrimvar = primvarsAPI.FindPrimvarWithInheritance(TfToken("displayOpacity"));
+	if (displayOpacityPrimvar) {
+		VtArray<float> usdOpacities;
+		if (displayOpacityPrimvar.ComputeFlattened(&usdOpacities, geomTimeCode)) {
+			rawOpacities.assign(usdOpacities.begin(), usdOpacities.end());
+			opacityInterp = GetInterpolationType(displayOpacityPrimvar.GetInterpolation());
+			gotOpacity = true;
+		}
+		else {
+			spdlog::debug(
+				"Mesh '{}' authored primvars:displayOpacity but it could not be flattened at geometry sample time {}; ignoring vertex opacity for preview extraction.",
 				primName,
 				geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
 		}
@@ -1036,6 +1056,31 @@ static void LoadGeom(
 		std::memcpy(dst, raw.data() + base, numComponents * sizeof(float));
 	};
 
+	auto sampleScalar = [&](const std::vector<float>& raw,
+		InterpolationType interp,
+		size_t faceIndex,
+		size_t fvIndex,
+		uint32_t vertIndex,
+		float defaultValue,
+		bool& warned,
+		const char* attributeName) -> float
+	{
+		const size_t base = tupleBase(interp, faceIndex, fvIndex, vertIndex, 1);
+		if (base >= raw.size()) {
+			if (!warned) {
+				spdlog::warn(
+					"Mesh '{}' sampled '{}' scalar data out of range at geometry sample time {}; using default value {}.",
+					primName,
+					attributeName,
+					geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue(),
+					defaultValue);
+				warned = true;
+			}
+			return defaultValue;
+		}
+		return raw[base];
+	};
+
 	auto copyTupleUInt = [&](std::byte* dst, const std::vector<uint32_t>& raw,
 		size_t numComponents, InterpolationType interp,
 		size_t faceIndex, size_t fvIndex, uint32_t vertIndex,
@@ -1065,8 +1110,10 @@ static void LoadGeom(
 	bool warnedTangentTupleRange = false;
 	bool warnedUvTupleRange = false;
 	bool warnedColorTupleRange = false;
+	bool warnedOpacityTupleRange = false;
 	bool warnedJointTupleRange = false;
 	bool warnedWeightTupleRange = false;
+	size_t alphaRejectedTriangles = 0;
 
 	size_t fvOffset = 0;
 	size_t outVertex = 0;
@@ -1111,6 +1158,24 @@ static void LoadGeom(
 
 				if (!validTriangle) {
 					continue;
+				}
+
+				if (options.vertexAlphaCutoff.has_value() && gotOpacity) {
+					bool allBelowCutoff = true;
+					for (int c = 0; c < 3; ++c) {
+						const size_t fvIndex = fvOffset + static_cast<size_t>(cornerIdxs[c]);
+						const uint32_t vertIdx = triVertIdxs[c];
+						const float opacity = sampleScalar(rawOpacities, opacityInterp, f, fvIndex, vertIdx, 1.0f, warnedOpacityTupleRange, "displayOpacity");
+						if (opacity >= options.vertexAlphaCutoff.value()) {
+							allBelowCutoff = false;
+							break;
+						}
+					}
+
+					if (allBelowCutoff) {
+						++alphaRejectedTriangles;
+						continue;
+					}
 				}
 
 				for (int c = 0; c < 3; ++c) {
@@ -1174,6 +1239,13 @@ static void LoadGeom(
 	rawData->resize(outVertex * static_cast<size_t>(vertexSize));
 	if (hasSkinning) {
 		skinningData.value()->resize(outVertex * static_cast<size_t>(skinningVertexSize));
+	}
+	if (alphaRejectedTriangles > 0) {
+		spdlog::info(
+			"Mesh '{}' rejected {} triangle(s) using primvars:displayOpacity and alpha cutoff {}.",
+			primName,
+			alphaRejectedTriangles,
+			options.vertexAlphaCutoff.value());
 	}
 }
 
@@ -1271,7 +1343,8 @@ MeshPreprocessResult ExtractSubMesh(
 	const VtTokenArray& skelJointOrderMapped,
 	bool doubleSidedVoxelSourceNormals,
 	const std::string& sourceIdentifierOverride,
-	std::uint32_t tessellationFactor)
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options)
 {
 	std::string subsetName = subset
 		? subset->GetPrim().GetName().GetString()
@@ -1280,6 +1353,21 @@ MeshPreprocessResult ExtractSubMesh(
 	auto cacheIdentity = CLodCacheLoader::BuildIdentity(mesh, stage, subsetName, geomTimeCode, sourceIdentifierOverride);
 	if (tessellationFactor > 1u) {
 		cacheIdentity.sourceIdentifier += "#usd_tessellation_factor=" + std::to_string(tessellationFactor);
+	}
+	if (options.vertexAlphaCutoff.has_value()) {
+		cacheIdentity.sourceIdentifier += "#usd_vertex_alpha_cutoff=" + std::to_string(options.vertexAlphaCutoff.value());
+	}
+	if (options.brniflyVertexAlpha) {
+		cacheIdentity.sourceIdentifier += "#brnifly_vertex_alpha=1";
+	}
+	if (!options.brniflyZBufferWrite) {
+		cacheIdentity.sourceIdentifier += "#brnifly_zbuffer_write=0";
+	}
+	if (options.brniflyDecal) {
+		cacheIdentity.sourceIdentifier += "#brnifly_decal=1";
+	}
+	if (options.brniflyDynamicDecal) {
+		cacheIdentity.sourceIdentifier += "#brnifly_dynamic_decal=1";
 	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::info("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
@@ -1314,7 +1402,7 @@ MeshPreprocessResult ExtractSubMesh(
 	const auto loadGeomBegin = std::chrono::steady_clock::now();
 	LoadGeom(rawData, skinningData, vertexSize, skinningVertexSize,
 		indices, vertexFlags, uvSets, mesh, subset, geomTimeCode, metersPerUnit, requiredUvSetNames,
-		skinQ, skelJointOrderRaw, skelJointOrderMapped);
+		skinQ, skelJointOrderRaw, skelJointOrderMapped, options);
 	TessellateExtractedTriangles(
 		rawData,
 		skinningData,

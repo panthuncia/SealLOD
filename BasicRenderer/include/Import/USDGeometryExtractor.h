@@ -27,6 +27,14 @@ struct BenchmarkStats {
 	std::uint64_t clodReloadMs = 0;
 };
 
+struct ExtractOptions {
+	std::optional<float> vertexAlphaCutoff;
+	bool brniflyVertexAlpha = false;
+	bool brniflyZBufferWrite = true;
+	bool brniflyDecal = false;
+	bool brniflyDynamicDecal = false;
+};
+
 void ResetBenchmarkStats();
 BenchmarkStats GetBenchmarkStats();
 
@@ -44,7 +52,8 @@ MeshPreprocessResult ExtractSubMesh(
 	const pxr::VtTokenArray& skelJointOrderMapped,
 	bool doubleSidedVoxelSourceNormals = false,
 	const std::string& sourceIdentifierOverride = {},
-	std::uint32_t tessellationFactor = 1);
+	std::uint32_t tessellationFactor = 1,
+	const ExtractOptions& options = {});
 
 // Build a UsdSkelSkinningQuery for a mesh if it has skinning data.
 std::optional<pxr::UsdSkelSkinningQuery> GetSkinningQuery(

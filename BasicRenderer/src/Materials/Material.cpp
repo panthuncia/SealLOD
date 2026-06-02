@@ -50,7 +50,11 @@ Material::Material(const std::string& name,
     TechniqueDescriptor technique,
     OpenPBRMaterialParameters openPBRMaterial,
     OpenPBRTextureBindings openPBRTextures,
-    float alphaCutoff)
+    float alphaCutoff,
+    bool brniflyVertexAlpha,
+    bool brniflyZBufferWrite,
+    bool brniflyDecal,
+    bool brniflyDynamicDecal)
     : m_name(name),
     m_psoFlags(psoFlags),
     m_baseColorTexture(baseColorTexture),
@@ -75,7 +79,11 @@ Material::Material(const std::string& name,
     m_emissiveFactor(emissiveFactor),
 	m_technique(technique),
     m_openPBRMaterial(openPBRMaterial),
-    m_openPBRTextures(openPBRTextures)
+    m_openPBRTextures(openPBRTextures),
+    m_brniflyVertexAlpha(brniflyVertexAlpha),
+    m_brniflyZBufferWrite(brniflyZBufferWrite),
+    m_brniflyDecal(brniflyDecal),
+    m_brniflyDynamicDecal(brniflyDynamicDecal)
 {
     m_materialData.materialFlags = materialFlags;
     m_materialData.ambientStrength = 0.5f;
@@ -173,6 +181,10 @@ MaterialDescription Material::ToCacheDescription() const
     desc.opacity.uvSetIndex = m_opacityUvSetIndex;
     desc.openPBR = m_openPBRMaterial;
     desc.openPBRTextures = m_openPBRTextures;
+    desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
+    desc.brniflyZBufferWrite = m_brniflyZBufferWrite;
+    desc.brniflyDecal = m_brniflyDecal;
+    desc.brniflyDynamicDecal = m_brniflyDynamicDecal;
     desc.materialModel = MaterialModel::OpenPBR;
     return desc;
 }

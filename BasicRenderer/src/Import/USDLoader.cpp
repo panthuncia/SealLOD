@@ -824,7 +824,7 @@ namespace USDLoader {
 		const json* alpha = nullptr;
 		if (metadata.contains("shader") && metadata["shader"].is_object()) {
 			shader = &metadata["shader"];
-		} else if (metadata.contains("shaderFlags2") || metadata.contains("lightingShader")) {
+		} else if (metadata.contains("shaderFlags1") || metadata.contains("shaderFlags2") || metadata.contains("lightingShader")) {
 			shader = &metadata;
 		}
 		if (metadata.contains("alpha") && metadata["alpha"].is_object()) {
@@ -834,7 +834,14 @@ namespace USDLoader {
 		}
 
 		if (shader) {
+			const uint32_t shaderFlags1 = shader->value("shaderFlags1", 0u);
 			const uint32_t shaderFlags2 = shader->value("shaderFlags2", 0u);
+			result.brniflyVertexAlpha = result.brniflyVertexAlpha || ((shaderFlags1 & (1u << 3)) != 0u);
+			result.brniflyDecal = result.brniflyDecal || ((shaderFlags1 & (1u << 26)) != 0u);
+			result.brniflyDynamicDecal = result.brniflyDynamicDecal || ((shaderFlags1 & (1u << 27)) != 0u);
+			if (shader->contains("shaderFlags2")) {
+				result.brniflyZBufferWrite = (shaderFlags2 & 1u) != 0u;
+			}
 			if ((shaderFlags2 & (1u << 4)) != 0u) {
 				result.forceDoubleSided = true;
 			}
@@ -1361,7 +1368,11 @@ namespace USDLoader {
             std::to_string(resolvedDesc.forceDoubleSided ? 1 : 0) + "|" +
 			std::to_string(static_cast<int>(resolvedDesc.blendState)) + "|" +
 			std::to_string(resolvedDesc.alphaCutoff) + "|" +
-			std::to_string(resolvedDesc.opacity.factor.Get());
+			std::to_string(resolvedDesc.opacity.factor.Get()) + "|" +
+			std::to_string(resolvedDesc.brniflyVertexAlpha ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.brniflyZBufferWrite ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.brniflyDecal ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.brniflyDynamicDecal ? 1 : 0);
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {
@@ -1504,10 +1515,6 @@ namespace USDLoader {
 
 		const auto& prim = mesh.GetPrim();
 		if (IsBelowInactiveBrNiflyLOD0Branch(prim)) {
-			return true;
-		}
-		const std::optional<int> flags = GetPrimCustomInt(prim, TfToken("brnifly:flags"));
-		if (flags && (*flags & (1 << 27)) != 0) {
 			return true;
 		}
 		if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
@@ -1733,6 +1740,42 @@ namespace USDLoader {
         return runtimeMaterial;
     }
 
+	USDGeometryExtractor::ExtractOptions BuildGeometryExtractOptions(
+		const UsdGeomMesh& mesh,
+		const UsdShadeMaterial& material)
+	{
+		MaterialDescription desc{};
+		if (material) {
+			const std::string materialPath = material.GetPrim().GetPath().GetString();
+			const auto templateIt = loadingCache.materialTemplateCache.find(materialPath);
+			if (templateIt != loadingCache.materialTemplateCache.end()) {
+				desc = templateIt->second.desc;
+			}
+			ApplyBrniflyMaterialMetadata(desc, material.GetPrim());
+		}
+		if (mesh) {
+			ApplyBrniflyMaterialMetadata(desc, mesh.GetPrim());
+		}
+
+		USDGeometryExtractor::ExtractOptions options{};
+		options.brniflyVertexAlpha = desc.brniflyVertexAlpha;
+		options.brniflyZBufferWrite = desc.brniflyZBufferWrite;
+		options.brniflyDecal = desc.brniflyDecal;
+		options.brniflyDynamicDecal = desc.brniflyDynamicDecal;
+		const bool temporaryBlockedOverlay = desc.brniflyDecal || desc.brniflyDynamicDecal;
+		if (desc.brniflyVertexAlpha && desc.blendState == BlendState::BLEND_STATE_MASK && temporaryBlockedOverlay) {
+			options.vertexAlphaCutoff = std::clamp(desc.alphaCutoff, 0.0f, 1.0f);
+		}
+		return options;
+	}
+
+	bool ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(const USDGeometryExtractor::ExtractOptions& options)
+	{
+		return options.vertexAlphaCutoff.has_value() &&
+			options.brniflyVertexAlpha &&
+			(options.brniflyDecal || options.brniflyDynamicDecal);
+	}
+
 	void PreprocessAllMeshes(
 		const UsdStageRefPtr& stage,
 		double metersPerUnit,
@@ -1750,6 +1793,7 @@ namespace USDLoader {
 			std::optional<UsdSkelSkinningQuery> skinQ;
 			VtTokenArray skelJointOrderRaw;
 			VtTokenArray skelJointOrderMapped;
+			USDGeometryExtractor::ExtractOptions extractOptions;
 			bool authoredDoubleSided = false;
 			bool inferredDoubleSided = false;
 		};
@@ -1814,6 +1858,9 @@ namespace USDLoader {
 				auto subsets = bindAPI.GetMaterialBindSubsets();
 
 				const auto getRequiredUvSetNames = [](const UsdShadeMaterial& material) {
+					if (!material) {
+						return std::vector<std::string>{};
+					}
 					const auto templateIt = loadingCache.materialTemplateCache.find(material.GetPrim().GetPath().GetString());
 					return templateIt != loadingCache.materialTemplateCache.end()
 						? templateIt->second.referencedUvSetNames
@@ -1823,6 +1870,18 @@ namespace USDLoader {
 				if (subsets.empty()) {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
 					ProcessMaterial(mat, stage, isUSDZ, directory);
+					const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
+					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
+						spdlog::info(
+							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
+							meshPath,
+							mat ? mat.GetPrim().GetPath().GetString() : std::string("<unbound>"),
+							extractOptions.brniflyZBufferWrite,
+							extractOptions.brniflyDecal,
+							extractOptions.brniflyDynamicDecal,
+							extractOptions.vertexAlphaCutoff.value());
+						return;
+					}
 					const bool inferredDoubleSided = ShouldForceDoubleSidedByName(mat, std::nullopt, importSettings);
 					workItems.push_back(MeshPreprocessWorkItem{
 						.meshPath = meshPath,
@@ -1833,6 +1892,7 @@ namespace USDLoader {
 						.skinQ = skinQ,
 						.skelJointOrderRaw = skelJointOrderRaw,
 						.skelJointOrderMapped = skelJointOrderMapped,
+						.extractOptions = extractOptions,
 						.authoredDoubleSided = authoredDoubleSided,
 						.inferredDoubleSided = inferredDoubleSided
 						});
@@ -1841,6 +1901,19 @@ namespace USDLoader {
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, isUSDZ, directory);
+						const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
+						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
+							spdlog::info(
+								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
+								meshPath,
+								subset.GetPrim().GetName().GetString(),
+								mat ? mat.GetPrim().GetPath().GetString() : std::string("<unbound>"),
+								extractOptions.brniflyZBufferWrite,
+								extractOptions.brniflyDecal,
+								extractOptions.brniflyDynamicDecal,
+								extractOptions.vertexAlphaCutoff.value());
+							continue;
+						}
 						const bool inferredDoubleSided = ShouldForceDoubleSidedByName(mat, subset, importSettings);
 						workItems.push_back(MeshPreprocessWorkItem{
 							.meshPath = meshPath,
@@ -1851,6 +1924,7 @@ namespace USDLoader {
 							.skinQ = skinQ,
 							.skelJointOrderRaw = skelJointOrderRaw,
 							.skelJointOrderMapped = skelJointOrderMapped,
+							.extractOptions = extractOptions,
 							.authoredDoubleSided = authoredDoubleSided,
 							.inferredDoubleSided = inferredDoubleSided
 							});
@@ -1886,7 +1960,8 @@ namespace USDLoader {
 				workItem.skelJointOrderMapped,
 				workItem.authoredDoubleSided || workItem.inferredDoubleSided,
 				sourceIdentifierOverride,
-				importSettings.nifTessellationFactor);
+				importSettings.nifTessellationFactor,
+				workItem.extractOptions);
 			});
 
 		for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {

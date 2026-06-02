@@ -238,7 +238,11 @@ public:
             technique,
             canonicalOpenPBR,
             desc.openPBRTextures,
-            desc.alphaCutoff
+            desc.alphaCutoff,
+            desc.brniflyVertexAlpha,
+            desc.brniflyZBufferWrite,
+            desc.brniflyDecal,
+            desc.brniflyDynamicDecal
         );
     }
     ~Material();
@@ -255,6 +259,10 @@ public:
     TechniqueDescriptor const& Technique() const { return m_technique; }
     OpenPBRMaterialParameters const& GetOpenPBRMaterial() const { return m_openPBRMaterial; }
     OpenPBRTextureBindings const& GetOpenPBRTextures() const { return m_openPBRTextures; }
+    bool BrniflyVertexAlpha() const { return m_brniflyVertexAlpha; }
+    bool BrniflyZBufferWrite() const { return m_brniflyZBufferWrite; }
+    bool BrniflyDecal() const { return m_brniflyDecal; }
+    bool BrniflyDynamicDecal() const { return m_brniflyDynamicDecal; }
     MaterialDescription ToCacheDescription() const;
     static void DestroyDefaultMaterial() {
         defaultMaterial.reset();
@@ -300,6 +308,10 @@ private:
     TechniqueDescriptor m_technique;
     OpenPBRMaterialParameters m_openPBRMaterial = {};
     OpenPBRTextureBindings m_openPBRTextures = {};
+    bool m_brniflyVertexAlpha = false;
+    bool m_brniflyZBufferWrite = true;
+    bool m_brniflyDecal = false;
+    bool m_brniflyDynamicDecal = false;
 
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);
@@ -337,10 +349,14 @@ private:
 		float geometricDisplacementMin,
 		float geometricDisplacementMax,
 		bool geometricDisplacementEnabled,
-		TechniqueDescriptor technique,
+        TechniqueDescriptor technique,
         OpenPBRMaterialParameters openPBRMaterial,
         OpenPBRTextureBindings openPBRTextures,
-        float alphaCutoff);
+        float alphaCutoff,
+        bool brniflyVertexAlpha,
+        bool brniflyZBufferWrite,
+        bool brniflyDecal,
+        bool brniflyDynamicDecal);
 
     static std::shared_ptr<Material> CreateShared(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags,
@@ -378,7 +394,11 @@ private:
         TechniqueDescriptor technique,
         OpenPBRMaterialParameters openPBRMaterial,
         OpenPBRTextureBindings openPBRTextures,
-        float alphaCutoff) {
+        float alphaCutoff,
+        bool brniflyVertexAlpha,
+        bool brniflyZBufferWrite,
+        bool brniflyDecal,
+        bool brniflyDynamicDecal) {
         return std::shared_ptr<Material>(new Material(name, materialFlags, psoFlags,
             baseColorTexture, normalTexture, aoMap, heightMap,
             metallicTexture, roughnessTexture, emissiveTexture, opacityTexture,
@@ -388,10 +408,14 @@ private:
             baseColorUvSetIndex, normalUvSetIndex, aoUvSetIndex, heightUvSetIndex,
 			metallicUvSetIndex, roughnessUvSetIndex, emissiveUvSetIndex, opacityUvSetIndex,
 			heightMapScale, geometricDisplacementMin, geometricDisplacementMax, geometricDisplacementEnabled,
-			technique,
+            technique,
             openPBRMaterial,
             openPBRTextures,
-            alphaCutoff));
+            alphaCutoff,
+            brniflyVertexAlpha,
+            brniflyZBufferWrite,
+            brniflyDecal,
+            brniflyDynamicDecal));
     }
 
     inline static std::shared_ptr<Material> defaultMaterial;

@@ -185,7 +185,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 4u;
+constexpr std::uint32_t kPayloadCacheVersion = 6u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -551,6 +551,10 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.invertNormalGreen);
     writer.Pod(desc.forceDoubleSided);
     writer.Pod(desc.enableGeometricDisplacement);
+    writer.Pod(desc.brniflyVertexAlpha);
+    writer.Pod(desc.brniflyZBufferWrite);
+    writer.Pod(desc.brniflyDecal);
+    writer.Pod(desc.brniflyDynamicDecal);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor);
     WriteTextureBinding(writer, desc.metallic);
@@ -585,6 +589,10 @@ bool ReadMaterialDescription(BinaryReader& reader, MaterialDescription& desc)
         !reader.Pod(desc.invertNormalGreen) ||
         !reader.Pod(desc.forceDoubleSided) ||
         !reader.Pod(desc.enableGeometricDisplacement) ||
+        !reader.Pod(desc.brniflyVertexAlpha) ||
+        !reader.Pod(desc.brniflyZBufferWrite) ||
+        !reader.Pod(desc.brniflyDecal) ||
+        !reader.Pod(desc.brniflyDynamicDecal) ||
         !reader.Pod(blend)) {
         return false;
     }
@@ -666,6 +674,13 @@ bool WritePayloadCache(
     const std::string& contentHash,
     const USDLoader::ImportedAssetPayload& payload)
 {
+    if (payload.meshes.empty() || payload.parts.empty()) {
+        spdlog::warn(
+            "nif_asset_payload_cache: refusing to cache empty renderable payload for '{}'",
+            normalizedCacheKey);
+        return false;
+    }
+
     const fs::path payloadPath = PayloadCachePathForAssetCache(cachePath);
     std::error_code ec;
     fs::create_directories(payloadPath.parent_path(), ec);
