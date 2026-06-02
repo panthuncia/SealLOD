@@ -242,7 +242,8 @@ public:
             desc.brniflyVertexAlpha,
             desc.brniflyZBufferWrite,
             desc.brniflyDecal,
-            desc.brniflyDynamicDecal
+            desc.brniflyDynamicDecal,
+            desc.brniflyModelSpaceNormals
         );
         material->SetLogicalTextureSourcePaths(desc);
         return material;
@@ -265,6 +266,7 @@ public:
     bool BrniflyZBufferWrite() const { return m_brniflyZBufferWrite; }
     bool BrniflyDecal() const { return m_brniflyDecal; }
     bool BrniflyDynamicDecal() const { return m_brniflyDynamicDecal; }
+    bool BrniflyModelSpaceNormals() const { return m_brniflyModelSpaceNormals; }
     MaterialDescription ToCacheDescription() const;
     void SetLogicalTextureSourcePaths(const MaterialDescription& desc);
     static void DestroyDefaultMaterial() {
@@ -323,6 +325,7 @@ private:
     bool m_brniflyZBufferWrite = true;
     bool m_brniflyDecal = false;
     bool m_brniflyDynamicDecal = false;
+    bool m_brniflyModelSpaceNormals = false;
 
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);
@@ -367,7 +370,8 @@ private:
         bool brniflyVertexAlpha,
         bool brniflyZBufferWrite,
         bool brniflyDecal,
-        bool brniflyDynamicDecal);
+        bool brniflyDynamicDecal,
+        bool brniflyModelSpaceNormals);
 
     static std::shared_ptr<Material> CreateShared(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags,
@@ -409,7 +413,8 @@ private:
         bool brniflyVertexAlpha,
         bool brniflyZBufferWrite,
         bool brniflyDecal,
-        bool brniflyDynamicDecal) {
+        bool brniflyDynamicDecal,
+        bool brniflyModelSpaceNormals) {
         return std::shared_ptr<Material>(new Material(name, materialFlags, psoFlags,
             baseColorTexture, normalTexture, aoMap, heightMap,
             metallicTexture, roughnessTexture, emissiveTexture, opacityTexture,
@@ -426,7 +431,8 @@ private:
             brniflyVertexAlpha,
             brniflyZBufferWrite,
             brniflyDecal,
-            brniflyDynamicDecal));
+            brniflyDynamicDecal,
+            brniflyModelSpaceNormals));
     }
 
     inline static std::shared_ptr<Material> defaultMaterial;

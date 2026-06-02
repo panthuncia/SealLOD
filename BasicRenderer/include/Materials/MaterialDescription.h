@@ -108,6 +108,7 @@ struct MaterialDescription {
 	bool brniflyZBufferWrite = true;
 	bool brniflyDecal = false;
 	bool brniflyDynamicDecal = false;
+	bool brniflyModelSpaceNormals = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};
     TextureAndConstant  metallic = { nullptr, 0.0f };

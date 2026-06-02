@@ -630,6 +630,8 @@ namespace USDLoader {
 		return value;
 	}
 
+	void DisableModelSpaceNormalMap(MaterialDescription& result);
+
 	void ApplyBrniflyTextureSlot(
 		MaterialDescription& result,
 		std::size_t slot,
@@ -650,9 +652,13 @@ namespace USDLoader {
 			break;
 		case 1:
 			result.normal.sourcePath = std::move(path);
-			result.normal.channels = { 0, 1, 2 };
-			result.negateNormals = false;
-			result.invertNormalGreen = false;
+			if (result.brniflyModelSpaceNormals) {
+				DisableModelSpaceNormalMap(result);
+			} else {
+				result.normal.channels = { 0, 1, 2 };
+				result.negateNormals = false;
+				result.invertNormalGreen = false;
+			}
 			break;
 		case 3:
 			result.emissive.sourcePath = std::move(path);
@@ -891,6 +897,15 @@ namespace USDLoader {
 		result.geometricDisplacementMax = std::max(result.geometricDisplacementMax, displacementScale);
 	}
 
+	void DisableModelSpaceNormalMap(MaterialDescription& result)
+	{
+		result.brniflyModelSpaceNormals = true;
+		result.normal.texture.reset();
+		result.normal.channels.clear();
+		result.negateNormals = false;
+		result.invertNormalGreen = false;
+	}
+
 	bool TryGetCustomString(const UsdPrim& prim, const TfToken& key, std::string& out)
 	{
 		const VtValue value = prim.GetCustomDataByKey(key);
@@ -920,6 +935,9 @@ namespace USDLoader {
 			const uint32_t shaderFlags1 = shader->value("shaderFlags1", 0u);
 			const uint32_t shaderFlags2 = shader->value("shaderFlags2", 0u);
 			result.brniflyVertexAlpha = result.brniflyVertexAlpha || ((shaderFlags1 & (1u << 3)) != 0u);
+			if ((shaderFlags1 & (1u << 12)) != 0u) {
+				DisableModelSpaceNormalMap(result);
+			}
 			result.brniflyDecal = result.brniflyDecal || ((shaderFlags1 & (1u << 26)) != 0u);
 			result.brniflyDynamicDecal = result.brniflyDynamicDecal || ((shaderFlags1 & (1u << 27)) != 0u);
 			if (shader->contains("shaderFlags2")) {
@@ -1476,7 +1494,8 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.brniflyVertexAlpha ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.brniflyZBufferWrite ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.brniflyDecal ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.brniflyDynamicDecal ? 1 : 0);
+			std::to_string(resolvedDesc.brniflyDynamicDecal ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0);
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {

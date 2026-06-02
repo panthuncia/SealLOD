@@ -185,7 +185,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 10u;
+constexpr std::uint32_t kPayloadCacheVersion = 11u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -557,6 +557,7 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.brniflyZBufferWrite);
     writer.Pod(desc.brniflyDecal);
     writer.Pod(desc.brniflyDynamicDecal);
+    writer.Pod(desc.brniflyModelSpaceNormals);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor);
     WriteTextureBinding(writer, desc.metallic);
@@ -595,6 +596,7 @@ bool ReadMaterialDescription(BinaryReader& reader, MaterialDescription& desc)
         !reader.Pod(desc.brniflyZBufferWrite) ||
         !reader.Pod(desc.brniflyDecal) ||
         !reader.Pod(desc.brniflyDynamicDecal) ||
+        !reader.Pod(desc.brniflyModelSpaceNormals) ||
         !reader.Pod(blend)) {
         return false;
     }
