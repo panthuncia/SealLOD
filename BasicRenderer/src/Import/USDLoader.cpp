@@ -1879,7 +1879,7 @@ namespace USDLoader {
 				workItem.skelJointOrderMapped,
 				workItem.authoredDoubleSided || workItem.inferredDoubleSided,
 				sourceIdentifierOverride,
-				importSettings.nifTessellationFactor);
+				/*importSettings.nifTessellationFactor*/1000);
 			});
 
 		for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {

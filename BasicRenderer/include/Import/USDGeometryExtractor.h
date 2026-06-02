@@ -56,12 +56,14 @@ struct StageExtractionResult {
 	size_t meshesProcessed = 0;
 	size_t submeshesProcessed = 0;
 	size_t cachesBuilt = 0;
+	std::vector<MeshPreprocessResult> submeshes;
 };
 
 // Open a USD stage and extract geometry + build CLod caches for every mesh.
 StageExtractionResult ExtractAll(const std::string& filePath);
 StageExtractionResult ExtractAllFromStage(
 	const pxr::UsdStageRefPtr& stage,
-	const std::string& sourceIdentifier = {});
+	const std::string& sourceIdentifier = {},
+	std::uint32_t tessellationFactor = 1);
 
 } // namespace USDGeometryExtractor

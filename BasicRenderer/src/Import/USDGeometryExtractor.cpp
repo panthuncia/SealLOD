@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <mutex>
 
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/tokens.h>
@@ -1255,6 +1256,9 @@ MeshPreprocessResult ExtractSubMesh(
 		: std::string{};
 
 	auto cacheIdentity = CLodCacheLoader::BuildIdentity(mesh, stage, subsetName, geomTimeCode, sourceIdentifierOverride);
+	if (tessellationFactor > 1u) {
+		cacheIdentity.sourceIdentifier += "#usd_tessellation_factor=" + std::to_string(tessellationFactor);
+	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::info("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
 		cacheIdentity.primPath, subsetName, cacheIdentity.sourceIdentifier);
@@ -1384,7 +1388,8 @@ MeshPreprocessResult ExtractSubMesh(
 
 StageExtractionResult ExtractAllFromStage(
 	const UsdStageRefPtr& stage,
-	const std::string& sourceIdentifier) {
+	const std::string& sourceIdentifier,
+	std::uint32_t tessellationFactor) {
 	StageExtractionResult result;
 
 	if (!stage) {
@@ -1465,21 +1470,26 @@ StageExtractionResult ExtractAllFromStage(
 	result.meshesProcessed = meshWorkItems.size();
 
 	const std::vector<std::string> requiredUvSetNames = { "st" };
+	std::mutex resultMutex;
 
 	TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessMeshes", meshWorkItems.size(), [&](size_t meshIndex) {
 		const MeshWorkItem& workItem = meshWorkItems[meshIndex];
 		spdlog::info("  Found mesh #{}: '{}'", meshIndex + 1, workItem.primPath);
 
 		if (workItem.subsets.empty()) {
-			ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
+			MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
 				requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-				workItem.doubleSided, sourceIdentifier);
+				workItem.doubleSided, sourceIdentifier, tessellationFactor);
+			std::lock_guard lock(resultMutex);
+			result.submeshes.push_back(std::move(submesh));
 		}
 		else {
 			TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessSubsets", workItem.subsets.size(), [&](size_t subsetIndex) {
-				ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
+				MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
 					requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-					workItem.doubleSided, sourceIdentifier);
+					workItem.doubleSided, sourceIdentifier, tessellationFactor);
+				std::lock_guard lock(resultMutex);
+				result.submeshes.push_back(std::move(submesh));
 				});
 		}
 		});

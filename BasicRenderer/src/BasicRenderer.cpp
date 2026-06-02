@@ -367,7 +367,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto needles = LoadModel("models/Trees/PineTree.usd");
 
-	auto farmhouse = LoadModel("models/farmhouse01.nif");
+	auto farmhouse = LoadModel("models/iceberglarge.nif");
 
     renderer.SetCurrentScene(baseScene);
 
