@@ -30,6 +30,8 @@ set(CLOD_SHARED_SOURCES
     "${BR_SRC}/Mesh/ClusterLOD.cpp"
     "${BR_SRC}/Mesh/ClusterLODUtilities.cpp"
     "${BR_SRC}/Mesh/VoxelGroupBuilder.cpp"
+    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.cpp"
+    "${BR_SRC}/Render/GraphExtensions/ClusterLOD/ReyesTessellationGeneratedReferenceSource.cpp"
 
     # Utilities
     "${BR_SRC}/Utilities/CachePathUtilities.cpp"
@@ -59,6 +61,7 @@ set_target_properties(CLodCacheTool PROPERTIES
 target_include_directories(CLodCacheTool PRIVATE
     "${BR_INCLUDE}"
     "${BR_SHADERS}"          # ClusterLODUtilities.cpp includes "../shaders/Common/defines.h"
+    "${BR_ROOT}/generated"
 )
 
 # The shaders include is for the relative-path include in ClusterLODUtilities.
@@ -66,6 +69,30 @@ target_include_directories(CLodCacheTool PRIVATE
 # to the .cpp location (BasicRenderer/src/Mesh/).  We add the parent of "shaders"
 # so that  ../shaders/Common/defines.h  resolves correctly.
 target_include_directories(CLodCacheTool PRIVATE "${BR_ROOT}")
+
+if(TARGET BasicRHI::BasicRHI)
+    target_include_directories(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_compile_definitions(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:BasicRHI::BasicRHI,INTERFACE_COMPILE_DEFINITIONS>
+    )
+else()
+    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/BasicRHI")
+endif()
+
+if(TARGET OpenRenderGraph::OpenRenderGraph)
+    target_include_directories(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_compile_definitions(CLodCacheTool PRIVATE
+        $<TARGET_PROPERTY:OpenRenderGraph::OpenRenderGraph,INTERFACE_COMPILE_DEFINITIONS>
+    )
+else()
+    get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    target_include_directories(CLodCacheTool PRIVATE "${REPO_ROOT}/OpenRenderGraph/include")
+endif()
 
 # Find packages (same vcpkg packages BasicRenderer uses) 
 find_package(spdlog       REQUIRED CONFIG)

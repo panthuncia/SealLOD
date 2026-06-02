@@ -1187,6 +1187,7 @@ endif()
 target_link_libraries(ShaderPreprocessTests
 PRIVATE
     unofficial::tree-sitter::tree-sitter
+    BasicRHI::BasicRHI
     "${BASICRENDERER_SOURCE_ROOT}/hlsl_parser.lib"
 )
 
