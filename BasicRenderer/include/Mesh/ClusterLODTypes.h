@@ -188,6 +188,7 @@ enum class ClusterLODVoxelPruningMode : uint8_t
 struct ClusterLODBuilderSettings
 {
 	bool disableSloppyFallback = false;
+	float sloppyFallbackErrorFactor = 2.0f;
 	float lodErrorMergePrevious = 1.5f;
 	float lodErrorMergeAdditive = 0.0f;
 	uint32_t partitionSizeFloor = 8u;
@@ -300,6 +301,8 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readFloat("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", settings.voxelFallbackAcceptanceBias);
 	readFloat("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD", settings.voxelFallbackOpacityThreshold);
 	readBool("BASICRENDERER_CLOD_VOXEL_CARRY_ZERO_COVERAGE", settings.voxelFallbackCarryZeroCoverage);
+	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
+	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);
 
 	const std::string pruningModeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_PRUNING");
 	if (!pruningModeString.empty())

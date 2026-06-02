@@ -1666,13 +1666,13 @@ bool CLodRefinedChildSuppressesParent(
     const float childBoundaryEOD = ProjectedGeometricError(
         childWorldCenter,
         childWorldRadius,
-        childGroup.maxParentError,
+        childGroup.bounds.error,
         lodUniformScale,
         lodCam.positionWorldSpace.xyz,
         lodCam.zNear,
         lodCameraIsOrtho);
 
-    if (childBoundaryEOD < lodCam.errorOverDistanceThreshold)
+    if (childBoundaryEOD <= lodCam.errorOverDistanceThreshold)
     {
         return false;
     }

@@ -160,8 +160,10 @@ namespace {
 		std::call_once(logOnce, [buildHash]() {
 			const ClusterLODBuilderSettings effectiveSettings = ApplyClusterLODBuilderEnvironmentOverrides({});
 			spdlog::info(
-				"CLod cache build config: hash=0x{:016X} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} voxel_pruning='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}' env_pruning='{}'",
+				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} voxel_pruning='{}' env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}' env_pruning='{}'",
 				buildHash,
+				!effectiveSettings.disableSloppyFallback,
+				effectiveSettings.sloppyFallbackErrorFactor,
 				effectiveSettings.enableVoxelFallback,
 				ToVoxelFallbackModeString(effectiveSettings.voxelFallbackMode),
 				effectiveSettings.voxelGridBaseResolution,
@@ -169,6 +171,8 @@ namespace {
 				effectiveSettings.voxelFallbackScalingFactor,
 				effectiveSettings.voxelFallbackOpacityThreshold,
 				ToVoxelPruningModeString(effectiveSettings.voxelFallbackPruningMode),
+				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK"),
+				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_MODE"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_GRID"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_RAYS"),
