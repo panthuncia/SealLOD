@@ -31,13 +31,6 @@ struct LoadTimingStats {
 	std::string importFailureReason;
 };
 
-struct CachedAssetLoadResult {
-	std::shared_ptr<Scene> scene;
-	std::filesystem::path cachePath;
-	std::string sourceIdentifier;
-	std::string contentHash;
-};
-
 struct PreprocessResult {
 	bool success = false;
 	bool skipped = false;
@@ -56,7 +49,6 @@ struct PreprocessResult {
 	std::uint64_t clodReloadMs = 0;
 };
 
-std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);

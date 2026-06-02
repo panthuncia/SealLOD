@@ -231,6 +231,40 @@ namespace USDLoader {
 		return UsdTimeCode::Default();
 	}
 
+	struct StageImportContext {
+		double metersPerUnit = 1.0;
+		GfRotation upRot;
+		std::string directory;
+		bool isUSDZ = false;
+	};
+
+	static GfRotation GetStageUpAxisCorrection(const UsdStageRefPtr& stage) {
+		TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+		if (upAxis == UsdGeomTokens->z) {
+			return GfRotation(GfVec3d(1, 0, 0), -90.0);
+		}
+		if (upAxis == UsdGeomTokens->y) {
+			return GfRotation(GfVec3d(0, 1, 0), 0);
+		}
+		if (upAxis == UsdGeomTokens->x) {
+			return GfRotation(GfVec3d(0, 1, 0), -90.0);
+		}
+
+		spdlog::warn("Unknown Up Axis: {}", upAxis.GetString());
+		return {};
+	}
+
+	static StageImportContext MakeStageImportContext(
+		const UsdStageRefPtr& stage,
+		const InMemoryStageOptions& options) {
+		StageImportContext context;
+		context.metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+		context.upRot = GetStageUpAxisCorrection(stage);
+		context.directory = options.sourceDirectory;
+		context.isUSDZ = options.isUsdPackage;
+		return context;
+	}
+
 	struct PointInstancerPrototypeRenderable {
 		std::vector<std::shared_ptr<Mesh>> meshes;
 		GfMatrix4d localTransform = GfMatrix4d(1.0);
@@ -2877,35 +2911,15 @@ namespace USDLoader {
 			spdlog::info("Loaded layer: {}", layer->GetIdentifier());
 		}
 
-		auto metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
-		TfToken upAxis = UsdGeomGetStageUpAxis(stage); // TODO
-		GfRotation upRot;  // identity by default
-		if (upAxis == UsdGeomTokens->z) {
-			// Rotate frame: Z-up -> Y-up = rotate -90 about X
-			upRot = GfRotation(GfVec3d(1, 0, 0), -90.0);
-		}
-		else if (upAxis == UsdGeomTokens->y) {
-			// Y-up is default, no rotation needed
-			upRot = GfRotation(GfVec3d(0, 1, 0), 0);
-		}
-		else if (upAxis == UsdGeomTokens->x) {
-			// X-up -> Z-up = rotate -90 about Y
-			upRot = GfRotation(GfVec3d(0, 1, 0), -90.0);
-		}
-		else {
-			spdlog::warn("Unknown Up Axis: {}", upAxis.GetString());
-		}
+		const auto stageContext = MakeStageImportContext(stage, options);
 
 		auto scene = std::make_shared<Scene>();
 
 		UsdSkelCache skelCache;
 
-		const bool isUSDZ = options.isUsdPackage;
-		const std::string directory = options.sourceDirectory;
+		PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options.sourceIdentifier);
 
-		PreprocessAllMeshes(stage, metersPerUnit, directory, isUSDZ, importSettings, options.sourceIdentifier);
-
-		ParseNodeHierarchy(scene, stage, metersPerUnit, upRot, directory, skelCache, isUSDZ);
+		ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
 
 		loadingCache.Clear();
 
@@ -2924,29 +2938,13 @@ namespace USDLoader {
 		auto ctx = stage->GetPathResolverContext();
 		ArResolverContextBinder binder(ctx);
 
-		auto metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
-		TfToken upAxis = UsdGeomGetStageUpAxis(stage);
-		GfRotation upRot;
-		if (upAxis == UsdGeomTokens->z) {
-			upRot = GfRotation(GfVec3d(1, 0, 0), -90.0);
-		}
-		else if (upAxis == UsdGeomTokens->y) {
-			upRot = GfRotation(GfVec3d(0, 1, 0), 0);
-		}
-		else if (upAxis == UsdGeomTokens->x) {
-			upRot = GfRotation(GfVec3d(0, 1, 0), -90.0);
-		}
-		else {
-			spdlog::warn("Unknown Up Axis: {}", upAxis.GetString());
-		}
+		const auto stageContext = MakeStageImportContext(stage, options);
 
 		try {
 			UsdSkelCache skelCache;
-			const bool isUSDZ = options.isUsdPackage;
-			const std::string directory = options.sourceDirectory;
 
-			PreprocessAllMeshes(stage, metersPerUnit, directory, isUSDZ, importSettings, options.sourceIdentifier);
-			auto payload = ParseImportedAssetPayload(stage, metersPerUnit, upRot, directory, skelCache, isUSDZ);
+			PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options.sourceIdentifier);
+			auto payload = ParseImportedAssetPayload(stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
 			loadingCache.Clear();
 			return payload;
 		}

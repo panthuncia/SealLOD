@@ -19,6 +19,7 @@
 #include "Managers/IndirectCommandBufferManager.h"
 #include "Managers/SkeletonManager.h"
 #include "Managers/MaterialManager.h"
+#include "Mesh/MeshInstanceFactory.h"
 #include "Mesh/MeshInstance.h"
 #include "Mesh/VertexFlags.h"
 #include "Render/RendererComponents.h"
@@ -597,24 +598,15 @@ flecs::entity Scene::CreateRenderableEntityECS(
 	} else {
 		AssignStableSceneID(entity);
 	}
-	Components::MeshInstances meshInstances;
-    for (auto& mesh : meshes) {
-		if (mesh == nullptr) {
-			continue;
-		}
-		bool skinned = mesh->HasBaseSkin();
-		if (skinned) {
+	const auto meshInstanceBegin = std::chrono::steady_clock::now();
+	auto meshInstances = br::mesh::CreateMeshInstances(meshes);
+	m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
+	for (const auto& meshInstance : meshInstances.meshInstances) {
+		if (meshInstance && meshInstance->HasSkin()) {
 			entity.add<Components::Skinned>();
+			break;
 		}
-		const auto meshInstanceBegin = std::chrono::steady_clock::now();
-		meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
-		m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
-		if (skinned) {
-			auto skeleton = mesh->GetBaseSkin()->CopySkeleton();
-			meshInstances.meshInstances.back()->SetSkeleton(skeleton);
-			entity.add<Components::Skinned>();
-		}
-    }
+	}
 	if (!meshInstances.meshInstances.empty()) {
 		entity.set<Components::MeshInstances>(meshInstances);
 	}
@@ -660,23 +652,19 @@ flecs::entity Scene::CreateInstancedRenderableEntityECS(
 		AssignStableSceneID(entity);
 	}
 
-	Components::MeshInstances meshInstances;
+	const auto meshInstanceBegin = std::chrono::steady_clock::now();
+	auto meshInstances = br::mesh::CreateMeshInstances(meshes);
+	m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
 	Components::InstanceTransforms instanceTransforms;
 	instanceTransforms.transforms.reserve(instanceMatrices.size());
 	for (const auto& matrix : instanceMatrices) {
 		instanceTransforms.transforms.push_back({ matrix });
 	}
-
-	for (auto& mesh : meshes) {
-		if (mesh == nullptr) {
-			continue;
-		}
-		if (mesh->HasBaseSkin()) {
+	for (const auto& meshInstance : meshInstances.meshInstances) {
+		if (meshInstance && meshInstance->HasSkin()) {
 			entity.add<Components::Skinned>();
+			break;
 		}
-		const auto meshInstanceBegin = std::chrono::steady_clock::now();
-		meshInstances.meshInstances.push_back(std::move(MeshInstance::CreateUnique(mesh)));
-		m_renderableMeshInstanceCreateUs += ElapsedUs(meshInstanceBegin);
 	}
 
 	if (!meshInstances.meshInstances.empty()) {

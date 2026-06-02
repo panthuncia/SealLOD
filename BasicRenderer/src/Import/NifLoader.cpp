@@ -322,17 +322,6 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     return options;
 }
 
-struct AssetCacheWriteResult
-{
-    fs::path path;
-    bool wrote{ false };
-};
-
-fs::path PayloadCachePathForAssetCache(const fs::path& cachePath)
-{
-    return cachePath;
-}
-
 class BinaryWriter
 {
 public:
@@ -685,7 +674,7 @@ bool WritePayloadCache(
         return false;
     }
 
-    const fs::path payloadPath = PayloadCachePathForAssetCache(cachePath);
+    const fs::path payloadPath = cachePath;
     std::error_code ec;
     fs::create_directories(payloadPath.parent_path(), ec);
     BinaryWriter writer(payloadPath);
@@ -770,7 +759,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     const std::string& pathHash,
     const std::string& contentHash)
 {
-    BinaryReader reader(PayloadCachePathForAssetCache(cachePath));
+    BinaryReader reader(cachePath);
     if (!reader) {
         return std::nullopt;
     }
@@ -907,19 +896,9 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
 
 } // namespace
 
-std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
-{
-    (void)cacheKey;
-    (void)settings;
-    const auto probeBegin = std::chrono::steady_clock::now();
-    if (stats) {
-        stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-    }
-    return std::nullopt;
-}
-
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
+    (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
     if (normalizedCacheKey.empty()) {
@@ -946,7 +925,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
             spdlog::debug(
                 "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
-                PayloadCachePathForAssetCache(cachePath).string(),
+                cachePath.string(),
                 fileContentHash);
             if (stats) {
                 stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
@@ -1145,10 +1124,6 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
 
 std::shared_ptr<Scene> LoadModel(std::string filePath, const USDLoader::ImportSettings& settings)
 {
-    if (auto cached = TryLoadCachedModel(filePath, settings, nullptr)) {
-        return cached->scene;
-    }
-
     return LoadModelWithCacheKey(filePath, filePath, settings, nullptr);
 }
 
