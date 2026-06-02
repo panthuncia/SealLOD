@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <DirectXMath.h>
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <functional>
@@ -1391,11 +1392,16 @@ namespace USDLoader {
 
 	bool BrNiflyLODShapeImportEnabled()
 	{
-		if (const char* value = std::getenv("BASICRENDERER_IMPORT_BRNIFLY_LOD_SHAPES")) {
-			return _stricmp(value, "1") == 0 ||
+		char* value = nullptr;
+		size_t valueSize = 0;
+		if (_dupenv_s(&value, &valueSize, "BASICRENDERER_IMPORT_BRNIFLY_LOD_SHAPES") == 0 && value) {
+			const bool enabled =
+				_stricmp(value, "1") == 0 ||
 				_stricmp(value, "true") == 0 ||
 				_stricmp(value, "yes") == 0 ||
 				_stricmp(value, "on") == 0;
+			std::free(value);
+			return enabled;
 		}
 		return false;
 	}
@@ -1409,6 +1415,24 @@ namespace USDLoader {
 		return value.UncheckedGet<std::string>();
 	}
 
+	bool IsBrNiflyLODMeshName(std::string name)
+	{
+		std::ranges::transform(name, name.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+
+		return name.starts_with("l1_") ||
+			name.starts_with("l2_") ||
+			name.starts_with("l3_") ||
+			name.starts_with("lod_") ||
+			name.starts_with("billboard_") ||
+			name.ends_with("_lod") ||
+			name.ends_with("_lod_0") ||
+			name.ends_with("_lod_1") ||
+			name.ends_with("_lod_2") ||
+			name.ends_with("_lod_3");
+	}
+
 	bool IsBrNiflyLODRenderMesh(const UsdGeomMesh& mesh)
 	{
 		if (!mesh || BrNiflyLODShapeImportEnabled()) {
@@ -1416,6 +1440,10 @@ namespace USDLoader {
 		}
 
 		const auto& prim = mesh.GetPrim();
+		if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
+			return true;
+		}
+
 		const std::string blockName = GetPrimCustomString(prim, TfToken("brnifly:blockName"));
 		if (blockName == "BSLODTriShape") {
 			return true;
