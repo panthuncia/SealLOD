@@ -4883,10 +4883,10 @@ namespace
 					grp.bounds.center[1],
 					grp.bounds.center[2],
 					grp.bounds.radius);
-				// Leaf traversal decisions use the max hierarchical parent
-				// traversal error. Internal traversal nodes propagate the max of
-				// their children below.
-				node.traversalMetric.maxQuadricError = parentErrorForGroup[info.ownerGroupId];
+				// Meshoptimizer condition 1 is evaluated against the simplified
+				// error of the group that owns this segment. Internal traversal
+				// nodes propagate the max of their children below.
+				node.traversalMetric.maxQuadricError = grp.bounds.error;
 			}
 
 			if (leafCount == 1) {

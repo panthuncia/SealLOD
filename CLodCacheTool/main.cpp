@@ -151,6 +151,8 @@ static void WriteClusterLODReport(
     float minGroupError = std::numeric_limits<float>::max();
     float maxGroupError = 0.0f;
     float maxParentToOwnErrorRatio = 0.0f;
+    std::vector<uint32_t> parentRefCounts(groups.size(), 0u);
+    std::vector<float> maxDirectParentError(groups.size(), 0.0f);
 
     for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
         const ClusterLODGroup& group = groups[groupIndex];
@@ -196,6 +198,8 @@ static void WriteClusterLODReport(
             else {
                 refinedEdgesToSameOrHigherDepth++;
             }
+            parentRefCounts[childGroupIndex]++;
+            maxDirectParentError[childGroupIndex] = std::max(maxDirectParentError[childGroupIndex], group.bounds.error);
             if (child.parentGroupId != static_cast<int32_t>(groupIndex)) {
                 nonSelectedParentEdges++;
             }
@@ -308,6 +312,17 @@ static void WriteClusterLODReport(
     out << "Errors: group_error_min=" << minGroupError
         << " group_error_max=" << maxGroupError
         << " max_parent_to_own_error_ratio=" << maxParentToOwnErrorRatio << "\n";
+    uint32_t rootGroupCount = 0u;
+    uint32_t multiParentGroupCount = 0u;
+    uint32_t maxParentRefCount = 0u;
+    for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
+        rootGroupCount += parentRefCounts[groupIndex] == 0u ? 1u : 0u;
+        multiParentGroupCount += parentRefCounts[groupIndex] > 1u ? 1u : 0u;
+        maxParentRefCount = std::max(maxParentRefCount, parentRefCounts[groupIndex]);
+    }
+    out << "Parentage: root_groups=" << rootGroupCount
+        << " multi_parent_groups=" << multiParentGroupCount
+        << " max_parent_ref_count=" << maxParentRefCount << "\n";
     out << "Validation: invalid_segment_ranges=" << invalidSegmentRanges
         << " invalid_refined_groups=" << invalidRefinedGroups
         << " refined_edges_to_lower_depth=" << refinedEdgesToLowerDepth
@@ -362,8 +377,26 @@ static void WriteClusterLODReport(
         }
     }
 
+    out << "\nRoot groups:\n";
+    out << "group,depth,error,segments,terminal_segments,meshlets,leaf_refs,page_base,page_count\n";
+    for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
+        if (parentRefCounts[groupIndex] != 0u) {
+            continue;
+        }
+        const ClusterLODGroup& group = groups[groupIndex];
+        out << groupIndex << ","
+            << group.depth << ","
+            << group.bounds.error << ","
+            << group.segmentCount << ","
+            << group.terminalSegmentCount << ","
+            << group.meshletCount << ","
+            << groupLeafRefs[groupIndex] << ","
+            << group.pageMapBase << ","
+            << group.pageCount << "\n";
+    }
+
     out << "\nSuspicious groups (first 128):\n";
-    out << "group,depth,flags,parent,max_parent_error,own_error,parent_to_own_ratio,segments,terminal_segments,meshlets,page_base,page_count,leaf_refs\n";
+    out << "group,depth,flags,parent_refs,selected_parent,max_direct_parent_error,max_parent_error,own_error,parent_to_own_ratio,segments,terminal_segments,meshlets,page_base,page_count,leaf_refs\n";
     uint32_t suspiciousWritten = 0;
     for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()) && suspiciousWritten < 128u; ++groupIndex) {
         const ClusterLODGroup& group = groups[groupIndex];
@@ -381,7 +414,9 @@ static void WriteClusterLODReport(
         }
         out << groupIndex << ","
             << group.depth << ",0x" << std::hex << group.flags << std::dec << ","
+            << parentRefCounts[groupIndex] << ","
             << group.parentGroupId << ","
+            << maxDirectParentError[groupIndex] << ","
             << group.maxParentError << ","
             << group.bounds.error << ","
             << ratio << ","
