@@ -43,7 +43,8 @@ MeshPreprocessResult ExtractSubMesh(
 	const pxr::VtTokenArray& skelJointOrderRaw,
 	const pxr::VtTokenArray& skelJointOrderMapped,
 	bool doubleSidedVoxelSourceNormals = false,
-	const std::string& sourceIdentifierOverride = {});
+	const std::string& sourceIdentifierOverride = {},
+	std::uint32_t tessellationFactor = 1);
 
 // Build a UsdSkelSkinningQuery for a mesh if it has skinning data.
 std::optional<pxr::UsdSkelSkinningQuery> GetSkinningQuery(

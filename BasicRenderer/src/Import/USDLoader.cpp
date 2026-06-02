@@ -1787,7 +1787,8 @@ namespace USDLoader {
 				workItem.skelJointOrderRaw,
 				workItem.skelJointOrderMapped,
 				workItem.authoredDoubleSided || workItem.inferredDoubleSided,
-				sourceIdentifierOverride);
+				sourceIdentifierOverride,
+				importSettings.nifTessellationFactor);
 			});
 
 		for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {

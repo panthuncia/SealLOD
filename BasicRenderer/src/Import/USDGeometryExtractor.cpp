@@ -10,6 +10,7 @@
 #include <optional>
 #include <atomic>
 #include <chrono>
+#include <limits>
 
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/tokens.h>
@@ -35,6 +36,7 @@
 #include "Mesh/VertexLayout.h"
 #include "Mesh/VertexFlags.h"
 #include "Mesh/DefaultCLodSettings.h"
+#include "Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.h"
 
 using namespace pxr;
 
@@ -179,6 +181,368 @@ static UsdTimeCode GetUsdGeometrySampleTime(const UsdStageRefPtr& stage)
 	}
 
 	return UsdTimeCode::Default();
+}
+
+static std::uint32_t TessellationSubdivisionForFactor(std::uint32_t tessellationFactor)
+{
+	if (tessellationFactor <= 1u) {
+		return 1u;
+	}
+
+	const double root = std::sqrt(static_cast<double>(tessellationFactor));
+	std::uint32_t subdivision = static_cast<std::uint32_t>(std::ceil(root));
+	return std::max(1u, subdivision);
+}
+
+static std::uint32_t ReyesTessellationLookupIndex(std::uint32_t edge01Segments, std::uint32_t edge12Segments, std::uint32_t edge20Segments)
+{
+	constexpr uint32_t kLookupSize = 16u;
+	constexpr uint32_t kLookupIndexBias =
+		1u +
+		kLookupSize +
+		kLookupSize * kLookupSize;
+	const uint32_t rawIndex =
+		edge01Segments +
+		edge12Segments * kLookupSize +
+		edge20Segments * kLookupSize * kLookupSize;
+	return rawIndex - kLookupIndexBias;
+}
+
+static DirectX::XMFLOAT3 DecodeReyesTessellationVertexBarycentrics(std::uint32_t packedVertex)
+{
+	constexpr float kCoordScale = 32768.0f;
+	const float u = static_cast<float>(packedVertex & 0xFFFFu) / kCoordScale;
+	const float v = static_cast<float>(packedVertex >> 16u) / kCoordScale;
+	return DirectX::XMFLOAT3{ 1.0f - u - v, u, v };
+}
+
+static DirectX::XMUINT3 DecodeReyesTessellationTriangleIndices(std::uint32_t packedTriangle)
+{
+	return DirectX::XMUINT3{
+		packedTriangle & 0xFFu,
+		(packedTriangle >> 8u) & 0xFFu,
+		(packedTriangle >> 16u) & 0xFFu
+	};
+}
+
+static void InterpolateFloatTuple(
+	std::byte* dst,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t offset,
+	size_t components,
+	float wa,
+	float wb,
+	float wc)
+{
+	auto* out = reinterpret_cast<float*>(dst + offset);
+	const auto* av = reinterpret_cast<const float*>(a + offset);
+	const auto* bv = reinterpret_cast<const float*>(b + offset);
+	const auto* cv = reinterpret_cast<const float*>(c + offset);
+	for (size_t component = 0; component < components; ++component) {
+		out[component] = av[component] * wa + bv[component] * wb + cv[component] * wc;
+	}
+}
+
+static void NormalizeFloat3(std::byte* dst, size_t offset)
+{
+	auto* value = reinterpret_cast<float*>(dst + offset);
+	const float len2 = value[0] * value[0] + value[1] * value[1] + value[2] * value[2];
+	if (len2 > 1e-20f) {
+		const float invLen = 1.0f / std::sqrt(len2);
+		value[0] *= invLen;
+		value[1] *= invLen;
+		value[2] *= invLen;
+	}
+}
+
+static const std::byte* NearestBarycentricVertex(
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	float wa,
+	float wb,
+	float wc)
+{
+	if (wb >= wa && wb >= wc) {
+		return b;
+	}
+	if (wc >= wa && wc >= wb) {
+		return c;
+	}
+	return a;
+}
+
+static void WriteInterpolatedVertex(
+	std::vector<std::byte>& out,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t vertexSize,
+	unsigned int vertexFlags,
+	float wa,
+	float wb,
+	float wc)
+{
+	const std::byte* nearest = NearestBarycentricVertex(a, b, c, wa, wb, wc);
+	const size_t dstOffset = out.size();
+	out.insert(out.end(), nearest, nearest + vertexSize);
+	std::byte* dst = out.data() + dstOffset;
+
+	InterpolateFloatTuple(dst, a, b, c, 0, 3, wa, wb, wc);
+	if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::NormalOffset, 3, wa, wb, wc);
+		NormalizeFloat3(dst, MeshVertexLayout::NormalOffset);
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0) {
+		const size_t tangentOffset = MeshVertexLayout::TangentOffset(vertexFlags);
+		InterpolateFloatTuple(dst, a, b, c, tangentOffset, 3, wa, wb, wc);
+		NormalizeFloat3(dst, tangentOffset);
+		reinterpret_cast<float*>(dst + tangentOffset)[3] =
+			reinterpret_cast<const float*>(nearest + tangentOffset)[3];
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::TexcoordOffset(vertexFlags), 2, wa, wb, wc);
+	}
+	if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0) {
+		InterpolateFloatTuple(dst, a, b, c, MeshVertexLayout::ColorOffset(vertexFlags), 3, wa, wb, wc);
+	}
+}
+
+static void WriteInterpolatedSkinningVertex(
+	std::vector<std::byte>& out,
+	const std::byte* a,
+	const std::byte* b,
+	const std::byte* c,
+	size_t skinningVertexSize,
+	float wa,
+	float wb,
+	float wc)
+{
+	const std::byte* nearest = NearestBarycentricVertex(a, b, c, wa, wb, wc);
+	const size_t dstOffset = out.size();
+	out.insert(out.end(), nearest, nearest + skinningVertexSize);
+	std::byte* dst = out.data() + dstOffset;
+	InterpolateFloatTuple(dst, a, b, c, 0, 3, wa, wb, wc);
+	InterpolateFloatTuple(dst, a, b, c, sizeof(DirectX::XMFLOAT3), 3, wa, wb, wc);
+	NormalizeFloat3(dst, sizeof(DirectX::XMFLOAT3));
+}
+
+static void TessellateExtractedTriangles(
+	std::unique_ptr<std::vector<std::byte>>& rawData,
+	std::optional<std::unique_ptr<std::vector<std::byte>>>& skinningData,
+	unsigned int vertexSize,
+	unsigned int skinningVertexSize,
+	std::vector<UINT32>& indices,
+	unsigned int vertexFlags,
+	std::vector<MeshUvSetData>& uvSets,
+	std::uint32_t tessellationFactor,
+	const std::string& primName)
+{
+	const std::uint32_t subdivision = TessellationSubdivisionForFactor(tessellationFactor);
+	if (subdivision <= 1u || !rawData || vertexSize == 0u || indices.size() < 3u) {
+		return;
+	}
+
+	const std::uint64_t inputTriangleCount = indices.size() / 3u;
+	const std::uint64_t outputTriangleCount = inputTriangleCount * subdivision * subdivision;
+	const std::uint64_t outputVertexCount = outputTriangleCount * 3u;
+	if (outputVertexCount > std::numeric_limits<UINT32>::max()) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} would produce {} vertices; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			outputVertexCount);
+		return;
+	}
+
+	const ReyesTessellationTableData& reyesTable = GetReyesTessellationTableData();
+	const bool useReyesTable =
+		subdivision <= 11u &&
+		ReyesTessellationLookupIndex(subdivision, subdivision, subdivision) < reyesTable.configs.size();
+	if (useReyesTable) {
+		const std::uint32_t configIndex = ReyesTessellationLookupIndex(subdivision, subdivision, subdivision);
+		const CLodReyesTessTableConfigEntry& config = reyesTable.configs[configIndex];
+		if (config.numVertices != 0u && config.numTriangles != 0u) {
+			const std::uint64_t tableOutputVertexCount = inputTriangleCount * config.numVertices;
+			if (tableOutputVertexCount > std::numeric_limits<UINT32>::max()) {
+				spdlog::warn(
+					"Mesh '{}' Reyes-table tessellation factor {} would produce {} vertices; skipping tessellation.",
+					primName,
+					tessellationFactor,
+					tableOutputVertexCount);
+				return;
+			}
+
+			std::vector<std::byte> tessellatedVertices;
+			std::vector<UINT32> tessellatedIndices;
+			tessellatedVertices.reserve(static_cast<size_t>(tableOutputVertexCount) * static_cast<size_t>(vertexSize));
+			tessellatedIndices.reserve(static_cast<size_t>(inputTriangleCount) * static_cast<size_t>(config.numTriangles) * 3u);
+
+			const bool hasSkinning = skinningData && *skinningData && skinningVertexSize != 0u;
+			std::vector<std::byte> tessellatedSkinningVertices;
+			if (hasSkinning) {
+				tessellatedSkinningVertices.reserve(static_cast<size_t>(tableOutputVertexCount) * static_cast<size_t>(skinningVertexSize));
+			}
+
+			std::vector<MeshUvSetData> tessellatedUvSets;
+			tessellatedUvSets.resize(uvSets.size());
+			for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+				tessellatedUvSets[uvSetIndex].name = uvSets[uvSetIndex].name;
+				tessellatedUvSets[uvSetIndex].values.reserve(static_cast<size_t>(tableOutputVertexCount));
+			}
+
+			const auto emitVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, float wa, float wb, float wc) {
+				const std::byte* a = rawData->data() + static_cast<size_t>(ia) * vertexSize;
+				const std::byte* b = rawData->data() + static_cast<size_t>(ib) * vertexSize;
+				const std::byte* c = rawData->data() + static_cast<size_t>(ic) * vertexSize;
+				WriteInterpolatedVertex(tessellatedVertices, a, b, c, vertexSize, vertexFlags, wa, wb, wc);
+				if (hasSkinning) {
+					const std::byte* sa = (*skinningData)->data() + static_cast<size_t>(ia) * skinningVertexSize;
+					const std::byte* sb = (*skinningData)->data() + static_cast<size_t>(ib) * skinningVertexSize;
+					const std::byte* sc = (*skinningData)->data() + static_cast<size_t>(ic) * skinningVertexSize;
+					WriteInterpolatedSkinningVertex(tessellatedSkinningVertices, sa, sb, sc, skinningVertexSize, wa, wb, wc);
+				}
+				for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+					const auto sampleUv = [&](UINT32 index) {
+						return index < uvSets[uvSetIndex].values.size()
+							? uvSets[uvSetIndex].values[index]
+							: DirectX::XMFLOAT2{ 0.0f, 0.0f };
+					};
+					const DirectX::XMFLOAT2 uva = sampleUv(ia);
+					const DirectX::XMFLOAT2 uvb = sampleUv(ib);
+					const DirectX::XMFLOAT2 uvc = sampleUv(ic);
+					tessellatedUvSets[uvSetIndex].values.push_back(DirectX::XMFLOAT2{
+						uva.x * wa + uvb.x * wb + uvc.x * wc,
+						uva.y * wa + uvb.y * wb + uvc.y * wc });
+				}
+			};
+
+			for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+				const UINT32 ia = indices[tri + 0u];
+				const UINT32 ib = indices[tri + 1u];
+				const UINT32 ic = indices[tri + 2u];
+				const auto baseVertex = static_cast<UINT32>(tessellatedVertices.size() / vertexSize);
+				for (std::uint32_t localVertexIndex = 0; localVertexIndex < config.numVertices; ++localVertexIndex) {
+					const DirectX::XMFLOAT3 bary = DecodeReyesTessellationVertexBarycentrics(
+						reyesTable.vertices[config.firstVertex + localVertexIndex]);
+					emitVertex(ia, ib, ic, bary.x, bary.y, bary.z);
+				}
+				for (std::uint32_t localTriangleIndex = 0; localTriangleIndex < config.numTriangles; ++localTriangleIndex) {
+					const DirectX::XMUINT3 local = DecodeReyesTessellationTriangleIndices(
+						reyesTable.triangles[config.firstTriangle + localTriangleIndex]);
+					tessellatedIndices.push_back(baseVertex + local.x);
+					tessellatedIndices.push_back(baseVertex + local.y);
+					tessellatedIndices.push_back(baseVertex + local.z);
+				}
+			}
+
+			*rawData = std::move(tessellatedVertices);
+			indices = std::move(tessellatedIndices);
+			if (hasSkinning) {
+				**skinningData = std::move(tessellatedSkinningVertices);
+			}
+			uvSets = std::move(tessellatedUvSets);
+
+			spdlog::info(
+				"Mesh '{}' tessellated with Reyes table: requested_factor={} subdivision={} triangles {} -> {} vertices_per_source_triangle={}",
+				primName,
+				tessellationFactor,
+				subdivision,
+				inputTriangleCount,
+				inputTriangleCount * config.numTriangles,
+				config.numVertices);
+			return;
+		}
+	}
+
+	std::vector<std::byte> tessellatedVertices;
+	std::vector<UINT32> tessellatedIndices;
+	tessellatedVertices.reserve(static_cast<size_t>(outputVertexCount) * static_cast<size_t>(vertexSize));
+	tessellatedIndices.reserve(static_cast<size_t>(outputVertexCount));
+
+	const bool hasSkinning = skinningData && *skinningData && skinningVertexSize != 0u;
+	std::vector<std::byte> tessellatedSkinningVertices;
+	if (hasSkinning) {
+		tessellatedSkinningVertices.reserve(static_cast<size_t>(outputVertexCount) * static_cast<size_t>(skinningVertexSize));
+	}
+
+	std::vector<MeshUvSetData> tessellatedUvSets;
+	tessellatedUvSets.resize(uvSets.size());
+	for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+		tessellatedUvSets[uvSetIndex].name = uvSets[uvSetIndex].name;
+		tessellatedUvSets[uvSetIndex].values.reserve(static_cast<size_t>(outputVertexCount));
+	}
+
+	const auto emitVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, float wa, float wb, float wc) {
+		const auto outIndex = static_cast<UINT32>(tessellatedIndices.size());
+		const std::byte* a = rawData->data() + static_cast<size_t>(ia) * vertexSize;
+		const std::byte* b = rawData->data() + static_cast<size_t>(ib) * vertexSize;
+		const std::byte* c = rawData->data() + static_cast<size_t>(ic) * vertexSize;
+		WriteInterpolatedVertex(tessellatedVertices, a, b, c, vertexSize, vertexFlags, wa, wb, wc);
+		if (hasSkinning) {
+			const std::byte* sa = (*skinningData)->data() + static_cast<size_t>(ia) * skinningVertexSize;
+			const std::byte* sb = (*skinningData)->data() + static_cast<size_t>(ib) * skinningVertexSize;
+			const std::byte* sc = (*skinningData)->data() + static_cast<size_t>(ic) * skinningVertexSize;
+			WriteInterpolatedSkinningVertex(tessellatedSkinningVertices, sa, sb, sc, skinningVertexSize, wa, wb, wc);
+		}
+		for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+			const auto sampleUv = [&](UINT32 index) {
+				return index < uvSets[uvSetIndex].values.size()
+					? uvSets[uvSetIndex].values[index]
+					: DirectX::XMFLOAT2{ 0.0f, 0.0f };
+			};
+			const DirectX::XMFLOAT2 uva = sampleUv(ia);
+			const DirectX::XMFLOAT2 uvb = sampleUv(ib);
+			const DirectX::XMFLOAT2 uvc = sampleUv(ic);
+			tessellatedUvSets[uvSetIndex].values.push_back(DirectX::XMFLOAT2{
+				uva.x * wa + uvb.x * wb + uvc.x * wc,
+				uva.y * wa + uvb.y * wb + uvc.y * wc });
+		}
+		tessellatedIndices.push_back(outIndex);
+	};
+
+	const auto emitBaryVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, std::uint32_t i, std::uint32_t j) {
+		const float invSubdivision = 1.0f / static_cast<float>(subdivision);
+		const float wb = static_cast<float>(i) * invSubdivision;
+		const float wc = static_cast<float>(j) * invSubdivision;
+		const float wa = 1.0f - wb - wc;
+		emitVertex(ia, ib, ic, wa, wb, wc);
+	};
+
+	for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+		const UINT32 ia = indices[tri + 0u];
+		const UINT32 ib = indices[tri + 1u];
+		const UINT32 ic = indices[tri + 2u];
+		for (std::uint32_t i = 0; i < subdivision; ++i) {
+			for (std::uint32_t j = 0; j < subdivision - i; ++j) {
+				emitBaryVertex(ia, ib, ic, i, j);
+				emitBaryVertex(ia, ib, ic, i + 1u, j);
+				emitBaryVertex(ia, ib, ic, i, j + 1u);
+				if (j + 1u < subdivision - i) {
+					emitBaryVertex(ia, ib, ic, i + 1u, j);
+					emitBaryVertex(ia, ib, ic, i + 1u, j + 1u);
+					emitBaryVertex(ia, ib, ic, i, j + 1u);
+				}
+			}
+		}
+	}
+
+	*rawData = std::move(tessellatedVertices);
+	indices = std::move(tessellatedIndices);
+	if (hasSkinning) {
+		**skinningData = std::move(tessellatedSkinningVertices);
+	}
+	uvSets = std::move(tessellatedUvSets);
+
+	spdlog::info(
+		"Mesh '{}' tessellated: requested_factor={} subdivision={} triangles {} -> {}",
+		primName,
+		tessellationFactor,
+		subdivision,
+		inputTriangleCount,
+		outputTriangleCount);
 }
 
 static bool HasMultipleAuthoredTimeSamples(const UsdAttribute& attr)
@@ -883,7 +1247,8 @@ MeshPreprocessResult ExtractSubMesh(
 	const VtTokenArray& skelJointOrderRaw,
 	const VtTokenArray& skelJointOrderMapped,
 	bool doubleSidedVoxelSourceNormals,
-	const std::string& sourceIdentifierOverride)
+	const std::string& sourceIdentifierOverride,
+	std::uint32_t tessellationFactor)
 {
 	std::string subsetName = subset
 		? subset->GetPrim().GetName().GetString()
@@ -924,6 +1289,16 @@ MeshPreprocessResult ExtractSubMesh(
 	LoadGeom(rawData, skinningData, vertexSize, skinningVertexSize,
 		indices, vertexFlags, uvSets, mesh, subset, geomTimeCode, metersPerUnit, requiredUvSetNames,
 		skinQ, skelJointOrderRaw, skelJointOrderMapped);
+	TessellateExtractedTriangles(
+		rawData,
+		skinningData,
+		vertexSize,
+		skinningVertexSize,
+		indices,
+		vertexFlags,
+		uvSets,
+		tessellationFactor,
+		mesh.GetPrim().GetPath().GetString());
 	AddMs(g_benchmarkStats.loadGeomMs, loadGeomBegin);
 
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;

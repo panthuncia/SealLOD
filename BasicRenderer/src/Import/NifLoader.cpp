@@ -119,7 +119,9 @@ bool IsKnownNonRenderableNif(const std::string& normalizedCacheKey)
         isEditorOrCollisionHelper;
 }
 
-std::string MakeStableSourceIdentifier(const std::string& normalizedCacheKey, const std::string& contentHash)
+std::string MakeStableSourceIdentifier(
+    const std::string& normalizedCacheKey,
+    const std::string& contentHash)
 {
     std::string uriPath = normalizedCacheKey;
     std::replace(uriPath.begin(), uriPath.end(), '\\', '/');
@@ -899,7 +901,6 @@ std::optional<CachedAssetLoadResult> TryLoadCachedModel(std::string cacheKey, co
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
-    (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
     if (normalizedCacheKey.empty()) {

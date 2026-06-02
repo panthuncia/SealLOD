@@ -14,7 +14,7 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings()
     settings.simplifyTangentSignWeight = 0.5f;
 
     settings.enableVoxelFallback = true;
-    settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+    settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::MeshOnly;
     settings.voxelGridBaseResolution = 32u;
     settings.voxelMinResolution = 0u;
     settings.voxelRaysPerCell = 64u;

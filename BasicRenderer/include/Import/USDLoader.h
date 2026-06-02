@@ -16,6 +16,7 @@ class Mesh;
 namespace USDLoader {
 	struct ImportSettings {
 		bool enableDoubleSidedNameHeuristic = true;
+		std::uint32_t nifTessellationFactor = 1;
 	};
 
 	struct InMemoryStageOptions {
