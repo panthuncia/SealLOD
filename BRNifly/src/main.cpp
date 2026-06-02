@@ -570,6 +570,9 @@ using GetNodeNameFn = int (*)(void*, char*, int);
 using GetNodeBlocknameFn = int (*)(void*, char*, int);
 using GetNodeFlagsFn = int (*)(void*);
 using GetNodeParentFn = void* (*)(void*, void*);
+using GetNodeSwitchIndexFn = int (*)(void*);
+using GetNodeChildCountFn = int (*)(void*);
+using GetNodeChildIDByIndexFn = int (*)(void*, int);
 using GetShapeBoneCountFn = int (*)(void*, void*);
 using GetShapeBoneNamesFn = int (*)(void*, void*, char*, int);
 using GetShapeBoneWeightsCountFn = int (*)(void*, void*, int);
@@ -634,6 +637,9 @@ struct NiflyApi {
     GetNodeBlocknameFn getNodeBlockname = nullptr;
     GetNodeFlagsFn getNodeFlags = nullptr;
     GetNodeParentFn getNodeParent = nullptr;
+    GetNodeSwitchIndexFn getNodeSwitchIndex = nullptr;
+    GetNodeChildCountFn getNodeChildCount = nullptr;
+    GetNodeChildIDByIndexFn getNodeChildIDByIndex = nullptr;
     GetShapeBoneCountFn getShapeBoneCount = nullptr;
     GetShapeBoneNamesFn getShapeBoneNames = nullptr;
     GetShapeBoneWeightsCountFn getShapeBoneWeightsCount = nullptr;
@@ -708,6 +714,9 @@ struct NiflyApi {
           getNodeBlockname(other.getNodeBlockname),
           getNodeFlags(other.getNodeFlags),
           getNodeParent(other.getNodeParent),
+          getNodeSwitchIndex(other.getNodeSwitchIndex),
+          getNodeChildCount(other.getNodeChildCount),
+          getNodeChildIDByIndex(other.getNodeChildIDByIndex),
           getShapeBoneCount(other.getShapeBoneCount),
           getShapeBoneNames(other.getShapeBoneNames),
           getShapeBoneWeightsCount(other.getShapeBoneWeightsCount),
@@ -787,6 +796,9 @@ struct NiflyApi {
             getNodeBlockname = other.getNodeBlockname;
             getNodeFlags = other.getNodeFlags;
             getNodeParent = other.getNodeParent;
+            getNodeSwitchIndex = other.getNodeSwitchIndex;
+            getNodeChildCount = other.getNodeChildCount;
+            getNodeChildIDByIndex = other.getNodeChildIDByIndex;
             getShapeBoneCount = other.getShapeBoneCount;
             getShapeBoneNames = other.getShapeBoneNames;
             getShapeBoneWeightsCount = other.getShapeBoneWeightsCount;
@@ -927,6 +939,9 @@ std::optional<NiflyApi> LoadNiflyApi(const char* argv0, std::vector<Diagnostic>&
     api.getNodeBlockname = LoadProc<GetNodeBlocknameFn>(module, "getNodeBlockname");
     api.getNodeFlags = LoadProc<GetNodeFlagsFn>(module, "getNodeFlags");
     api.getNodeParent = LoadProc<GetNodeParentFn>(module, "getNodeParent");
+    api.getNodeSwitchIndex = LoadProc<GetNodeSwitchIndexFn>(module, "getNodeSwitchIndex");
+    api.getNodeChildCount = LoadProc<GetNodeChildCountFn>(module, "getNodeChildCount");
+    api.getNodeChildIDByIndex = LoadProc<GetNodeChildIDByIndexFn>(module, "getNodeChildIDByIndex");
     api.getShapeBoneCount = LoadProc<GetShapeBoneCountFn>(module, "getShapeBoneCount");
     api.getShapeBoneNames = LoadProc<GetShapeBoneNamesFn>(module, "getShapeBoneNames");
     api.getShapeBoneWeightsCount = LoadProc<GetShapeBoneWeightsCountFn>(module, "getShapeBoneWeightsCount");
@@ -1107,6 +1122,8 @@ struct NodeData {
     std::string name;
     std::string blockName;
     int flags = 0;
+    int switchIndex = -1;
+    int lod0ChildBlockId = -1;
     TransformBuf transform;
     SdfPath path;
 };
@@ -1276,6 +1293,14 @@ std::vector<NodeData> ReadNodes(const NiflyApi& api, void* nifHandle)
             ? ReadCString([&](char* buffer, int size) { return api.getNodeBlockname(nodeHandle, buffer, size); }).value_or("")
             : std::string();
         node.flags = api.getNodeFlags ? api.getNodeFlags(nodeHandle) : 0;
+        if (api.getNodeSwitchIndex) {
+            node.switchIndex = api.getNodeSwitchIndex(nodeHandle);
+        }
+        if (node.blockName == "NiSwitchNode" || node.blockName == "NiLODNode") {
+            if (api.getNodeChildCount && api.getNodeChildIDByIndex && api.getNodeChildCount(nodeHandle) > 0) {
+                node.lod0ChildBlockId = api.getNodeChildIDByIndex(nodeHandle, 0);
+            }
+        }
         if (api.getNodeTransform) {
             api.getNodeTransform(nodeHandle, &node.transform);
         }
@@ -2048,6 +2073,12 @@ std::optional<std::string> ConvertShapesToUsd(
             nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockName"), VtValue(node.blockName));
         }
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:flags"), VtValue(node.flags));
+        if (node.switchIndex >= 0) {
+            nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:switchIndex"), VtValue(node.switchIndex));
+        }
+        if (node.lod0ChildBlockId >= 0) {
+            nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:lod0ChildBlockId"), VtValue(node.lod0ChildBlockId));
+        }
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:transform"), VtValue(TransformJson(node.transform).dump()));
         ApplyTransform(nodePrim.GetPrim(), node.transform);
         return node.path;

@@ -1415,6 +1415,65 @@ namespace USDLoader {
 		return value.UncheckedGet<std::string>();
 	}
 
+	std::optional<int> GetPrimCustomInt(const UsdPrim& prim, const TfToken& key)
+	{
+		const VtValue value = prim.GetCustomDataByKey(key);
+		if (value.IsEmpty()) {
+			return std::nullopt;
+		}
+		if (value.IsHolding<int>()) {
+			return value.UncheckedGet<int>();
+		}
+		if (value.IsHolding<unsigned int>()) {
+			return static_cast<int>(value.UncheckedGet<unsigned int>());
+		}
+		return std::nullopt;
+	}
+
+	UsdPrim GetImmediateChildOnPath(const UsdPrim& ancestor, const UsdPrim& descendant)
+	{
+		if (!ancestor || !descendant) {
+			return {};
+		}
+		const SdfPath ancestorPath = ancestor.GetPath();
+		SdfPath childPath = descendant.GetPath();
+		if (childPath == ancestorPath || !childPath.HasPrefix(ancestorPath)) {
+			return {};
+		}
+		while (!childPath.IsEmpty() && childPath.GetParentPath() != ancestorPath) {
+			childPath = childPath.GetParentPath();
+		}
+		return childPath.IsEmpty() ? UsdPrim() : ancestor.GetStage()->GetPrimAtPath(childPath);
+	}
+
+	bool IsBelowInactiveBrNiflyLOD0Branch(const UsdPrim& prim)
+	{
+		if (!prim) {
+			return false;
+		}
+		UsdStageWeakPtr stage = prim.GetStage();
+		if (!stage) {
+			return false;
+		}
+
+		for (SdfPath ancestorPath = prim.GetPath().GetParentPath();
+			!ancestorPath.IsEmpty() && ancestorPath != SdfPath::AbsoluteRootPath();
+			ancestorPath = ancestorPath.GetParentPath()) {
+			const UsdPrim ancestor = stage->GetPrimAtPath(ancestorPath);
+			const std::optional<int> lod0ChildBlockId = GetPrimCustomInt(ancestor, TfToken("brnifly:lod0ChildBlockId"));
+			if (!lod0ChildBlockId) {
+				continue;
+			}
+
+			const UsdPrim branchRoot = GetImmediateChildOnPath(ancestor, prim);
+			const std::optional<int> branchBlockId = GetPrimCustomInt(branchRoot, TfToken("brnifly:blockId"));
+			if (branchBlockId && *branchBlockId != *lod0ChildBlockId) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool IsBrNiflyLODMeshName(std::string name)
 	{
 		std::ranges::transform(name, name.begin(), [](unsigned char ch) {
@@ -1430,7 +1489,8 @@ namespace USDLoader {
 			name.ends_with("_lod_0") ||
 			name.ends_with("_lod_1") ||
 			name.ends_with("_lod_2") ||
-			name.ends_with("_lod_3");
+			name.ends_with("_lod_3") ||
+			name.contains("_lod_");
 	}
 
 	bool IsBrNiflyLODRenderMesh(const UsdGeomMesh& mesh)
@@ -1440,6 +1500,9 @@ namespace USDLoader {
 		}
 
 		const auto& prim = mesh.GetPrim();
+		if (IsBelowInactiveBrNiflyLOD0Branch(prim)) {
+			return true;
+		}
 		if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
 			return true;
 		}
