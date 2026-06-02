@@ -185,7 +185,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 6u;
+constexpr std::uint32_t kPayloadCacheVersion = 10u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -512,9 +512,10 @@ bool ReadStringVector(BinaryReader& reader, std::vector<std::string>& values)
 
 void WriteTextureBinding(BinaryWriter& writer, const TextureAndConstant& binding)
 {
-    writer.String(binding.texture ? binding.texture->Meta().filePath : std::string{});
+    writer.String(!binding.sourcePath.empty() ? binding.sourcePath : (binding.texture ? binding.texture->Meta().filePath : std::string{}));
     writer.Pod(binding.factor.Get());
     writer.Pod(binding.uvSetIndex);
+    writer.String(binding.uvSetName);
     writer.PodVector(binding.channels);
 }
 
@@ -522,11 +523,12 @@ bool ReadTextureBinding(BinaryReader& reader, TextureAndConstant& binding, bool 
 {
     std::string texturePath;
     float factor = 1.0f;
-    if (!reader.String(texturePath) || !reader.Pod(factor) || !reader.Pod(binding.uvSetIndex) || !reader.PodVector(binding.channels)) {
+    if (!reader.String(texturePath) || !reader.Pod(factor) || !reader.Pod(binding.uvSetIndex) || !reader.String(binding.uvSetName) || !reader.PodVector(binding.channels)) {
         return false;
     }
     binding.factor = factor;
-    if (!texturePath.empty()) {
+    binding.sourcePath = texturePath;
+    if (!texturePath.empty() && fs::is_regular_file(texturePath)) {
         try {
             binding.texture = LoadTextureFromFile(s2ws(texturePath), nullptr, preferSRGB);
         } catch (const std::exception& ex) {

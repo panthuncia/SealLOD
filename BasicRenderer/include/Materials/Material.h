@@ -200,7 +200,7 @@ public:
         emissiveColor.z *= emissiveScalar;
 		TechniqueDescriptor technique = PickTechnique(desc);
 
-        return CreateShared(
+        auto material = CreateShared(
             desc.name,
             static_cast<MaterialFlags>(materialFlags),
             static_cast<PSOFlags>(psoFlags),
@@ -244,6 +244,8 @@ public:
             desc.brniflyDecal,
             desc.brniflyDynamicDecal
         );
+        material->SetLogicalTextureSourcePaths(desc);
+        return material;
     }
     ~Material();
 
@@ -264,6 +266,7 @@ public:
     bool BrniflyDecal() const { return m_brniflyDecal; }
     bool BrniflyDynamicDecal() const { return m_brniflyDynamicDecal; }
     MaterialDescription ToCacheDescription() const;
+    void SetLogicalTextureSourcePaths(const MaterialDescription& desc);
     static void DestroyDefaultMaterial() {
         defaultMaterial.reset();
     }
@@ -284,6 +287,14 @@ private:
     std::shared_ptr<TextureAsset> m_metallicTexture;
     std::shared_ptr<TextureAsset> m_emissiveTexture;
     std::shared_ptr<TextureAsset> m_opacityTexture;
+    std::string m_baseColorSourcePath;
+    std::string m_normalSourcePath;
+    std::string m_aoSourcePath;
+    std::string m_heightSourcePath;
+    std::string m_roughnessSourcePath;
+    std::string m_metallicSourcePath;
+    std::string m_emissiveSourcePath;
+    std::string m_opacitySourcePath;
     std::vector<uint32_t> m_baseColorChannels;
     std::vector<uint32_t> m_normalChannels;
     std::vector<uint32_t> m_aoChannel;

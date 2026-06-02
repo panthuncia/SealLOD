@@ -479,7 +479,7 @@ uint32_t ComputeDefaultStreamingBootstrapTopMip(const TextureDescription& desc, 
 		return 0u;
 	}
 
-	static constexpr uint32_t kBootstrapMaxDimension = 1024u;
+	static constexpr uint32_t kBootstrapMaxDimension = 512u;
 	uint32_t width = desc.imageDimensions[0].width;
 	uint32_t height = desc.imageDimensions[0].height;
 	uint32_t topMip = 0u;
@@ -2106,10 +2106,38 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 					return;
 				}
 				if (useConditionedCacheResidency) {
-					ensureProcessingPlaceholder(
-						processingError.empty()
-							? "async processing failed; keeping placeholder texture"
-							: "async processing failed ('" + processingError + "'); keeping placeholder texture");
+					try {
+						const auto fallbackSourceData = BuildSourceData();
+						const uint32_t residentMipCount = CalcMipCountFromDescription(fallbackSourceData->desc);
+						m_meta.isProcessingCacheArtifact = false;
+						m_desc = fallbackSourceData->desc;
+						m_image = factory.CreateAlwaysResidentPixelBuffer(
+							fallbackSourceData->desc,
+							TextureFactory::TextureInitialData::FromBytes(fallbackSourceData->subresources),
+							m_name,
+							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc));
+						RefreshStreamingStateFromDescription();
+						SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
+						SetPendingTopMip(desiredResidentTopMip);
+						RecordUploadPath(
+							TextureUploadPathTelemetry::ProcessingFailedFallback,
+							processingError.empty()
+								? "async processing failed; conditioned residency unavailable, uploaded original bytes through TextureFactory"
+								: "async processing failed ('" + processingError + "'); conditioned residency unavailable, uploaded original bytes through TextureFactory");
+						m_hasUploadedFinalImage = true;
+						m_hasUploadedPlaceholder = false;
+						BumpBindingRevision();
+					}
+					catch (const std::exception& ex) {
+						spdlog::warn(
+							"TextureAsset: failed to upload processing failure fallback for '{}': {}",
+							TextureTelemetryLabel(*this),
+							ex.what());
+						ensureProcessingPlaceholder(
+							processingError.empty()
+								? "async processing failed; keeping placeholder texture"
+								: "async processing failed ('" + processingError + "'); keeping placeholder texture");
+					}
 					m_processingHandle.reset();
 					return;
 				}

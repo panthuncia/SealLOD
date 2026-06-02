@@ -610,6 +610,89 @@ namespace USDLoader {
 		return value.x == 0.0f && value.y == 0.0f && value.z == 0.0f;
 	}
 
+	std::string NormalizeBrniflyTexturePath(std::string value)
+	{
+		for (char& ch : value) {
+			if (ch == '/') {
+				ch = '\\';
+			}
+		}
+		while (!value.empty() && (value.front() == '\\' || value.front() == '/')) {
+			value.erase(value.begin());
+		}
+		std::string lower = value;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (!lower.empty() && lower.rfind("textures\\", 0) != 0) {
+			value = "textures\\" + value;
+		}
+		return value;
+	}
+
+	void ApplyBrniflyTextureSlot(
+		MaterialDescription& result,
+		std::size_t slot,
+		std::string path)
+	{
+		if (path.empty()) {
+			return;
+		}
+		path = NormalizeBrniflyTexturePath(std::move(path));
+		if (path.empty()) {
+			return;
+		}
+
+		switch (slot) {
+		case 0:
+			result.baseColor.sourcePath = std::move(path);
+			result.baseColor.channels = { 0, 1, 2, 3 };
+			break;
+		case 1:
+			result.normal.sourcePath = std::move(path);
+			result.normal.channels = { 0, 1, 2 };
+			result.negateNormals = false;
+			result.invertNormalGreen = false;
+			break;
+		case 3:
+			result.emissive.sourcePath = std::move(path);
+			result.emissive.channels = { 0, 1, 2 };
+			if (IsBlack(result.emissiveColor)) {
+				result.emissiveColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+			}
+			break;
+		case 4:
+			result.heightMap.sourcePath = std::move(path);
+			result.heightMap.channels = { 0 };
+			result.enableGeometricDisplacement = true;
+			result.geometricDisplacementMin = std::min(result.geometricDisplacementMin, 0.0f);
+			result.geometricDisplacementMax = std::max(result.geometricDisplacementMax, result.heightMapScale);
+			break;
+		default:
+			break;
+		}
+	}
+
+	void ApplyBrniflyTextureMetadata(MaterialDescription& result, const json& metadata)
+	{
+		const json* textures = nullptr;
+		if (metadata.contains("textures") && metadata["textures"].is_array()) {
+			textures = &metadata["textures"];
+		} else if (metadata.is_array()) {
+			textures = &metadata;
+		}
+		if (!textures) {
+			return;
+		}
+
+		for (std::size_t slot = 0; slot < textures->size(); ++slot) {
+			const auto& entry = (*textures)[slot];
+			if (entry.is_string()) {
+				ApplyBrniflyTextureSlot(result, slot, entry.get<std::string>());
+			}
+		}
+	}
+
 	std::optional<pxr::TfToken> MapOpenPBRInputToLegacyTextureSlot(const pxr::TfToken& name) {
 		const std::string normalized = NormalizeUsdIdentifier(name.GetString());
 		if (normalized == "basecolor") {
@@ -884,11 +967,27 @@ namespace USDLoader {
 				spdlog::warn(
 					"Failed to parse BRNifly material metadata '{}' on '{}': {}",
 					key.GetString(),
+				prim.GetPath().GetString(),
+				ex.what());
+			}
+		};
+		auto applyTextureJson = [&] {
+			std::string metadataJson;
+			if (!TryGetCustomString(prim, TfToken("brnifly:textures"), metadataJson)) {
+				return;
+			}
+			try {
+				ApplyBrniflyTextureMetadata(result, json::parse(metadataJson));
+			}
+			catch (const std::exception& ex) {
+				spdlog::warn(
+					"Failed to parse BRNifly texture metadata on '{}': {}",
 					prim.GetPath().GetString(),
 					ex.what());
 			}
 		};
 		applyCustomJson(TfToken("brnifly:material"));
+		applyTextureJson();
 		applyCustomJson(TfToken("brnifly:shader"));
 		applyCustomJson(TfToken("brnifly:alphaProperty"));
 	}
@@ -1061,6 +1160,11 @@ namespace USDLoader {
                 }
 
                 textureBinding->texture = tex;
+                textureBinding->sourcePath = logicalPath;
+				if (tex) {
+					tex->Meta().filePath = logicalPath;
+					tex->Meta().preferSRGB = preferSRGB;
+				}
                 textureBinding->channels = SwizzleToIndices(swizzle);
                 if (name == TfToken("diffuseColor") && textureBinding->channels.size() == 3) {
                     textureBinding->channels.push_back(3);

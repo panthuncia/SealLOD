@@ -1823,12 +1823,16 @@ std::vector<ShapeData> ReadShapes(const NiflyApi& api, void* nifHandle, std::vec
         api.getTriangles(nifHandle, shapeHandle, shape.triangles.data(), static_cast<int>(shape.triangles.size()), 0);
 
         if (api.getShaderTextureSlot) {
+            shape.textures.resize(10);
             for (int slot = 0; slot < 10; ++slot) {
                 std::array<char, 1024> textureBuffer{};
                 const int len = api.getShaderTextureSlot(nifHandle, shapeHandle, slot, textureBuffer.data(), static_cast<int>(textureBuffer.size()));
                 if (len > 0 && textureBuffer[0] != '\0') {
-                    shape.textures.emplace_back(textureBuffer.data());
+                    shape.textures[static_cast<size_t>(slot)] = textureBuffer.data();
                 }
+            }
+            while (!shape.textures.empty() && shape.textures.back().empty()) {
+                shape.textures.pop_back();
             }
         }
 

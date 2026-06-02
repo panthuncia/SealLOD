@@ -1400,7 +1400,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("rayTracedReflectionLodBias", 0.0f);
     settingsManager.registerSetting<bool>("useAsyncCompute", false);
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
-	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, false);
+	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", true);
     settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphDisableCaching", false);
@@ -3060,20 +3060,20 @@ void Renderer::CreateRenderGraph() {
     newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
     newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
 
-    DebugGridPass::Params params;
-    params.planeY = 0.0f;
-    params.minorCellSize = 1.0;
-    params.majorCellSize = 10;
-    params.axisHalfWidthWorld = 0.5f * 0.04f * params.minorCellSize;
-    params.minorLineWidth = 0.01f;
-    params.majorLineWidth = 0.02f;
-    params.minorOpacity = 0.3f;
-	params.majorOpacity = 0.55f;
-	params.axisOpacity = 0.85f;
-    params.overallOpacity = 1.0f;
+    // DebugGridPass::Params params;
+    // params.planeY = 0.0f;
+    // params.minorCellSize = 1.0;
+    // params.majorCellSize = 10;
+    // params.axisHalfWidthWorld = 0.5f * 0.04f * params.minorCellSize;
+    // params.minorLineWidth = 0.01f;
+    // params.majorLineWidth = 0.02f;
+    // params.minorOpacity = 0.3f;
+	// params.majorOpacity = 0.55f;
+	// params.axisOpacity = 0.85f;
+    // params.overallOpacity = 1.0f;
 
-	newGraph->BuildComputePass<DebugGridPass>("DebugGridPass", params);
-    newGraph->SetPassTechnique("DebugGridPass", "Debug::Overlays");
+	// newGraph->BuildComputePass<DebugGridPass>("DebugGridPass", params);
+    // newGraph->SetPassTechnique("DebugGridPass", "Debug::Overlays");
 
     newGraph->BuildRenderPass<UpscalingPass>("UpscalingPass");
     newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");

@@ -29,6 +29,7 @@ struct TextureAndConstant {
 	std::vector<uint32_t> channels; // For swizzling texture channels, e.g. R, G, B, A
 	uint32_t uvSetIndex = 0;
 	std::string uvSetName;
+	std::string sourcePath;
 };
 
 struct OpenPBRTextureBindings {

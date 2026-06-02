@@ -119,6 +119,18 @@ Material::Material(const std::string& name,
 Material::~Material() {
 }
 
+void Material::SetLogicalTextureSourcePaths(const MaterialDescription& desc)
+{
+    m_baseColorSourcePath = desc.baseColor.sourcePath;
+    m_normalSourcePath = desc.normal.sourcePath;
+    m_aoSourcePath = desc.aoMap.sourcePath;
+    m_heightSourcePath = desc.heightMap.sourcePath;
+    m_roughnessSourcePath = desc.roughness.sourcePath;
+    m_metallicSourcePath = desc.metallic.sourcePath;
+    m_emissiveSourcePath = desc.emissive.sourcePath;
+    m_opacitySourcePath = desc.opacity.sourcePath;
+}
+
 void Material::ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const {
     auto visitTexture = [&](const std::shared_ptr<TextureAsset>& texture) {
         if (texture) {
@@ -145,6 +157,13 @@ void Material::ForEachReferencedTexture(const std::function<void(const std::shar
 
 MaterialDescription Material::ToCacheDescription() const
 {
+    auto sourcePathFor = [](const std::string& logicalPath, const std::shared_ptr<TextureAsset>& texture) {
+        if (!logicalPath.empty()) {
+            return logicalPath;
+        }
+        return texture ? texture->Meta().filePath : std::string{};
+    };
+
     MaterialDescription desc{};
     desc.name = m_name;
     desc.diffuseColor = m_baseColorFactor;
@@ -165,20 +184,28 @@ MaterialDescription Material::ToCacheDescription() const
 
     desc.baseColor = TextureAndConstant{ m_baseColorTexture, 1.0f, m_baseColorChannels };
     desc.baseColor.uvSetIndex = m_baseColorUvSetIndex;
+    desc.baseColor.sourcePath = sourcePathFor(m_baseColorSourcePath, m_baseColorTexture);
     desc.normal = TextureAndConstant{ m_normalTexture, 1.0f, m_normalChannels };
     desc.normal.uvSetIndex = m_normalUvSetIndex;
+    desc.normal.sourcePath = sourcePathFor(m_normalSourcePath, m_normalTexture);
     desc.aoMap = TextureAndConstant{ m_aoMap, 1.0f, m_aoChannel };
     desc.aoMap.uvSetIndex = m_aoUvSetIndex;
+    desc.aoMap.sourcePath = sourcePathFor(m_aoSourcePath, m_aoMap);
     desc.heightMap = TextureAndConstant{ m_heightMap, 1.0f, m_heightChannel };
     desc.heightMap.uvSetIndex = m_heightUvSetIndex;
+    desc.heightMap.sourcePath = sourcePathFor(m_heightSourcePath, m_heightMap);
     desc.metallic = TextureAndConstant{ m_metallicTexture, m_metallicFactor, m_metallicChannel };
     desc.metallic.uvSetIndex = m_metallicUvSetIndex;
+    desc.metallic.sourcePath = sourcePathFor(m_metallicSourcePath, m_metallicTexture);
     desc.roughness = TextureAndConstant{ m_roughnessTexture, m_roughnessFactor, m_roughnessChannel };
     desc.roughness.uvSetIndex = m_roughnessUvSetIndex;
+    desc.roughness.sourcePath = sourcePathFor(m_roughnessSourcePath, m_roughnessTexture);
     desc.emissive = TextureAndConstant{ m_emissiveTexture, 1.0f, m_emissiveChannels };
     desc.emissive.uvSetIndex = m_emissiveUvSetIndex;
+    desc.emissive.sourcePath = sourcePathFor(m_emissiveSourcePath, m_emissiveTexture);
     desc.opacity = TextureAndConstant{ m_opacityTexture, m_baseColorFactor.w };
     desc.opacity.uvSetIndex = m_opacityUvSetIndex;
+    desc.opacity.sourcePath = sourcePathFor(m_opacitySourcePath, m_opacityTexture);
     desc.openPBR = m_openPBRMaterial;
     desc.openPBRTextures = m_openPBRTextures;
     desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
