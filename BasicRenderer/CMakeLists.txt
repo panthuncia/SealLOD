@@ -415,24 +415,33 @@ function(add_symlink_or_copy_per_config source destination IS_DIRECTORY target_n
         get_filename_component(target_name "${destination}" NAME)
     endif()
 
+    set(_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/${target_name}.stamp")
+    set(_sync_stamp_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>")
+
     if (IS_DIRECTORY)
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing directory ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove_directory "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy_directory,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
         )
     else()
-        add_custom_target(
-            "${target_name}_sync" ALL
+        add_custom_command(
+            OUTPUT "${_sync_stamp}"
             COMMENT "Syncing file ${destination} <- ${source}"
             VERBATIM
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_sync_stamp_dir}"
             COMMAND ${CMAKE_COMMAND} -E remove "${destination}"
             COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Release>,copy,create_symlink> "${source}" "${destination}"
+            COMMAND ${CMAKE_COMMAND} -E touch "${_sync_stamp}"
+            DEPENDS "${source}"
         )
     endif()
 
+    add_custom_target("${target_name}_sync" DEPENDS "${_sync_stamp}")
     add_dependencies(${PROJECT_NAME} "${target_name}_sync")
     add_dependencies(${BASICRENDERER_DEMO_TARGET} "${target_name}_sync")
 endfunction()
@@ -753,16 +762,21 @@ add_symlink_or_copy_per_config(
     "tbb"
 )
 
-add_custom_target(
-    tbb_config_sync ALL
+set(_tbb_config_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/tbb_config.stamp")
+add_custom_command(
+    OUTPUT "${_tbb_config_sync_stamp}"
     COMMENT "Syncing config-specific TBB runtime"
     VERBATIM
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>"
     COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_DIR=${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin"
         "-DDESTINATION_DIR=${BASICRENDERER_OUTPUT_ROOT}"
         "-DCONFIG=$<CONFIG>"
         -P "${CMAKE_CURRENT_LIST_DIR}/cmake/SyncTbbRuntime.cmake"
+    COMMAND ${CMAKE_COMMAND} -E touch "${_tbb_config_sync_stamp}"
+    DEPENDS "${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin/tbb.dll"
 )
+add_custom_target(tbb_config_sync DEPENDS "${_tbb_config_sync_stamp}")
 add_dependencies(${PROJECT_NAME} tbb_config_sync)
 add_dependencies(${BASICRENDERER_DEMO_TARGET} tbb_config_sync)
 

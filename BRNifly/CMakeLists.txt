@@ -62,12 +62,18 @@ endif()
 target_compile_definitions(BRNifly PRIVATE NOMINMAX _UNICODE UNICODE)
 
 set(BRNIFLY_USD_RUNTIME_ROOT "${BRNIFLY_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>")
-add_custom_command(TARGET BRNifly POST_BUILD
+set(BRNIFLY_USD_RUNTIME_SYNC_STAMP "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/BRNiflyUsdRuntimeSync.stamp")
+add_custom_command(
+    OUTPUT "${BRNIFLY_USD_RUNTIME_SYNC_STAMP}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>"
     COMMAND ${CMAKE_COMMAND}
         "-DUSD_RUNTIME_ROOT=${BRNIFLY_USD_RUNTIME_ROOT}"
         "-DTARGET_DIR=$<TARGET_FILE_DIR:BRNifly>"
         "-DCONFIG=$<CONFIG>"
         -P "${CMAKE_CURRENT_LIST_DIR}/cmake/SyncUsdRuntime.cmake"
+    COMMAND ${CMAKE_COMMAND} -E touch "${BRNIFLY_USD_RUNTIME_SYNC_STAMP}"
+    DEPENDS BRNifly
     COMMENT "Syncing OpenUSD runtime dependencies for BRNifly"
     VERBATIM
 )
+add_custom_target(BRNiflyUsdRuntimeSync DEPENDS "${BRNIFLY_USD_RUNTIME_SYNC_STAMP}")
