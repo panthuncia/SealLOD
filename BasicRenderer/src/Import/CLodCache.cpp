@@ -556,7 +556,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // UV quantization heuristic version
 		boost::hash_combine(seed, static_cast<uint32_t>(7));  // USD compliance layout + inherited primvar card isolation
 		boost::hash_combine(seed, static_cast<uint32_t>(27));  // voxel page descriptors use local segment addressing and SGGX voxel attributes
-		boost::hash_combine(seed, static_cast<uint32_t>(4));  // traversal leaves use owner group error; segments split by refined domain
+		boost::hash_combine(seed, static_cast<uint32_t>(5));  // traversal leaves use owner group error; sloppy fallback error factor defaults to 2
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
@@ -569,6 +569,8 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_CARRY_ZERO_COVERAGE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_PRUNING");
+		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
+		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
 		return static_cast<uint64_t>(seed);
 	}
 

@@ -5544,12 +5544,13 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	config.optimize_bounds = true;
 
 	const bool disableSloppyFallback = settings.disableSloppyFallback;
+	const float sloppyFallbackErrorFactor = std::max(1.0f, settings.sloppyFallbackErrorFactor);
 	const float lodErrorMergeAdditive = std::max(0.0f, settings.lodErrorMergeAdditive);
 	const float lodErrorMergePrevious = std::max(0.0f, settings.lodErrorMergePrevious);
 	const uint32_t partitionSizeFloor = std::max<uint32_t>(1u, settings.partitionSizeFloor);
 
-	config.simplify_fallback_sloppy = true; // TODO: Useful?
-	config.simplify_error_factor_sloppy = 100.0f; // Scales error for sloppy groups
+	config.simplify_fallback_sloppy = !disableSloppyFallback; // TODO: Useful?
+	config.simplify_error_factor_sloppy = sloppyFallbackErrorFactor; // Scales error for sloppy groups
 
 	config.simplify_fallback_permissive = false; // Simplify in permissive, disable fallback-only
 

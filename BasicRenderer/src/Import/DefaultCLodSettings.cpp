@@ -4,6 +4,7 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings()
 {
     ClusterLODBuilderSettings settings;
     settings.disableSloppyFallback = false;
+    settings.sloppyFallbackErrorFactor = 2.0f;
     settings.lodErrorMergePrevious = 1.5f;
     settings.lodErrorMergeAdditive = 0.0f;
     settings.partitionSizeFloor = 8u;

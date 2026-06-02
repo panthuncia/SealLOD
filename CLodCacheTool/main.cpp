@@ -338,6 +338,151 @@ static void WriteClusterLODReport(
         << " unreachable_nodes=" << unreachableNodes
         << " duplicate_segment_leaf_refs=" << duplicateSegmentLeafRefs << "\n";
 
+    struct DepthIntervalStats {
+        uint32_t segments = 0u;
+        uint64_t meshlets = 0u;
+        float minLower = std::numeric_limits<float>::max();
+        float maxLower = 0.0f;
+        float minUpper = std::numeric_limits<float>::max();
+        float maxUpper = 0.0f;
+    };
+
+    std::map<int32_t, DepthIntervalStats> intervalStatsByDepth;
+    std::vector<float> thresholdCandidates;
+    thresholdCandidates.reserve(groups.size() * 2u + 1u);
+    thresholdCandidates.push_back(0.0f);
+
+    for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
+        const ClusterLODGroup& group = groups[groupIndex];
+        if (std::isfinite(group.bounds.error) && group.bounds.error > 0.0f) {
+            thresholdCandidates.push_back(group.bounds.error);
+        }
+        if (group.firstSegment + group.segmentCount > segments.size()) {
+            continue;
+        }
+
+        for (uint32_t offset = 0; offset < group.segmentCount; ++offset) {
+            const ClusterLODGroupSegment& segment = segments[group.firstSegment + offset];
+            const float upper = group.bounds.error;
+            const float lower = segment.refinedGroup >= 0 && static_cast<uint32_t>(segment.refinedGroup) < groups.size()
+                ? groups[static_cast<uint32_t>(segment.refinedGroup)].bounds.error
+                : 0.0f;
+            if (!std::isfinite(upper) || !std::isfinite(lower) || upper < lower) {
+                continue;
+            }
+
+            DepthIntervalStats& stats = intervalStatsByDepth[group.depth];
+            stats.segments++;
+            stats.meshlets += segment.meshletCount;
+            stats.minLower = std::min(stats.minLower, lower);
+            stats.maxLower = std::max(stats.maxLower, lower);
+            stats.minUpper = std::min(stats.minUpper, upper);
+            stats.maxUpper = std::max(stats.maxUpper, upper);
+        }
+    }
+
+    std::sort(thresholdCandidates.begin(), thresholdCandidates.end());
+    thresholdCandidates.erase(
+        std::unique(
+            thresholdCandidates.begin(),
+            thresholdCandidates.end(),
+            [](float a, float b) {
+                const float scale = std::max({ 1.0f, std::fabs(a), std::fabs(b) });
+                return std::fabs(a - b) <= scale * 1.0e-5f;
+            }),
+        thresholdCandidates.end());
+
+    std::vector<float> sweepThresholds;
+    sweepThresholds.reserve(thresholdCandidates.size() * 2u);
+    for (size_t i = 0; i < thresholdCandidates.size(); ++i) {
+        sweepThresholds.push_back(thresholdCandidates[i]);
+        if (i + 1u < thresholdCandidates.size()) {
+            const float a = thresholdCandidates[i];
+            const float b = thresholdCandidates[i + 1u];
+            if (b > a) {
+                sweepThresholds.push_back(a > 0.0f ? std::sqrt(a * b) : b * 0.5f);
+            }
+        }
+    }
+
+    out << "\nDAG interval coverage by owner depth:\n";
+    out << "depth,segments,meshlets,min_child_error,max_child_error,min_owner_error,max_owner_error\n";
+    for (const auto& [depth, stats] : intervalStatsByDepth) {
+        out << depth << ","
+            << stats.segments << ","
+            << stats.meshlets << ","
+            << (stats.segments != 0u ? stats.minLower : 0.0f) << ","
+            << stats.maxLower << ","
+            << (stats.segments != 0u ? stats.minUpper : 0.0f) << ","
+            << stats.maxUpper << "\n";
+    }
+
+    out << "\nDAG threshold sweep (mesh-space interval rule, first 96):\n";
+    out << "threshold,total_segments,total_meshlets,dominant_depth,active_depths\n";
+    uint32_t sweepRows = 0u;
+    int32_t previousDominantDepth = std::numeric_limits<int32_t>::min();
+    std::string previousActiveDepths;
+    for (float threshold : sweepThresholds) {
+        std::map<int32_t, std::pair<uint32_t, uint64_t>> activeByDepth;
+        uint32_t totalSegments = 0u;
+        uint64_t totalMeshlets = 0u;
+
+        for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
+            const ClusterLODGroup& group = groups[groupIndex];
+            if (!std::isfinite(group.bounds.error) || group.bounds.error < threshold ||
+                group.firstSegment + group.segmentCount > segments.size()) {
+                continue;
+            }
+
+            for (uint32_t offset = 0; offset < group.segmentCount; ++offset) {
+                const ClusterLODGroupSegment& segment = segments[group.firstSegment + offset];
+                const float childError = segment.refinedGroup >= 0 && static_cast<uint32_t>(segment.refinedGroup) < groups.size()
+                    ? groups[static_cast<uint32_t>(segment.refinedGroup)].bounds.error
+                    : 0.0f;
+                if (!std::isfinite(childError) || childError > threshold) {
+                    continue;
+                }
+
+                totalSegments++;
+                totalMeshlets += segment.meshletCount;
+                auto& depthStats = activeByDepth[group.depth];
+                depthStats.first++;
+                depthStats.second += segment.meshletCount;
+            }
+        }
+
+        int32_t dominantDepth = -1;
+        uint64_t dominantMeshlets = 0u;
+        std::string activeDepths;
+        for (const auto& [depth, stats] : activeByDepth) {
+            if (!activeDepths.empty()) {
+                activeDepths += ";";
+            }
+            activeDepths += std::to_string(depth) + ":" + std::to_string(stats.first) + "/" + std::to_string(stats.second);
+            if (stats.second > dominantMeshlets) {
+                dominantMeshlets = stats.second;
+                dominantDepth = depth;
+            }
+        }
+
+        const bool changed = dominantDepth != previousDominantDepth || activeDepths != previousActiveDepths;
+        if (!changed) {
+            continue;
+        }
+
+        out << threshold << ","
+            << totalSegments << ","
+            << totalMeshlets << ","
+            << dominantDepth << ","
+            << activeDepths << "\n";
+
+        previousDominantDepth = dominantDepth;
+        previousActiveDepths = std::move(activeDepths);
+        if (++sweepRows >= 96u) {
+            break;
+        }
+    }
+
     out << "\nLOD depth summary:\n";
     out << "depth,groups,meshlets,terminal_segments,root_node,root_kind,root_children,root_error,root_lod_radius,range_offset,range_count\n";
     for (uint32_t depth = 0; depth < static_cast<uint32_t>(data.lodLevelRoots.size()); ++depth) {
@@ -481,6 +626,8 @@ static bool TryConsumeOption(const std::string& arg) {
     constexpr const char* biasPrefix = "--clod-voxel-acceptance-bias=";
     constexpr const char* opacityPrefix = "--clod-voxel-opacity-threshold=";
     constexpr const char* pruningPrefix = "--clod-voxel-pruning=";
+    constexpr const char* disableSloppyPrefix = "--clod-disable-sloppy-fallback=";
+    constexpr const char* sloppyFactorPrefix = "--clod-sloppy-error-factor=";
 
     auto consumeValue = [&arg](const char* prefix, const char* envName) -> bool {
         const std::string prefixString(prefix);
@@ -517,7 +664,9 @@ static bool TryConsumeOption(const std::string& arg) {
         consumeValue(growthPrefix, "BASICRENDERER_CLOD_VOXEL_GROWTH") ||
         consumeValue(biasPrefix, "BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS") ||
         consumeValue(opacityPrefix, "BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD") ||
-        consumeValue(pruningPrefix, "BASICRENDERER_CLOD_VOXEL_PRUNING");
+        consumeValue(pruningPrefix, "BASICRENDERER_CLOD_VOXEL_PRUNING") ||
+        consumeValue(disableSloppyPrefix, "BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK") ||
+        consumeValue(sloppyFactorPrefix, "BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
 }
 
 // Processing
