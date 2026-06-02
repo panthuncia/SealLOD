@@ -11,6 +11,8 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <memory>
+#include <mutex>
 
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/tokens.h>
@@ -225,6 +227,114 @@ static DirectX::XMUINT3 DecodeReyesTessellationTriangleIndices(std::uint32_t pac
 	};
 }
 
+struct TessellationPattern
+{
+	std::vector<DirectX::XMFLOAT3> vertices;
+	std::vector<DirectX::XMUINT3> triangles;
+	bool fromReyesTable{ false };
+};
+
+static std::uint32_t TriangularLatticeVertexIndex(std::uint32_t subdivision, std::uint32_t i, std::uint32_t j)
+{
+	return i * (subdivision + 1u) - (i * (i - 1u)) / 2u + j;
+}
+
+static std::shared_ptr<const TessellationPattern> BuildReyesTessellationPattern(std::uint32_t subdivision)
+{
+	const ReyesTessellationTableData& reyesTable = GetReyesTessellationTableData();
+	const std::uint32_t configIndex = ReyesTessellationLookupIndex(subdivision, subdivision, subdivision);
+	if (configIndex >= reyesTable.configs.size()) {
+		return nullptr;
+	}
+
+	const CLodReyesTessTableConfigEntry& config = reyesTable.configs[configIndex];
+	if (config.numVertices == 0u || config.numTriangles == 0u) {
+		return nullptr;
+	}
+
+	auto pattern = std::make_shared<TessellationPattern>();
+	pattern->fromReyesTable = true;
+	pattern->vertices.reserve(config.numVertices);
+	for (std::uint32_t i = 0; i < config.numVertices; ++i) {
+		pattern->vertices.push_back(DecodeReyesTessellationVertexBarycentrics(reyesTable.vertices[config.firstVertex + i]));
+	}
+	pattern->triangles.reserve(config.numTriangles);
+	for (std::uint32_t i = 0; i < config.numTriangles; ++i) {
+		pattern->triangles.push_back(DecodeReyesTessellationTriangleIndices(reyesTable.triangles[config.firstTriangle + i]));
+	}
+	return pattern;
+}
+
+static std::shared_ptr<const TessellationPattern> BuildLatticeTessellationPattern(std::uint32_t subdivision)
+{
+	if (subdivision == 0u) {
+		return nullptr;
+	}
+
+	const std::uint64_t vertexCount64 =
+		(static_cast<std::uint64_t>(subdivision) + 1ull) *
+		(static_cast<std::uint64_t>(subdivision) + 2ull) / 2ull;
+	const std::uint64_t triangleCount64 = static_cast<std::uint64_t>(subdivision) * subdivision;
+	if (vertexCount64 > std::numeric_limits<std::uint32_t>::max() ||
+		triangleCount64 > std::numeric_limits<std::uint32_t>::max()) {
+		return nullptr;
+	}
+
+	auto pattern = std::make_shared<TessellationPattern>();
+	pattern->vertices.reserve(static_cast<size_t>(vertexCount64));
+	pattern->triangles.reserve(static_cast<size_t>(triangleCount64));
+
+	const float invSubdivision = 1.0f / static_cast<float>(subdivision);
+	for (std::uint32_t i = 0; i <= subdivision; ++i) {
+		for (std::uint32_t j = 0; j <= subdivision - i; ++j) {
+			const float wb = static_cast<float>(i) * invSubdivision;
+			const float wc = static_cast<float>(j) * invSubdivision;
+			pattern->vertices.push_back(DirectX::XMFLOAT3{ 1.0f - wb - wc, wb, wc });
+		}
+	}
+
+	for (std::uint32_t i = 0; i < subdivision; ++i) {
+		for (std::uint32_t j = 0; j < subdivision - i; ++j) {
+			pattern->triangles.push_back(DirectX::XMUINT3{
+				TriangularLatticeVertexIndex(subdivision, i, j),
+				TriangularLatticeVertexIndex(subdivision, i + 1u, j),
+				TriangularLatticeVertexIndex(subdivision, i, j + 1u)
+			});
+			if (j + 1u < subdivision - i) {
+				pattern->triangles.push_back(DirectX::XMUINT3{
+					TriangularLatticeVertexIndex(subdivision, i + 1u, j),
+					TriangularLatticeVertexIndex(subdivision, i + 1u, j + 1u),
+					TriangularLatticeVertexIndex(subdivision, i, j + 1u)
+				});
+			}
+		}
+	}
+
+	return pattern;
+}
+
+static std::shared_ptr<const TessellationPattern> GetTessellationPattern(std::uint32_t subdivision)
+{
+	static std::mutex cacheMutex;
+	static std::unordered_map<std::uint32_t, std::shared_ptr<const TessellationPattern>> cache;
+
+	std::lock_guard<std::mutex> lock(cacheMutex);
+	if (auto it = cache.find(subdivision); it != cache.end()) {
+		return it->second;
+	}
+
+	auto pattern = subdivision <= 11u
+		? BuildReyesTessellationPattern(subdivision)
+		: BuildLatticeTessellationPattern(subdivision);
+	if (!pattern) {
+		pattern = BuildLatticeTessellationPattern(subdivision);
+	}
+	if (pattern) {
+		cache.emplace(subdivision, pattern);
+	}
+	return pattern;
+}
+
 static void InterpolateFloatTuple(
 	std::byte* dst,
 	const std::byte* a,
@@ -346,121 +456,45 @@ static void TessellateExtractedTriangles(
 	}
 
 	const std::uint64_t inputTriangleCount = indices.size() / 3u;
-	const std::uint64_t outputTriangleCount = inputTriangleCount * subdivision * subdivision;
-	const std::uint64_t outputVertexCount = outputTriangleCount * 3u;
-	if (outputVertexCount > std::numeric_limits<UINT32>::max()) {
+	const std::shared_ptr<const TessellationPattern> pattern = GetTessellationPattern(subdivision);
+	if (!pattern || pattern->vertices.empty() || pattern->triangles.empty()) {
 		spdlog::warn(
-			"Mesh '{}' tessellation factor {} would produce {} vertices; skipping tessellation.",
+			"Mesh '{}' tessellation factor {} subdivision {} could not build a tessellation pattern; skipping tessellation.",
 			primName,
 			tessellationFactor,
-			outputVertexCount);
+			subdivision);
 		return;
 	}
 
-	const ReyesTessellationTableData& reyesTable = GetReyesTessellationTableData();
-	const bool useReyesTable =
-		subdivision <= 11u &&
-		ReyesTessellationLookupIndex(subdivision, subdivision, subdivision) < reyesTable.configs.size();
-	if (useReyesTable) {
-		const std::uint32_t configIndex = ReyesTessellationLookupIndex(subdivision, subdivision, subdivision);
-		const CLodReyesTessTableConfigEntry& config = reyesTable.configs[configIndex];
-		if (config.numVertices != 0u && config.numTriangles != 0u) {
-			const std::uint64_t tableOutputVertexCount = inputTriangleCount * config.numVertices;
-			if (tableOutputVertexCount > std::numeric_limits<UINT32>::max()) {
-				spdlog::warn(
-					"Mesh '{}' Reyes-table tessellation factor {} would produce {} vertices; skipping tessellation.",
-					primName,
-					tessellationFactor,
-					tableOutputVertexCount);
-				return;
-			}
+	const std::uint64_t outputTriangleCount = inputTriangleCount * static_cast<std::uint64_t>(pattern->triangles.size());
+	const std::uint64_t outputVertexCount = inputTriangleCount * static_cast<std::uint64_t>(pattern->vertices.size());
+	if (outputVertexCount > std::numeric_limits<UINT32>::max() ||
+		outputTriangleCount > (std::numeric_limits<std::uint64_t>::max() / 3ull)) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} subdivision {} would produce {} vertices and {} triangles; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			subdivision,
+			outputVertexCount,
+			outputTriangleCount);
+		return;
+	}
 
-			std::vector<std::byte> tessellatedVertices;
-			std::vector<UINT32> tessellatedIndices;
-			tessellatedVertices.reserve(static_cast<size_t>(tableOutputVertexCount) * static_cast<size_t>(vertexSize));
-			tessellatedIndices.reserve(static_cast<size_t>(inputTriangleCount) * static_cast<size_t>(config.numTriangles) * 3u);
-
-			const bool hasSkinning = skinningData && *skinningData && skinningVertexSize != 0u;
-			std::vector<std::byte> tessellatedSkinningVertices;
-			if (hasSkinning) {
-				tessellatedSkinningVertices.reserve(static_cast<size_t>(tableOutputVertexCount) * static_cast<size_t>(skinningVertexSize));
-			}
-
-			std::vector<MeshUvSetData> tessellatedUvSets;
-			tessellatedUvSets.resize(uvSets.size());
-			for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
-				tessellatedUvSets[uvSetIndex].name = uvSets[uvSetIndex].name;
-				tessellatedUvSets[uvSetIndex].values.reserve(static_cast<size_t>(tableOutputVertexCount));
-			}
-
-			const auto emitVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, float wa, float wb, float wc) {
-				const std::byte* a = rawData->data() + static_cast<size_t>(ia) * vertexSize;
-				const std::byte* b = rawData->data() + static_cast<size_t>(ib) * vertexSize;
-				const std::byte* c = rawData->data() + static_cast<size_t>(ic) * vertexSize;
-				WriteInterpolatedVertex(tessellatedVertices, a, b, c, vertexSize, vertexFlags, wa, wb, wc);
-				if (hasSkinning) {
-					const std::byte* sa = (*skinningData)->data() + static_cast<size_t>(ia) * skinningVertexSize;
-					const std::byte* sb = (*skinningData)->data() + static_cast<size_t>(ib) * skinningVertexSize;
-					const std::byte* sc = (*skinningData)->data() + static_cast<size_t>(ic) * skinningVertexSize;
-					WriteInterpolatedSkinningVertex(tessellatedSkinningVertices, sa, sb, sc, skinningVertexSize, wa, wb, wc);
-				}
-				for (size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
-					const auto sampleUv = [&](UINT32 index) {
-						return index < uvSets[uvSetIndex].values.size()
-							? uvSets[uvSetIndex].values[index]
-							: DirectX::XMFLOAT2{ 0.0f, 0.0f };
-					};
-					const DirectX::XMFLOAT2 uva = sampleUv(ia);
-					const DirectX::XMFLOAT2 uvb = sampleUv(ib);
-					const DirectX::XMFLOAT2 uvc = sampleUv(ic);
-					tessellatedUvSets[uvSetIndex].values.push_back(DirectX::XMFLOAT2{
-						uva.x * wa + uvb.x * wb + uvc.x * wc,
-						uva.y * wa + uvb.y * wb + uvc.y * wc });
-				}
-			};
-
-			for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
-				const UINT32 ia = indices[tri + 0u];
-				const UINT32 ib = indices[tri + 1u];
-				const UINT32 ic = indices[tri + 2u];
-				const auto baseVertex = static_cast<UINT32>(tessellatedVertices.size() / vertexSize);
-				for (std::uint32_t localVertexIndex = 0; localVertexIndex < config.numVertices; ++localVertexIndex) {
-					const DirectX::XMFLOAT3 bary = DecodeReyesTessellationVertexBarycentrics(
-						reyesTable.vertices[config.firstVertex + localVertexIndex]);
-					emitVertex(ia, ib, ic, bary.x, bary.y, bary.z);
-				}
-				for (std::uint32_t localTriangleIndex = 0; localTriangleIndex < config.numTriangles; ++localTriangleIndex) {
-					const DirectX::XMUINT3 local = DecodeReyesTessellationTriangleIndices(
-						reyesTable.triangles[config.firstTriangle + localTriangleIndex]);
-					tessellatedIndices.push_back(baseVertex + local.x);
-					tessellatedIndices.push_back(baseVertex + local.y);
-					tessellatedIndices.push_back(baseVertex + local.z);
-				}
-			}
-
-			*rawData = std::move(tessellatedVertices);
-			indices = std::move(tessellatedIndices);
-			if (hasSkinning) {
-				**skinningData = std::move(tessellatedSkinningVertices);
-			}
-			uvSets = std::move(tessellatedUvSets);
-
-			spdlog::info(
-				"Mesh '{}' tessellated with Reyes table: requested_factor={} subdivision={} triangles {} -> {} vertices_per_source_triangle={}",
-				primName,
-				tessellationFactor,
-				subdivision,
-				inputTriangleCount,
-				inputTriangleCount * config.numTriangles,
-				config.numVertices);
-			return;
-		}
+	const std::uint64_t outputIndexCount = outputTriangleCount * 3ull;
+	if (outputIndexCount > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) ||
+		outputVertexCount > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)() / std::max<std::size_t>(1u, vertexSize))) {
+		spdlog::warn(
+			"Mesh '{}' tessellation factor {} subdivision {} would produce too many indices for this process; skipping tessellation.",
+			primName,
+			tessellationFactor,
+			subdivision);
+		return;
 	}
 
 	std::vector<std::byte> tessellatedVertices;
 	std::vector<UINT32> tessellatedIndices;
 	tessellatedVertices.reserve(static_cast<size_t>(outputVertexCount) * static_cast<size_t>(vertexSize));
-	tessellatedIndices.reserve(static_cast<size_t>(outputVertexCount));
+	tessellatedIndices.reserve(static_cast<size_t>(outputIndexCount));
 
 	const bool hasSkinning = skinningData && *skinningData && skinningVertexSize != 0u;
 	std::vector<std::byte> tessellatedSkinningVertices;
@@ -476,7 +510,6 @@ static void TessellateExtractedTriangles(
 	}
 
 	const auto emitVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, float wa, float wb, float wc) {
-		const auto outIndex = static_cast<UINT32>(tessellatedIndices.size());
 		const std::byte* a = rawData->data() + static_cast<size_t>(ia) * vertexSize;
 		const std::byte* b = rawData->data() + static_cast<size_t>(ib) * vertexSize;
 		const std::byte* c = rawData->data() + static_cast<size_t>(ic) * vertexSize;
@@ -500,32 +533,20 @@ static void TessellateExtractedTriangles(
 				uva.x * wa + uvb.x * wb + uvc.x * wc,
 				uva.y * wa + uvb.y * wb + uvc.y * wc });
 		}
-		tessellatedIndices.push_back(outIndex);
-	};
-
-	const auto emitBaryVertex = [&](UINT32 ia, UINT32 ib, UINT32 ic, std::uint32_t i, std::uint32_t j) {
-		const float invSubdivision = 1.0f / static_cast<float>(subdivision);
-		const float wb = static_cast<float>(i) * invSubdivision;
-		const float wc = static_cast<float>(j) * invSubdivision;
-		const float wa = 1.0f - wb - wc;
-		emitVertex(ia, ib, ic, wa, wb, wc);
 	};
 
 	for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
 		const UINT32 ia = indices[tri + 0u];
 		const UINT32 ib = indices[tri + 1u];
 		const UINT32 ic = indices[tri + 2u];
-		for (std::uint32_t i = 0; i < subdivision; ++i) {
-			for (std::uint32_t j = 0; j < subdivision - i; ++j) {
-				emitBaryVertex(ia, ib, ic, i, j);
-				emitBaryVertex(ia, ib, ic, i + 1u, j);
-				emitBaryVertex(ia, ib, ic, i, j + 1u);
-				if (j + 1u < subdivision - i) {
-					emitBaryVertex(ia, ib, ic, i + 1u, j);
-					emitBaryVertex(ia, ib, ic, i + 1u, j + 1u);
-					emitBaryVertex(ia, ib, ic, i, j + 1u);
-				}
-			}
+		const auto baseVertex = static_cast<UINT32>(tessellatedVertices.size() / vertexSize);
+		for (const DirectX::XMFLOAT3& bary : pattern->vertices) {
+			emitVertex(ia, ib, ic, bary.x, bary.y, bary.z);
+		}
+		for (const DirectX::XMUINT3& local : pattern->triangles) {
+			tessellatedIndices.push_back(baseVertex + local.x);
+			tessellatedIndices.push_back(baseVertex + local.y);
+			tessellatedIndices.push_back(baseVertex + local.z);
 		}
 	}
 
@@ -537,12 +558,14 @@ static void TessellateExtractedTriangles(
 	uvSets = std::move(tessellatedUvSets);
 
 	spdlog::info(
-		"Mesh '{}' tessellated: requested_factor={} subdivision={} triangles {} -> {}",
+		"Mesh '{}' tessellated: requested_factor={} subdivision={} source={} triangles {} -> {} vertices_per_source_triangle={}",
 		primName,
 		tessellationFactor,
 		subdivision,
+		pattern->fromReyesTable ? "reyes-table" : "lattice",
 		inputTriangleCount,
-		outputTriangleCount);
+		outputTriangleCount,
+		pattern->vertices.size());
 }
 
 static bool HasMultipleAuthoredTimeSamples(const UsdAttribute& attr)
