@@ -305,7 +305,7 @@ struct TerrainQuadrantGPU {
     int cellY;
     unsigned int quadrant;
     unsigned int layerCount;
-    unsigned int layerIndices[6];
+    unsigned int layerIndices[12];
     unsigned int weightAtlasX;
     unsigned int weightAtlasY;
     unsigned int weightAtlasStride;
@@ -323,12 +323,12 @@ struct TerrainSetGPU {
     unsigned int layerCount;
     unsigned int weightAtlas0TextureIndex;
     unsigned int weightAtlas1TextureIndex;
+    unsigned int weightAtlas2TextureIndex;
     unsigned int weightAtlasSamplerIndex;
     unsigned int weightAtlasWidth;
     unsigned int weightAtlasHeight;
     float pad0;
     float pad1;
-    float pad2;
 };
 
 struct PerMaterialOpenPBRCB {

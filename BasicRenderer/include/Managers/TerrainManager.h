@@ -18,6 +18,7 @@ class TextureFactory;
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
+inline constexpr std::uint32_t kTerrainMaxBlendLayers = 12;
 
 struct TerrainLayerDesc
 {
@@ -34,10 +35,10 @@ struct TerrainQuadrantDesc
     std::int32_t cellX = 0;
     std::int32_t cellY = 0;
     std::uint32_t quadrant = 0;
-    std::array<std::uint32_t, 6> layerIndices = {};
+    std::array<std::uint32_t, kTerrainMaxBlendLayers> layerIndices = {};
     std::uint32_t weightAtlasX = 0;
     std::uint32_t weightAtlasY = 0;
-    std::uint32_t weightAtlasStride = 18;
+    std::uint32_t weightAtlasStride = 19;
 };
 
 struct TerrainMaterialDesc
@@ -46,6 +47,7 @@ struct TerrainMaterialDesc
     std::vector<TerrainQuadrantDesc> quadrants;
     std::vector<std::uint8_t> weights0Rgba8;
     std::vector<std::uint8_t> weights1Rgba8;
+    std::vector<std::uint8_t> weights2Rgba8;
     std::uint32_t weightAtlasWidth = 0;
     std::uint32_t weightAtlasHeight = 0;
 };
@@ -79,5 +81,6 @@ private:
     std::shared_ptr<ResourceGroup> m_textureGroup;
     std::shared_ptr<TextureAsset> m_weightAtlas0;
     std::shared_ptr<TextureAsset> m_weightAtlas1;
+    std::shared_ptr<TextureAsset> m_weightAtlas2;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
 };

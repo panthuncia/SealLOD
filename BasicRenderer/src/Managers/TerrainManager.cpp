@@ -18,7 +18,7 @@ namespace {
     std::uint32_t LayerCountForQuadrant(const TerrainQuadrantDesc& desc)
     {
         std::uint32_t count = 1;
-        for (std::uint32_t i = 1; i < 6; ++i) {
+        for (std::uint32_t i = 1; i < kTerrainMaxBlendLayers; ++i) {
             if (desc.layerIndices[i] != 0u) {
                 count = i + 1u;
             }
@@ -30,7 +30,7 @@ namespace {
     {
         TerrainQuadrantGPU result{};
         result.layerCount = 1;
-        result.weightAtlasStride = 18;
+        result.weightAtlasStride = 19;
         return result;
     }
 
@@ -52,6 +52,7 @@ namespace {
         TerrainSetGPU result{};
         result.weightAtlas0TextureIndex = kInvalidDescriptor;
         result.weightAtlas1TextureIndex = kInvalidDescriptor;
+        result.weightAtlas2TextureIndex = kInvalidDescriptor;
         result.weightAtlasSamplerIndex = kInvalidDescriptor;
         return result;
     }
@@ -101,7 +102,7 @@ namespace {
             out.weightAtlasX = q.weightAtlasX;
             out.weightAtlasY = q.weightAtlasY;
             out.weightAtlasStride = q.weightAtlasStride;
-            for (std::uint32_t i = 0; i < 6; ++i) {
+            for (std::uint32_t i = 0; i < kTerrainMaxBlendLayers; ++i) {
                 out.layerIndices[i] = q.layerIndices[i];
             }
         }
@@ -239,6 +240,12 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         desc.weightAtlasHeight,
         desc.weights1Rgba8,
         textureFactory);
+    m_weightAtlas2 = CreateWeightAtlasTexture(
+        "Terrain Weight Atlas 2",
+        desc.weightAtlasWidth,
+        desc.weightAtlasHeight,
+        desc.weights2Rgba8,
+        textureFactory);
 
     TerrainSetGPU set = MakeEmptySet();
     set.minCellX = minCellX;
@@ -262,6 +269,13 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             set.weightAtlasSamplerIndex = m_weightAtlas1->SamplerDescriptorIndex();
         }
         m_textureGroup->AddResource(m_weightAtlas1->ImagePtr());
+    }
+    if (m_weightAtlas2 && m_weightAtlas2->ImagePtr()) {
+        set.weightAtlas2TextureIndex = m_weightAtlas2->ImagePtr()->GetSRVInfo(0).slot.index;
+        if (set.weightAtlasSamplerIndex == kInvalidDescriptor) {
+            set.weightAtlasSamplerIndex = m_weightAtlas2->SamplerDescriptorIndex();
+        }
+        m_textureGroup->AddResource(m_weightAtlas2->ImagePtr());
     }
     m_sets->UpdateAt(0u, set);
     spdlog::info(
@@ -288,10 +302,14 @@ void TerrainManager::ClearActiveTerrain()
         if (m_weightAtlas1 && m_weightAtlas1->ImagePtr()) {
             m_textureGroup->RemoveResource(m_weightAtlas1->ImagePtr().get());
         }
+        if (m_weightAtlas2 && m_weightAtlas2->ImagePtr()) {
+            m_textureGroup->RemoveResource(m_weightAtlas2->ImagePtr().get());
+        }
     }
     m_layerTextures.clear();
     m_weightAtlas0.reset();
     m_weightAtlas1.reset();
+    m_weightAtlas2.reset();
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
     m_quadrants->UpdateAt(0u, MakeFallbackQuadrant());

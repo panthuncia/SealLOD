@@ -408,7 +408,7 @@ struct TerrainQuadrantInfo {
     int cellY;
     uint quadrant;
     uint layerCount;
-    uint layerIndices[6];
+    uint layerIndices[12];
     uint weightAtlasX;
     uint weightAtlasY;
     uint weightAtlasStride;
@@ -426,12 +426,12 @@ struct TerrainSetInfo {
     uint layerCount;
     uint weightAtlas0TextureIndex;
     uint weightAtlas1TextureIndex;
+    uint weightAtlas2TextureIndex;
     uint weightAtlasSamplerIndex;
     uint weightAtlasWidth;
     uint weightAtlasHeight;
     float pad0;
     float pad1;
-    float pad2;
 };
 
 struct OpenPBRMaterialInfo {
