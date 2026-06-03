@@ -56,6 +56,92 @@ float TerrainGetWeight(float4 weights0, float4 weights1, uint slot)
     return weights1.y;
 }
 
+void TerrainLoadPackedWeights(
+    Texture2D<float4> weightAtlas0,
+    Texture2D<float4> weightAtlas1,
+    uint2 texel,
+    out float4 weights0,
+    out float4 weights1)
+{
+    weights0 = weightAtlas0.Load(int3(texel, 0));
+    weights1 = weightAtlas1.Load(int3(texel, 0));
+}
+
+float4 TerrainCubicBSpline(float4 p0, float4 p1, float4 p2, float4 p3, float t)
+{
+    float t2 = t * t;
+    float t3 = t2 * t;
+
+    float w0 = (1.0f - 3.0f * t + 3.0f * t2 - t3) * (1.0f / 6.0f);
+    float w1 = (4.0f - 6.0f * t2 + 3.0f * t3) * (1.0f / 6.0f);
+    float w2 = (1.0f + 3.0f * t + 3.0f * t2 - 3.0f * t3) * (1.0f / 6.0f);
+    float w3 = t3 * (1.0f / 6.0f);
+
+    return p0 * w0 + p1 * w1 + p2 * w2 + p3 * w3;
+}
+
+void TerrainLoadWeightSample(
+    Texture2D<float4> weightAtlas0,
+    Texture2D<float4> weightAtlas1,
+    TerrainQuadrantInfo q,
+    int2 sample,
+    out float4 weights0,
+    out float4 weights1)
+{
+    int2 clampedSample = clamp(sample, 0, 16);
+    uint2 texel = uint2(q.weightAtlasX, q.weightAtlasY) + uint2(clampedSample);
+    TerrainLoadPackedWeights(weightAtlas0, weightAtlas1, texel, weights0, weights1);
+}
+
+void TerrainLoadWeightRowCubic(
+    Texture2D<float4> weightAtlas0,
+    Texture2D<float4> weightAtlas1,
+    TerrainQuadrantInfo q,
+    int2 baseSample,
+    float t,
+    out float4 weights0,
+    out float4 weights1)
+{
+    float4 p0_0, p1_0, p2_0, p3_0;
+    float4 p0_1, p1_1, p2_1, p3_1;
+    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, q, baseSample + int2(-1, 0), p0_0, p0_1);
+    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, q, baseSample + int2(0, 0), p1_0, p1_1);
+    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, q, baseSample + int2(1, 0), p2_0, p2_1);
+    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, q, baseSample + int2(2, 0), p3_0, p3_1);
+    weights0 = TerrainCubicBSpline(p0_0, p1_0, p2_0, p3_0, t);
+    weights1 = TerrainCubicBSpline(p0_1, p1_1, p2_1, p3_1, t);
+}
+
+void TerrainInterpolateLayerWeights(
+    Texture2D<float4> weightAtlas0,
+    Texture2D<float4> weightAtlas1,
+    TerrainQuadrantInfo q,
+    float2 quadrantLocal,
+    out float4 weights0,
+    out float4 weights1)
+{
+    // Skyrim stores close landscape weights on a 17x17 quadrant lattice and feeds
+    // them as vertex attributes. Reconstruct the painted material field from that
+    // lattice rather than from the CLod render triangles, which may not match the
+    // original terrain topology after virtualized-geometry clustering. A cubic
+    // B-spline acts as a small, non-overshooting low-pass filter over abrupt
+    // 128-unit paint transitions, which better suits full-quality terrain seen
+    // at arbitrary CLod distances than exact interpolation of the coarse lattice.
+    float2 grid = saturate(quadrantLocal / TERRAIN_QUADRANT_SIZE) * 16.0f;
+    int2 baseSample = (int2)floor(grid);
+    float2 f = grid - (float2)baseSample;
+
+    float4 r0_0, r1_0, r2_0, r3_0;
+    float4 r0_1, r1_1, r2_1, r3_1;
+    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, q, baseSample + int2(0, -1), f.x, r0_0, r0_1);
+    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, q, baseSample + int2(0, 0), f.x, r1_0, r1_1);
+    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, q, baseSample + int2(0, 1), f.x, r2_0, r2_1);
+    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, q, baseSample + int2(0, 2), f.x, r3_0, r3_1);
+
+    weights0 = saturate(TerrainCubicBSpline(r0_0, r1_0, r2_0, r3_0, f.y));
+    weights1 = saturate(TerrainCubicBSpline(r0_1, r1_1, r2_1, r3_1, f.y));
+}
+
 float3x3 TerrainBasis(float3 normalWS)
 {
     float3 tangentWS = cross(float3(0.0f, 0.0f, -1.0f), normalWS);
@@ -117,21 +203,15 @@ void ApplyTerrainMaterialInternal(
     TerrainQuadrantInfo q = terrainQuadrants[quadrantIndex];
 
     float2 quadrantLocal = local - float2(quadrantX, quadrantY) * TERRAIN_QUADRANT_SIZE;
-    float2 weightSampleCoord = saturate(quadrantLocal / TERRAIN_QUADRANT_SIZE) * 16.0f;
-    float2 weightUv = (float2(q.weightAtlasX, q.weightAtlasY) + weightSampleCoord + 0.5f.xx) /
-        float2(max(terrain.weightAtlasWidth, 1u), max(terrain.weightAtlasHeight, 1u));
 
     float4 weights0 = float4(1.0f, 0.0f, 0.0f, 0.0f);
     float4 weights1 = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (terrain.weightAtlas0TextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-        terrain.weightAtlas1TextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-        terrain.weightAtlasSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        terrain.weightAtlas1TextureIndex != TERRAIN_INVALID_DESCRIPTOR)
     {
         Texture2D<float4> weightAtlas0 = ResourceDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlas0TextureIndex)];
         Texture2D<float4> weightAtlas1 = ResourceDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlas1TextureIndex)];
-        SamplerState weightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlasSamplerIndex)];
-        weights0 = weightAtlas0.SampleLevel(weightSampler, weightUv, 0.0f);
-        weights1 = weightAtlas1.SampleLevel(weightSampler, weightUv, 0.0f);
+        TerrainInterpolateLayerWeights(weightAtlas0, weightAtlas1, q, quadrantLocal, weights0, weights1);
     }
 
     float weightSum = weights0.x + weights0.y + weights0.z + weights0.w + weights1.x + weights1.y;
