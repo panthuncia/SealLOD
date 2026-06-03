@@ -31,6 +31,7 @@
 #include "Managers/EnvironmentManager.h"
 #include "Managers/MaterialManager.h"
 #include "Managers/SkeletonManager.h"
+#include "Managers/TerrainManager.h"
 #include "Managers/ReadbackManager.h"
 #include "Factories/TextureFactory.h"
 #include "Scene/MovementState.h"
@@ -155,8 +156,9 @@ private:
     std::unique_ptr<IndirectCommandBufferManager> m_pIndirectCommandBufferManager = nullptr;
     std::unique_ptr<ViewManager> m_pViewManager = nullptr;
 	std::unique_ptr<EnvironmentManager> m_pEnvironmentManager = nullptr;
-	std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
+    std::unique_ptr<MaterialManager> m_pMaterialManager = nullptr;
 	std::unique_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
+    std::unique_ptr<TerrainManager> m_pTerrainManager = nullptr;
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;

@@ -7,6 +7,12 @@
       "TextureStreamingMetadataBuffer": {},
       "TextureStreamingFeedbackBuffer": {}
     },
+    "Terrain": {
+      "Sets": {},
+      "Layers": {},
+      "Quadrants": {},
+      "TextureGroup": {}
+    },
     "PerMaterialDataBuffer": {},
     "PerMaterialOpenPBRDataBuffer": {},
     "PrimaryCamera": {

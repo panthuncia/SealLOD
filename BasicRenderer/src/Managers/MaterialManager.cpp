@@ -212,6 +212,7 @@ namespace {
 		result.emissiveFactor = base.emissiveFactor;
 		result.baseColorChannels = base.baseColorChannels;
 		result.normalChannels = base.normalChannels;
+		result.terrainSetIndex = base.terrainSetIndex;
 		result.aoChannel = base.aoChannel;
 		result.heightChannel = base.heightChannel;
 		result.metallicChannel = base.metallicChannel;

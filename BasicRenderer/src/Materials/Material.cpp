@@ -296,8 +296,13 @@ void Material::SetOpenPBRMaterialDataIndex(uint32_t index) {
     m_materialData.openPBRMaterialDataIndex = index;
 }
 
+void Material::SetTerrainSetIndex(uint32_t index) {
+    m_materialData.materialFlags |= MaterialFlags::MATERIAL_TERRAIN;
+    m_materialData.terrainSetIndex = index;
+}
+
 void Material::SetRasterBucketIndex(uint32_t index) {
-    m_materialData.rasterBuckedIndex = index;
+	m_materialData.rasterBuckedIndex = index;
 }
 
 std::shared_ptr<Material> Material::GetDefaultMaterial() {

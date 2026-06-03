@@ -88,6 +88,12 @@ struct Builtin {
     inline static constexpr std::string_view TextureStreamingFeedbackBuffer = "Builtin::Material::TextureStreamingFeedbackBuffer";
     inline static constexpr std::string_view TextureStreamingMetadataBuffer = "Builtin::Material::TextureStreamingMetadataBuffer";
   };
+  struct Terrain {
+    inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
+    inline static constexpr std::string_view Quadrants = "Builtin::Terrain::Quadrants";
+    inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
+    inline static constexpr std::string_view TextureGroup = "Builtin::Terrain::TextureGroup";
+  };
   struct Noise {
     inline static constexpr std::string_view BlueNoise2D = "Builtin::Noise::BlueNoise2D";
   };

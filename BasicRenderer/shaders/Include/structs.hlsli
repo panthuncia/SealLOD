@@ -284,7 +284,7 @@ struct MaterialInfo {
     float geometricDisplacementMin;
     float geometricDisplacementMax;
     uint geometricDisplacementEnabled;
-    uint perMaterialPad0;
+    uint terrainSetIndex;
     
     float4 baseColorFactor;
     float4 emissiveFactor;
@@ -359,7 +359,7 @@ struct MaterialEvalInfo {
     uint4 baseColorChannels;
 
     uint3 normalChannels;
-    uint perMaterialEvalPad0;
+    uint terrainSetIndex;
 
     uint aoChannel;
     uint heightChannel;
@@ -387,6 +387,51 @@ struct MaterialEvalInfo {
     uint aoStreamingTextureID;
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
+};
+
+struct TerrainLayerInfo {
+    uint diffuseTextureIndex;
+    uint diffuseSamplerIndex;
+    uint normalTextureIndex;
+    uint normalSamplerIndex;
+    uint3 normalChannels;
+    uint flags;
+    float4 fallbackColor;
+    float uvScale;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct TerrainQuadrantInfo {
+    int cellX;
+    int cellY;
+    uint quadrant;
+    uint layerCount;
+    uint layerIndices[6];
+    uint weightAtlasX;
+    uint weightAtlasY;
+    uint weightAtlasStride;
+    uint pad0;
+};
+
+struct TerrainSetInfo {
+    int minCellX;
+    int minCellY;
+    uint cellCountX;
+    uint cellCountY;
+    uint quadrantBase;
+    uint quadrantCount;
+    uint layerBase;
+    uint layerCount;
+    uint weightAtlas0TextureIndex;
+    uint weightAtlas1TextureIndex;
+    uint weightAtlasSamplerIndex;
+    uint weightAtlasWidth;
+    uint weightAtlasHeight;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 struct OpenPBRMaterialInfo {

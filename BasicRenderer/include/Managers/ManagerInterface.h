@@ -9,6 +9,7 @@ class EnvironmentManager;
 class MaterialManager;
 class SkeletonManager;
 class TextureFactory;
+class TerrainManager;
 
 class ManagerInterface {
 public:
@@ -22,7 +23,8 @@ public:
 		EnvironmentManager*  environmentManager,
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
-		TextureFactory* textureFactory
+		TextureFactory* textureFactory,
+		TerrainManager* terrainManager = nullptr
 	) : m_pMeshManager(meshManager),
 		m_pObjectManager(objectManager),
 		m_pIndirectCommandBufferManager(indirectCommandBufferManager),
@@ -31,7 +33,8 @@ public:
 		m_pEnvironmentManager(environmentManager),
 		m_pMaterialManager(materialManager),
 		m_pSkeletonManager(skeletonManager),
-		m_pTextureFactory(textureFactory) {
+		m_pTextureFactory(textureFactory),
+		m_pTerrainManager(terrainManager) {
 	}
 
 	void SetManagers(MeshManager* meshManager,
@@ -42,7 +45,8 @@ public:
 		EnvironmentManager* environmentManager,
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
-		TextureFactory* textureFactory) {
+		TextureFactory* textureFactory,
+		TerrainManager* terrainManager = nullptr) {
 		m_pMeshManager = meshManager;
 		m_pObjectManager = objectManager;
 		m_pIndirectCommandBufferManager = indirectCommandBufferManager;
@@ -52,6 +56,7 @@ public:
 		m_pMaterialManager = materialManager;
 		m_pSkeletonManager = skeletonManager;
 		m_pTextureFactory = textureFactory;
+		m_pTerrainManager = terrainManager;
 	}
 
 	MeshManager* GetMeshManager() const { return m_pMeshManager; }
@@ -63,6 +68,7 @@ public:
 	MaterialManager* GetMaterialManager() const { return m_pMaterialManager; }
 	SkeletonManager* GetSkeletonManager() const { return m_pSkeletonManager; }
 	TextureFactory* GetTextureFactory() const { return m_pTextureFactory; }
+	TerrainManager* GetTerrainManager() const { return m_pTerrainManager; }
 private:
 	MeshManager* m_pMeshManager = nullptr;
 	ObjectManager* m_pObjectManager = nullptr;
@@ -73,4 +79,5 @@ private:
 	MaterialManager* m_pMaterialManager = nullptr;
 	SkeletonManager* m_pSkeletonManager = nullptr;
 	TextureFactory* m_pTextureFactory = nullptr;
+	TerrainManager* m_pTerrainManager = nullptr;
 };

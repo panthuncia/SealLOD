@@ -178,7 +178,7 @@ struct PerMaterialCB {
 	float geometricDisplacementMin;
 	float geometricDisplacementMax;
     unsigned int geometricDisplacementEnabled;
-    unsigned int perMaterialPad0;
+    unsigned int terrainSetIndex;
 
     DirectX::XMFLOAT4 baseColorFactor;
     DirectX::XMFLOAT4 emissiveFactor;
@@ -252,7 +252,7 @@ struct PerMaterialEvalCB {
     DirectX::XMUINT4 baseColorChannels;
 
     DirectX::XMUINT3 normalChannels;
-    unsigned int perMaterialEvalPad0;
+    unsigned int terrainSetIndex;
 
     unsigned int aoChannel;
     unsigned int heightChannel;
@@ -285,6 +285,51 @@ static_assert(sizeof(PerMaterialEvalCB) == 256, "PerMaterialEvalCB must match HL
 static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
+
+struct TerrainLayerGPU {
+    unsigned int diffuseTextureIndex;
+    unsigned int diffuseSamplerIndex;
+    unsigned int normalTextureIndex;
+    unsigned int normalSamplerIndex;
+    DirectX::XMUINT3 normalChannels;
+    unsigned int flags;
+    DirectX::XMFLOAT4 fallbackColor;
+    float uvScale;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct TerrainQuadrantGPU {
+    int cellX;
+    int cellY;
+    unsigned int quadrant;
+    unsigned int layerCount;
+    unsigned int layerIndices[6];
+    unsigned int weightAtlasX;
+    unsigned int weightAtlasY;
+    unsigned int weightAtlasStride;
+    unsigned int pad0;
+};
+
+struct TerrainSetGPU {
+    int minCellX;
+    int minCellY;
+    unsigned int cellCountX;
+    unsigned int cellCountY;
+    unsigned int quadrantBase;
+    unsigned int quadrantCount;
+    unsigned int layerBase;
+    unsigned int layerCount;
+    unsigned int weightAtlas0TextureIndex;
+    unsigned int weightAtlas1TextureIndex;
+    unsigned int weightAtlasSamplerIndex;
+    unsigned int weightAtlasWidth;
+    unsigned int weightAtlasHeight;
+    float pad0;
+    float pad1;
+    float pad2;
+};
 
 struct PerMaterialOpenPBRCB {
     float baseWeight;

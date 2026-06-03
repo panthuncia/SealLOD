@@ -451,6 +451,7 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
 	m_pMaterialManager = MaterialManager::CreateUnique();
+    m_pTerrainManager = TerrainManager::CreateUnique();
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
 	m_pLightManager->SetViewManager(m_pViewManager.get()); // Light manager needs access to view manager for shadow cameras
 	m_pViewManager->SetIndirectCommandBufferManager(m_pIndirectCommandBufferManager.get()); // View manager needs to make indirect command buffers
@@ -474,7 +475,8 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
         m_pEnvironmentManager.get(), 
         m_pMaterialManager.get(),
         m_pSkeletonManager.get(),
-        m_pTextureFactory.get());
+        m_pTextureFactory.get(),
+        m_pTerrainManager.get());
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;
@@ -1400,7 +1402,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("rayTracedReflectionLodBias", 0.0f);
     settingsManager.registerSetting<bool>("useAsyncCompute", false);
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
-	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
+	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, false);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphDisableCaching", false);
@@ -2907,6 +2909,7 @@ void Renderer::CreateRenderGraph() {
     newGraph->RegisterProvider(m_pEnvironmentManager.get());
     newGraph->RegisterProvider(m_pIndirectCommandBufferManager.get());
 	newGraph->RegisterProvider(m_pMaterialManager.get());
+    newGraph->RegisterProvider(m_pTerrainManager.get());
 	newGraph->RegisterProvider(m_pSkeletonManager.get());
     newGraph->RegisterProvider(&m_coreResourceProvider);
     newGraph->PrepareExtensionsForBuild();

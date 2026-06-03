@@ -7,6 +7,7 @@
 #include "include/skinningCommon.hlsli"
 #include "include/meshletCommon.hlsli"
 #include "include/utilities.hlsli"
+#include "include/terrainCommon.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "include/visibilityPacking.hlsli"
 #include "include/clodStructs.hlsli"
@@ -1727,6 +1728,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         dpdy,
         materialInputs);
     #endif
+    ApplyTerrainMaterial(materialInfo, worldPosition, worldNormal, vertexColor, materialInputs);
 
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;
 
