@@ -557,7 +557,7 @@ static void TessellateExtractedTriangles(
 	}
 	uvSets = std::move(tessellatedUvSets);
 
-	spdlog::info(
+	spdlog::debug(
 		"Mesh '{}' tessellated: requested_factor={} subdivision={} source={} triangles {} -> {} vertices_per_source_triangle={}",
 		primName,
 		tessellationFactor,
@@ -1370,9 +1370,9 @@ MeshPreprocessResult ExtractSubMesh(
 		cacheIdentity.sourceIdentifier += "#brnifly_dynamic_decal=1";
 	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
-	spdlog::info("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
+	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
 		cacheIdentity.primPath, subsetName, cacheIdentity.sourceIdentifier);
-	spdlog::info("    Geometry sample time for prim='{}' is {}",
+	spdlog::debug("    Geometry sample time for prim='{}' is {}",
 		cacheIdentity.primPath,
 		geomTimeCode.IsDefault() ? -1.0 : geomTimeCode.GetValue());
 
@@ -1387,9 +1387,9 @@ MeshPreprocessResult ExtractSubMesh(
 		g_benchmarkStats.clodCacheMisses.fetch_add(1, std::memory_order_relaxed);
 	}
 	if (prebuiltData.has_value())
-		spdlog::info("    Cache HIT for prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
+		spdlog::debug("    Cache HIT for prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
 	else
-		spdlog::info("    Cache MISS for prim='{}' subset='{}' — will build", cacheIdentity.primPath, subsetName);
+		spdlog::debug("    Cache MISS for prim='{}' subset='{}' — will build", cacheIdentity.primPath, subsetName);
 
 	// Load raw geometry
 	std::unique_ptr<std::vector<std::byte>> rawData;

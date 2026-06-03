@@ -1994,6 +1994,7 @@ namespace
 		std::vector<uint64_t> totalUvBitsPerSet;
 		uint32_t totalVertexCount = 0;
 		uint32_t totalNormalWords = 0;
+		uint32_t totalTangentFrameWords = 0;
 		uint32_t totalColorWords = 0;
 		uint32_t totalBoneIndexCount = 0;
 		uint32_t totalTriangleBytes = 0;
@@ -2158,6 +2159,7 @@ namespace
 				totals.totalPositionBytes += vertexCount * CLOD_NATIVE_POSITION_STRIDE_BYTES;
 				totals.totalVertexCount += vertexCount;
 				totals.totalNormalWords += ((attributeMask & CLOD_PAGE_ATTRIBUTE_NORMAL) != 0u) ? vertexCount : 0u;
+				totals.totalTangentFrameWords += ((attributeMask & CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME) != 0u) ? vertexCount : 0u;
 				totals.totalColorWords += ((attributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u) ? vertexCount : 0u;
 				totals.totalBoneIndexCount += desc.boneCount;
 				totals.totalTriangleBytes += triangleCount * 3u;
@@ -2197,6 +2199,7 @@ namespace
 		}
 
 		const bool pageHasNormals = (attributeMask & CLOD_PAGE_ATTRIBUTE_NORMAL) != 0u;
+		const bool pageHasTangentFrames = (attributeMask & CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME) != 0u;
 		const bool pageHasColors = (attributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u;
 		const bool pageHasJoints = (attributeMask & CLOD_PAGE_ATTRIBUTE_JOINTS) != 0u;
 		const bool pageHasWeights = (attributeMask & CLOD_PAGE_ATTRIBUTE_WEIGHTS) != 0u;
@@ -2214,18 +2217,36 @@ namespace
 		const size_t positionBytes = static_cast<size_t>(totals.totalPositionBytes);
 		const uint32_t normalArrayOffset = pageHasNormals ? static_cast<uint32_t>(align4(positionBitstreamOffset + positionBytes)) : 0u;
 		const size_t normalBytes = pageHasNormals ? static_cast<size_t>(totals.totalNormalWords) * sizeof(uint32_t) : 0u;
-		const uint32_t colorArrayOffset = pageHasColors ? static_cast<uint32_t>(align4(pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes))) : 0u;
+		const uint32_t tangentFrameArrayOffset = pageHasTangentFrames
+			? static_cast<uint32_t>(align4(pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes)))
+			: 0u;
+		const size_t tangentFrameBytes = pageHasTangentFrames ? static_cast<size_t>(totals.totalTangentFrameWords) * sizeof(uint32_t) : 0u;
+		const size_t afterNormalAndTangentBytes = pageHasTangentFrames
+			? (static_cast<size_t>(tangentFrameArrayOffset) + tangentFrameBytes)
+			: (pageHasNormals
+				? (static_cast<size_t>(normalArrayOffset) + normalBytes)
+				: (static_cast<size_t>(positionBitstreamOffset) + positionBytes));
+		const uint32_t colorArrayOffset = pageHasColors ? static_cast<uint32_t>(align4(afterNormalAndTangentBytes)) : 0u;
 		const size_t colorBytes = pageHasColors ? static_cast<size_t>(totals.totalColorWords) * sizeof(uint32_t) : 0u;
-		const uint32_t jointArrayOffset = pageHasJoints ? static_cast<uint32_t>(align4(pageHasColors ? (colorArrayOffset + colorBytes) : (pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes)))) : 0u;
+		const size_t afterColorBytes = pageHasColors
+			? (static_cast<size_t>(colorArrayOffset) + colorBytes)
+			: afterNormalAndTangentBytes;
+		const uint32_t jointArrayOffset = pageHasJoints ? static_cast<uint32_t>(align4(afterColorBytes)) : 0u;
 		const size_t jointBytes = pageHasJoints ? static_cast<size_t>(totals.totalVertexCount) * sizeof(DirectX::XMUINT4) * 2u : 0u;
-		const uint32_t weightArrayOffset = pageHasWeights ? static_cast<uint32_t>(align4(pageHasJoints ? (jointArrayOffset + jointBytes) : (pageHasColors ? (colorArrayOffset + colorBytes) : (pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes))))) : 0u;
+		const size_t afterJointBytes = pageHasJoints
+			? (static_cast<size_t>(jointArrayOffset) + jointBytes)
+			: afterColorBytes;
+		const uint32_t weightArrayOffset = pageHasWeights ? static_cast<uint32_t>(align4(afterJointBytes)) : 0u;
 		const size_t weightBytes = pageHasWeights ? static_cast<size_t>(totals.totalVertexCount) * sizeof(DirectX::XMFLOAT4) * 2u : 0u;
-		const uint32_t uvBitstreamDirectoryOffset = pageHasUvSets ? static_cast<uint32_t>(align4(pageHasWeights ? (weightArrayOffset + weightBytes) : (pageHasJoints ? (jointArrayOffset + jointBytes) : (pageHasColors ? (colorArrayOffset + colorBytes) : (pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes)))))) : 0u;
+		const size_t afterWeightBytes = pageHasWeights
+			? (static_cast<size_t>(weightArrayOffset) + weightBytes)
+			: afterJointBytes;
+		const uint32_t uvBitstreamDirectoryOffset = pageHasUvSets ? static_cast<uint32_t>(align4(afterWeightBytes)) : 0u;
 
 		std::vector<uint32_t> uvBitstreamOffsets(uvSetCount, 0u);
 		size_t uvBitstreamCursor = pageHasUvSets
 			? align4(static_cast<size_t>(uvBitstreamDirectoryOffset) + static_cast<size_t>(uvSetCount) * sizeof(uint32_t))
-			: align4(pageHasWeights ? (weightArrayOffset + weightBytes) : (pageHasJoints ? (jointArrayOffset + jointBytes) : (pageHasColors ? (colorArrayOffset + colorBytes) : (pageHasNormals ? (normalArrayOffset + normalBytes) : (positionBitstreamOffset + positionBytes)))));
+			: align4(afterWeightBytes);
 		for (uint32_t uvSetIndex = 0; uvSetIndex < uvSetCount; ++uvSetIndex)
 		{
 			uvBitstreamOffsets[uvSetIndex] = static_cast<uint32_t>(uvBitstreamCursor);
@@ -2306,6 +2327,13 @@ namespace
 					copyBytes(
 						normalArrayOffset + vertexAttributeCursor * static_cast<uint32_t>(sizeof(uint32_t)),
 						sourceHeader.normalArrayOffset + sourceDesc.vertexAttributeOffset * static_cast<uint32_t>(sizeof(uint32_t)),
+						vertexCount * static_cast<uint32_t>(sizeof(uint32_t)));
+				}
+				if (pageHasTangentFrames && sourceHeader.tangentFrameArrayOffset != 0u)
+				{
+					copyBytes(
+						tangentFrameArrayOffset + vertexAttributeCursor * static_cast<uint32_t>(sizeof(uint32_t)),
+						sourceHeader.tangentFrameArrayOffset + sourceDesc.vertexAttributeOffset * static_cast<uint32_t>(sizeof(uint32_t)),
 						vertexCount * static_cast<uint32_t>(sizeof(uint32_t)));
 				}
 				if (pageHasColors && sourceHeader.colorArrayOffset != 0u)
@@ -2406,6 +2434,7 @@ namespace
 		header.uvDescriptorOffset = uvDescriptorOffset;
 		header.positionBitstreamOffset = positionBitstreamOffset;
 		header.normalArrayOffset = normalArrayOffset;
+		header.tangentFrameArrayOffset = tangentFrameArrayOffset;
 		header.colorArrayOffset = colorArrayOffset;
 		header.jointArrayOffset = jointArrayOffset;
 		header.weightArrayOffset = weightArrayOffset;
@@ -2550,7 +2579,7 @@ namespace
 					candidateTotals.totalUvBitsPerSet,
 					candidateTotals.totalVertexCount,
 					candidateTotals.totalNormalWords,
-					0u,
+					candidateTotals.totalTangentFrameWords,
 					candidateTotals.totalColorWords,
 					candidateTotals.totalBoneIndexCount,
 					candidateTotals.totalTriangleBytes);
@@ -5723,16 +5752,10 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		captureContext.meshPositionQuantScale = meshPositionQuantScale;
 		captureContext.meshPositionQuantExp = meshPositionQuantExp;
 		captureContext.recomputeGroupNormals = recomputeGroupNormals;
-		clodBuildParallelConfig parallelConfig{};
-		parallelConfig.iteration_callback = &ClodBuildCallbacks::Iterate;
-		const bool hasSkinningStream =
-			skinningVertices != nullptr &&
-			skinningVertexSize >= sizeof(DirectX::XMFLOAT3) + sizeof(DirectX::XMFLOAT3) + sizeof(PackedSkinningInfluences) &&
-			!skinningVertices->empty();
-		const clodBuildParallelConfig* parallelConfigPtr =
-			(!hasSkinningStream && TaskSchedulerManager::GetInstance().GetNumTaskThreads() > 1u) ? &parallelConfig : nullptr;
-
-		clodBuildEx(config, mesh, &captureContext, &ClodBuildCallbacks::Output, parallelConfigPtr);
+		// Keep CLOD generation deterministic while investigating cold-build normal/tangent instability.
+		// The output callback assigns renderer group IDs in callback arrival order, so parallel
+		// clodBuildEx execution can make persisted hierarchy/page ordering depend on worker scheduling.
+		clodBuildEx(config, mesh, &captureContext, &ClodBuildCallbacks::Output, nullptr);
 
 		state.maxDepth = captureContext.maxDepthObserved;
 
@@ -5767,7 +5790,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		? static_cast<float>(groupsWithRefinedChildren) / static_cast<float>(totalGroupCount)
 		: 0.0f;
 
-	spdlog::info(
+	spdlog::debug(
 		"ClusterLOD metrics: groups={} segments={} refined_groups={} refined_ratio={:.3f} normal_attributes={} tangent_attributes={}",
 		totalGroupCount,
 		static_cast<uint32_t>(state.segments.size()),

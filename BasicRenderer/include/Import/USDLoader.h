@@ -22,6 +22,7 @@ namespace USDLoader {
 	struct InMemoryStageOptions {
 		std::string sourceIdentifier;
 		std::string sourceDirectory;
+		std::vector<std::string> textureSearchRoots;
 		std::string layerIdentifierHint = "in_memory.usda";
 		bool isUsdPackage = false;
 	};

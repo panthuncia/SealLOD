@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <span>
 #include <sstream>
 #include <thread>
 #include <vector>

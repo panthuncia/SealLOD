@@ -242,7 +242,7 @@ void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
         if (rg::runtime::GetActiveUploadService() != nullptr) {
             m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
             const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
-            spdlog::info(
+            spdlog::debug(
                 "SortedUnsignedIntBuffer '{}' GrowBuffer replayed retained bytes writes={} bytes={}",
                 GetName(),
                 replayStats.flushedWrites,

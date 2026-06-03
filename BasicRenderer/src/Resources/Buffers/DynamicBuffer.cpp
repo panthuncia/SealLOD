@@ -79,7 +79,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
     size_t trackedFreeSize = m_capacity - newBlockOffset;
     m_blocksByOffset[newBlockOffset] = { newBlockOffset, trackedFreeSize, true };
     m_freeBlocks.insert({ trackedFreeSize, newBlockOffset });
-	spdlog::info("Growing buffer to {} bytes", newCapacity);
+	spdlog::debug("Growing buffer to {} bytes", newCapacity);
 	// Try allocating again
     return Allocate(size, elementSize);
 }
@@ -446,7 +446,7 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
             if (rg::runtime::GetActiveUploadService() != nullptr) {
                 m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
                 const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
-                spdlog::info(
+                spdlog::debug(
                     "DynamicBuffer '{}' id={} GrowBuffer replayed retained bytes writes={} bytes={}",
                     m_name,
                     GetGlobalResourceID(),

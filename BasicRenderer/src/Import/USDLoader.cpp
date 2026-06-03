@@ -6,6 +6,7 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 #include <cstring>
 #include <cctype>
@@ -59,6 +60,7 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
+#include "Resources/Texture.h"
 #include "Resources/Sampler.h"
 #include "Import/Filetypes.h"
 #include "Scene/Scene.h"
@@ -424,6 +426,19 @@ namespace USDLoader {
 			}
 		}
 		return indices;
+	}
+
+	bool NormalTextureNeedsReconstructedZ(rhi::Format format)
+	{
+		switch (format) {
+		case rhi::Format::BC5_UNorm:
+		case rhi::Format::BC5_SNorm:
+		case rhi::Format::R8G8_UNorm:
+		case rhi::Format::R8G8_SNorm:
+			return true;
+		default:
+			return false;
+		}
 	}
 
 	struct ResolvedProducer {
@@ -1109,7 +1124,7 @@ namespace USDLoader {
 				const std::string cacheKey = BuildUsdTextureCacheKey(logicalPath, semantic, preferSRGB, normalConvention);
 
 				if (!loadingCache.textureCache.contains(cacheKey)) {
-					spdlog::info("Found texture  {} in material", src.source.GetPrim().GetName().GetString());
+					spdlog::debug("Found texture  {} in material", src.source.GetPrim().GetName().GetString());
 					//auto texPath = asset.GetAssetPath();
 					//spdlog::info("Loading texture from path: {}", texPath);
 
@@ -1131,7 +1146,7 @@ namespace USDLoader {
 						tex->Meta().preferSRGB = preferSRGB;
 						tex->SetProcessingSettings(cacheProbeMeta.processing);
 						loadingCache.textureCache[cacheKey] = tex;
-						spdlog::info("USDLoader: texture processing cache hit for '{}' -> '{}'", resolved.GetPathString(), ws2s(cachePath));
+						spdlog::debug("USDLoader: texture processing cache hit for '{}' -> '{}'", resolved.GetPathString(), ws2s(cachePath));
 					}
 					else {
 						// Open the asset
@@ -1202,31 +1217,33 @@ namespace USDLoader {
 			const std::string cacheKey = BuildUsdTextureCacheKey(logicalPath, semantic, preferSRGB, normalConvention);
 			auto texIt = loadingCache.textureCache.find(cacheKey);
 			if (texIt != loadingCache.textureCache.end()) {
-
 				auto tex = texIt->second;
 				std::string swizzle = src.sourceName.GetString();
 				TextureAndConstant* textureBinding = FindTextureBinding(result, name);
-                if (textureBinding == nullptr) {
-                    spdlog::warn("Unknown texture input: {}", name.GetString());
-                    return;
-                }
+				if (textureBinding == nullptr) {
+					spdlog::warn("Unknown texture input: {}", name.GetString());
+					return;
+				}
 
-                textureBinding->texture = tex;
-                textureBinding->sourcePath = logicalPath;
+				textureBinding->texture = tex;
+				textureBinding->sourcePath = logicalPath;
 				if (tex) {
 					tex->Meta().filePath = logicalPath;
 					tex->Meta().preferSRGB = preferSRGB;
 				}
-                textureBinding->channels = SwizzleToIndices(swizzle);
-                if (name == TfToken("diffuseColor") && textureBinding->channels.size() == 3) {
-                    textureBinding->channels.push_back(3);
-                }
+				textureBinding->channels = SwizzleToIndices(swizzle);
+				if (name == TfToken("diffuseColor") && textureBinding->channels.size() == 3) {
+					textureBinding->channels.push_back(3);
+				}
 				if (name == TfToken("normal")) {
+					if (tex && NormalTextureNeedsReconstructedZ(tex->Description().format)) {
+						textureBinding->channels = { 0u, 1u, 4u };
+					}
 					result.negateNormals =
 						tex->Meta().fileType == ImageFiletype::DDS ||
 						(tex->Meta().isProcessingCacheArtifact && tex->Meta().processing.semantic == TextureSemantic::Normal);
-                    result.invertNormalGreen = false;
-                }
+					result.invertNormalGreen = false;
+				}
 				if (name == TfToken("emissiveColor") && IsBlack(result.emissiveColor)) {
 					result.emissiveColor = { 1.0f, 1.0f, 1.0f, 1.0f };
 				}
@@ -1459,7 +1476,7 @@ namespace USDLoader {
 
 		ApplyBrniflyMaterialMetadata(result, material.GetPrim());
 
-        spdlog::info(
+        spdlog::debug(
             "USD material '{}' displacement: enabled={}, hasHeightMap={}, scale={}, range=[{}, {}]",
             result.name,
             result.enableGeometricDisplacement,
@@ -1477,11 +1494,11 @@ namespace USDLoader {
 		}
 
 		if (loadingCache.materialTemplateCache.contains(material.GetPrim().GetPath().GetString())) {
-			spdlog::info("Material {} already processed, skipping.", material.GetPrim().GetPath().GetString());
+			spdlog::debug("Material {} already processed, skipping.", material.GetPrim().GetPath().GetString());
 			return; // Already processed
 		}
 
-		spdlog::info("Processing material: {}", material.GetPrim().GetPath().GetString());
+		spdlog::debug("Processing material: {}", material.GetPrim().GetPath().GetString());
 
 		auto materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ);
         MaterialTemplateRecord record;
@@ -2101,7 +2118,7 @@ namespace USDLoader {
 		};
 		gatherMeshJobs(stage->GetPseudoRoot());
 
-		spdlog::info("USD mesh preprocessing: gathered {} mesh/subset job(s).", workItems.size());
+		spdlog::debug("USD mesh preprocessing: gathered {} mesh/subset job(s).", workItems.size());
 		std::vector<std::optional<MeshPreprocessResult>> preprocessed(workItems.size());
 		TaskSchedulerManager::GetInstance().ParallelFor("USDLoader::PreprocessMeshes", workItems.size(), [&](size_t workIndex) {
 			const MeshPreprocessWorkItem& workItem = workItems[workIndex];
@@ -2387,7 +2404,7 @@ namespace USDLoader {
 			return {};
 		}
 		if (IsBrNiflyLODRenderMesh(mesh)) {
-			spdlog::info("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+			spdlog::debug("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
 			return {};
 		}
 
@@ -2452,7 +2469,7 @@ namespace USDLoader {
 			return;
 		}
 		if (IsBrNiflyLODRenderMesh(mesh)) {
-			spdlog::info("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+			spdlog::debug("Skipping BRNifly LOD mesh '{}'.", mesh.GetPrim().GetPath().GetString());
 			return;
 		}
 

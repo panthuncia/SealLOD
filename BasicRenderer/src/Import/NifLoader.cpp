@@ -5,10 +5,12 @@
 #include <cctype>
 #include <cstdint>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -23,8 +25,10 @@
 #include "Import/CLodCache.h"
 #include "Import/USDGeometryExtractor.h"
 #include "Animation/Skeleton.h"
+#include "Managers/Singletons/TextureProcessingManager.h"
 #include "Materials/Material.h"
 #include "Mesh/Mesh.h"
+#include "Resources/Texture.h"
 #include "Scene/Scene.h"
 #include "Utilities/CachePathUtilities.h"
 #include "Utilities/Utilities.h"
@@ -185,7 +189,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 11u;
+constexpr std::uint32_t kPayloadCacheVersion = 15u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -312,11 +316,13 @@ void RegisterCachedAsset(const std::string& pathHash, const fs::path& cachePath)
 USDLoader::InMemoryStageOptions MakeStageOptions(
     const std::string& sourceIdentifier,
     const std::string& sourceDirectory,
+    const std::vector<std::string>& textureSearchRoots,
     const std::string& layerIdentifierHint)
 {
     USDLoader::InMemoryStageOptions options{};
     options.sourceIdentifier = sourceIdentifier;
     options.sourceDirectory = sourceDirectory;
+    options.textureSearchRoots = textureSearchRoots;
     options.layerIdentifierHint = layerIdentifierHint;
     options.isUsdPackage = false;
     return options;
@@ -499,27 +505,244 @@ bool ReadStringVector(BinaryReader& reader, std::vector<std::string>& values)
     return true;
 }
 
-void WriteTextureBinding(BinaryWriter& writer, const TextureAndConstant& binding)
+std::string BuildCachedTextureSourceIdentity(
+    const std::string& texturePath,
+    TextureSemantic semantic,
+    bool preferSRGB,
+    NormalMapConvention normalConvention)
 {
-    writer.String(!binding.sourcePath.empty() ? binding.sourcePath : (binding.texture ? binding.texture->Meta().filePath : std::string{}));
+    return texturePath + "|semantic:" + std::to_string(static_cast<std::uint32_t>(semantic)) +
+        (preferSRGB ? "|srgb" : "|linear") +
+        "|normalconv:" + std::to_string(static_cast<std::uint32_t>(normalConvention));
+}
+
+TextureProcessingSettings MakeCachedTextureProcessingSettings(
+    const std::string& texturePath,
+    TextureSemantic semantic,
+    bool preferSRGB,
+    NormalMapConvention normalConvention)
+{
+    return MakeMaterialTextureProcessingSettings(
+        semantic,
+        preferSRGB,
+        BuildCachedTextureSourceIdentity(texturePath, semantic, preferSRGB, normalConvention),
+        false,
+        normalConvention);
+}
+
+TextureProcessingSettings GetTextureBindingProcessingSettings(
+    const TextureAndConstant& binding,
+    TextureSemantic semantic,
+    bool preferSRGB,
+    NormalMapConvention normalConvention,
+    const std::string& texturePath)
+{
+    if (binding.texture) {
+        const TextureProcessingSettings& settings = binding.texture->ProcessingSettings();
+        if (settings.isParticipatingMaterialTexture || settings.semantic != TextureSemantic::Unknown) {
+            return settings;
+        }
+    }
+    return MakeCachedTextureProcessingSettings(texturePath, semantic, preferSRGB, normalConvention);
+}
+
+std::string NormalizeTextureRelativePath(std::string path)
+{
+    for (char& ch : path) {
+        if (ch == '/') {
+            ch = '\\';
+        }
+    }
+    while (!path.empty() && (path.front() == '\\' || path.front() == '/')) {
+        path.erase(path.begin());
+    }
+    return path;
+}
+
+std::optional<fs::path> ResolveCachedTexturePath(
+    const std::string& texturePath,
+    const std::vector<std::string>& textureSearchRoots)
+{
+    if (texturePath.empty()) {
+        return std::nullopt;
+    }
+
+    std::error_code ec;
+    const fs::path input(texturePath);
+    if (fs::is_regular_file(input, ec)) {
+        fs::path resolved = fs::weakly_canonical(input, ec);
+        return ec ? input : resolved;
+    }
+
+    const std::string normalizedRelative = NormalizeTextureRelativePath(texturePath);
+    std::string withoutTexturesPrefix = normalizedRelative;
+    std::string lower = normalizedRelative;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (lower.rfind("textures\\", 0) == 0) {
+        withoutTexturesPrefix = normalizedRelative.substr(std::string_view("textures\\").size());
+    }
+
+    std::vector<fs::path> candidateRoots;
+    for (const std::string& root : textureSearchRoots) {
+        if (!root.empty()) {
+            candidateRoots.emplace_back(root);
+        }
+    }
+
+    candidateRoots.emplace_back(fs::current_path(ec));
+    if (const char* tempEnv = std::getenv("LOCALAPPDATA"); tempEnv && *tempEnv) {
+        candidateRoots.emplace_back(fs::path(tempEnv) / "Temp" / "SARP" / "ResourceCache");
+    }
+    candidateRoots.emplace_back(fs::temp_directory_path(ec) / "SARP" / "ResourceCache");
+
+    for (const fs::path& root : candidateRoots) {
+        std::array<fs::path, 2> candidates = {
+            root / normalizedRelative,
+            root / "textures" / withoutTexturesPrefix
+        };
+        for (const fs::path& candidate : candidates) {
+            ec.clear();
+            if (fs::is_regular_file(candidate, ec)) {
+                fs::path resolved = fs::weakly_canonical(candidate, ec);
+                return ec ? candidate : resolved;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+void WriteTextureProcessingSettings(BinaryWriter& writer, const TextureProcessingSettings& settings)
+{
+    writer.Pod(static_cast<std::uint32_t>(settings.semantic));
+    writer.Pod(settings.isParticipatingMaterialTexture);
+    writer.Pod(settings.requestMipChain);
+    writer.Pod(settings.requestBlockCompression);
+    writer.Pod(settings.allowAsyncPlaceholder);
+    writer.Pod(settings.preferSRGB);
+    writer.Pod(settings.preservePackedChannels);
+    writer.Pod(static_cast<std::uint32_t>(settings.normalConvention));
+    writer.String(settings.sourceIdentity);
+}
+
+bool ReadTextureProcessingSettings(BinaryReader& reader, TextureProcessingSettings& settings)
+{
+    std::uint32_t semantic = 0;
+    std::uint32_t normalConvention = 0;
+    if (!reader.Pod(semantic) ||
+        !reader.Pod(settings.isParticipatingMaterialTexture) ||
+        !reader.Pod(settings.requestMipChain) ||
+        !reader.Pod(settings.requestBlockCompression) ||
+        !reader.Pod(settings.allowAsyncPlaceholder) ||
+        !reader.Pod(settings.preferSRGB) ||
+        !reader.Pod(settings.preservePackedChannels) ||
+        !reader.Pod(normalConvention) ||
+        !reader.String(settings.sourceIdentity)) {
+        return false;
+    }
+    settings.semantic = static_cast<TextureSemantic>(semantic);
+    settings.normalConvention = static_cast<NormalMapConvention>(normalConvention);
+    return true;
+}
+
+bool NormalTextureNeedsReconstructedZ(rhi::Format format)
+{
+    switch (format) {
+    case rhi::Format::BC5_UNorm:
+    case rhi::Format::BC5_SNorm:
+    case rhi::Format::R8G8_UNorm:
+    case rhi::Format::R8G8_SNorm:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void WriteTextureBinding(
+    BinaryWriter& writer,
+    const TextureAndConstant& binding,
+    TextureSemantic semantic,
+    bool preferSRGB,
+    NormalMapConvention normalConvention = NormalMapConvention::DirectX)
+{
+    const std::string texturePath = !binding.sourcePath.empty()
+        ? binding.sourcePath
+        : (binding.texture ? binding.texture->Meta().filePath : std::string{});
+    writer.Pod(binding.texture != nullptr);
+    writer.String(texturePath);
     writer.Pod(binding.factor.Get());
     writer.Pod(binding.uvSetIndex);
     writer.String(binding.uvSetName);
     writer.PodVector(binding.channels);
+    WriteTextureProcessingSettings(
+        writer,
+        GetTextureBindingProcessingSettings(binding, semantic, preferSRGB, normalConvention, texturePath));
 }
 
-bool ReadTextureBinding(BinaryReader& reader, TextureAndConstant& binding, bool preferSRGB)
+bool ReadTextureBinding(
+    BinaryReader& reader,
+    TextureAndConstant& binding,
+    TextureSemantic semantic,
+    bool preferSRGB,
+    const std::vector<std::string>& textureSearchRoots)
 {
+    bool hadTexture = false;
     std::string texturePath;
     float factor = 1.0f;
-    if (!reader.String(texturePath) || !reader.Pod(factor) || !reader.Pod(binding.uvSetIndex) || !reader.String(binding.uvSetName) || !reader.PodVector(binding.channels)) {
+    if (!reader.Pod(hadTexture) || !reader.String(texturePath) || !reader.Pod(factor) || !reader.Pod(binding.uvSetIndex) || !reader.String(binding.uvSetName) || !reader.PodVector(binding.channels)) {
         return false;
+    }
+    TextureProcessingSettings processing{};
+    if (!ReadTextureProcessingSettings(reader, processing)) {
+        return false;
+    }
+    if (processing.semantic == TextureSemantic::Unknown && !texturePath.empty()) {
+        processing = MakeCachedTextureProcessingSettings(
+            texturePath,
+            TextureSemantic::Unknown,
+            preferSRGB,
+            NormalMapConvention::DirectX);
     }
     binding.factor = factor;
     binding.sourcePath = texturePath;
-    if (!texturePath.empty() && fs::is_regular_file(texturePath)) {
+    if (!hadTexture) {
+        return true;
+    }
+
+    const auto resolvedTexturePath = ResolveCachedTexturePath(texturePath, textureSearchRoots);
+    if (resolvedTexturePath) {
         try {
-            binding.texture = LoadTextureFromFile(s2ws(texturePath), nullptr, preferSRGB);
+            const bool texturePreferSRGB = processing.isParticipatingMaterialTexture
+                ? processing.preferSRGB
+                : preferSRGB;
+            TextureFileMeta cacheProbeMeta{};
+            cacheProbeMeta.filePath = resolvedTexturePath->string();
+            cacheProbeMeta.preferSRGB = texturePreferSRGB;
+            cacheProbeMeta.processing = processing;
+
+            const std::wstring conditionedCachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
+            if (!conditionedCachePath.empty()) {
+                binding.texture = LoadTextureFromFile(conditionedCachePath, nullptr, texturePreferSRGB);
+                if (binding.texture) {
+                    binding.texture->Meta().filePath = texturePath;
+                    binding.texture->Meta().isProcessingCacheArtifact = true;
+                }
+            } else {
+                binding.texture = LoadTextureFromFile(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB);
+                if (binding.texture) {
+                    binding.texture->Meta().filePath = texturePath;
+                }
+            }
+            if (binding.texture) {
+                binding.texture->Meta().preferSRGB = texturePreferSRGB;
+                binding.texture->SetProcessingSettings(processing);
+                if (semantic == TextureSemantic::Normal &&
+                    NormalTextureNeedsReconstructedZ(binding.texture->Description().format)) {
+                    binding.channels = { 0u, 1u, 4u };
+                }
+            }
         } catch (const std::exception& ex) {
             spdlog::warn("nif_asset_payload_cache: failed to reload texture '{}': {}", texturePath, ex.what());
             binding.texture.reset();
@@ -548,24 +771,27 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.brniflyDynamicDecal);
     writer.Pod(desc.brniflyModelSpaceNormals);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
-    WriteTextureBinding(writer, desc.baseColor);
-    WriteTextureBinding(writer, desc.metallic);
-    WriteTextureBinding(writer, desc.roughness);
-    WriteTextureBinding(writer, desc.emissive);
-    WriteTextureBinding(writer, desc.opacity);
-    WriteTextureBinding(writer, desc.aoMap);
-    WriteTextureBinding(writer, desc.heightMap);
-    WriteTextureBinding(writer, desc.normal);
+    WriteTextureBinding(writer, desc.baseColor, TextureSemantic::BaseColor, true);
+    WriteTextureBinding(writer, desc.metallic, TextureSemantic::Metallic, false);
+    WriteTextureBinding(writer, desc.roughness, TextureSemantic::Roughness, false);
+    WriteTextureBinding(writer, desc.emissive, TextureSemantic::Emissive, true);
+    WriteTextureBinding(writer, desc.opacity, TextureSemantic::Opacity, false);
+    WriteTextureBinding(writer, desc.aoMap, TextureSemantic::AO, false);
+    WriteTextureBinding(writer, desc.heightMap, TextureSemantic::Height, false);
+    WriteTextureBinding(writer, desc.normal, TextureSemantic::Normal, false, NormalMapConvention::OpenGL);
     writer.Pod(desc.openPBR);
-    WriteTextureBinding(writer, desc.openPBRTextures.coatColor);
-    WriteTextureBinding(writer, desc.openPBRTextures.coatWeight);
-    WriteTextureBinding(writer, desc.openPBRTextures.coatRoughness);
-    WriteTextureBinding(writer, desc.openPBRTextures.fuzzColor);
-    WriteTextureBinding(writer, desc.openPBRTextures.fuzzWeight);
-    WriteTextureBinding(writer, desc.openPBRTextures.fuzzRoughness);
+    WriteTextureBinding(writer, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true);
+    WriteTextureBinding(writer, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false);
+    WriteTextureBinding(writer, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false);
+    WriteTextureBinding(writer, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true);
+    WriteTextureBinding(writer, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false);
+    WriteTextureBinding(writer, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false);
 }
 
-bool ReadMaterialDescription(BinaryReader& reader, MaterialDescription& desc)
+bool ReadMaterialDescription(
+    BinaryReader& reader,
+    MaterialDescription& desc,
+    const std::vector<std::string>& textureSearchRoots)
 {
     std::uint32_t model = 0;
     std::uint32_t blend = 0;
@@ -591,21 +817,21 @@ bool ReadMaterialDescription(BinaryReader& reader, MaterialDescription& desc)
     }
     desc.materialModel = static_cast<MaterialModel>(model);
     desc.blendState = static_cast<BlendState>(blend);
-    return ReadTextureBinding(reader, desc.baseColor, true) &&
-        ReadTextureBinding(reader, desc.metallic, false) &&
-        ReadTextureBinding(reader, desc.roughness, false) &&
-        ReadTextureBinding(reader, desc.emissive, true) &&
-        ReadTextureBinding(reader, desc.opacity, false) &&
-        ReadTextureBinding(reader, desc.aoMap, false) &&
-        ReadTextureBinding(reader, desc.heightMap, false) &&
-        ReadTextureBinding(reader, desc.normal, false) &&
+    return ReadTextureBinding(reader, desc.baseColor, TextureSemantic::BaseColor, true, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.metallic, TextureSemantic::Metallic, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.roughness, TextureSemantic::Roughness, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.emissive, TextureSemantic::Emissive, true, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.opacity, TextureSemantic::Opacity, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.aoMap, TextureSemantic::AO, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.heightMap, TextureSemantic::Height, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.normal, TextureSemantic::Normal, false, textureSearchRoots) &&
         reader.Pod(desc.openPBR) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatColor, true) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatWeight, false) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatRoughness, false) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, true) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, false) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, false);
+        ReadTextureBinding(reader, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false, textureSearchRoots);
 }
 
 void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
@@ -665,6 +891,7 @@ bool WritePayloadCache(
     const std::string& normalizedCacheKey,
     const std::string& pathHash,
     const std::string& contentHash,
+    const std::vector<std::string>& textureSearchRoots,
     const USDLoader::ImportedAssetPayload& payload)
 {
     if (payload.meshes.empty() || payload.parts.empty()) {
@@ -689,6 +916,7 @@ bool WritePayloadCache(
     writer.String(normalizedCacheKey);
     writer.String(pathHash);
     writer.String(contentHash);
+    WriteStringVector(writer, textureSearchRoots);
 
     std::unordered_map<const Mesh*, std::uint32_t> meshIndices;
     for (std::uint32_t i = 0; i < payload.meshes.size(); ++i) {
@@ -697,11 +925,13 @@ bool WritePayloadCache(
 
     const std::uint64_t meshCount = payload.meshes.size();
     writer.Pod(meshCount);
-    for (const auto& mesh : payload.meshes) {
+    for (std::uint64_t meshIndex = 0; meshIndex < payload.meshes.size(); ++meshIndex) {
+        const auto& mesh = payload.meshes[static_cast<std::size_t>(meshIndex)];
         if (!mesh || !mesh->material) {
             return false;
         }
-        WriteMaterialDescription(writer, mesh->material->ToCacheDescription());
+        MaterialDescription desc = mesh->material->ToCacheDescription();
+        WriteMaterialDescription(writer, desc);
         WritePrebuilt(writer, mesh->GetClusterLODPrebuiltData());
         const auto& meshCB = mesh->GetPerMeshCBData();
         writer.Pod(meshCB.vertexFlags);
@@ -776,6 +1006,10 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         return std::nullopt;
     }
 
+    std::vector<std::string> textureSearchRoots;
+    if (!ReadStringVector(reader, textureSearchRoots)) {
+        return std::nullopt;
+    }
     USDLoader::ImportedAssetPayload payload;
     std::uint64_t meshCount = 0;
     if (!reader.Pod(meshCount) || meshCount > 100000u) {
@@ -785,7 +1019,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     for (std::uint64_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
         MaterialDescription desc{};
         ClusterLODPrebuiltData prebuilt{};
-        if (!ReadMaterialDescription(reader, desc) || !ReadPrebuilt(reader, prebuilt)) {
+        if (!ReadMaterialDescription(reader, desc, textureSearchRoots) || !ReadPrebuilt(reader, prebuilt)) {
             return std::nullopt;
         }
         std::uint32_t vertexFlags = 0;
@@ -993,6 +1227,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
+        package->textureSearchRoots,
         "brnifly_" + package->contentHash + ".usda");
     const auto extractBegin = std::chrono::steady_clock::now();
     auto payload = USDLoader::LoadImportedAssetFromUsdBytes(package->rootLayerText, options, settings);
@@ -1007,7 +1242,13 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, package->contentHash)),
             stableSourceIdentifier);
         const auto cacheWriteBegin = std::chrono::steady_clock::now();
-        const bool wrote = WritePayloadCache(cachePath, normalizedCacheKey, pathHash, package->contentHash, *payload);
+        const bool wrote = WritePayloadCache(
+            cachePath,
+            normalizedCacheKey,
+            pathHash,
+            package->contentHash,
+            package->textureSearchRoots,
+            *payload);
         if (stats) {
             stats->assetWriteMs += ElapsedMs(cacheWriteBegin, std::chrono::steady_clock::now());
             stats->assetCacheWritten = wrote;
@@ -1113,6 +1354,7 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
+        package->textureSearchRoots,
         "brnifly_" + package->contentHash + ".usda");
     const auto usdLoadBegin = std::chrono::steady_clock::now();
     auto scene = USDLoader::LoadModelFromUsdBytes(package->rootLayerText, options, settings);

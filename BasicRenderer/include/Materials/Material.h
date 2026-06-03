@@ -245,6 +245,7 @@ public:
             desc.brniflyDynamicDecal,
             desc.brniflyModelSpaceNormals
         );
+        material->m_materialModel = desc.materialModel;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }
@@ -273,7 +274,7 @@ public:
         defaultMaterial.reset();
     }
     uint32_t GetMaterialID() const { return m_materialID; }
-	PerMaterialCB const& GetData() const { return m_materialData; }
+    PerMaterialCB const& GetData() const { return m_materialData; }
     void EnsureTexturesUploaded(const TextureFactory& factory);
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;
 private:
@@ -319,6 +320,7 @@ private:
     PerMaterialCB m_materialData = { 0 };
     PSOFlags m_psoFlags;
     TechniqueDescriptor m_technique;
+    MaterialModel m_materialModel = MaterialModel::LegacyPreviewSurface;
     OpenPBRMaterialParameters m_openPBRMaterial = {};
     OpenPBRTextureBindings m_openPBRTextures = {};
     bool m_brniflyVertexAlpha = false;

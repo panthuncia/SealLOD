@@ -764,7 +764,7 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, Texture
 		elapsedUs >= 2000;
 	if (hadWork && now - m_lastMaterialUpdateStatsLog >= std::chrono::seconds(1)) {
 		m_lastMaterialUpdateStatsLog = now;
-		spdlog::info(
+		spdlog::debug(
 			"MaterialManager::ProcessPendingMaterialUpdates stats: elapsed_us={} feedback_us={} upload_us={} dirtyMaterial_us={} dirtyTexture_us={} uploadAdvance visited={} alive={} stillPending={} bindingChanged={} stateChanged={} pending(noImage={} placeholder={} streamingReload={} processing={} reload={} directStorage={}) dirtyMaterials visited={} flushed={} dirtyTextureMetadata visited={} alive={} updated={} activeMaterials={} activeStreamingTextures={} dirtyReasons(feedback={} idle={} track={} uploadState={} uploadPending={} other={})",
 			elapsedUs,
 			feedbackUs,
@@ -796,7 +796,7 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, Texture
 			m_textureDirtyReasonUploadPending,
 			m_textureDirtyReasonOther);
 		for (const auto& sample : pendingSamples) {
-			spdlog::info(
+			spdlog::debug(
 				"MaterialManager::ProcessPendingMaterialUpdates pendingTexture: id={} label='{}' name='{}' source='{}' file='{}' initial='{}' cacheArtifact={} loadPath={} uploadPath={} requestedTopMip={} pendingTopMip={} residentTopMip={} directStorageTargetTopMip={} residentMipCount={} totalMipCount={} stateRevision={} bindingRevision={} processing={} reload={} directStorage={}",
 				sample.id,
 				sample.label,

@@ -1314,7 +1314,7 @@ void TextureAsset::RecordLoadPath(TextureLoadPathTelemetry path, std::string det
 		return;
 	}
 	m_lastReportedLoadPath = path;
-	spdlog::info(
+	spdlog::debug(
 		"TextureTelemetry: load_path={} texture='{}' detail='{}'",
 		ToString(path),
 		TextureTelemetryLabel(*this),
@@ -1328,7 +1328,7 @@ void TextureAsset::RecordUploadPath(TextureUploadPathTelemetry path, std::string
 		return;
 	}
 	m_lastReportedUploadPath = path;
-	spdlog::info(
+	spdlog::debug(
 		"TextureTelemetry: upload_path={} texture='{}' detail='{}'",
 		ToString(path),
 		TextureTelemetryLabel(*this),

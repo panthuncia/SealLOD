@@ -7,6 +7,52 @@
 #include "Resources/PixelBuffer.h"
 #include "Render/MemoryIntrospectionAPI.h"
 
+namespace {
+    bool NormalTextureNeedsReconstructedZ(rhi::Format format) {
+        switch (format) {
+        case rhi::Format::BC5_UNorm:
+        case rhi::Format::BC5_SNorm:
+        case rhi::Format::R8G8_UNorm:
+        case rhi::Format::R8G8_SNorm:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool IsDxt5Format(rhi::Format format) {
+        switch (format) {
+        case rhi::Format::BC3_Typeless:
+        case rhi::Format::BC3_UNorm:
+        case rhi::Format::BC3_UNorm_sRGB:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    const char* NormalTextureFormatName(rhi::Format format) {
+        switch (format) {
+        case rhi::Format::BC3_Typeless: return "BC3_Typeless/DXT5";
+        case rhi::Format::BC3_UNorm: return "BC3_UNorm/DXT5";
+        case rhi::Format::BC3_UNorm_sRGB: return "BC3_UNorm_sRGB/DXT5";
+        case rhi::Format::BC5_UNorm: return "BC5_UNorm";
+        case rhi::Format::BC5_SNorm: return "BC5_SNorm";
+        case rhi::Format::R8G8_UNorm: return "R8G8_UNorm";
+        case rhi::Format::R8G8_SNorm: return "R8G8_SNorm";
+        default: return "other";
+        }
+    }
+
+    bool HasReconstructedZChannels(const std::vector<uint32_t>& channels) {
+        return channels.size() >= 3u && channels[0] == 0u && channels[1] == 1u && channels[2] == 4u;
+    }
+
+    bool RequestsRgbNormalChannels(const std::vector<uint32_t>& channels) {
+        return channels.size() >= 3u && channels[0] == 0u && channels[1] == 1u && channels[2] == 2u;
+    }
+}
+
 Material::Material(const std::string& name,
     MaterialFlags materialFlags, PSOFlags psoFlags)
     : m_name(name), m_psoFlags(psoFlags) {
@@ -215,7 +261,7 @@ MaterialDescription Material::ToCacheDescription() const
     desc.brniflyDecal = m_brniflyDecal;
     desc.brniflyDynamicDecal = m_brniflyDynamicDecal;
     desc.brniflyModelSpaceNormals = m_brniflyModelSpaceNormals;
-    desc.materialModel = MaterialModel::OpenPBR;
+    desc.materialModel = m_materialModel;
     return desc;
 }
 
@@ -364,6 +410,27 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory) {
     if (m_normalTexture != nullptr) {
         auto image = m_normalTexture->ImagePtr();
         if (image) {
+            const auto normalFormat = m_normalTexture->Description().format;
+            if (NormalTextureNeedsReconstructedZ(normalFormat)) {
+                if (!HasReconstructedZChannels(m_normalChannels)) {
+                    spdlog::warn(
+                        "Material '{}' normal texture '{}' uses {} but requested channels ({},{},{}); forcing reconstructed-Z channels (0,1,4).",
+                        m_name,
+                        !m_normalSourcePath.empty() ? m_normalSourcePath : m_normalTexture->Meta().filePath,
+                        NormalTextureFormatName(normalFormat),
+                        m_normalChannels.size() > 0u ? m_normalChannels[0] : 0u,
+                        m_normalChannels.size() > 1u ? m_normalChannels[1] : 0u,
+                        m_normalChannels.size() > 2u ? m_normalChannels[2] : 0u);
+                }
+                m_normalChannels = { 0u, 1u, 4u };
+            }
+            else if (IsDxt5Format(normalFormat) && RequestsRgbNormalChannels(m_normalChannels)) {
+                spdlog::warn(
+                    "Material '{}' normal texture '{}' uses {} but requested RGB channels (0,1,2); DXT5 normal maps usually need an explicit packed-channel convention.",
+                    m_name,
+                    !m_normalSourcePath.empty() ? m_normalSourcePath : m_normalTexture->Meta().filePath,
+                    NormalTextureFormatName(normalFormat));
+            }
             m_materialData.normalTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.normalSamplerIndex = m_normalTexture->SamplerDescriptorIndex();
             m_materialData.normalStreamingTextureID = textureStreamingEnabled ? m_normalTexture->GetStreamingTextureID() : 0u;

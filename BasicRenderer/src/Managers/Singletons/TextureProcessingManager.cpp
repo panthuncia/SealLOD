@@ -7,8 +7,10 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <boost/container_hash/hash.hpp>
 #include <DirectXTex.h>
@@ -165,6 +167,18 @@ std::wstring BuildProcessingConditionedCachePath(const std::string& key) {
 		<< seed
 		<< br::processed_texture_cache::kExtension;
 	return GetCacheFilePath(fileName.str(), L"textures");
+}
+
+std::mutex& GetCacheWriteMutexForKey(const std::string& key) {
+	static std::mutex tableMutex;
+	static std::unordered_map<std::string, std::shared_ptr<std::mutex>> table;
+
+	std::scoped_lock lock(tableMutex);
+	auto& entry = table[key];
+	if (!entry) {
+		entry = std::make_shared<std::mutex>();
+	}
+	return *entry;
 }
 
 uint32_t GetTextureTotalArraySlices(const TextureDescription& desc) {
@@ -448,12 +462,14 @@ std::shared_ptr<TextureSourceData> TryLoadTextureSourceDataFromCache(const std::
 }
 
 std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const TextureSourceData& sourceData) {
+	std::scoped_lock cacheWriteLock(GetCacheWriteMutexForKey(key));
+
 	const std::wstring cachePath = BuildProcessingCachePath(key);
 	const std::wstring conditionedCachePath = BuildProcessingConditionedCachePath(key);
 	std::wstring writtenConditionedCachePath;
 	if (TryWriteConditionedTextureCache(conditionedCachePath, sourceData)) {
 		writtenConditionedCachePath = conditionedCachePath;
-		spdlog::info(
+		spdlog::debug(
 			"TextureProcessingManager: wrote conditioned cache file '{}' format={} subresources={}",
 			ws2s(conditionedCachePath),
 			static_cast<uint32_t>(sourceData.desc.format),
@@ -481,7 +497,7 @@ std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const Text
 		return writtenConditionedCachePath;
 	}
 
-	spdlog::info(
+	spdlog::debug(
 		"TextureProcessingManager: wrote cache file '{}' format={} subresources={} fullMipChain={} blockCompressed={}",
 		ws2s(cachePath),
 		static_cast<uint32_t>(sourceData.desc.format),
@@ -638,7 +654,7 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 	}
 	flags = static_cast<TEX_COMPRESS_FLAGS>(flags | TEX_COMPRESS_PARALLEL);
 
-	spdlog::info(
+	spdlog::debug(
 		"TextureProcessingManager: CPU finalize begin semantic={} srcFormat={} targetFormat={} dims={}x{} subresources={} fullMipChain={} preservePackedChannels={} preferSRGB={}",
 		TextureSemanticToString(meta.processing.semantic),
 		static_cast<uint32_t>(preparedSourceData->desc.format),
@@ -734,12 +750,13 @@ std::wstring TextureProcessingManager::GetExistingCachePathForFile(const Texture
 	}
 
 	if (auto cachedSourceData = TryLoadTextureSourceDataFromCache(key)) {
-		if (TryWriteConditionedTextureCache(conditionedCachePath, *cachedSourceData)) {
-			spdlog::info(
+		const std::wstring backfilledConditionedCachePath = TryWriteTextureSourceDataToCache(key, *cachedSourceData);
+		if (!backfilledConditionedCachePath.empty()) {
+			spdlog::debug(
 				"TextureProcessingManager: backfilled conditioned cache '{}' from legacy DDS cache '{}'",
-				ws2s(conditionedCachePath),
+				ws2s(backfilledConditionedCachePath),
 				ws2s(cachePath));
-			return conditionedCachePath;
+			return backfilledConditionedCachePath;
 		}
 	}
 
@@ -762,7 +779,7 @@ std::string TextureProcessingManager::BuildProcessingCacheKey(
 	boost::hash_combine(seed, meta.processing.preservePackedChannels);
 	boost::hash_combine(seed, static_cast<uint32_t>(meta.processing.normalConvention));
 	boost::hash_combine(seed, meta.alphaIsAllOpaque);
-	boost::hash_combine(seed, 4u); // texture processing algorithm/cache version
+	boost::hash_combine(seed, 5u); // texture processing algorithm/cache version
 	return normalizedIdentity + "#" + TextureSemanticToString(meta.processing.semantic) + "#" + std::to_string(seed);
 }
 
@@ -800,13 +817,6 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 
 	const std::string cacheKey = BuildProcessingCacheKey(meta);
 	const std::string key = BuildProcessingJobKey(sourceData, meta);
-	{
-		std::scoped_lock lock(m_mutex);
-		auto existing = m_jobsByKey.find(key);
-		if (existing != m_jobsByKey.end()) {
-			return existing->second;
-		}
-	}
 
 	auto handle = std::make_shared<TextureProcessingJobHandle>();
 	handle->requestMeta = meta;
@@ -816,7 +826,10 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 
 	{
 		std::scoped_lock lock(m_mutex);
-		m_jobsByKey[key] = handle;
+		auto [it, inserted] = m_jobsByKey.try_emplace(key, handle);
+		if (!inserted) {
+			return it->second;
+		}
 	}
 
 	TaskSchedulerManager::GetInstance().RunBackgroundTask("TextureProcessingManager::RequestProcessing", [handle, sourceData, meta, key, cacheKey]() {
@@ -825,7 +838,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 			const std::wstring conditionedCachePath = BuildProcessingConditionedCachePath(cacheKey);
 			std::error_code cacheEc;
 			if (std::filesystem::exists(std::filesystem::path(conditionedCachePath), cacheEc) && !cacheEc) {
-				spdlog::info(
+				spdlog::debug(
 					"TextureProcessingManager: conditioned cache hit for '{}' file='{}' semantic={} path='{}'",
 					cacheKey,
 					meta.filePath,
@@ -846,7 +859,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 				return;
 			}
 
-			spdlog::info(
+			spdlog::debug(
 				"TextureProcessingManager: begin processing '{}' semantic={} srcFormat={} blockCompressed={} fullMipChain={} subresources={} dims={}x{} preservePackedChannels={}",
 				key,
 				TextureSemanticToString(meta.processing.semantic),
@@ -860,7 +873,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 
 			if (auto cachedResult = TryLoadTextureSourceDataFromCache(cacheKey)) {
 				const std::wstring backfilledConditionedCachePath = TryWriteTextureSourceDataToCache(cacheKey, *cachedResult);
-				spdlog::info(
+				spdlog::debug(
 					"TextureProcessingManager: cache hit for request='{}' cache='{}' file='{}' semantic={} bc={} mips={} fmt={} subresources={} dims={}x{}",
 					key,
 					cacheKey,
@@ -889,7 +902,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 
 			auto prepared = ProcessTextureSourceData(sourceData, meta);
 			if (prepared.preparedSourceData) {
-				spdlog::info(
+				spdlog::debug(
 					"TextureProcessingManager: prepared '{}' semantic={} fmt={} blockCompressed={} fullMipChain={} subresources={} dims={}x{} requiresGpuCompression={}",
 					key,
 					TextureSemanticToString(meta.processing.semantic),
@@ -913,7 +926,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 					handle->error.clear();
 				}
 				handle->state.store(TextureProcessingJobState::GpuReadyToSubmit, std::memory_order_release);
-				spdlog::info(
+				spdlog::debug(
 					"TextureProcessingManager: prepared texture '{}' semantic={} for GPU BC7 submission",
 					key,
 					TextureSemanticToString(meta.processing.semantic));
@@ -937,7 +950,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 				handle->error.clear();
 			}
 			handle->state.store(TextureProcessingJobState::Ready, std::memory_order_release);
-			spdlog::info(
+			spdlog::debug(
 				"TextureProcessingManager: processed texture '{}' semantic={} bc={} mips={}",
 				key,
 				TextureSemanticToString(meta.processing.semantic),

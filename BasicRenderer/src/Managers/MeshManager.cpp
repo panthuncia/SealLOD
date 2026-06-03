@@ -499,7 +499,6 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
 		m_clodSharedStreamingRangesDirty = true;
 		m_clodStreamingStructureDirty = true;
-
 	}
 
 	mesh->SetCLodBufferViews(
