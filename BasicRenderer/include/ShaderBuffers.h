@@ -300,35 +300,41 @@ struct TerrainLayerGPU {
     float pad2;
 };
 
-struct TerrainQuadrantGPU {
-    int cellX;
-    int cellY;
-    unsigned int quadrant;
-    unsigned int layerCount;
-    unsigned int layerIndices[12];
-    unsigned int weightAtlasX;
-    unsigned int weightAtlasY;
-    unsigned int weightAtlasStride;
+struct TerrainLayerRefGPU {
+    unsigned int layerIndex;
     unsigned int pad0;
+    unsigned int pad1;
+    unsigned int pad2;
+};
+
+struct TerrainRegionGPU {
+    int regionX;
+    int regionY;
+    unsigned int layerRefStart;
+    unsigned int layerRefCount;
+    unsigned int weightBlockStart;
+    unsigned int weightSampleSide;
+    unsigned int pad0;
+    unsigned int pad1;
 };
 
 struct TerrainSetGPU {
-    int minCellX;
-    int minCellY;
-    unsigned int cellCountX;
-    unsigned int cellCountY;
-    unsigned int quadrantBase;
-    unsigned int quadrantCount;
+    int minRegionX;
+    int minRegionY;
+    unsigned int regionCountX;
+    unsigned int regionCountY;
+    unsigned int regionBase;
+    unsigned int regionCount;
     unsigned int layerBase;
     unsigned int layerCount;
-    unsigned int weightAtlas0TextureIndex;
-    unsigned int weightAtlas1TextureIndex;
-    unsigned int weightAtlas2TextureIndex;
-    unsigned int weightAtlasSamplerIndex;
-    unsigned int weightAtlasWidth;
-    unsigned int weightAtlasHeight;
+    unsigned int layerRefBase;
+    unsigned int layerRefCount;
+    unsigned int weightBlockBase;
+    unsigned int weightBlockCount;
+    float regionSizeWorld;
     float pad0;
     float pad1;
+    float pad2;
 };
 
 struct PerMaterialOpenPBRCB {

@@ -403,35 +403,41 @@ struct TerrainLayerInfo {
     float pad2;
 };
 
-struct TerrainQuadrantInfo {
-    int cellX;
-    int cellY;
-    uint quadrant;
-    uint layerCount;
-    uint layerIndices[12];
-    uint weightAtlasX;
-    uint weightAtlasY;
-    uint weightAtlasStride;
+struct TerrainLayerRefInfo {
+    uint layerIndex;
     uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+struct TerrainRegionInfo {
+    int regionX;
+    int regionY;
+    uint layerRefStart;
+    uint layerRefCount;
+    uint weightBlockStart;
+    uint weightSampleSide;
+    uint pad0;
+    uint pad1;
 };
 
 struct TerrainSetInfo {
-    int minCellX;
-    int minCellY;
-    uint cellCountX;
-    uint cellCountY;
-    uint quadrantBase;
-    uint quadrantCount;
+    int minRegionX;
+    int minRegionY;
+    uint regionCountX;
+    uint regionCountY;
+    uint regionBase;
+    uint regionCount;
     uint layerBase;
     uint layerCount;
-    uint weightAtlas0TextureIndex;
-    uint weightAtlas1TextureIndex;
-    uint weightAtlas2TextureIndex;
-    uint weightAtlasSamplerIndex;
-    uint weightAtlasWidth;
-    uint weightAtlasHeight;
+    uint layerRefBase;
+    uint layerRefCount;
+    uint weightBlockBase;
+    uint weightBlockCount;
+    float regionSizeWorld;
     float pad0;
     float pad1;
+    float pad2;
 };
 
 struct OpenPBRMaterialInfo {

@@ -10,28 +10,25 @@
 #include "Factories/TextureFactory.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
-#include "Resources/Sampler.h"
 
 namespace {
     constexpr std::uint32_t kInvalidDescriptor = 0xffffffffu;
 
-    std::uint32_t LayerCountForQuadrant(const TerrainQuadrantDesc& desc)
+    TerrainRegionGPU MakeFallbackRegion()
     {
-        std::uint32_t count = 1;
-        for (std::uint32_t i = 1; i < kTerrainMaxBlendLayers; ++i) {
-            if (desc.layerIndices[i] != 0u) {
-                count = i + 1u;
-            }
-        }
-        return count;
+        TerrainRegionGPU result{};
+        result.weightSampleSide = 19;
+        return result;
     }
 
-    TerrainQuadrantGPU MakeFallbackQuadrant()
+    TerrainLayerRefGPU MakeFallbackLayerRef()
     {
-        TerrainQuadrantGPU result{};
-        result.layerCount = 1;
-        result.weightAtlasStride = 19;
-        return result;
+        return TerrainLayerRefGPU{};
+    }
+
+    std::uint32_t MakeFallbackWeightBlock()
+    {
+        return 0u;
     }
 
     TerrainLayerGPU MakeFallbackLayer()
@@ -50,61 +47,51 @@ namespace {
     TerrainSetGPU MakeEmptySet()
     {
         TerrainSetGPU result{};
-        result.weightAtlas0TextureIndex = kInvalidDescriptor;
-        result.weightAtlas1TextureIndex = kInvalidDescriptor;
-        result.weightAtlas2TextureIndex = kInvalidDescriptor;
-        result.weightAtlasSamplerIndex = kInvalidDescriptor;
+        result.regionSizeWorld = kDefaultTerrainRegionSizeWorld;
         return result;
     }
 
-    std::vector<TerrainQuadrantGPU> BuildDenseQuadrants(
-        const std::vector<TerrainQuadrantDesc>& source,
-        std::int32_t& minCellX,
-        std::int32_t& minCellY,
-        std::uint32_t& cellCountX,
-        std::uint32_t& cellCountY)
+    std::vector<TerrainRegionGPU> BuildDenseRegions(
+        const std::vector<TerrainRegionDesc>& source,
+        std::int32_t& minRegionX,
+        std::int32_t& minRegionY,
+        std::uint32_t& regionCountX,
+        std::uint32_t& regionCountY)
     {
         if (source.empty()) {
-            minCellX = 0;
-            minCellY = 0;
-            cellCountX = 0;
-            cellCountY = 0;
+            minRegionX = 0;
+            minRegionY = 0;
+            regionCountX = 0;
+            regionCountY = 0;
             return {};
         }
 
-        std::int32_t maxCellX = std::numeric_limits<std::int32_t>::min();
-        std::int32_t maxCellY = std::numeric_limits<std::int32_t>::min();
-        minCellX = std::numeric_limits<std::int32_t>::max();
-        minCellY = std::numeric_limits<std::int32_t>::max();
-        for (const auto& q : source) {
-            minCellX = (std::min)(minCellX, q.cellX);
-            minCellY = (std::min)(minCellY, q.cellY);
-            maxCellX = (std::max)(maxCellX, q.cellX);
-            maxCellY = (std::max)(maxCellY, q.cellY);
+        std::int32_t maxRegionX = std::numeric_limits<std::int32_t>::min();
+        std::int32_t maxRegionY = std::numeric_limits<std::int32_t>::min();
+        minRegionX = std::numeric_limits<std::int32_t>::max();
+        minRegionY = std::numeric_limits<std::int32_t>::max();
+        for (const auto& region : source) {
+            minRegionX = (std::min)(minRegionX, region.regionX);
+            minRegionY = (std::min)(minRegionY, region.regionY);
+            maxRegionX = (std::max)(maxRegionX, region.regionX);
+            maxRegionY = (std::max)(maxRegionY, region.regionY);
         }
 
-        cellCountX = static_cast<std::uint32_t>(maxCellX - minCellX + 1);
-        cellCountY = static_cast<std::uint32_t>(maxCellY - minCellY + 1);
-        std::vector<TerrainQuadrantGPU> dense(static_cast<std::size_t>(cellCountX) * cellCountY * 4u, MakeFallbackQuadrant());
+        regionCountX = static_cast<std::uint32_t>(maxRegionX - minRegionX + 1);
+        regionCountY = static_cast<std::uint32_t>(maxRegionY - minRegionY + 1);
+        std::vector<TerrainRegionGPU> dense(static_cast<std::size_t>(regionCountX) * regionCountY, MakeFallbackRegion());
 
-        for (const auto& q : source) {
-            if (q.quadrant >= 4u) {
-                continue;
-            }
-            const auto localX = static_cast<std::uint32_t>(q.cellX - minCellX);
-            const auto localY = static_cast<std::uint32_t>(q.cellY - minCellY);
-            const auto index = (static_cast<std::size_t>(localY) * cellCountX + localX) * 4u + q.quadrant;
+        for (const auto& region : source) {
+            const auto localX = static_cast<std::uint32_t>(region.regionX - minRegionX);
+            const auto localY = static_cast<std::uint32_t>(region.regionY - minRegionY);
+            const auto index = static_cast<std::size_t>(localY) * regionCountX + localX;
             auto& out = dense[index];
-            out.cellX = q.cellX;
-            out.cellY = q.cellY;
-            out.quadrant = q.quadrant;
-            out.layerCount = LayerCountForQuadrant(q);
-            out.weightAtlasX = q.weightAtlasX;
-            out.weightAtlasY = q.weightAtlasY;
-            out.weightAtlasStride = q.weightAtlasStride;
-            for (std::uint32_t i = 0; i < kTerrainMaxBlendLayers; ++i) {
-                out.layerIndices[i] = q.layerIndices[i];
-            }
+            out.regionX = region.regionX;
+            out.regionY = region.regionY;
+            out.layerRefStart = region.layerRefStart;
+            out.layerRefCount = region.layerRefCount;
+            out.weightBlockStart = region.weightBlockStart;
+            out.weightSampleSide = region.weightSampleSide;
         }
 
         return dense;
@@ -127,25 +114,6 @@ namespace {
         }
     }
 
-    std::shared_ptr<Sampler> GetTerrainWeightSampler()
-    {
-        rhi::SamplerDesc samplerDesc{};
-        samplerDesc.minFilter = rhi::Filter::Linear;
-        samplerDesc.magFilter = rhi::Filter::Linear;
-        samplerDesc.mipFilter = rhi::MipFilter::Nearest;
-        samplerDesc.addressU = rhi::AddressMode::Clamp;
-        samplerDesc.addressV = rhi::AddressMode::Clamp;
-        samplerDesc.addressW = rhi::AddressMode::Clamp;
-        samplerDesc.mipLodBias = 0.0f;
-        samplerDesc.minLod = 0.0f;
-        samplerDesc.maxLod = 0.0f;
-        samplerDesc.maxAnisotropy = 1;
-        samplerDesc.compareEnable = false;
-        samplerDesc.compareOp = rhi::CompareOp::Always;
-        samplerDesc.reduction = rhi::ReductionMode::Standard;
-        samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
-        return Sampler::CreateSampler(samplerDesc);
-    }
 }
 
 std::unique_ptr<TerrainManager> TerrainManager::CreateUnique()
@@ -157,27 +125,33 @@ TerrainManager::TerrainManager()
 {
     m_sets = DynamicStructuredBuffer<TerrainSetGPU>::CreateShared(1, "Builtin::Terrain::Sets", true);
     m_layers = DynamicStructuredBuffer<TerrainLayerGPU>::CreateShared(1, "Builtin::Terrain::Layers", true);
-    m_quadrants = DynamicStructuredBuffer<TerrainQuadrantGPU>::CreateShared(1, "Builtin::Terrain::Quadrants", true);
+    m_layerRefs = DynamicStructuredBuffer<TerrainLayerRefGPU>::CreateShared(1, "Builtin::Terrain::LayerRefs", true);
+    m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
+    m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
     m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
     rg::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_quadrants, "Terrain material buffers");
+    rg::memory::SetResourceUsageHint(*m_layerRefs, "Terrain material buffers");
+    rg::memory::SetResourceUsageHint(*m_regions, "Terrain material buffers");
+    rg::memory::SetResourceUsageHint(*m_weightBlocks, "Terrain material buffers");
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
-    m_quadrants->UpdateAt(0u, MakeFallbackQuadrant());
+    m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
+    m_regions->UpdateAt(0u, MakeFallbackRegion());
+    m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
 }
 
 std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory)
 {
     ClearActiveTerrain();
 
-    std::int32_t minCellX = 0;
-    std::int32_t minCellY = 0;
-    std::uint32_t cellCountX = 0;
-    std::uint32_t cellCountY = 0;
-    auto denseQuadrants = BuildDenseQuadrants(desc.quadrants, minCellX, minCellY, cellCountX, cellCountY);
-    if (denseQuadrants.empty()) {
-        denseQuadrants.push_back(MakeFallbackQuadrant());
+    std::int32_t minRegionX = 0;
+    std::int32_t minRegionY = 0;
+    std::uint32_t regionCountX = 0;
+    std::uint32_t regionCountY = 0;
+    auto denseRegions = BuildDenseRegions(desc.regions, minRegionX, minRegionY, regionCountX, regionCountY);
+    if (denseRegions.empty()) {
+        denseRegions.push_back(MakeFallbackRegion());
     }
 
     const std::uint32_t layerCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layers.size()));
@@ -222,69 +196,55 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         m_layers->UpdateAt(i, layer);
     }
 
-    const auto quadrantCount = static_cast<std::uint32_t>(denseQuadrants.size());
-    m_quadrants->Resize(quadrantCount);
-    for (std::uint32_t i = 0; i < quadrantCount; ++i) {
-        m_quadrants->UpdateAt(i, denseQuadrants[i]);
+    const auto layerRefCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layerRefs.size()));
+    m_layerRefs->Resize(layerRefCount);
+    for (std::uint32_t i = 0; i < layerRefCount; ++i) {
+        TerrainLayerRefGPU layerRef = MakeFallbackLayerRef();
+        if (i < desc.layerRefs.size()) {
+            layerRef.layerIndex = desc.layerRefs[i].layerIndex;
+        }
+        m_layerRefs->UpdateAt(i, layerRef);
     }
 
-    m_weightAtlas0 = CreateWeightAtlasTexture(
-        "Terrain Weight Atlas 0",
-        desc.weightAtlasWidth,
-        desc.weightAtlasHeight,
-        desc.weights0Rgba8,
-        textureFactory);
-    m_weightAtlas1 = CreateWeightAtlasTexture(
-        "Terrain Weight Atlas 1",
-        desc.weightAtlasWidth,
-        desc.weightAtlasHeight,
-        desc.weights1Rgba8,
-        textureFactory);
-    m_weightAtlas2 = CreateWeightAtlasTexture(
-        "Terrain Weight Atlas 2",
-        desc.weightAtlasWidth,
-        desc.weightAtlasHeight,
-        desc.weights2Rgba8,
-        textureFactory);
+    const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(desc.weightBlocks.size()));
+    m_weightBlocks->Resize(weightBlockCount);
+    for (std::uint32_t i = 0; i < weightBlockCount; ++i) {
+        auto weightBlock = MakeFallbackWeightBlock();
+        if (i < desc.weightBlocks.size()) {
+            weightBlock = desc.weightBlocks[i];
+        }
+        m_weightBlocks->UpdateAt(i, weightBlock);
+    }
+
+    const auto regionCount = static_cast<std::uint32_t>(denseRegions.size());
+    m_regions->Resize(regionCount);
+    for (std::uint32_t i = 0; i < regionCount; ++i) {
+        m_regions->UpdateAt(i, denseRegions[i]);
+    }
 
     TerrainSetGPU set = MakeEmptySet();
-    set.minCellX = minCellX;
-    set.minCellY = minCellY;
-    set.cellCountX = cellCountX;
-    set.cellCountY = cellCountY;
-    set.quadrantBase = 0;
-    set.quadrantCount = quadrantCount;
+    set.minRegionX = minRegionX;
+    set.minRegionY = minRegionY;
+    set.regionCountX = regionCountX;
+    set.regionCountY = regionCountY;
+    set.regionBase = 0;
+    set.regionCount = regionCount;
     set.layerBase = 0;
     set.layerCount = layerCount;
-    set.weightAtlasWidth = desc.weightAtlasWidth;
-    set.weightAtlasHeight = desc.weightAtlasHeight;
-    if (m_weightAtlas0 && m_weightAtlas0->ImagePtr()) {
-        set.weightAtlas0TextureIndex = m_weightAtlas0->ImagePtr()->GetSRVInfo(0).slot.index;
-        set.weightAtlasSamplerIndex = m_weightAtlas0->SamplerDescriptorIndex();
-        m_textureGroup->AddResource(m_weightAtlas0->ImagePtr());
-    }
-    if (m_weightAtlas1 && m_weightAtlas1->ImagePtr()) {
-        set.weightAtlas1TextureIndex = m_weightAtlas1->ImagePtr()->GetSRVInfo(0).slot.index;
-        if (set.weightAtlasSamplerIndex == kInvalidDescriptor) {
-            set.weightAtlasSamplerIndex = m_weightAtlas1->SamplerDescriptorIndex();
-        }
-        m_textureGroup->AddResource(m_weightAtlas1->ImagePtr());
-    }
-    if (m_weightAtlas2 && m_weightAtlas2->ImagePtr()) {
-        set.weightAtlas2TextureIndex = m_weightAtlas2->ImagePtr()->GetSRVInfo(0).slot.index;
-        if (set.weightAtlasSamplerIndex == kInvalidDescriptor) {
-            set.weightAtlasSamplerIndex = m_weightAtlas2->SamplerDescriptorIndex();
-        }
-        m_textureGroup->AddResource(m_weightAtlas2->ImagePtr());
-    }
+    set.layerRefBase = 0;
+    set.layerRefCount = layerRefCount;
+    set.weightBlockBase = 0;
+    set.weightBlockCount = weightBlockCount;
+    set.regionSizeWorld = desc.regionSizeWorld > 0.0f ? desc.regionSizeWorld : kDefaultTerrainRegionSizeWorld;
     m_sets->UpdateAt(0u, set);
     spdlog::info(
-        "Terrain close-landscape material active: layers={} snowLayers={} quadrants={} weightAtlas={}x{} lodLandBlend=disabled",
+        "Terrain close-landscape material active: layers={} snowLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
         layerCount,
         snowLayerCount,
-        quadrantCount,
-        desc.weightAtlasWidth,
-        desc.weightAtlasHeight);
+        regionCount,
+        layerRefCount,
+        weightBlockCount,
+        set.regionSizeWorld);
     return 0u;
 }
 
@@ -296,57 +256,13 @@ void TerrainManager::ClearActiveTerrain()
                 m_textureGroup->RemoveResource(texture->ImagePtr().get());
             }
         }
-        if (m_weightAtlas0 && m_weightAtlas0->ImagePtr()) {
-            m_textureGroup->RemoveResource(m_weightAtlas0->ImagePtr().get());
-        }
-        if (m_weightAtlas1 && m_weightAtlas1->ImagePtr()) {
-            m_textureGroup->RemoveResource(m_weightAtlas1->ImagePtr().get());
-        }
-        if (m_weightAtlas2 && m_weightAtlas2->ImagePtr()) {
-            m_textureGroup->RemoveResource(m_weightAtlas2->ImagePtr().get());
-        }
     }
     m_layerTextures.clear();
-    m_weightAtlas0.reset();
-    m_weightAtlas1.reset();
-    m_weightAtlas2.reset();
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
-    m_quadrants->UpdateAt(0u, MakeFallbackQuadrant());
-}
-
-std::shared_ptr<TextureAsset> TerrainManager::CreateWeightAtlasTexture(
-    const char* name,
-    std::uint32_t width,
-    std::uint32_t height,
-    const std::vector<std::uint8_t>& rgba8,
-    TextureFactory* textureFactory)
-{
-    if (width == 0u || height == 0u || rgba8.size() < static_cast<std::size_t>(width) * height * 4u) {
-        return nullptr;
-    }
-
-    TextureDescription textureDesc{};
-    textureDesc.channels = 4;
-    textureDesc.format = rhi::Format::R8G8B8A8_UNorm;
-    textureDesc.hasSRV = true;
-    textureDesc.imageDimensions.push_back(ImageDimensions{
-        width,
-        height,
-        static_cast<std::uint64_t>(width) * 4u,
-        static_cast<std::uint64_t>(width) * height * 4u,
-    });
-    TextureAsset::BytesList bytes;
-    bytes.push_back(std::make_shared<std::vector<std::uint8_t>>(rgba8));
-    auto texture = TextureAsset::CreateShared(textureDesc, std::move(bytes), GetTerrainWeightSampler(), TextureFileMeta{});
-    texture->SetName(name);
-    if (textureFactory) {
-        texture->EnsureUploaded(*textureFactory);
-    }
-    if (auto image = texture->ImagePtr()) {
-        rg::memory::SetResourceUsageHint(*image, "Terrain weight atlases");
-    }
-    return texture;
+    m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
+    m_regions->UpdateAt(0u, MakeFallbackRegion());
+    m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
 }
 
 std::shared_ptr<Resource> TerrainManager::ProvideResource(ResourceIdentifier const& key)
@@ -358,8 +274,14 @@ std::shared_ptr<Resource> TerrainManager::ProvideResource(ResourceIdentifier con
     if (text == Builtin::Terrain::Layers) {
         return m_layers;
     }
-    if (text == Builtin::Terrain::Quadrants) {
-        return m_quadrants;
+    if (text == Builtin::Terrain::LayerRefs) {
+        return m_layerRefs;
+    }
+    if (text == Builtin::Terrain::Regions) {
+        return m_regions;
+    }
+    if (text == Builtin::Terrain::WeightBlocks) {
+        return m_weightBlocks;
     }
     return nullptr;
 }
@@ -369,7 +291,9 @@ std::vector<ResourceIdentifier> TerrainManager::GetSupportedKeys()
     return {
         Builtin::Terrain::Sets,
         Builtin::Terrain::Layers,
-        Builtin::Terrain::Quadrants,
+        Builtin::Terrain::LayerRefs,
+        Builtin::Terrain::Regions,
+        Builtin::Terrain::WeightBlocks,
     };
 }
 

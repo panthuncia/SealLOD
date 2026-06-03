@@ -17,8 +17,8 @@
 class TextureFactory;
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
+inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
-inline constexpr std::uint32_t kTerrainMaxBlendLayers = 12;
 
 struct TerrainLayerDesc
 {
@@ -30,26 +30,28 @@ struct TerrainLayerDesc
     std::uint32_t flags = 0u;
 };
 
-struct TerrainQuadrantDesc
+struct TerrainLayerRefDesc
 {
-    std::int32_t cellX = 0;
-    std::int32_t cellY = 0;
-    std::uint32_t quadrant = 0;
-    std::array<std::uint32_t, kTerrainMaxBlendLayers> layerIndices = {};
-    std::uint32_t weightAtlasX = 0;
-    std::uint32_t weightAtlasY = 0;
-    std::uint32_t weightAtlasStride = 19;
+    std::uint32_t layerIndex = 0;
+};
+
+struct TerrainRegionDesc
+{
+    std::int32_t regionX = 0;
+    std::int32_t regionY = 0;
+    std::uint32_t layerRefStart = 0;
+    std::uint32_t layerRefCount = 0;
+    std::uint32_t weightBlockStart = 0;
+    std::uint32_t weightSampleSide = 19;
 };
 
 struct TerrainMaterialDesc
 {
     std::vector<TerrainLayerDesc> layers;
-    std::vector<TerrainQuadrantDesc> quadrants;
-    std::vector<std::uint8_t> weights0Rgba8;
-    std::vector<std::uint8_t> weights1Rgba8;
-    std::vector<std::uint8_t> weights2Rgba8;
-    std::uint32_t weightAtlasWidth = 0;
-    std::uint32_t weightAtlasHeight = 0;
+    std::vector<TerrainLayerRefDesc> layerRefs;
+    std::vector<TerrainRegionDesc> regions;
+    std::vector<std::uint32_t> weightBlocks;
+    float regionSizeWorld = kDefaultTerrainRegionSizeWorld;
 };
 
 class TerrainManager : public IResourceProvider
@@ -68,19 +70,11 @@ public:
 private:
     TerrainManager();
 
-    static std::shared_ptr<TextureAsset> CreateWeightAtlasTexture(
-        const char* name,
-        std::uint32_t width,
-        std::uint32_t height,
-        const std::vector<std::uint8_t>& rgba8,
-        TextureFactory* textureFactory);
-
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerGPU>> m_layers;
-    std::shared_ptr<DynamicStructuredBuffer<TerrainQuadrantGPU>> m_quadrants;
+    std::shared_ptr<DynamicStructuredBuffer<TerrainLayerRefGPU>> m_layerRefs;
+    std::shared_ptr<DynamicStructuredBuffer<TerrainRegionGPU>> m_regions;
+    std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_weightBlocks;
     std::shared_ptr<ResourceGroup> m_textureGroup;
-    std::shared_ptr<TextureAsset> m_weightAtlas0;
-    std::shared_ptr<TextureAsset> m_weightAtlas1;
-    std::shared_ptr<TextureAsset> m_weightAtlas2;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
 };

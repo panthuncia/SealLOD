@@ -10,7 +10,9 @@
     "Terrain": {
       "Sets": {},
       "Layers": {},
-      "Quadrants": {},
+      "LayerRefs": {},
+      "Regions": {},
+      "WeightBlocks": {},
       "TextureGroup": {}
     },
     "PerMaterialDataBuffer": {},

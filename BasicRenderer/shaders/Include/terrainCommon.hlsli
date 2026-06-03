@@ -6,7 +6,6 @@
 
 static const float TERRAIN_CELL_SIZE = 4096.0f;
 static const float TERRAIN_QUADRANT_SIZE = 2048.0f;
-static const uint TERRAIN_MAX_LAYERS = 12u;
 static const uint TERRAIN_INVALID_DESCRIPTOR = 0xffffffffu;
 static const uint TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 
@@ -36,42 +35,7 @@ float2 TerrainSkyrimXYFromRendererPosition(float3 positionWS)
     return float2(positionWS.x, -positionWS.z);
 }
 
-uint TerrainGetLayerIndex(TerrainQuadrantInfo q, uint slot)
-{
-    return q.layerIndices[min(slot, TERRAIN_MAX_LAYERS - 1u)];
-}
-
-float TerrainGetWeight(float4 weights0, float4 weights1, float4 weights2, uint slot)
-{
-    if (slot == 0u) return weights0.x;
-    if (slot == 1u) return weights0.y;
-    if (slot == 2u) return weights0.z;
-    if (slot == 3u) return weights0.w;
-    if (slot == 4u) return weights1.x;
-    if (slot == 5u) return weights1.y;
-    if (slot == 6u) return weights1.z;
-    if (slot == 7u) return weights1.w;
-    if (slot == 8u) return weights2.x;
-    if (slot == 9u) return weights2.y;
-    if (slot == 10u) return weights2.z;
-    return weights2.w;
-}
-
-void TerrainLoadPackedWeights(
-    Texture2D<float4> weightAtlas0,
-    Texture2D<float4> weightAtlas1,
-    Texture2D<float4> weightAtlas2,
-    uint2 texel,
-    out float4 weights0,
-    out float4 weights1,
-    out float4 weights2)
-{
-    weights0 = weightAtlas0.Load(int3(texel, 0));
-    weights1 = weightAtlas1.Load(int3(texel, 0));
-    weights2 = weightAtlas2.Load(int3(texel, 0));
-}
-
-float4 TerrainCubicBSpline(float4 p0, float4 p1, float4 p2, float4 p3, float t)
+float TerrainCubicBSpline(float p0, float p1, float p2, float p3, float t)
 {
     float t2 = t * t;
     float t3 = t2 * t;
@@ -84,53 +48,52 @@ float4 TerrainCubicBSpline(float4 p0, float4 p1, float4 p2, float4 p3, float t)
     return p0 * w0 + p1 * w1 + p2 * w2 + p3 * w3;
 }
 
-void TerrainLoadWeightSample(
-    Texture2D<float4> weightAtlas0,
-    Texture2D<float4> weightAtlas1,
-    Texture2D<float4> weightAtlas2,
-    TerrainQuadrantInfo q,
-    int2 sample,
-    out float4 weights0,
-    out float4 weights1,
-    out float4 weights2)
+float TerrainUnpackWeightByte(uint packed, uint sampleIndex)
 {
-    int2 clampedSample = clamp(sample, -1, 17);
-    uint2 texel = uint2(q.weightAtlasX, q.weightAtlasY) + uint2(clampedSample + 1);
-    TerrainLoadPackedWeights(weightAtlas0, weightAtlas1, weightAtlas2, texel, weights0, weights1, weights2);
+    return ((packed >> ((sampleIndex & 3u) * 8u)) & 0xFFu) * (1.0f / 255.0f);
 }
 
-void TerrainLoadWeightRowCubic(
-    Texture2D<float4> weightAtlas0,
-    Texture2D<float4> weightAtlas1,
-    Texture2D<float4> weightAtlas2,
-    TerrainQuadrantInfo q,
+float TerrainLoadWeightSample(
+    StructuredBuffer<uint> weightBlocks,
+    TerrainSetInfo terrain,
+    TerrainRegionInfo region,
+    uint localLayer,
+    int2 sample)
+{
+    int maxSample = (int)region.weightSampleSide - 2;
+    int2 clampedSample = clamp(sample, -1, maxSample);
+    uint2 packedSample = (uint2)(clampedSample + 1);
+    uint sampleIndex = packedSample.y * region.weightSampleSide + packedSample.x;
+    uint packedWordsPerLayer = (region.weightSampleSide * region.weightSampleSide + 3u) / 4u;
+    uint wordIndex = terrain.weightBlockBase + region.weightBlockStart + localLayer * packedWordsPerLayer + sampleIndex / 4u;
+    if (wordIndex >= terrain.weightBlockBase + terrain.weightBlockCount)
+    {
+        return 0.0f;
+    }
+    return TerrainUnpackWeightByte(weightBlocks[wordIndex], sampleIndex);
+}
+
+float TerrainLoadWeightRowCubic(
+    StructuredBuffer<uint> weightBlocks,
+    TerrainSetInfo terrain,
+    TerrainRegionInfo region,
+    uint localLayer,
     int2 baseSample,
-    float t,
-    out float4 weights0,
-    out float4 weights1,
-    out float4 weights2)
+    float t)
 {
-    float4 p0_0, p1_0, p2_0, p3_0;
-    float4 p0_1, p1_1, p2_1, p3_1;
-    float4 p0_2, p1_2, p2_2, p3_2;
-    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(-1, 0), p0_0, p0_1, p0_2);
-    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(0, 0), p1_0, p1_1, p1_2);
-    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(1, 0), p2_0, p2_1, p2_2);
-    TerrainLoadWeightSample(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(2, 0), p3_0, p3_1, p3_2);
-    weights0 = TerrainCubicBSpline(p0_0, p1_0, p2_0, p3_0, t);
-    weights1 = TerrainCubicBSpline(p0_1, p1_1, p2_1, p3_1, t);
-    weights2 = TerrainCubicBSpline(p0_2, p1_2, p2_2, p3_2, t);
+    float p0 = TerrainLoadWeightSample(weightBlocks, terrain, region, localLayer, baseSample + int2(-1, 0));
+    float p1 = TerrainLoadWeightSample(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 0));
+    float p2 = TerrainLoadWeightSample(weightBlocks, terrain, region, localLayer, baseSample + int2(1, 0));
+    float p3 = TerrainLoadWeightSample(weightBlocks, terrain, region, localLayer, baseSample + int2(2, 0));
+    return TerrainCubicBSpline(p0, p1, p2, p3, t);
 }
 
-void TerrainInterpolateLayerWeights(
-    Texture2D<float4> weightAtlas0,
-    Texture2D<float4> weightAtlas1,
-    Texture2D<float4> weightAtlas2,
-    TerrainQuadrantInfo q,
-    float2 quadrantLocal,
-    out float4 weights0,
-    out float4 weights1,
-    out float4 weights2)
+float TerrainInterpolateLayerWeight(
+    StructuredBuffer<uint> weightBlocks,
+    TerrainSetInfo terrain,
+    TerrainRegionInfo region,
+    uint localLayer,
+    float2 regionLocal)
 {
     // Skyrim stores close landscape weights on a 17x17 quadrant lattice and feeds
     // them as vertex attributes. Reconstruct the painted material field from that
@@ -139,21 +102,16 @@ void TerrainInterpolateLayerWeights(
     // B-spline acts as a small, non-overshooting low-pass filter over abrupt
     // 128-unit paint transitions, which better suits full-quality terrain seen
     // at arbitrary CLod distances than exact interpolation of the coarse lattice.
-    float2 grid = saturate(quadrantLocal / TERRAIN_QUADRANT_SIZE) * 16.0f;
+    float2 grid = saturate(regionLocal / terrain.regionSizeWorld) * 16.0f;
     int2 baseSample = (int2)floor(grid);
     float2 f = grid - (float2)baseSample;
 
-    float4 r0_0, r1_0, r2_0, r3_0;
-    float4 r0_1, r1_1, r2_1, r3_1;
-    float4 r0_2, r1_2, r2_2, r3_2;
-    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(0, -1), f.x, r0_0, r0_1, r0_2);
-    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(0, 0), f.x, r1_0, r1_1, r1_2);
-    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(0, 1), f.x, r2_0, r2_1, r2_2);
-    TerrainLoadWeightRowCubic(weightAtlas0, weightAtlas1, weightAtlas2, q, baseSample + int2(0, 2), f.x, r3_0, r3_1, r3_2);
+    float r0 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, -1), f.x);
+    float r1 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 0), f.x);
+    float r2 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 1), f.x);
+    float r3 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 2), f.x);
 
-    weights0 = saturate(TerrainCubicBSpline(r0_0, r1_0, r2_0, r3_0, f.y));
-    weights1 = saturate(TerrainCubicBSpline(r0_1, r1_1, r2_1, r3_1, f.y));
-    weights2 = saturate(TerrainCubicBSpline(r0_2, r1_2, r2_2, r3_2, f.y));
+    return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
 
 float3x3 TerrainBasis(float3 normalWS)
@@ -185,72 +143,63 @@ void ApplyTerrainMaterialInternal(
 
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
-    StructuredBuffer<TerrainQuadrantInfo> terrainQuadrants = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Quadrants)];
+    StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
+    StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
+    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-    if (terrain.cellCountX == 0u || terrain.cellCountY == 0u || terrain.layerCount == 0u)
+    if (terrain.regionSizeWorld <= 0.0f ||
+        terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
     {
         return;
     }
 
     float2 skyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
-    int2 cell = int2(floor(skyrimXY / TERRAIN_CELL_SIZE));
-    uint2 localCell;
-    localCell.x = (uint)(cell.x - terrain.minCellX);
-    localCell.y = (uint)(cell.y - terrain.minCellY);
-    if (cell.x < terrain.minCellX || cell.y < terrain.minCellY ||
-        localCell.x >= terrain.cellCountX || localCell.y >= terrain.cellCountY)
+    int2 regionCoord = int2(floor(skyrimXY / terrain.regionSizeWorld));
+    uint2 localRegion;
+    localRegion.x = (uint)(regionCoord.x - terrain.minRegionX);
+    localRegion.y = (uint)(regionCoord.y - terrain.minRegionY);
+    if (regionCoord.x < terrain.minRegionX || regionCoord.y < terrain.minRegionY ||
+        localRegion.x >= terrain.regionCountX || localRegion.y >= terrain.regionCountY)
     {
         return;
     }
 
-    float2 cellOrigin = float2(cell) * TERRAIN_CELL_SIZE;
-    float2 local = skyrimXY - cellOrigin;
-    uint quadrantX = local.x >= TERRAIN_QUADRANT_SIZE ? 1u : 0u;
-    uint quadrantY = local.y >= TERRAIN_QUADRANT_SIZE ? 1u : 0u;
-    uint quadrant = quadrantY * 2u + quadrantX;
-    uint quadrantIndex = terrain.quadrantBase + ((localCell.y * terrain.cellCountX + localCell.x) * 4u + quadrant);
-    if (quadrantIndex >= terrain.quadrantBase + terrain.quadrantCount)
+    uint regionIndex = terrain.regionBase + localRegion.y * terrain.regionCountX + localRegion.x;
+    if (regionIndex >= terrain.regionBase + terrain.regionCount)
     {
         return;
     }
-    TerrainQuadrantInfo q = terrainQuadrants[quadrantIndex];
-
-    float2 quadrantLocal = local - float2(quadrantX, quadrantY) * TERRAIN_QUADRANT_SIZE;
-
-    float4 weights0 = float4(1.0f, 0.0f, 0.0f, 0.0f);
-    float4 weights1 = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    float4 weights2 = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (terrain.weightAtlas0TextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-        terrain.weightAtlas1TextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-        terrain.weightAtlas2TextureIndex != TERRAIN_INVALID_DESCRIPTOR)
+    TerrainRegionInfo region = terrainRegions[regionIndex];
+    if (region.layerRefCount == 0u || region.weightSampleSide < 2u)
     {
-        Texture2D<float4> weightAtlas0 = ResourceDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlas0TextureIndex)];
-        Texture2D<float4> weightAtlas1 = ResourceDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlas1TextureIndex)];
-        Texture2D<float4> weightAtlas2 = ResourceDescriptorHeap[NonUniformResourceIndex(terrain.weightAtlas2TextureIndex)];
-        TerrainInterpolateLayerWeights(weightAtlas0, weightAtlas1, weightAtlas2, q, quadrantLocal, weights0, weights1, weights2);
+        return;
     }
 
-    float weightSum = weights0.x + weights0.y + weights0.z + weights0.w +
-        weights1.x + weights1.y + weights1.z + weights1.w +
-        weights2.x + weights2.y + weights2.z + weights2.w;
-    float invWeightSum = rcp(max(weightSum, 1.0e-4f));
+    float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
+    float2 regionLocal = skyrimXY - regionOrigin;
 
     float2 skyrimXYDdx = ddx(skyrimXY);
     float2 skyrimXYDdy = ddy(skyrimXY);
 
     float3 blendedBaseColor = 0.0f.xxx;
     float3 blendedNormalTS = 0.0f.xxx;
-    [unroll]
-    for (uint slot = 0u; slot < TERRAIN_MAX_LAYERS; ++slot)
+    float weightSum = 0.0f;
+    for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
-        float weight = TerrainGetWeight(weights0, weights1, weights2, slot) * invWeightSum;
+        float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
         if (weight <= 0.0001f)
         {
             continue;
         }
+        weightSum += weight;
 
-        uint layerIndex = min(terrain.layerBase + TerrainGetLayerIndex(q, slot), terrain.layerBase + terrain.layerCount - 1u);
+        uint layerRefIndex = terrain.layerRefBase + region.layerRefStart + localLayer;
+        if (layerRefIndex >= terrain.layerRefBase + terrain.layerRefCount)
+        {
+            continue;
+        }
+        uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
         TerrainLayerInfo layer = terrainLayers[layerIndex];
         float2 layerUv = skyrimXY * layer.uvScale;
         float2 layerDUdx = skyrimXYDdx * layer.uvScale;
@@ -274,6 +223,14 @@ void ApplyTerrainMaterialInternal(
         }
         blendedNormalTS += layerNormalTS * weight;
     }
+
+    if (weightSum <= 1.0e-4f)
+    {
+        return;
+    }
+    float invWeightSum = rcp(weightSum);
+    blendedBaseColor *= invWeightSum;
+    blendedNormalTS *= invWeightSum;
 
     float3x3 basis = TerrainBasis(normalWSBase);
     inputs.albedo = blendedBaseColor * vertexColor;
