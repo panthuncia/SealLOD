@@ -17,6 +17,7 @@
 class TextureFactory;
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
+inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 
 struct TerrainLayerDesc
 {
@@ -24,6 +25,7 @@ struct TerrainLayerDesc
     std::shared_ptr<TextureAsset> normal;
     DirectX::XMFLOAT4 fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
     float uvScale = kDefaultTerrainLayerUvScale;
+    // Close landscape layer flags copied from Skyrim LTEX metadata. Distant land LOD overlays are not terrain layers.
     std::uint32_t flags = 0u;
 };
 

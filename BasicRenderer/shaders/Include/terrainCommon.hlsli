@@ -8,6 +8,7 @@ static const float TERRAIN_CELL_SIZE = 4096.0f;
 static const float TERRAIN_QUADRANT_SIZE = 2048.0f;
 static const uint TERRAIN_MAX_LAYERS = 6u;
 static const uint TERRAIN_INVALID_DESCRIPTOR = 0xffffffffu;
+static const uint TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 
 float TerrainDynamicSwizzle(float4 value, uint channel)
 {
@@ -75,6 +76,8 @@ void ApplyTerrainMaterialInternal(
     in float3 vertexColor,
     inout MaterialInputs inputs)
 {
+    // Close landscape domain: sample full-quality LAND layer weights everywhere.
+    // Skyrim distant land overlay/noise blending is intentionally not represented here.
     if ((materialFlags & MATERIAL_TERRAIN) == 0u)
     {
         return;

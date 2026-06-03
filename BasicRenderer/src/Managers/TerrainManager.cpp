@@ -125,6 +125,26 @@ namespace {
             return { 0u, 1u, 2u };
         }
     }
+
+    std::shared_ptr<Sampler> GetTerrainWeightSampler()
+    {
+        rhi::SamplerDesc samplerDesc{};
+        samplerDesc.minFilter = rhi::Filter::Linear;
+        samplerDesc.magFilter = rhi::Filter::Linear;
+        samplerDesc.mipFilter = rhi::MipFilter::Nearest;
+        samplerDesc.addressU = rhi::AddressMode::Clamp;
+        samplerDesc.addressV = rhi::AddressMode::Clamp;
+        samplerDesc.addressW = rhi::AddressMode::Clamp;
+        samplerDesc.mipLodBias = 0.0f;
+        samplerDesc.minLod = 0.0f;
+        samplerDesc.maxLod = 0.0f;
+        samplerDesc.maxAnisotropy = 1;
+        samplerDesc.compareEnable = false;
+        samplerDesc.compareOp = rhi::CompareOp::Always;
+        samplerDesc.reduction = rhi::ReductionMode::Standard;
+        samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
+        return Sampler::CreateSampler(samplerDesc);
+    }
 }
 
 std::unique_ptr<TerrainManager> TerrainManager::CreateUnique()
@@ -161,6 +181,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
 
     const std::uint32_t layerCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layers.size()));
     m_layers->Resize(layerCount);
+    std::uint32_t snowLayerCount = 0;
     for (std::uint32_t i = 0; i < layerCount; ++i) {
         TerrainLayerGPU layer = MakeFallbackLayer();
         if (i < desc.layers.size()) {
@@ -168,6 +189,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             layer.fallbackColor = source.fallbackColor;
             layer.uvScale = source.uvScale;
             layer.flags = source.flags;
+            if ((source.flags & TERRAIN_LAYER_FLAG_SNOW) != 0u) {
+                ++snowLayerCount;
+            }
             if (source.diffuse) {
                 source.diffuse->SetGenerateMipmaps(true);
                 if (textureFactory) {
@@ -240,6 +264,13 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         m_textureGroup->AddResource(m_weightAtlas1->ImagePtr());
     }
     m_sets->UpdateAt(0u, set);
+    spdlog::info(
+        "Terrain close-landscape material active: layers={} snowLayers={} quadrants={} weightAtlas={}x{} lodLandBlend=disabled",
+        layerCount,
+        snowLayerCount,
+        quadrantCount,
+        desc.weightAtlasWidth,
+        desc.weightAtlasHeight);
     return 0u;
 }
 
@@ -289,7 +320,7 @@ std::shared_ptr<TextureAsset> TerrainManager::CreateWeightAtlasTexture(
     });
     TextureAsset::BytesList bytes;
     bytes.push_back(std::make_shared<std::vector<std::uint8_t>>(rgba8));
-    auto texture = TextureAsset::CreateShared(textureDesc, std::move(bytes), Sampler::GetDefaultSampler(), TextureFileMeta{});
+    auto texture = TextureAsset::CreateShared(textureDesc, std::move(bytes), GetTerrainWeightSampler(), TextureFileMeta{});
     texture->SetName(name);
     if (textureFactory) {
         texture->EnsureUploaded(*textureFactory);
