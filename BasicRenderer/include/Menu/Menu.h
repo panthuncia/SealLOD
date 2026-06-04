@@ -677,6 +677,12 @@ private:
     bool m_terrainStochasticSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticSamplingEnabled;
     std::function<void(bool)> setTerrainStochasticSamplingEnabled;
+    bool m_terrainStochasticDiffuseSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticDiffuseSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticDiffuseSamplingEnabled;
+    bool m_terrainStochasticNormalSamplingEnabled = false;
+    std::function<bool()> getTerrainStochasticNormalSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticNormalSamplingEnabled;
 
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
@@ -1164,6 +1170,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticSampling");
     m_terrainStochasticSamplingEnabled = getTerrainStochasticSamplingEnabled();
     observerSetting(m_terrainStochasticSamplingEnabled, "enableTerrainStochasticSampling");
+    setTerrainStochasticDiffuseSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticDiffuseSampling");
+    getTerrainStochasticDiffuseSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticDiffuseSampling");
+    m_terrainStochasticDiffuseSamplingEnabled = getTerrainStochasticDiffuseSamplingEnabled();
+    observerSetting(m_terrainStochasticDiffuseSamplingEnabled, "enableTerrainStochasticDiffuseSampling");
+    setTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticNormalSampling");
+    getTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticNormalSampling");
+    m_terrainStochasticNormalSamplingEnabled = getTerrainStochasticNormalSamplingEnabled();
+    observerSetting(m_terrainStochasticNormalSamplingEnabled, "enableTerrainStochasticNormalSampling");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1788,9 +1802,15 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Visibility Rendering", &m_visibilityRenderingEnabled)) {
             setVisibilityRenderingEnabled(m_visibilityRenderingEnabled);
-		}
+        }
         if (ImGui::Checkbox("Terrain Stochastic Sampling", &m_terrainStochasticSamplingEnabled)) {
             setTerrainStochasticSamplingEnabled(m_terrainStochasticSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Stochastic Diffuse", &m_terrainStochasticDiffuseSamplingEnabled)) {
+            setTerrainStochasticDiffuseSamplingEnabled(m_terrainStochasticDiffuseSamplingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Stochastic Normals", &m_terrainStochasticNormalSamplingEnabled)) {
+            setTerrainStochasticNormalSamplingEnabled(m_terrainStochasticNormalSamplingEnabled);
         }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);

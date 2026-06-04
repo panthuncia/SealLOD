@@ -221,8 +221,8 @@ struct PerFrameBuffer {
     float shadowVirtualSmrtRayLengthScaleDirectional;
     float shadowVirtualSmrtMaxTraceDistanceWorld;
     uint terrainStochasticSamplingEnabled;
-    uint _padSmrt0;
-    uint _padSmrt1;
+    uint terrainStochasticDiffuseEnabled;
+    uint terrainStochasticNormalEnabled;
     uint _padSmrt2;
 };
 

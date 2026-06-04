@@ -75,7 +75,14 @@ TerrainStochasticContext TerrainBuildStochasticContext(
     ctx.uv = uv;
     ctx.duDx = duDx;
     ctx.duDy = duDy;
-    ctx.lod = lodTexture.CalculateLevelOfDetail(lodSampler, uv);
+    uint textureWidth = 1u;
+    uint textureHeight = 1u;
+    lodTexture.GetDimensions(textureWidth, textureHeight);
+    float2 textureSize = float2(max(textureWidth, 1u), max(textureHeight, 1u));
+    float2 dxTexels = duDx * textureSize;
+    float2 dyTexels = duDy * textureSize;
+    float maxFootprintSq = max(dot(dxTexels, dxTexels), dot(dyTexels, dyTexels));
+    ctx.lod = max(0.0f, 0.5f * log2(max(maxFootprintSq, 1.0e-8f)));
 
     float scale = max(stochasticScale, 0.001f);
     float2 grid = uv * scale;
@@ -303,6 +310,8 @@ void ApplyTerrainMaterialInternal(
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     bool terrainStochasticSamplingEnabled = perFrameBuffer.terrainStochasticSamplingEnabled != 0u;
+    bool terrainStochasticDiffuseEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
+    bool terrainStochasticNormalEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticNormalEnabled != 0u;
     if (terrain.regionSizeWorld <= 0.0f ||
         terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
     {
@@ -359,7 +368,8 @@ void ApplyTerrainMaterialInternal(
         float2 layerUv = skyrimXY * layer.uvScale;
         float2 layerDUdx = skyrimXYDdx * layer.uvScale;
         float2 layerDUdy = skyrimXYDdy * layer.uvScale;
-        bool hasStochasticLayer = terrainStochasticSamplingEnabled && layer.stochasticLayerIndex != TERRAIN_INVALID_DESCRIPTOR;
+        bool hasStochasticLayer = (terrainStochasticDiffuseEnabled || terrainStochasticNormalEnabled) &&
+            layer.stochasticLayerIndex != TERRAIN_INVALID_DESCRIPTOR;
         TerrainStochasticLayerInfo stochasticLayer = (TerrainStochasticLayerInfo)0;
         TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
         if (hasStochasticLayer)
@@ -385,7 +395,8 @@ void ApplyTerrainMaterialInternal(
         }
 
         float3 layerBaseColor = layer.fallbackColor.rgb;
-        if (hasStochasticLayer &&
+        if (terrainStochasticDiffuseEnabled &&
+            hasStochasticLayer &&
             (stochasticLayer.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u &&
             layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR &&
             stochasticLayer.diffuseGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
@@ -404,7 +415,8 @@ void ApplyTerrainMaterialInternal(
         blendedBaseColor += layerBaseColor * weight;
 
         float3 layerNormalTS = float3(0.0f, 0.0f, 1.0f);
-        if (hasStochasticLayer &&
+        if (terrainStochasticNormalEnabled &&
+            hasStochasticLayer &&
             (stochasticLayer.normalFlags & TERRAIN_STOCHASTIC_FLAG_NORMAL) != 0u &&
             (layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR || layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR) &&
             stochasticLayer.normalGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&

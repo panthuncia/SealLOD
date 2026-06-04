@@ -1340,9 +1340,11 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<unsigned int>("outputType", OutputType::COLOR);
 	settingsManager.registerSetting<unsigned int>("tonemapType", TonemapType::AMD_LPM);
     settingsManager.registerSetting<bool>("allowTearing", false);
-	settingsManager.registerSetting<bool>("drawBoundingSpheres", false);
+    settingsManager.registerSetting<bool>("drawBoundingSpheres", false);
     settingsManager.registerSetting<bool>("enableClusteredLighting", m_clusteredLighting);
     settingsManager.registerSetting<bool>("enableTerrainStochasticSampling", true);
+    settingsManager.registerSetting<bool>("enableTerrainStochasticDiffuseSampling", true);
+    settingsManager.registerSetting<bool>("enableTerrainStochasticNormalSampling", false);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);
