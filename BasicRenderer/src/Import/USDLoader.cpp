@@ -1615,6 +1615,23 @@ namespace USDLoader {
 		return std::nullopt;
 	}
 
+	bool IsBrNiflyObjectRootPrim(const UsdPrim& prim)
+	{
+		if (!prim) {
+			return false;
+		}
+		const auto blockId = GetPrimCustomInt(prim, TfToken("brnifly:blockId"));
+		if (!blockId || *blockId != 0) {
+			return false;
+		}
+		if (GetPrimCustomString(prim, TfToken("brnifly:blockName")).empty()) {
+			return false;
+		}
+
+		const auto parent = prim.GetParent();
+		return parent && parent.GetName() == TfToken("BRNifly");
+	}
+
 	UsdPrim GetImmediateChildOnPath(const UsdPrim& ancestor, const UsdPrim& descendant)
 	{
 		if (!ancestor || !descendant) {
@@ -2849,6 +2866,12 @@ namespace USDLoader {
 				if (prim.IsA<UsdGeomXformable>()) {
 					UsdGeomXformable xform(prim);
 					xform.GetLocalTransformation(&localUsdMatrix, &resetsXformStack, geomTimeCode);
+					if (IsBrNiflyObjectRootPrim(prim)) {
+						// Skyrim places the loaded NIF root with the reference transform. Treat
+						// the authored top object-root transform as replaceable placement state,
+						// not reusable asset-local geometry offset.
+						localUsdMatrix = GfMatrix4d(1.0);
+					}
 					if (!nextHasCorrectedAxis || resetsXformStack) {
 						GfMatrix4d rotMat(upRot, GfVec3d(0.0));
 						localUsdMatrix = localUsdMatrix * rotMat;
