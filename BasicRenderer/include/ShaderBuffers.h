@@ -96,7 +96,7 @@ struct PerFrameCB {
     float shadowVirtualSmrtMaxTraceDistanceWorld = 0.0f;
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;
-    unsigned int terrainStochasticNormalEnabled = 0u;
+    unsigned int terrainStochasticNormalEnabled = 1u;
     unsigned int _padSmrt2 = 0u;
 };
 

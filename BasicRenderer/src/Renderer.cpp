@@ -1344,7 +1344,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableClusteredLighting", m_clusteredLighting);
     settingsManager.registerSetting<bool>("enableTerrainStochasticSampling", true);
     settingsManager.registerSetting<bool>("enableTerrainStochasticDiffuseSampling", true);
-    settingsManager.registerSetting<bool>("enableTerrainStochasticNormalSampling", false);
+    settingsManager.registerSetting<bool>("enableTerrainStochasticNormalSampling", true);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);

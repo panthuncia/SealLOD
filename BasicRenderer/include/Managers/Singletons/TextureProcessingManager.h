@@ -49,7 +49,7 @@ struct StochasticTextureArtifactSettings {
 	NormalMapConvention normalConvention = NormalMapConvention::DirectX;
 	std::string sourceIdentity;
 	std::uint32_t lutWidth = 256;
-	std::uint32_t algorithmVersion = 2;
+	std::uint32_t algorithmVersion = 4;
 };
 
 struct StochasticTextureArtifactResult {

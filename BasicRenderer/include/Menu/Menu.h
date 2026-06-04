@@ -680,7 +680,7 @@ private:
     bool m_terrainStochasticDiffuseSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticDiffuseSamplingEnabled;
     std::function<void(bool)> setTerrainStochasticDiffuseSamplingEnabled;
-    bool m_terrainStochasticNormalSamplingEnabled = false;
+    bool m_terrainStochasticNormalSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticNormalSamplingEnabled;
     std::function<void(bool)> setTerrainStochasticNormalSamplingEnabled;
 
