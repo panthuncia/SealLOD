@@ -1342,6 +1342,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("allowTearing", false);
 	settingsManager.registerSetting<bool>("drawBoundingSpheres", false);
     settingsManager.registerSetting<bool>("enableClusteredLighting", m_clusteredLighting);
+    settingsManager.registerSetting<bool>("enableTerrainStochasticSampling", true);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);

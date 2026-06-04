@@ -8,6 +8,9 @@ static const float TERRAIN_CELL_SIZE = 4096.0f;
 static const float TERRAIN_QUADRANT_SIZE = 2048.0f;
 static const uint TERRAIN_INVALID_DESCRIPTOR = 0xffffffffu;
 static const uint TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
+static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
+static const uint TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
+static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
 
 float TerrainDynamicSwizzle(float4 value, uint channel)
 {
@@ -28,6 +31,155 @@ float3 TerrainDecodeNormal(float4 encoded, uint3 channels)
         ? sqrt(saturate(1.0f - n.x * n.x - n.y * n.y))
         : TerrainDynamicSwizzle(encoded, channels.z) * 2.0f - 1.0f;
     return normalize(n);
+}
+
+uint TerrainHash(uint2 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1013904223u;
+    v ^= (v >> 16u);
+    v *= 2246822519u;
+    v ^= (v >> 13u);
+    return v.x ^ v.y;
+}
+
+float2 TerrainHash2(int2 p)
+{
+    uint h0 = TerrainHash(asuint(p));
+    uint h1 = TerrainHash(asuint(p + int2(37, 119)));
+    return float2(h0 & 0x00ffffffu, h1 & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
+struct TerrainStochasticContext
+{
+    float3 weights;
+    float2 offsets0;
+    float2 offsets1;
+    float2 offsets2;
+    float2 uv;
+    float2 duDx;
+    float2 duDy;
+    float lod;
+};
+
+TerrainStochasticContext TerrainBuildStochasticContext(
+    Texture2D<float4> lodTexture,
+    SamplerState lodSampler,
+    float2 uv,
+    float2 duDx,
+    float2 duDy,
+    float stochasticScale)
+{
+    TerrainStochasticContext ctx;
+    ctx.uv = uv;
+    ctx.duDx = duDx;
+    ctx.duDy = duDy;
+    ctx.lod = lodTexture.CalculateLevelOfDetail(lodSampler, uv);
+
+    float scale = max(stochasticScale, 0.001f);
+    float2 grid = uv * scale;
+    float2 skewed = float2(grid.x - 0.57735027f * grid.y, 1.15470054f * grid.y);
+    int2 baseCell = int2(floor(skewed));
+    float2 f = skewed - (float2)baseCell;
+    float z = 1.0f - f.x - f.y;
+
+    int2 v0;
+    int2 v1;
+    int2 v2;
+    float3 w;
+    if (z > 0.0f)
+    {
+        v0 = baseCell;
+        v1 = baseCell + int2(0, 1);
+        v2 = baseCell + int2(1, 0);
+        w = float3(z, f.y, f.x);
+    }
+    else
+    {
+        v0 = baseCell + int2(1, 1);
+        v1 = baseCell + int2(1, 0);
+        v2 = baseCell + int2(0, 1);
+        w = float3(-z, 1.0f - f.y, 1.0f - f.x);
+    }
+
+    ctx.weights = w;
+    ctx.offsets0 = TerrainHash2(v0);
+    ctx.offsets1 = TerrainHash2(v1);
+    ctx.offsets2 = TerrainHash2(v2);
+    return ctx;
+}
+
+float3 TerrainVariancePreservingBlend(float3 a, float3 b, float3 c, float3 weights)
+{
+    float varianceScale = rsqrt(max(dot(weights, weights), 1.0e-4f));
+    return saturate(((a - 0.5f.xxx) * weights.x + (b - 0.5f.xxx) * weights.y + (c - 0.5f.xxx) * weights.z) * varianceScale + 0.5f.xxx);
+}
+
+float2 TerrainVariancePreservingBlend2(float2 a, float2 b, float2 c, float3 weights)
+{
+    float varianceScale = rsqrt(max(dot(weights, weights), 1.0e-4f));
+    return saturate(((a - 0.5f.xx) * weights.x + (b - 0.5f.xx) * weights.y + (c - 0.5f.xx) * weights.z) * varianceScale + 0.5f.xx);
+}
+
+float TerrainLutY(float lod, float lutHeight)
+{
+    return saturate((max(lod, 0.0f) + 0.5f) / max(lutHeight, 1.0f));
+}
+
+float3 TerrainInverseLut3(Texture2D<float4> lut, SamplerState samplerState, float3 gaussian, float lod, float lutHeight)
+{
+    float y = TerrainLutY(lod, lutHeight);
+    return float3(
+        lut.SampleLevel(samplerState, float2(gaussian.r, y), 0.0f).r,
+        lut.SampleLevel(samplerState, float2(gaussian.g, y), 0.0f).g,
+        lut.SampleLevel(samplerState, float2(gaussian.b, y), 0.0f).b);
+}
+
+float2 TerrainInverseLut2(Texture2D<float4> lut, SamplerState samplerState, float2 gaussian, float lod, float lutHeight)
+{
+    float y = TerrainLutY(lod, lutHeight);
+    return float2(
+        lut.SampleLevel(samplerState, float2(gaussian.x, y), 0.0f).r,
+        lut.SampleLevel(samplerState, float2(gaussian.y, y), 0.0f).g);
+}
+
+float3 TerrainSampleStochasticDiffuse(TerrainStochasticLayerInfo stochastic, TerrainStochasticContext ctx, SamplerState textureSampler)
+{
+    Texture2D<float4> gaussianTex = ResourceDescriptorHeap[NonUniformResourceIndex(stochastic.diffuseGaussianTextureIndex)];
+    Texture2D<float4> inverseLut = ResourceDescriptorHeap[NonUniformResourceIndex(stochastic.diffuseInverseLutTextureIndex)];
+    SamplerState lutSampler = SamplerDescriptorHeap[NonUniformResourceIndex(stochastic.diffuseInverseLutSamplerIndex)];
+    float3 g0 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).rgb;
+    float3 g1 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).rgb;
+    float3 g2 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).rgb;
+    float3 gaussian = TerrainVariancePreservingBlend(g0, g1, g2, ctx.weights);
+    float3 color = TerrainInverseLut3(inverseLut, lutSampler, gaussian, ctx.lod, stochastic.diffuseLutHeight);
+    if ((stochastic.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE) != 0u)
+    {
+        color = stochastic.diffuseColorSpaceOrigin.rgb +
+            stochastic.diffuseColorSpaceVector0.rgb * color.r +
+            stochastic.diffuseColorSpaceVector1.rgb * color.g +
+            stochastic.diffuseColorSpaceVector2.rgb * color.b;
+    }
+    return saturate(color);
+}
+
+float3 TerrainSampleStochasticNormal(TerrainStochasticLayerInfo stochastic, TerrainStochasticContext ctx, SamplerState textureSampler)
+{
+    Texture2D<float4> gaussianTex = ResourceDescriptorHeap[NonUniformResourceIndex(stochastic.normalGaussianTextureIndex)];
+    Texture2D<float4> inverseLut = ResourceDescriptorHeap[NonUniformResourceIndex(stochastic.normalInverseLutTextureIndex)];
+    SamplerState lutSampler = SamplerDescriptorHeap[NonUniformResourceIndex(stochastic.normalInverseLutSamplerIndex)];
+    float2 g0 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).rg;
+    float2 g1 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).rg;
+    float2 g2 = gaussianTex.SampleGrad(textureSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).rg;
+    float2 encoded = TerrainInverseLut2(
+        inverseLut,
+        lutSampler,
+        TerrainVariancePreservingBlend2(g0, g1, g2, ctx.weights),
+        ctx.lod,
+        stochastic.normalLutHeight);
+    float2 xy = encoded * 2.0f - 1.0f;
+    return normalize(float3(xy, sqrt(saturate(1.0f - dot(xy, xy)))));
 }
 
 float2 TerrainSkyrimXYFromRendererPosition(float3 positionWS)
@@ -143,11 +295,14 @@ void ApplyTerrainMaterialInternal(
 
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
+    StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
     StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
     StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    bool terrainStochasticSamplingEnabled = perFrameBuffer.terrainStochasticSamplingEnabled != 0u;
     if (terrain.regionSizeWorld <= 0.0f ||
         terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
     {
@@ -204,9 +359,43 @@ void ApplyTerrainMaterialInternal(
         float2 layerUv = skyrimXY * layer.uvScale;
         float2 layerDUdx = skyrimXYDdx * layer.uvScale;
         float2 layerDUdy = skyrimXYDdy * layer.uvScale;
+        bool hasStochasticLayer = terrainStochasticSamplingEnabled && layer.stochasticLayerIndex != TERRAIN_INVALID_DESCRIPTOR;
+        TerrainStochasticLayerInfo stochasticLayer = (TerrainStochasticLayerInfo)0;
+        TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
+        if (hasStochasticLayer)
+        {
+            stochasticLayer = terrainStochasticLayers[layer.stochasticLayerIndex];
+            float contextScale = max(stochasticLayer.stochasticScale, 0.001f);
+            if (layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+            {
+                Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+                SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+                stochasticContext = TerrainBuildStochasticContext(lodTex, lodSampler, layerUv, layerDUdx, layerDUdy, contextScale);
+            }
+            else if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+            {
+                Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
+                SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
+                stochasticContext = TerrainBuildStochasticContext(lodTex, lodSampler, layerUv, layerDUdx, layerDUdy, contextScale);
+            }
+            else
+            {
+                hasStochasticLayer = false;
+            }
+        }
 
         float3 layerBaseColor = layer.fallbackColor.rgb;
-        if (layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        if (hasStochasticLayer &&
+            (stochasticLayer.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u &&
+            layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            stochasticLayer.diffuseGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            stochasticLayer.diffuseInverseLutTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            stochasticLayer.diffuseInverseLutSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        {
+            SamplerState stochasticTextureSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+            layerBaseColor = TerrainSampleStochasticDiffuse(stochasticLayer, stochasticContext, stochasticTextureSampler);
+        }
+        else if (layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
         {
             Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
             SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
@@ -215,7 +404,20 @@ void ApplyTerrainMaterialInternal(
         blendedBaseColor += layerBaseColor * weight;
 
         float3 layerNormalTS = float3(0.0f, 0.0f, 1.0f);
-        if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        if (hasStochasticLayer &&
+            (stochasticLayer.normalFlags & TERRAIN_STOCHASTIC_FLAG_NORMAL) != 0u &&
+            (layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR || layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR) &&
+            stochasticLayer.normalGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            stochasticLayer.normalInverseLutTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            stochasticLayer.normalInverseLutSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        {
+            uint normalSampleSamplerIndex = layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR
+                ? layer.normalSamplerIndex
+                : layer.diffuseSamplerIndex;
+            SamplerState stochasticTextureSampler = SamplerDescriptorHeap[NonUniformResourceIndex(normalSampleSamplerIndex)];
+            layerNormalTS = TerrainSampleStochasticNormal(stochasticLayer, stochasticContext, stochasticTextureSampler);
+        }
+        else if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
         {
             Texture2D<float4> normalTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
             SamplerState normalSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];

@@ -93,9 +93,10 @@ struct Builtin {
     inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
     inline static constexpr std::string_view Regions = "Builtin::Terrain::Regions";
     inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
+    inline static constexpr std::string_view StochasticLayers = "Builtin::Terrain::StochasticLayers";
     inline static constexpr std::string_view TextureGroup = "Builtin::Terrain::TextureGroup";
     inline static constexpr std::string_view WeightBlocks = "Builtin::Terrain::WeightBlocks";
-  };
+};
   struct Noise {
     inline static constexpr std::string_view BlueNoise2D = "Builtin::Noise::BlueNoise2D";
   };

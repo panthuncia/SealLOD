@@ -674,6 +674,10 @@ private:
 	std::function<bool()> getVisibilityRenderingEnabled;
 	std::function<void(bool)> setVisibilityRenderingEnabled;
 
+    bool m_terrainStochasticSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticSamplingEnabled;
+
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
 	std::function<void(bool)> setGTAOEnabled;
@@ -1155,6 +1159,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	getVisibilityRenderingEnabled = settingsManager.getSettingGetter<bool>("enableVisibilityRendering");
 	m_visibilityRenderingEnabled = getVisibilityRenderingEnabled();
 	observerSetting(m_visibilityRenderingEnabled, "enableVisibilityRendering");
+
+    setTerrainStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticSampling");
+    getTerrainStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticSampling");
+    m_terrainStochasticSamplingEnabled = getTerrainStochasticSamplingEnabled();
+    observerSetting(m_terrainStochasticSamplingEnabled, "enableTerrainStochasticSampling");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1780,6 +1789,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Visibility Rendering", &m_visibilityRenderingEnabled)) {
             setVisibilityRenderingEnabled(m_visibilityRenderingEnabled);
 		}
+        if (ImGui::Checkbox("Terrain Stochastic Sampling", &m_terrainStochasticSamplingEnabled)) {
+            setTerrainStochasticSamplingEnabled(m_terrainStochasticSamplingEnabled);
+        }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);
 		}

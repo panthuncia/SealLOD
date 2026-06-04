@@ -94,6 +94,7 @@ public:
             Builtin::Material::TextureGroup,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
+            Builtin::Terrain::StochasticLayers,
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,

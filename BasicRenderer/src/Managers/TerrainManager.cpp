@@ -38,9 +38,29 @@ namespace {
         result.diffuseSamplerIndex = kInvalidDescriptor;
         result.normalTextureIndex = kInvalidDescriptor;
         result.normalSamplerIndex = kInvalidDescriptor;
+        result.stochasticLayerIndex = kInvalidDescriptor;
         result.normalChannels = { 0u, 1u, 2u };
         result.fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
         result.uvScale = kDefaultTerrainLayerUvScale;
+        return result;
+    }
+
+    TerrainStochasticLayerGPU MakeFallbackStochasticLayer()
+    {
+        TerrainStochasticLayerGPU result{};
+        result.diffuseGaussianTextureIndex = kInvalidDescriptor;
+        result.diffuseInverseLutTextureIndex = kInvalidDescriptor;
+        result.diffuseInverseLutSamplerIndex = kInvalidDescriptor;
+        result.normalGaussianTextureIndex = kInvalidDescriptor;
+        result.normalInverseLutTextureIndex = kInvalidDescriptor;
+        result.normalInverseLutSamplerIndex = kInvalidDescriptor;
+        result.stochasticScale = kDefaultTerrainStochasticScale;
+        result.diffuseLutHeight = 1.0f;
+        result.normalLutHeight = 1.0f;
+        result.diffuseColorSpaceOrigin = { 0.0f, 0.0f, 0.0f, 0.0f };
+        result.diffuseColorSpaceVector0 = { 1.0f, 0.0f, 0.0f, 0.0f };
+        result.diffuseColorSpaceVector1 = { 0.0f, 1.0f, 0.0f, 0.0f };
+        result.diffuseColorSpaceVector2 = { 0.0f, 0.0f, 1.0f, 0.0f };
         return result;
     }
 
@@ -114,6 +134,35 @@ namespace {
         }
     }
 
+    bool UploadTerrainTexture(
+        const std::shared_ptr<TextureAsset>& texture,
+        TextureFactory* textureFactory,
+        std::shared_ptr<ResourceGroup>& textureGroup,
+        std::vector<std::shared_ptr<TextureAsset>>& retainedTextures,
+        bool generateMipmaps,
+        std::uint32_t& textureIndex,
+        std::uint32_t& samplerIndex)
+    {
+        textureIndex = kInvalidDescriptor;
+        samplerIndex = kInvalidDescriptor;
+        if (!texture) {
+            return false;
+        }
+
+        texture->SetGenerateMipmaps(generateMipmaps);
+        if (textureFactory) {
+            texture->EnsureUploaded(*textureFactory);
+        }
+        if (auto image = texture->ImagePtr()) {
+            textureIndex = image->GetSRVInfo(0).slot.index;
+            samplerIndex = texture->SamplerDescriptorIndex();
+            textureGroup->AddResource(image);
+            retainedTextures.push_back(texture);
+            return true;
+        }
+        return false;
+    }
+
 }
 
 std::unique_ptr<TerrainManager> TerrainManager::CreateUnique()
@@ -125,17 +174,20 @@ TerrainManager::TerrainManager()
 {
     m_sets = DynamicStructuredBuffer<TerrainSetGPU>::CreateShared(1, "Builtin::Terrain::Sets", true);
     m_layers = DynamicStructuredBuffer<TerrainLayerGPU>::CreateShared(1, "Builtin::Terrain::Layers", true);
+    m_stochasticLayers = DynamicStructuredBuffer<TerrainStochasticLayerGPU>::CreateShared(1, "Builtin::Terrain::StochasticLayers", true);
     m_layerRefs = DynamicStructuredBuffer<TerrainLayerRefGPU>::CreateShared(1, "Builtin::Terrain::LayerRefs", true);
     m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
     m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
     m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
     rg::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
+    rg::memory::SetResourceUsageHint(*m_stochasticLayers, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_layerRefs, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_regions, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_weightBlocks, "Terrain material buffers");
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
+    m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());
     m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
     m_regions->UpdateAt(0u, MakeFallbackRegion());
     m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
@@ -156,7 +208,10 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
 
     const std::uint32_t layerCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layers.size()));
     m_layers->Resize(layerCount);
+    std::vector<TerrainStochasticLayerGPU> stochasticLayers;
+    stochasticLayers.reserve(desc.layers.size());
     std::uint32_t snowLayerCount = 0;
+    std::uint32_t stochasticLayerCount = 0;
     for (std::uint32_t i = 0; i < layerCount; ++i) {
         TerrainLayerGPU layer = MakeFallbackLayer();
         if (i < desc.layers.size()) {
@@ -167,33 +222,131 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if ((source.flags & TERRAIN_LAYER_FLAG_SNOW) != 0u) {
                 ++snowLayerCount;
             }
-            if (source.diffuse) {
-                source.diffuse->SetGenerateMipmaps(true);
-                if (textureFactory) {
-                    source.diffuse->EnsureUploaded(*textureFactory);
-                }
-                if (auto image = source.diffuse->ImagePtr()) {
-                    layer.diffuseTextureIndex = image->GetSRVInfo(0).slot.index;
-                    layer.diffuseSamplerIndex = source.diffuse->SamplerDescriptorIndex();
-                    m_textureGroup->AddResource(image);
-                    m_layerTextures.push_back(source.diffuse);
-                }
+            UploadTerrainTexture(
+                source.diffuse,
+                textureFactory,
+                m_textureGroup,
+                m_layerTextures,
+                true,
+                layer.diffuseTextureIndex,
+                layer.diffuseSamplerIndex);
+            if (UploadTerrainTexture(
+                    source.normal,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    true,
+                    layer.normalTextureIndex,
+                    layer.normalSamplerIndex)) {
+                layer.normalChannels = NormalChannelsForTexture(source.normal);
             }
-            if (source.normal) {
-                source.normal->SetGenerateMipmaps(true);
-                if (textureFactory) {
-                    source.normal->EnsureUploaded(*textureFactory);
-                }
-                if (auto image = source.normal->ImagePtr()) {
-                    layer.normalTextureIndex = image->GetSRVInfo(0).slot.index;
-                    layer.normalSamplerIndex = source.normal->SamplerDescriptorIndex();
-                    layer.normalChannels = NormalChannelsForTexture(source.normal);
-                    m_textureGroup->AddResource(image);
-                    m_layerTextures.push_back(source.normal);
-                }
+
+            TerrainStochasticLayerGPU stochastic = MakeFallbackStochasticLayer();
+            stochastic.stochasticScale = source.stochastic.scale > 0.0f
+                ? source.stochastic.scale
+                : kDefaultTerrainStochasticScale;
+            bool hasStochastic = false;
+            std::uint32_t textureIndex = kInvalidDescriptor;
+            std::uint32_t samplerIndex = kInvalidDescriptor;
+            if (UploadTerrainTexture(
+                    source.stochastic.diffuse.gaussian,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    true,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.diffuseGaussianTextureIndex = textureIndex;
+                stochastic.diffuseFlags |= TERRAIN_STOCHASTIC_FLAG_DIFFUSE;
+                hasStochastic = true;
+            }
+            if (UploadTerrainTexture(
+                    source.stochastic.diffuse.inverseLut,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    false,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.diffuseInverseLutTextureIndex = textureIndex;
+                stochastic.diffuseInverseLutSamplerIndex = samplerIndex;
+                stochastic.diffuseLutHeight = static_cast<float>((std::max)(1u, source.stochastic.diffuse.lutHeight));
+                stochastic.diffuseFlags |= source.stochastic.diffuse.flags;
+                hasStochastic = hasStochastic && stochastic.diffuseGaussianTextureIndex != kInvalidDescriptor;
+            }
+            else {
+                stochastic.diffuseFlags &= ~TERRAIN_STOCHASTIC_FLAG_DIFFUSE;
+                hasStochastic = stochastic.normalFlags != 0u;
+            }
+            if ((stochastic.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE) != 0u) {
+                stochastic.diffuseColorSpaceOrigin = {
+                    source.stochastic.diffuse.colorSpaceOrigin.x,
+                    source.stochastic.diffuse.colorSpaceOrigin.y,
+                    source.stochastic.diffuse.colorSpaceOrigin.z,
+                    0.0f
+                };
+                stochastic.diffuseColorSpaceVector0 = {
+                    source.stochastic.diffuse.colorSpaceVector0.x,
+                    source.stochastic.diffuse.colorSpaceVector0.y,
+                    source.stochastic.diffuse.colorSpaceVector0.z,
+                    0.0f
+                };
+                stochastic.diffuseColorSpaceVector1 = {
+                    source.stochastic.diffuse.colorSpaceVector1.x,
+                    source.stochastic.diffuse.colorSpaceVector1.y,
+                    source.stochastic.diffuse.colorSpaceVector1.z,
+                    0.0f
+                };
+                stochastic.diffuseColorSpaceVector2 = {
+                    source.stochastic.diffuse.colorSpaceVector2.x,
+                    source.stochastic.diffuse.colorSpaceVector2.y,
+                    source.stochastic.diffuse.colorSpaceVector2.z,
+                    0.0f
+                };
+            }
+            if (UploadTerrainTexture(
+                    source.stochastic.normal.gaussian,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    true,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.normalGaussianTextureIndex = textureIndex;
+                stochastic.normalFlags |= TERRAIN_STOCHASTIC_FLAG_NORMAL;
+                hasStochastic = true;
+            }
+            if (UploadTerrainTexture(
+                    source.stochastic.normal.inverseLut,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    false,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.normalInverseLutTextureIndex = textureIndex;
+                stochastic.normalInverseLutSamplerIndex = samplerIndex;
+                stochastic.normalLutHeight = static_cast<float>((std::max)(1u, source.stochastic.normal.lutHeight));
+                stochastic.normalFlags |= source.stochastic.normal.flags;
+                hasStochastic = hasStochastic && stochastic.normalGaussianTextureIndex != kInvalidDescriptor;
+            }
+            else {
+                stochastic.normalFlags &= ~TERRAIN_STOCHASTIC_FLAG_NORMAL;
+                hasStochastic = (stochastic.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u;
+            }
+            if (hasStochastic) {
+                layer.stochasticLayerIndex = static_cast<std::uint32_t>(stochasticLayers.size());
+                stochasticLayers.push_back(stochastic);
+                ++stochasticLayerCount;
             }
         }
         m_layers->UpdateAt(i, layer);
+    }
+
+    const auto stochasticBufferCount = (std::max)(1u, static_cast<std::uint32_t>(stochasticLayers.size()));
+    m_stochasticLayers->Resize(stochasticBufferCount);
+    for (std::uint32_t i = 0; i < stochasticBufferCount; ++i) {
+        m_stochasticLayers->UpdateAt(i, i < stochasticLayers.size() ? stochasticLayers[i] : MakeFallbackStochasticLayer());
     }
 
     const auto layerRefCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layerRefs.size()));
@@ -238,9 +391,10 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     set.regionSizeWorld = desc.regionSizeWorld > 0.0f ? desc.regionSizeWorld : kDefaultTerrainRegionSizeWorld;
     m_sets->UpdateAt(0u, set);
     spdlog::info(
-        "Terrain close-landscape material active: layers={} snowLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
+        "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
         layerCount,
         snowLayerCount,
+        stochasticLayerCount,
         regionCount,
         layerRefCount,
         weightBlockCount,
@@ -260,6 +414,7 @@ void TerrainManager::ClearActiveTerrain()
     m_layerTextures.clear();
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
+    m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());
     m_layerRefs->UpdateAt(0u, MakeFallbackLayerRef());
     m_regions->UpdateAt(0u, MakeFallbackRegion());
     m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
@@ -273,6 +428,9 @@ std::shared_ptr<Resource> TerrainManager::ProvideResource(ResourceIdentifier con
     }
     if (text == Builtin::Terrain::Layers) {
         return m_layers;
+    }
+    if (text == Builtin::Terrain::StochasticLayers) {
+        return m_stochasticLayers;
     }
     if (text == Builtin::Terrain::LayerRefs) {
         return m_layerRefs;
@@ -291,6 +449,7 @@ std::vector<ResourceIdentifier> TerrainManager::GetSupportedKeys()
     return {
         Builtin::Terrain::Sets,
         Builtin::Terrain::Layers,
+        Builtin::Terrain::StochasticLayers,
         Builtin::Terrain::LayerRefs,
         Builtin::Terrain::Regions,
         Builtin::Terrain::WeightBlocks,

@@ -1,7 +1,9 @@
 #include "Managers/Singletons/TextureProcessingManager.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -508,6 +510,536 @@ std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const Text
 	return writtenConditionedCachePath;
 }
 
+std::wstring BuildStochasticCachePath(const std::string& key, const wchar_t* suffix) {
+	size_t seed = 0;
+	boost::hash_combine(seed, key);
+
+	std::wostringstream fileName;
+	fileName << L"stochastic_"
+		<< std::hex
+		<< std::setw(static_cast<int>(sizeof(size_t) * 2))
+		<< std::setfill(L'0')
+		<< seed
+		<< suffix;
+	return GetCacheFilePath(fileName.str(), L"textures");
+}
+
+double InverseNormalCdf(double p) {
+	p = std::clamp(p, 1.0e-6, 1.0 - 1.0e-6);
+	static constexpr double a[] = {
+		-3.969683028665376e+01,
+		 2.209460984245205e+02,
+		-2.759285104469687e+02,
+		 1.383577518672690e+02,
+		-3.066479806614716e+01,
+		 2.506628277459239e+00
+	};
+	static constexpr double b[] = {
+		-5.447609879822406e+01,
+		 1.615858368580409e+02,
+		-1.556989798598866e+02,
+		 6.680131188771972e+01,
+		-1.328068155288572e+01
+	};
+	static constexpr double c[] = {
+		-7.784894002430293e-03,
+		-3.223964580411365e-01,
+		-2.400758277161838e+00,
+		-2.549732539343734e+00,
+		 4.374664141464968e+00,
+		 2.938163982698783e+00
+	};
+	static constexpr double d[] = {
+		 7.784695709041462e-03,
+		 3.224671290700398e-01,
+		 2.445134137142996e+00,
+		 3.754408661907416e+00
+	};
+	static constexpr double pLow = 0.02425;
+	static constexpr double pHigh = 1.0 - pLow;
+	if (p < pLow) {
+		const double q = std::sqrt(-2.0 * std::log(p));
+		return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+			((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+	}
+	if (p > pHigh) {
+		const double q = std::sqrt(-2.0 * std::log(1.0 - p));
+		return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+			((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+	}
+	const double q = p - 0.5;
+	const double r = q * q;
+	return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+		(((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0);
+}
+
+uint8_t QuantizeUnorm8(float value) {
+	return static_cast<uint8_t>(std::clamp(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f), 0l, 255l));
+}
+
+float GaussianizedValue(float cdf) {
+	return std::clamp(0.5f + static_cast<float>(InverseNormalCdf(cdf)) * (1.0f / 6.0f), 0.0f, 1.0f);
+}
+
+std::vector<uint8_t> BuildGaussianizedPixels(
+	const std::vector<std::array<float, 4>>& sourcePixels,
+	uint32_t channels)
+{
+	const size_t pixelCount = sourcePixels.size();
+	std::vector<uint8_t> result(pixelCount * channels, 0u);
+	for (uint32_t channel = 0; channel < channels; ++channel) {
+		std::vector<std::pair<float, size_t>> sorted;
+		sorted.reserve(pixelCount);
+		for (size_t i = 0; i < pixelCount; ++i) {
+			sorted.emplace_back(std::clamp(sourcePixels[i][channel], 0.0f, 1.0f), i);
+		}
+		std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+			return a.first < b.first;
+		});
+
+		for (size_t rank = 0; rank < sorted.size(); ++rank) {
+			const float cdf = (static_cast<float>(rank) + 0.5f) / static_cast<float>((std::max)(size_t(1), sorted.size()));
+			result[sorted[rank].second * channels + channel] = QuantizeUnorm8(GaussianizedValue(cdf));
+		}
+	}
+	if (channels == 4) {
+		for (size_t i = 0; i < pixelCount; ++i) {
+			result[i * channels + 3] = QuantizeUnorm8(sourcePixels[i][3]);
+		}
+	}
+	return result;
+}
+
+std::vector<uint8_t> DownsampleUnorm8(
+	const std::vector<uint8_t>& src,
+	uint32_t srcWidth,
+	uint32_t srcHeight,
+	uint32_t channels,
+	uint32_t& dstWidth,
+	uint32_t& dstHeight)
+{
+	dstWidth = (std::max)(1u, srcWidth >> 1);
+	dstHeight = (std::max)(1u, srcHeight >> 1);
+	std::vector<uint8_t> dst(static_cast<size_t>(dstWidth) * dstHeight * channels, 0u);
+	for (uint32_t y = 0; y < dstHeight; ++y) {
+		for (uint32_t x = 0; x < dstWidth; ++x) {
+			for (uint32_t c = 0; c < channels; ++c) {
+				uint32_t sum = 0;
+				uint32_t count = 0;
+				for (uint32_t oy = 0; oy < 2; ++oy) {
+					for (uint32_t ox = 0; ox < 2; ++ox) {
+						const uint32_t sx = (std::min)(srcWidth - 1, x * 2 + ox);
+						const uint32_t sy = (std::min)(srcHeight - 1, y * 2 + oy);
+						sum += src[(static_cast<size_t>(sy) * srcWidth + sx) * channels + c];
+						++count;
+					}
+				}
+				dst[(static_cast<size_t>(y) * dstWidth + x) * channels + c] =
+					static_cast<uint8_t>((sum + count / 2u) / count);
+			}
+		}
+	}
+	return dst;
+}
+
+std::shared_ptr<TextureSourceData> BuildMipmappedUnormSourceData(
+	std::vector<uint8_t> basePixels,
+	uint32_t width,
+	uint32_t height,
+	uint32_t channels,
+	rhi::Format format)
+{
+	auto result = std::make_shared<TextureSourceData>();
+	result->desc.format = format;
+	result->desc.channels = static_cast<unsigned short>(channels);
+	result->desc.arraySize = 1;
+	result->desc.generateMipMaps = false;
+	result->hasFullMipChain = true;
+	result->isBlockCompressed = false;
+
+	uint32_t mipWidth = width;
+	uint32_t mipHeight = height;
+	std::vector<uint8_t> mipPixels = std::move(basePixels);
+	for (;;) {
+		ImageDimensions dims{};
+		dims.width = mipWidth;
+		dims.height = mipHeight;
+		dims.rowPitch = static_cast<uint64_t>(mipWidth) * channels;
+		dims.slicePitch = dims.rowPitch * mipHeight;
+		result->desc.imageDimensions.push_back(dims);
+		result->subresources.push_back(std::make_shared<std::vector<uint8_t>>(mipPixels));
+		if (mipWidth == 1u && mipHeight == 1u) {
+			break;
+		}
+		uint32_t nextWidth = 1;
+		uint32_t nextHeight = 1;
+		mipPixels = DownsampleUnorm8(mipPixels, mipWidth, mipHeight, channels, nextWidth, nextHeight);
+		mipWidth = nextWidth;
+		mipHeight = nextHeight;
+	}
+	return result;
+}
+
+float EstimateAverageWindowVariance(
+	const std::vector<uint8_t>& gaussianPixels,
+	uint32_t width,
+	uint32_t height,
+	uint32_t channels,
+	uint32_t channel,
+	uint32_t windowSide)
+{
+	if (gaussianPixels.empty() || width == 0u || height == 0u || channels == 0u || channel >= channels || windowSide <= 1u) {
+		return 0.0f;
+	}
+
+	double varianceSum = 0.0;
+	uint32_t blockCount = 0;
+	for (uint32_t y0 = 0; y0 < height; y0 += windowSide) {
+		for (uint32_t x0 = 0; x0 < width; x0 += windowSide) {
+			const uint32_t y1 = (std::min)(height, y0 + windowSide);
+			const uint32_t x1 = (std::min)(width, x0 + windowSide);
+			double sum = 0.0;
+			double sumSquares = 0.0;
+			uint32_t count = 0;
+			for (uint32_t y = y0; y < y1; ++y) {
+				for (uint32_t x = x0; x < x1; ++x) {
+					const float value = gaussianPixels[(static_cast<size_t>(y) * width + x) * channels + channel] * (1.0f / 255.0f);
+					sum += value;
+					sumSquares += static_cast<double>(value) * value;
+					++count;
+				}
+			}
+			if (count > 1u) {
+				const double mean = sum / count;
+				varianceSum += (sumSquares / count) - mean * mean;
+				++blockCount;
+			}
+		}
+	}
+	return blockCount == 0u ? 0.0f : static_cast<float>(varianceSum / blockCount);
+}
+
+std::shared_ptr<TextureSourceData> BuildInverseLutSourceData(
+	const std::vector<std::array<float, 4>>& sourcePixels,
+	uint32_t channels,
+	uint32_t lutWidth,
+	uint32_t lutHeight,
+	rhi::Format format,
+	const std::vector<uint8_t>& gaussianizedBasePixels,
+	uint32_t sourceWidth,
+	uint32_t sourceHeight)
+{
+	std::vector<uint8_t> pixels(static_cast<size_t>(lutWidth) * lutHeight * channels, 0u);
+	for (uint32_t channel = 0; channel < channels; ++channel) {
+		std::vector<float> sorted;
+		sorted.reserve(sourcePixels.size());
+		for (const auto& p : sourcePixels) {
+			sorted.push_back(std::clamp(p[channel], 0.0f, 1.0f));
+		}
+		std::sort(sorted.begin(), sorted.end());
+		std::vector<float> baseLut(lutWidth, 0.0f);
+		for (uint32_t y = 0; y < lutHeight; ++y) {
+			float variance = 0.0f;
+			if (y > 0u) {
+				const uint32_t windowSide = 1u << (std::min)(y, 12u);
+				variance = EstimateAverageWindowVariance(
+					gaussianizedBasePixels,
+					sourceWidth,
+					sourceHeight,
+					channels,
+					channel,
+					windowSide);
+			}
+			for (uint32_t x = 0; x < lutWidth; ++x) {
+				const float g = (static_cast<float>(x) + 0.5f) / static_cast<float>(lutWidth);
+				if (y == 0u) {
+					const float normal = (g - 0.5f) * 6.0f;
+					const float cdf = 0.5f * (1.0f + std::erf(normal / std::sqrt(2.0f)));
+					const size_t index = (std::min)(
+						sorted.size() - 1u,
+						static_cast<size_t>(std::clamp(cdf, 0.0f, 1.0f) * static_cast<float>(sorted.size() - 1u)));
+					baseLut[x] = sorted[index];
+				}
+				float filtered = baseLut[x];
+				if (y > 0u && variance > 1.0e-8f) {
+					const float center = g;
+					const float sigma = std::sqrt(variance);
+					const int radius = static_cast<int>((std::min)(static_cast<float>(lutWidth), std::ceil(sigma * 4.0f * lutWidth)));
+					double weighted = 0.0;
+					double weightSum = 0.0;
+					for (int dx = -radius; dx <= radius; ++dx) {
+						const int sx = std::clamp(static_cast<int>(x) + dx, 0, static_cast<int>(lutWidth) - 1);
+						const float sampleCenter = (static_cast<float>(sx) + 0.5f) / static_cast<float>(lutWidth);
+						const float d = sampleCenter - center;
+						const float w = std::exp(-(d * d) / (2.0f * variance));
+						weighted += static_cast<double>(baseLut[static_cast<size_t>(sx)]) * w;
+						weightSum += w;
+					}
+					if (weightSum > 0.0) {
+						filtered = static_cast<float>(weighted / weightSum);
+					}
+				}
+				pixels[(static_cast<size_t>(y) * lutWidth + x) * channels + channel] = QuantizeUnorm8(filtered);
+			}
+		}
+	}
+	if (channels == 4) {
+		for (uint32_t y = 0; y < lutHeight; ++y) {
+			for (uint32_t x = 0; x < lutWidth; ++x) {
+				pixels[(static_cast<size_t>(y) * lutWidth + x) * channels + 3u] = 255u;
+			}
+		}
+	}
+
+	auto result = std::make_shared<TextureSourceData>();
+	result->desc.format = format;
+	result->desc.channels = static_cast<unsigned short>(channels);
+	result->desc.arraySize = 1;
+	result->desc.generateMipMaps = false;
+	result->hasFullMipChain = true;
+	result->isBlockCompressed = false;
+	ImageDimensions dims{};
+	dims.width = lutWidth;
+	dims.height = lutHeight;
+	dims.rowPitch = static_cast<uint64_t>(lutWidth) * channels;
+	dims.slicePitch = dims.rowPitch * lutHeight;
+	result->desc.imageDimensions.push_back(dims);
+	result->subresources.push_back(std::make_shared<std::vector<uint8_t>>(std::move(pixels)));
+	return result;
+}
+
+bool TryReadStochasticMetadata(const std::wstring& path, StochasticTextureArtifactResult& result) {
+	std::ifstream file(path);
+	if (!file) {
+		return false;
+	}
+	std::string key;
+	while (file >> key) {
+		if (key == "lutWidth") file >> result.lutWidth;
+		else if (key == "lutHeight") file >> result.lutHeight;
+		else if (key == "transformMode") {
+			uint32_t mode = 0;
+			file >> mode;
+			result.transformMode = static_cast<StochasticTextureTransformMode>(mode);
+		}
+		else if (key == "origin") file >> result.colorSpaceOrigin.x >> result.colorSpaceOrigin.y >> result.colorSpaceOrigin.z;
+		else if (key == "vector0") file >> result.colorSpaceVector0.x >> result.colorSpaceVector0.y >> result.colorSpaceVector0.z;
+		else if (key == "vector1") file >> result.colorSpaceVector1.x >> result.colorSpaceVector1.y >> result.colorSpaceVector1.z;
+		else if (key == "vector2") file >> result.colorSpaceVector2.x >> result.colorSpaceVector2.y >> result.colorSpaceVector2.z;
+	}
+	return result.lutWidth > 0u && result.lutHeight > 0u;
+}
+
+bool TryWriteStochasticMetadata(const std::wstring& path, const StochasticTextureArtifactResult& result) {
+	std::error_code ec;
+	std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+	std::ofstream file(path, std::ios::trunc);
+	if (!file) {
+		return false;
+	}
+	file << "lutWidth " << result.lutWidth << "\n";
+	file << "lutHeight " << result.lutHeight << "\n";
+	file << "transformMode " << static_cast<uint32_t>(result.transformMode) << "\n";
+	file << "origin " << result.colorSpaceOrigin.x << " " << result.colorSpaceOrigin.y << " " << result.colorSpaceOrigin.z << "\n";
+	file << "vector0 " << result.colorSpaceVector0.x << " " << result.colorSpaceVector0.y << " " << result.colorSpaceVector0.z << "\n";
+	file << "vector1 " << result.colorSpaceVector1.x << " " << result.colorSpaceVector1.y << " " << result.colorSpaceVector1.z << "\n";
+	file << "vector2 " << result.colorSpaceVector2.x << " " << result.colorSpaceVector2.y << " " << result.colorSpaceVector2.z << "\n";
+	return file.good();
+}
+
+std::string HashTextureSourceBaseSubresource(const TextureSourceData& sourceData) {
+	if (sourceData.subresources.empty() || !sourceData.subresources[0]) {
+		return {};
+	}
+	uint64_t hash = 1469598103934665603ull;
+	for (uint8_t byte : *sourceData.subresources[0]) {
+		hash ^= static_cast<uint64_t>(byte);
+		hash *= 1099511628211ull;
+	}
+	std::ostringstream ss;
+	ss << std::hex << hash;
+	return ss.str();
+}
+
+std::array<float, 3> Normalize3(std::array<float, 3> v) {
+	const float lenSq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+	if (lenSq <= 1.0e-12f) {
+		return { 0.0f, 0.0f, 0.0f };
+	}
+	const float invLen = 1.0f / std::sqrt(lenSq);
+	return { v[0] * invLen, v[1] * invLen, v[2] * invLen };
+}
+
+std::array<float, 3> Cross3(const std::array<float, 3>& a, const std::array<float, 3>& b) {
+	return {
+		a[1] * b[2] - a[2] * b[1],
+		a[2] * b[0] - a[0] * b[2],
+		a[0] * b[1] - a[1] * b[0]
+	};
+}
+
+float Dot3(const std::array<float, 3>& a, const std::array<float, 3>& b) {
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+std::array<std::array<float, 3>, 3> JacobiEigenvectors3x3(std::array<std::array<float, 3>, 3> a) {
+	std::array<std::array<float, 3>, 3> v = {
+		std::array<float, 3>{ 1.0f, 0.0f, 0.0f },
+		std::array<float, 3>{ 0.0f, 1.0f, 0.0f },
+		std::array<float, 3>{ 0.0f, 0.0f, 1.0f }
+	};
+
+	for (uint32_t iter = 0; iter < 12u; ++iter) {
+		uint32_t p = 0;
+		uint32_t q = 1;
+		float maxOffDiag = std::abs(a[0][1]);
+		if (std::abs(a[0][2]) > maxOffDiag) {
+			p = 0; q = 2; maxOffDiag = std::abs(a[0][2]);
+		}
+		if (std::abs(a[1][2]) > maxOffDiag) {
+			p = 1; q = 2; maxOffDiag = std::abs(a[1][2]);
+		}
+		if (maxOffDiag < 1.0e-8f) {
+			break;
+		}
+
+		const float app = a[p][p];
+		const float aqq = a[q][q];
+		const float apq = a[p][q];
+		const float theta = 0.5f * std::atan2(2.0f * apq, aqq - app);
+		const float c = std::cos(theta);
+		const float s = std::sin(theta);
+
+		for (uint32_t k = 0; k < 3u; ++k) {
+			const float akp = a[k][p];
+			const float akq = a[k][q];
+			a[k][p] = c * akp - s * akq;
+			a[k][q] = s * akp + c * akq;
+		}
+		for (uint32_t k = 0; k < 3u; ++k) {
+			const float apk = a[p][k];
+			const float aqk = a[q][k];
+			a[p][k] = c * apk - s * aqk;
+			a[q][k] = s * apk + c * aqk;
+		}
+		for (uint32_t k = 0; k < 3u; ++k) {
+			const float vkp = v[k][p];
+			const float vkq = v[k][q];
+			v[k][p] = c * vkp - s * vkq;
+			v[k][q] = s * vkp + c * vkq;
+		}
+	}
+
+	std::array<uint32_t, 3> order = { 0u, 1u, 2u };
+	std::sort(order.begin(), order.end(), [&](uint32_t lhs, uint32_t rhs) {
+		return a[lhs][lhs] > a[rhs][rhs];
+	});
+
+	std::array<std::array<float, 3>, 3> axes{};
+	for (uint32_t out = 0; out < 3u; ++out) {
+		const uint32_t column = order[out];
+		axes[out] = Normalize3({ v[0][column], v[1][column], v[2][column] });
+	}
+	if (Dot3(Cross3(axes[0], axes[1]), axes[2]) < 0.0f) {
+		axes[2] = { -axes[2][0], -axes[2][1], -axes[2][2] };
+	}
+	return axes;
+}
+
+void ApplyDiffuseDecorrelation(std::vector<std::array<float, 4>>& pixels, StochasticTextureArtifactResult& result) {
+	if (pixels.empty()) {
+		return;
+	}
+
+	std::array<float, 3> mean = { 0.0f, 0.0f, 0.0f };
+	for (const auto& pixel : pixels) {
+		mean[0] += std::clamp(pixel[0], 0.0f, 1.0f);
+		mean[1] += std::clamp(pixel[1], 0.0f, 1.0f);
+		mean[2] += std::clamp(pixel[2], 0.0f, 1.0f);
+	}
+	const float invCount = 1.0f / static_cast<float>(pixels.size());
+	mean[0] *= invCount;
+	mean[1] *= invCount;
+	mean[2] *= invCount;
+
+	std::array<std::array<float, 3>, 3> covariance = {};
+	for (const auto& pixel : pixels) {
+		const std::array<float, 3> d = {
+			std::clamp(pixel[0], 0.0f, 1.0f) - mean[0],
+			std::clamp(pixel[1], 0.0f, 1.0f) - mean[1],
+			std::clamp(pixel[2], 0.0f, 1.0f) - mean[2]
+		};
+		for (uint32_t row = 0; row < 3u; ++row) {
+			for (uint32_t col = 0; col < 3u; ++col) {
+				covariance[row][col] += d[row] * d[col] * invCount;
+			}
+		}
+	}
+
+	auto axes = JacobiEigenvectors3x3(covariance);
+	std::array<float, 3> minProjection = {
+		(std::numeric_limits<float>::max)(),
+		(std::numeric_limits<float>::max)(),
+		(std::numeric_limits<float>::max)()
+	};
+	std::array<float, 3> maxProjection = {
+		-(std::numeric_limits<float>::max)(),
+		-(std::numeric_limits<float>::max)(),
+		-(std::numeric_limits<float>::max)()
+	};
+	for (const auto& pixel : pixels) {
+		const std::array<float, 3> rgb = {
+			std::clamp(pixel[0], 0.0f, 1.0f),
+			std::clamp(pixel[1], 0.0f, 1.0f),
+			std::clamp(pixel[2], 0.0f, 1.0f)
+		};
+		for (uint32_t axis = 0; axis < 3u; ++axis) {
+			const float projection = Dot3(axes[axis], rgb);
+			minProjection[axis] = (std::min)(minProjection[axis], projection);
+			maxProjection[axis] = (std::max)(maxProjection[axis], projection);
+		}
+	}
+
+	for (auto& pixel : pixels) {
+		const std::array<float, 3> rgb = {
+			std::clamp(pixel[0], 0.0f, 1.0f),
+			std::clamp(pixel[1], 0.0f, 1.0f),
+			std::clamp(pixel[2], 0.0f, 1.0f)
+		};
+		for (uint32_t axis = 0; axis < 3u; ++axis) {
+			const float range = maxProjection[axis] - minProjection[axis];
+			pixel[axis] = range > 1.0e-6f
+				? std::clamp((Dot3(axes[axis], rgb) - minProjection[axis]) / range, 0.0f, 1.0f)
+				: 0.5f;
+		}
+	}
+
+	const std::array<float, 3> v0 = {
+		axes[0][0] * (maxProjection[0] - minProjection[0]),
+		axes[0][1] * (maxProjection[0] - minProjection[0]),
+		axes[0][2] * (maxProjection[0] - minProjection[0])
+	};
+	const std::array<float, 3> v1 = {
+		axes[1][0] * (maxProjection[1] - minProjection[1]),
+		axes[1][1] * (maxProjection[1] - minProjection[1]),
+		axes[1][2] * (maxProjection[1] - minProjection[1])
+	};
+	const std::array<float, 3> v2 = {
+		axes[2][0] * (maxProjection[2] - minProjection[2]),
+		axes[2][1] * (maxProjection[2] - minProjection[2]),
+		axes[2][2] * (maxProjection[2] - minProjection[2])
+	};
+	const std::array<float, 3> origin = {
+		axes[0][0] * minProjection[0] + axes[1][0] * minProjection[1] + axes[2][0] * minProjection[2],
+		axes[0][1] * minProjection[0] + axes[1][1] * minProjection[1] + axes[2][1] * minProjection[2],
+		axes[0][2] * minProjection[0] + axes[1][2] * minProjection[1] + axes[2][2] * minProjection[2]
+	};
+	result.colorSpaceOrigin = { origin[0], origin[1], origin[2] };
+	result.colorSpaceVector0 = { v0[0], v0[1], v0[2] };
+	result.colorSpaceVector1 = { v1[0], v1[1], v1[2] };
+	result.colorSpaceVector2 = { v2[0], v2[1], v2[2] };
+}
+
 constexpr bool kEnableGpuBc7Compression = true;
 
 struct PreparedTextureProcessingData {
@@ -761,6 +1293,191 @@ std::wstring TextureProcessingManager::GetExistingCachePathForFile(const Texture
 	}
 
 	return {};
+}
+
+StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtifactsBlocking(
+	const std::shared_ptr<TextureSourceData>& sourceData,
+	const TextureFileMeta& meta,
+	const StochasticTextureArtifactSettings& settings)
+{
+	StochasticTextureArtifactResult result{};
+	if (!sourceData) {
+		result.failureReason = "source data is null";
+		return result;
+	}
+	if (sourceData->desc.isArray || sourceData->desc.isCubemap || sourceData->desc.imageDimensions.empty()) {
+		result.failureReason = "only non-array 2D textures are supported";
+		return result;
+	}
+
+	const bool isNormal = settings.semantic == TextureSemantic::Normal;
+	const bool isDiffuse = settings.semantic == TextureSemantic::BaseColor ||
+		settings.semantic == TextureSemantic::OpenPBRColor ||
+		settings.semantic == TextureSemantic::Emissive;
+	if (!isNormal && !isDiffuse) {
+		result.failureReason = "semantic is not active for stochastic terrain sampling";
+		return result;
+	}
+
+	const std::string identity = settings.sourceIdentity.empty()
+		? ResolveProcessingIdentity(meta)
+		: NormalizeCacheSourcePath(settings.sourceIdentity);
+	const uint32_t lutWidth = (std::max)(16u, settings.lutWidth);
+	TextureFileMeta versionMeta = meta;
+	if (!settings.sourceIdentity.empty()) {
+		versionMeta.processing.sourceIdentity = settings.sourceIdentity;
+	}
+	const std::string versionTag = TryGetSourceVersionTag(versionMeta);
+	const std::string contentHash = HashTextureSourceBaseSubresource(*sourceData);
+	std::ostringstream keyBuilder;
+	keyBuilder
+		<< "terrain-stochastic-v" << settings.algorithmVersion
+		<< "|identity:" << identity
+		<< "|version:" << versionTag
+		<< "|baseHash:" << contentHash
+		<< "|semantic:" << TextureSemanticToString(settings.semantic)
+		<< "|srgb:" << (settings.preferSRGB ? 1 : 0)
+		<< "|normalConv:" << static_cast<uint32_t>(settings.normalConvention)
+		<< "|lut:" << lutWidth;
+	const std::string key = keyBuilder.str();
+	result.gaussianCachePath = BuildStochasticCachePath(key, L"_gaussian.dstexcache");
+	result.inverseLutCachePath = BuildStochasticCachePath(key, L"_invlut.dstexcache");
+	const std::wstring metaPath = BuildStochasticCachePath(key, L".stochmeta");
+
+	{
+		std::error_code ec;
+		if (std::filesystem::exists(result.gaussianCachePath, ec) && !ec &&
+			std::filesystem::exists(result.inverseLutCachePath, ec) && !ec &&
+			std::filesystem::exists(metaPath, ec) && !ec &&
+			TryReadStochasticMetadata(metaPath, result)) {
+			result.ready = true;
+			result.loadedFromCache = true;
+			return result;
+		}
+	}
+
+	std::scoped_lock cacheWriteLock(GetCacheWriteMutexForKey(key));
+	{
+		std::error_code ec;
+		if (std::filesystem::exists(result.gaussianCachePath, ec) && !ec &&
+			std::filesystem::exists(result.inverseLutCachePath, ec) && !ec &&
+			std::filesystem::exists(metaPath, ec) && !ec &&
+			TryReadStochasticMetadata(metaPath, result)) {
+			result.ready = true;
+			result.loadedFromCache = true;
+			return result;
+		}
+	}
+
+	try {
+		ScratchImage sourceScratch;
+		HRESULT hr = InitializeScratchImageFromSource(*sourceData, sourceScratch);
+		if (FAILED(hr)) {
+			throw std::runtime_error("failed to initialize source scratch image");
+		}
+		if (sourceData->isBlockCompressed) {
+			ScratchImage decompressed;
+			hr = Decompress(sourceScratch.GetImages(), sourceScratch.GetImageCount(), sourceScratch.GetMetadata(), DXGI_FORMAT_UNKNOWN, decompressed);
+			if (FAILED(hr)) {
+				throw std::runtime_error("DirectXTex decompress failed");
+			}
+			sourceScratch = std::move(decompressed);
+		}
+		ScratchImage floatScratch;
+		hr = Convert(
+			sourceScratch.GetImages(),
+			sourceScratch.GetImageCount(),
+			sourceScratch.GetMetadata(),
+			DXGI_FORMAT_R32G32B32A32_FLOAT,
+			TEX_FILTER_DEFAULT,
+			TEX_THRESHOLD_DEFAULT,
+			floatScratch);
+		if (FAILED(hr)) {
+			throw std::runtime_error("DirectXTex float conversion failed");
+		}
+
+		const Image* image = floatScratch.GetImage(0, 0, 0);
+		if (!image || !image->pixels || image->width == 0 || image->height == 0) {
+			throw std::runtime_error("invalid converted source image");
+		}
+
+		const uint32_t width = static_cast<uint32_t>(image->width);
+		const uint32_t height = static_cast<uint32_t>(image->height);
+		const size_t pixelCount = static_cast<size_t>(width) * height;
+		std::vector<std::array<float, 4>> sourcePixels(pixelCount);
+		for (uint32_t y = 0; y < height; ++y) {
+			const auto* row = reinterpret_cast<const float*>(image->pixels + static_cast<size_t>(y) * image->rowPitch);
+			for (uint32_t x = 0; x < width; ++x) {
+				const size_t index = static_cast<size_t>(y) * width + x;
+				std::array<float, 4> value = {
+					row[x * 4u + 0u],
+					row[x * 4u + 1u],
+					row[x * 4u + 2u],
+					row[x * 4u + 3u]
+				};
+				if (isNormal && settings.normalConvention == NormalMapConvention::OpenGL) {
+					value[1] = 1.0f - value[1];
+				}
+				sourcePixels[index] = value;
+			}
+		}
+
+		if (isDiffuse) {
+			ApplyDiffuseDecorrelation(sourcePixels, result);
+		}
+
+		const uint32_t channels = isNormal ? 2u : 4u;
+		const rhi::Format gaussianFormat = isNormal ? rhi::Format::R8G8_UNorm : rhi::Format::R8G8B8A8_UNorm;
+		const rhi::Format lutFormat = gaussianFormat;
+		const uint32_t lutHeight = CalcMipCount(width, height);
+		auto gaussianizedBasePixels = BuildGaussianizedPixels(sourcePixels, channels);
+		auto gaussian = BuildMipmappedUnormSourceData(
+			gaussianizedBasePixels,
+			width,
+			height,
+			channels,
+			gaussianFormat);
+		auto inverseLut = BuildInverseLutSourceData(
+			sourcePixels,
+			channels,
+			lutWidth,
+			lutHeight,
+			lutFormat,
+			gaussianizedBasePixels,
+			width,
+			height);
+		if (!TryWriteConditionedTextureCache(result.gaussianCachePath, *gaussian)) {
+			throw std::runtime_error("failed to write Gaussian texture cache");
+		}
+		if (!TryWriteConditionedTextureCache(result.inverseLutCachePath, *inverseLut)) {
+			throw std::runtime_error("failed to write inverse LUT cache");
+		}
+
+		result.ready = true;
+		result.loadedFromCache = false;
+		result.lutWidth = lutWidth;
+		result.lutHeight = lutHeight;
+		result.transformMode = isNormal
+			? StochasticTextureTransformMode::NormalXY
+			: StochasticTextureTransformMode::DecorrelatedColor;
+		if (!TryWriteStochasticMetadata(metaPath, result)) {
+			throw std::runtime_error("failed to write stochastic metadata");
+		}
+		spdlog::info(
+			"TextureProcessingManager: built stochastic terrain artifacts identity='{}' semantic={} dims={}x{} lut={}x{}",
+			identity,
+			TextureSemanticToString(settings.semantic),
+			width,
+			height,
+			lutWidth,
+			lutHeight);
+	}
+	catch (const std::exception& ex) {
+		result.ready = false;
+		result.failureReason = ex.what();
+		spdlog::warn("TextureProcessingManager: stochastic artifact build failed for '{}': {}", identity, ex.what());
+	}
+	return result;
 }
 
 std::string TextureProcessingManager::BuildProcessingCacheKey(

@@ -82,6 +82,8 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
         SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName)();
 	perFrameCBData.shadowVirtualSmrtMaxTraceDistanceWorld =
 		SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName)();
+	perFrameCBData.terrainStochasticSamplingEnabled =
+		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticSampling")() ? 1u : 0u;
 
 	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), rg::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
 }

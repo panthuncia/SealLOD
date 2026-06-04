@@ -220,7 +220,10 @@ struct PerFrameBuffer {
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees;
     float shadowVirtualSmrtRayLengthScaleDirectional;
     float shadowVirtualSmrtMaxTraceDistanceWorld;
-    float _padSmrt;
+    uint terrainStochasticSamplingEnabled;
+    uint _padSmrt0;
+    uint _padSmrt1;
+    uint _padSmrt2;
 };
 
 struct BoundingSphere {
@@ -398,9 +401,28 @@ struct TerrainLayerInfo {
     uint flags;
     float4 fallbackColor;
     float uvScale;
-    float pad0;
+    uint stochasticLayerIndex;
     float pad1;
     float pad2;
+};
+
+struct TerrainStochasticLayerInfo {
+    uint diffuseGaussianTextureIndex;
+    uint diffuseInverseLutTextureIndex;
+    uint diffuseInverseLutSamplerIndex;
+    uint diffuseFlags;
+    uint normalGaussianTextureIndex;
+    uint normalInverseLutTextureIndex;
+    uint normalInverseLutSamplerIndex;
+    uint normalFlags;
+    float stochasticScale;
+    float diffuseLutHeight;
+    float normalLutHeight;
+    float pad0;
+    float4 diffuseColorSpaceOrigin;
+    float4 diffuseColorSpaceVector0;
+    float4 diffuseColorSpaceVector1;
+    float4 diffuseColorSpaceVector2;
 };
 
 struct TerrainLayerRefInfo {

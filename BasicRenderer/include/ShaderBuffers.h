@@ -94,7 +94,10 @@ struct PerFrameCB {
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees = 0.0f;
     float shadowVirtualSmrtRayLengthScaleDirectional = 0.0f;
     float shadowVirtualSmrtMaxTraceDistanceWorld = 0.0f;
-    float _padSmrt = 0.0f;
+    unsigned int terrainStochasticSamplingEnabled = 1u;
+    unsigned int _padSmrt0 = 0u;
+    unsigned int _padSmrt1 = 0u;
+    unsigned int _padSmrt2 = 0u;
 };
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
@@ -295,9 +298,28 @@ struct TerrainLayerGPU {
     unsigned int flags;
     DirectX::XMFLOAT4 fallbackColor;
     float uvScale;
+    unsigned int stochasticLayerIndex;
     float pad0;
     float pad1;
-    float pad2;
+};
+
+struct TerrainStochasticLayerGPU {
+    unsigned int diffuseGaussianTextureIndex;
+    unsigned int diffuseInverseLutTextureIndex;
+    unsigned int diffuseInverseLutSamplerIndex;
+    unsigned int diffuseFlags;
+    unsigned int normalGaussianTextureIndex;
+    unsigned int normalInverseLutTextureIndex;
+    unsigned int normalInverseLutSamplerIndex;
+    unsigned int normalFlags;
+    float stochasticScale;
+    float diffuseLutHeight;
+    float normalLutHeight;
+    float pad0;
+    DirectX::XMFLOAT4 diffuseColorSpaceOrigin;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector0;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector1;
+    DirectX::XMFLOAT4 diffuseColorSpaceVector2;
 };
 
 struct TerrainLayerRefGPU {
