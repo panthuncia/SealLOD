@@ -88,6 +88,8 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticDiffuseSampling")() ? 1u : 0u;
 	perFrameCBData.terrainStochasticNormalEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticNormalSampling")() ? 1u : 0u;
+	perFrameCBData.terrainStochasticBlendCurve =
+		SettingsManager::GetInstance().getSettingGetter<float>("terrainStochasticBlendCurve")();
 
 	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), rg::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
 }

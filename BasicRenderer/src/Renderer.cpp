@@ -1345,6 +1345,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainStochasticSampling", true);
     settingsManager.registerSetting<bool>("enableTerrainStochasticDiffuseSampling", true);
     settingsManager.registerSetting<bool>("enableTerrainStochasticNormalSampling", true);
+    settingsManager.registerSetting<float>("terrainStochasticBlendCurve", 0.65f);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);

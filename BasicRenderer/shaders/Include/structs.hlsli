@@ -223,7 +223,7 @@ struct PerFrameBuffer {
     uint terrainStochasticSamplingEnabled;
     uint terrainStochasticDiffuseEnabled;
     uint terrainStochasticNormalEnabled;
-    uint _padSmrt2;
+    float terrainStochasticBlendCurve;
 };
 
 struct BoundingSphere {

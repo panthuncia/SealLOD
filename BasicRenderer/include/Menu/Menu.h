@@ -683,6 +683,9 @@ private:
     bool m_terrainStochasticNormalSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticNormalSamplingEnabled;
     std::function<void(bool)> setTerrainStochasticNormalSamplingEnabled;
+    float m_terrainStochasticBlendCurve = 0.65f;
+    std::function<float()> getTerrainStochasticBlendCurve;
+    std::function<void(float)> setTerrainStochasticBlendCurve;
 
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
@@ -1178,6 +1181,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticNormalSampling");
     m_terrainStochasticNormalSamplingEnabled = getTerrainStochasticNormalSamplingEnabled();
     observerSetting(m_terrainStochasticNormalSamplingEnabled, "enableTerrainStochasticNormalSampling");
+    setTerrainStochasticBlendCurve = settingsManager.getSettingSetter<float>("terrainStochasticBlendCurve");
+    getTerrainStochasticBlendCurve = settingsManager.getSettingGetter<float>("terrainStochasticBlendCurve");
+    m_terrainStochasticBlendCurve = getTerrainStochasticBlendCurve();
+    observerSetting(m_terrainStochasticBlendCurve, "terrainStochasticBlendCurve");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1811,6 +1818,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Terrain Stochastic Normals", &m_terrainStochasticNormalSamplingEnabled)) {
             setTerrainStochasticNormalSamplingEnabled(m_terrainStochasticNormalSamplingEnabled);
+        }
+        if (ImGui::SliderFloat("Terrain Stochastic Blend Curve", &m_terrainStochasticBlendCurve, 0.0f, 1.0f, "%.2f")) {
+            setTerrainStochasticBlendCurve(m_terrainStochasticBlendCurve);
         }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);

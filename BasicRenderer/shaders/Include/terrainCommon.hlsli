@@ -51,6 +51,50 @@ float2 TerrainHash2(int2 p)
     return float2(h0 & 0x00ffffffu, h1 & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
+float TerrainBias(float value, float bias)
+{
+    value = saturate(value);
+    bias = clamp(bias, 0.001f, 0.999f);
+    return value / (((1.0f / bias) - 2.0f) * (1.0f - value) + 1.0f);
+}
+
+float TerrainGain(float value, float gain)
+{
+    value = saturate(value);
+    gain = saturate(gain);
+    if (abs(gain - 0.5f) < 1.0e-4f)
+    {
+        return value;
+    }
+    return value < 0.5f
+        ? 0.5f * TerrainBias(value * 2.0f, 1.0f - gain)
+        : 1.0f - 0.5f * TerrainBias(2.0f - value * 2.0f, 1.0f - gain);
+}
+
+float3 TerrainNormalizeWeights(float3 weights)
+{
+    weights = max(weights, 0.0f.xxx);
+    float sumWeights = weights.x + weights.y + weights.z;
+    return sumWeights > 1.0e-5f ? weights / sumWeights : float3(1.0f, 0.0f, 0.0f);
+}
+
+float3 TerrainShapeStochasticWeights(float3 weights, float blendCurve)
+{
+    blendCurve = saturate(blendCurve);
+    float sharpAmount = saturate((blendCurve - 0.5f) * 2.0f);
+    float softAmount = saturate((0.5f - blendCurve) * 2.0f);
+    float gamma = lerp(1.0f, 7.0f, sharpAmount);
+    gamma = lerp(gamma, 0.5f, softAmount);
+
+    float3 shaped = pow(max(weights, 1.0e-5f.xxx), gamma);
+    shaped = TerrainNormalizeWeights(shaped);
+    shaped = float3(
+        TerrainGain(shaped.x, blendCurve),
+        TerrainGain(shaped.y, blendCurve),
+        TerrainGain(shaped.z, blendCurve));
+    return TerrainNormalizeWeights(shaped);
+}
+
 struct TerrainStochasticContext
 {
     float3 weights;
@@ -69,7 +113,8 @@ TerrainStochasticContext TerrainBuildStochasticContext(
     float2 uv,
     float2 duDx,
     float2 duDy,
-    float stochasticScale)
+    float stochasticScale,
+    float blendCurve)
 {
     TerrainStochasticContext ctx;
     ctx.uv = uv;
@@ -110,7 +155,7 @@ TerrainStochasticContext TerrainBuildStochasticContext(
         w = float3(-z, 1.0f - f.y, 1.0f - f.x);
     }
 
-    ctx.weights = w;
+    ctx.weights = TerrainShapeStochasticWeights(w, blendCurve);
     ctx.offsets0 = TerrainHash2(v0);
     ctx.offsets1 = TerrainHash2(v1);
     ctx.offsets2 = TerrainHash2(v2);
@@ -380,13 +425,27 @@ void ApplyTerrainMaterialInternal(
             {
                 Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
                 SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-                stochasticContext = TerrainBuildStochasticContext(lodTex, lodSampler, layerUv, layerDUdx, layerDUdy, contextScale);
+                stochasticContext = TerrainBuildStochasticContext(
+                    lodTex,
+                    lodSampler,
+                    layerUv,
+                    layerDUdx,
+                    layerDUdy,
+                    contextScale,
+                    perFrameBuffer.terrainStochasticBlendCurve);
             }
             else if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
             {
                 Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
                 SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
-                stochasticContext = TerrainBuildStochasticContext(lodTex, lodSampler, layerUv, layerDUdx, layerDUdy, contextScale);
+                stochasticContext = TerrainBuildStochasticContext(
+                    lodTex,
+                    lodSampler,
+                    layerUv,
+                    layerDUdx,
+                    layerDUdy,
+                    contextScale,
+                    perFrameBuffer.terrainStochasticBlendCurve);
             }
             else
             {

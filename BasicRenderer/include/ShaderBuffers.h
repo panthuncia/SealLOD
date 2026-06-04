@@ -97,7 +97,7 @@ struct PerFrameCB {
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;
     unsigned int terrainStochasticNormalEnabled = 1u;
-    unsigned int _padSmrt2 = 0u;
+    float terrainStochasticBlendCurve = 0.65f;
 };
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
