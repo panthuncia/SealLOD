@@ -38,10 +38,13 @@ namespace {
         result.diffuseSamplerIndex = kInvalidDescriptor;
         result.normalTextureIndex = kInvalidDescriptor;
         result.normalSamplerIndex = kInvalidDescriptor;
+        result.heightTextureIndex = kInvalidDescriptor;
+        result.heightSamplerIndex = kInvalidDescriptor;
         result.stochasticLayerIndex = kInvalidDescriptor;
         result.normalChannels = { 0u, 1u, 2u };
         result.fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
         result.uvScale = kDefaultTerrainLayerUvScale;
+        result.heightScale = 1.0f;
         return result;
     }
 
@@ -54,9 +57,13 @@ namespace {
         result.normalGaussianTextureIndex = kInvalidDescriptor;
         result.normalInverseLutTextureIndex = kInvalidDescriptor;
         result.normalInverseLutSamplerIndex = kInvalidDescriptor;
+        result.heightGaussianTextureIndex = kInvalidDescriptor;
+        result.heightInverseLutTextureIndex = kInvalidDescriptor;
+        result.heightInverseLutSamplerIndex = kInvalidDescriptor;
         result.stochasticScale = kDefaultTerrainStochasticScale;
         result.diffuseLutHeight = 1.0f;
         result.normalLutHeight = 1.0f;
+        result.heightLutHeight = 1.0f;
         result.diffuseColorSpaceOrigin = { 0.0f, 0.0f, 0.0f, 0.0f };
         result.diffuseColorSpaceVector0 = { 1.0f, 0.0f, 0.0f, 0.0f };
         result.diffuseColorSpaceVector1 = { 0.0f, 1.0f, 0.0f, 0.0f };
@@ -240,6 +247,14 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                     layer.normalSamplerIndex)) {
                 layer.normalChannels = NormalChannelsForTexture(source.normal);
             }
+            UploadTerrainTexture(
+                source.height,
+                textureFactory,
+                m_textureGroup,
+                m_layerTextures,
+                true,
+                layer.heightTextureIndex,
+                layer.heightSamplerIndex);
 
             TerrainStochasticLayerGPU stochastic = MakeFallbackStochasticLayer();
             stochastic.stochasticScale = source.stochastic.scale > 0.0f
@@ -333,6 +348,37 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             else {
                 stochastic.normalFlags &= ~TERRAIN_STOCHASTIC_FLAG_NORMAL;
                 hasStochastic = (stochastic.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u;
+            }
+            if (UploadTerrainTexture(
+                    source.stochastic.height.gaussian,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    true,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.heightGaussianTextureIndex = textureIndex;
+                stochastic.heightFlags |= TERRAIN_STOCHASTIC_FLAG_HEIGHT;
+                hasStochastic = true;
+            }
+            if (UploadTerrainTexture(
+                    source.stochastic.height.inverseLut,
+                    textureFactory,
+                    m_textureGroup,
+                    m_layerTextures,
+                    false,
+                    textureIndex,
+                    samplerIndex)) {
+                stochastic.heightInverseLutTextureIndex = textureIndex;
+                stochastic.heightInverseLutSamplerIndex = samplerIndex;
+                stochastic.heightLutHeight = static_cast<float>((std::max)(1u, source.stochastic.height.lutHeight));
+                stochastic.heightFlags |= source.stochastic.height.flags;
+                hasStochastic = hasStochastic && stochastic.heightGaussianTextureIndex != kInvalidDescriptor;
+            }
+            else {
+                stochastic.heightFlags &= ~TERRAIN_STOCHASTIC_FLAG_HEIGHT;
+                hasStochastic = ((stochastic.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u) ||
+                    ((stochastic.normalFlags & TERRAIN_STOCHASTIC_FLAG_NORMAL) != 0u);
             }
             if (hasStochastic) {
                 layer.stochasticLayerIndex = static_cast<std::uint32_t>(stochasticLayers.size());

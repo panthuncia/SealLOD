@@ -97,7 +97,12 @@ struct PerFrameCB {
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;
     unsigned int terrainStochasticNormalEnabled = 1u;
+    unsigned int terrainStochasticDerivativeNormalsEnabled = 1u;
     float terrainStochasticBlendCurve = 0.65f;
+    unsigned int parallaxOcclusionMappingEnabled = 1u;
+    unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
+    float terrainParallaxHeightScale = 0.03f;
+    unsigned int terrainParallaxMaxSteps = 16u;
 };
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
@@ -294,13 +299,15 @@ struct TerrainLayerGPU {
     unsigned int diffuseSamplerIndex;
     unsigned int normalTextureIndex;
     unsigned int normalSamplerIndex;
+    unsigned int heightTextureIndex;
+    unsigned int heightSamplerIndex;
     DirectX::XMUINT3 normalChannels;
     unsigned int flags;
     DirectX::XMFLOAT4 fallbackColor;
     float uvScale;
     unsigned int stochasticLayerIndex;
+    float heightScale;
     float pad0;
-    float pad1;
 };
 
 struct TerrainStochasticLayerGPU {
@@ -315,11 +322,15 @@ struct TerrainStochasticLayerGPU {
     float stochasticScale;
     float diffuseLutHeight;
     float normalLutHeight;
-    float pad0;
+    float heightLutHeight;
     DirectX::XMFLOAT4 diffuseColorSpaceOrigin;
     DirectX::XMFLOAT4 diffuseColorSpaceVector0;
     DirectX::XMFLOAT4 diffuseColorSpaceVector1;
     DirectX::XMFLOAT4 diffuseColorSpaceVector2;
+    unsigned int heightGaussianTextureIndex;
+    unsigned int heightInverseLutTextureIndex;
+    unsigned int heightInverseLutSamplerIndex;
+    unsigned int heightFlags;
 };
 
 struct TerrainLayerRefGPU {

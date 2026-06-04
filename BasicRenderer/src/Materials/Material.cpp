@@ -172,7 +172,7 @@ void Material::SetLogicalTextureSourcePaths(const MaterialDescription& desc)
     m_baseColorSourcePath = desc.baseColor.sourcePath;
     m_normalSourcePath = desc.normal.sourcePath;
     m_aoSourcePath = desc.aoMap.sourcePath;
-    m_heightSourcePath = desc.heightMap.sourcePath;
+    m_heightSourcePath = desc.heightMapFromBaseColorAlpha ? desc.baseColor.sourcePath : desc.heightMap.sourcePath;
     m_roughnessSourcePath = desc.roughness.sourcePath;
     m_metallicSourcePath = desc.metallic.sourcePath;
     m_emissiveSourcePath = desc.emissive.sourcePath;
@@ -239,9 +239,17 @@ MaterialDescription Material::ToCacheDescription() const
     desc.aoMap = TextureAndConstant{ m_aoMap, 1.0f, m_aoChannel };
     desc.aoMap.uvSetIndex = m_aoUvSetIndex;
     desc.aoMap.sourcePath = sourcePathFor(m_aoSourcePath, m_aoMap);
-    desc.heightMap = TextureAndConstant{ m_heightMap, 1.0f, m_heightChannel };
-    desc.heightMap.uvSetIndex = m_heightUvSetIndex;
-    desc.heightMap.sourcePath = sourcePathFor(m_heightSourcePath, m_heightMap);
+    desc.heightMapFromBaseColorAlpha = (m_materialData.materialFlags & MaterialFlags::MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
+    if (desc.heightMapFromBaseColorAlpha) {
+        desc.heightMap = {};
+        desc.heightMap.channels = { 3u };
+        desc.heightMap.uvSetIndex = m_baseColorUvSetIndex;
+        desc.heightMap.sourcePath = {};
+    } else {
+        desc.heightMap = TextureAndConstant{ m_heightMap, 1.0f, m_heightChannel };
+        desc.heightMap.uvSetIndex = m_heightUvSetIndex;
+        desc.heightMap.sourcePath = sourcePathFor(m_heightSourcePath, m_heightMap);
+    }
     desc.metallic = TextureAndConstant{ m_metallicTexture, m_metallicFactor, m_metallicChannel };
     desc.metallic.uvSetIndex = m_metallicUvSetIndex;
     desc.metallic.sourcePath = sourcePathFor(m_metallicSourcePath, m_metallicTexture);

@@ -223,7 +223,12 @@ struct PerFrameBuffer {
     uint terrainStochasticSamplingEnabled;
     uint terrainStochasticDiffuseEnabled;
     uint terrainStochasticNormalEnabled;
+    uint terrainStochasticDerivativeNormalsEnabled;
     float terrainStochasticBlendCurve;
+    uint parallaxOcclusionMappingEnabled;
+    uint terrainParallaxOcclusionMappingEnabled;
+    float terrainParallaxHeightScale;
+    uint terrainParallaxMaxSteps;
 };
 
 struct BoundingSphere {
@@ -397,13 +402,15 @@ struct TerrainLayerInfo {
     uint diffuseSamplerIndex;
     uint normalTextureIndex;
     uint normalSamplerIndex;
+    uint heightTextureIndex;
+    uint heightSamplerIndex;
     uint3 normalChannels;
     uint flags;
     float4 fallbackColor;
     float uvScale;
     uint stochasticLayerIndex;
+    float heightScale;
     float pad1;
-    float pad2;
 };
 
 struct TerrainStochasticLayerInfo {
@@ -418,11 +425,15 @@ struct TerrainStochasticLayerInfo {
     float stochasticScale;
     float diffuseLutHeight;
     float normalLutHeight;
-    float pad0;
+    float heightLutHeight;
     float4 diffuseColorSpaceOrigin;
     float4 diffuseColorSpaceVector0;
     float4 diffuseColorSpaceVector1;
     float4 diffuseColorSpaceVector2;
+    uint heightGaussianTextureIndex;
+    uint heightInverseLutTextureIndex;
+    uint heightInverseLutSamplerIndex;
+    uint heightFlags;
 };
 
 struct TerrainLayerRefInfo {

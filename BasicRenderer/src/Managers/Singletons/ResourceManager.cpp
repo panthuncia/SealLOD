@@ -88,8 +88,18 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticDiffuseSampling")() ? 1u : 0u;
 	perFrameCBData.terrainStochasticNormalEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticNormalSampling")() ? 1u : 0u;
+	perFrameCBData.terrainStochasticDerivativeNormalsEnabled =
+		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticDerivativeNormalSampling")() ? 1u : 0u;
 	perFrameCBData.terrainStochasticBlendCurve =
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainStochasticBlendCurve")();
+	perFrameCBData.parallaxOcclusionMappingEnabled =
+		SettingsManager::GetInstance().getSettingGetter<bool>("enableParallaxOcclusionMapping")() ? 1u : 0u;
+	perFrameCBData.terrainParallaxOcclusionMappingEnabled =
+		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainParallaxOcclusionMapping")() ? 1u : 0u;
+	perFrameCBData.terrainParallaxHeightScale =
+		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxHeightScale")();
+	perFrameCBData.terrainParallaxMaxSteps =
+		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainParallaxMaxSteps")();
 
 	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), rg::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
 }

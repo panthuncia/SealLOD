@@ -683,9 +683,24 @@ private:
     bool m_terrainStochasticNormalSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticNormalSamplingEnabled;
     std::function<void(bool)> setTerrainStochasticNormalSamplingEnabled;
+    bool m_terrainStochasticDerivativeNormalSamplingEnabled = true;
+    std::function<bool()> getTerrainStochasticDerivativeNormalSamplingEnabled;
+    std::function<void(bool)> setTerrainStochasticDerivativeNormalSamplingEnabled;
     float m_terrainStochasticBlendCurve = 0.65f;
     std::function<float()> getTerrainStochasticBlendCurve;
     std::function<void(float)> setTerrainStochasticBlendCurve;
+    bool m_parallaxOcclusionMappingEnabled = true;
+    std::function<bool()> getParallaxOcclusionMappingEnabled;
+    std::function<void(bool)> setParallaxOcclusionMappingEnabled;
+    bool m_terrainParallaxOcclusionMappingEnabled = true;
+    std::function<bool()> getTerrainParallaxOcclusionMappingEnabled;
+    std::function<void(bool)> setTerrainParallaxOcclusionMappingEnabled;
+    float m_terrainParallaxHeightScale = 0.03f;
+    std::function<float()> getTerrainParallaxHeightScale;
+    std::function<void(float)> setTerrainParallaxHeightScale;
+    uint32_t m_terrainParallaxMaxSteps = 16u;
+    std::function<uint32_t()> getTerrainParallaxMaxSteps;
+    std::function<void(uint32_t)> setTerrainParallaxMaxSteps;
 
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
@@ -1181,10 +1196,30 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainStochasticNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticNormalSampling");
     m_terrainStochasticNormalSamplingEnabled = getTerrainStochasticNormalSamplingEnabled();
     observerSetting(m_terrainStochasticNormalSamplingEnabled, "enableTerrainStochasticNormalSampling");
+    setTerrainStochasticDerivativeNormalSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticDerivativeNormalSampling");
+    getTerrainStochasticDerivativeNormalSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticDerivativeNormalSampling");
+    m_terrainStochasticDerivativeNormalSamplingEnabled = getTerrainStochasticDerivativeNormalSamplingEnabled();
+    observerSetting(m_terrainStochasticDerivativeNormalSamplingEnabled, "enableTerrainStochasticDerivativeNormalSampling");
     setTerrainStochasticBlendCurve = settingsManager.getSettingSetter<float>("terrainStochasticBlendCurve");
     getTerrainStochasticBlendCurve = settingsManager.getSettingGetter<float>("terrainStochasticBlendCurve");
     m_terrainStochasticBlendCurve = getTerrainStochasticBlendCurve();
     observerSetting(m_terrainStochasticBlendCurve, "terrainStochasticBlendCurve");
+    setParallaxOcclusionMappingEnabled = settingsManager.getSettingSetter<bool>("enableParallaxOcclusionMapping");
+    getParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableParallaxOcclusionMapping");
+    m_parallaxOcclusionMappingEnabled = getParallaxOcclusionMappingEnabled();
+    observerSetting(m_parallaxOcclusionMappingEnabled, "enableParallaxOcclusionMapping");
+    setTerrainParallaxOcclusionMappingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainParallaxOcclusionMapping");
+    getTerrainParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainParallaxOcclusionMapping");
+    m_terrainParallaxOcclusionMappingEnabled = getTerrainParallaxOcclusionMappingEnabled();
+    observerSetting(m_terrainParallaxOcclusionMappingEnabled, "enableTerrainParallaxOcclusionMapping");
+    setTerrainParallaxHeightScale = settingsManager.getSettingSetter<float>("terrainParallaxHeightScale");
+    getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
+    m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
+    observerSetting(m_terrainParallaxHeightScale, "terrainParallaxHeightScale");
+    setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
+    getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
+    m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
+    observerSetting(m_terrainParallaxMaxSteps, "terrainParallaxMaxSteps");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1819,8 +1854,25 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Terrain Stochastic Normals", &m_terrainStochasticNormalSamplingEnabled)) {
             setTerrainStochasticNormalSamplingEnabled(m_terrainStochasticNormalSamplingEnabled);
         }
+        if (ImGui::Checkbox("Terrain Derivative Normal Blend", &m_terrainStochasticDerivativeNormalSamplingEnabled)) {
+            setTerrainStochasticDerivativeNormalSamplingEnabled(m_terrainStochasticDerivativeNormalSamplingEnabled);
+        }
         if (ImGui::SliderFloat("Terrain Stochastic Blend Curve", &m_terrainStochasticBlendCurve, 0.0f, 1.0f, "%.2f")) {
             setTerrainStochasticBlendCurve(m_terrainStochasticBlendCurve);
+        }
+        if (ImGui::Checkbox("Parallax Occlusion Mapping", &m_parallaxOcclusionMappingEnabled)) {
+            setParallaxOcclusionMappingEnabled(m_parallaxOcclusionMappingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Parallax Occlusion Mapping", &m_terrainParallaxOcclusionMappingEnabled)) {
+            setTerrainParallaxOcclusionMappingEnabled(m_terrainParallaxOcclusionMappingEnabled);
+        }
+        if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
+            setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);
+        }
+        int terrainParallaxMaxSteps = static_cast<int>(m_terrainParallaxMaxSteps);
+        if (ImGui::SliderInt("Terrain Parallax Max Steps", &terrainParallaxMaxSteps, 4, 32)) {
+            m_terrainParallaxMaxSteps = static_cast<uint32_t>(std::clamp(terrainParallaxMaxSteps, 4, 32));
+            setTerrainParallaxMaxSteps(m_terrainParallaxMaxSteps);
         }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);

@@ -1311,10 +1311,12 @@ StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtif
 	}
 
 	const bool isNormal = settings.semantic == TextureSemantic::Normal;
+	const bool isScalar = settings.semantic == TextureSemantic::Height ||
+		settings.semantic == TextureSemantic::OpenPBRScalar;
 	const bool isDiffuse = settings.semantic == TextureSemantic::BaseColor ||
 		settings.semantic == TextureSemantic::OpenPBRColor ||
 		settings.semantic == TextureSemantic::Emissive;
-	if (!isNormal && !isDiffuse) {
+	if (!isNormal && !isDiffuse && !isScalar) {
 		result.failureReason = "semantic is not active for stochastic terrain sampling";
 		return result;
 	}
@@ -1426,8 +1428,10 @@ StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtif
 			ApplyDiffuseDecorrelation(sourcePixels, result);
 		}
 
-		const uint32_t channels = isNormal ? 2u : 4u;
-		const rhi::Format gaussianFormat = isNormal ? rhi::Format::R8G8_UNorm : rhi::Format::R8G8B8A8_UNorm;
+		const uint32_t channels = isNormal ? 2u : (isScalar ? 1u : 4u);
+		const rhi::Format gaussianFormat = isNormal
+			? rhi::Format::R8G8_UNorm
+			: (isScalar ? rhi::Format::R8_UNorm : rhi::Format::R8G8B8A8_UNorm);
 		const rhi::Format lutFormat = gaussianFormat;
 		const uint32_t lutHeight = CalcMipCount(width, height);
 		auto gaussianizedBasePixels = BuildGaussianizedPixels(sourcePixels, channels);
@@ -1459,7 +1463,7 @@ StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtif
 		result.lutHeight = lutHeight;
 		result.transformMode = isNormal
 			? StochasticTextureTransformMode::NormalXY
-			: StochasticTextureTransformMode::DecorrelatedColor;
+			: (isScalar ? StochasticTextureTransformMode::Scalar : StochasticTextureTransformMode::DecorrelatedColor);
 		if (!TryWriteStochasticMetadata(metaPath, result)) {
 			throw std::runtime_error("failed to write stochastic metadata");
 		}

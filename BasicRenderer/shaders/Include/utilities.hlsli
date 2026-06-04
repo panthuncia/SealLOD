@@ -1089,7 +1089,8 @@ bool MaterialSlotEnabled(MaterialInfo materialInfo, uint materialFlags, Material
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return (materialFlags & MATERIAL_EMISSIVE_TEXTURE) != 0u;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return (materialFlags & MATERIAL_PARALLAX) != 0u;
+        return (materialFlags & MATERIAL_PARALLAX) != 0u &&
+            (((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u) || ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u));
     default:
         return false;
     }
@@ -1119,7 +1120,9 @@ uint MaterialSlotUvSetIndex(MaterialInfo materialInfo, MaterialTextureSlot slot)
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveUvSetIndex;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightUvSetIndex;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorUvSetIndex
+            : materialInfo.heightUvSetIndex;
     default:
         return 0u;
     }
@@ -1144,7 +1147,9 @@ uint MaterialSlotUvSetIndex(MaterialEvalInfo materialInfo, MaterialTextureSlot s
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveUvSetIndex;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightUvSetIndex;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorUvSetIndex
+            : materialInfo.heightUvSetIndex;
     default:
         return 0u;
     }
@@ -1777,23 +1782,46 @@ void SampleMaterialFromUvCache(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            TBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+        }
     }
 #endif
 
@@ -1984,23 +2012,46 @@ void SampleMaterialEvalFromUvCache(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS.xyz);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    parallaxTBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    parallaxTBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            parallaxTBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+        }
     }
 #endif
 
@@ -2242,23 +2293,46 @@ void SampleMaterialFromUvCacheRuntime(
 
         float3 viewDir = normalize(mainCamera.positionWorldSpace.xyz - posWS);
 
-        Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-        SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        if (perFrameBuffer.parallaxOcclusionMappingEnabled != 0u)
+        {
+            float3 uvh;
+            if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+            {
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    3u,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
+            else
+            {
+                Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+                SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+                uvh = getParallaxOcclusionMappingCoordsAndHeight(
+                    parallaxTexture,
+                    parallaxSamplerState,
+                    TBN,
+                    heightUv.uv,
+                    viewDir,
+                    materialInfo.heightMapScale,
+                    16u,
+                    heightUv.dUVdx,
+                    heightUv.dUVdy);
+            }
 
-        float3 uvh = getContactRefinementParallaxCoordsAndHeight(
-            parallaxTexture,
-            parallaxSamplerState,
-            TBN,
-            heightUv.uv,
-            viewDir,
-            materialInfo.heightMapScale,
-            heightUv.dUVdx,
-            heightUv.dUVdy);
-
-        parallaxUv = uvh.xy;
-        parallaxDUdx = heightUv.dUVdx;
-        parallaxDUdy = heightUv.dUVdy;
-        hasParallaxResolvedUv = true;
+            parallaxUv = uvh.xy;
+            parallaxDUdx = heightUv.dUVdx;
+            parallaxDUdy = heightUv.dUVdy;
+            hasParallaxResolvedUv = true;
+        }
     }
 
     float4 baseColor = materialInfo.baseColorFactor;
@@ -2456,14 +2530,15 @@ void SampleMaterialCorePrecompiled(
     Texture2D<float> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
 
-    // IMPORTANT: inside getContactRefinementParallaxCoordsAndHeight, use SampleGrad too.
-    float3 uvh = getContactRefinementParallaxCoordsAndHeight(
+    // IMPORTANT: inside getParallaxOcclusionMappingCoordsAndHeight, use SampleGrad too.
+    float3 uvh = getParallaxOcclusionMappingCoordsAndHeight(
         parallaxTexture,
         parallaxSamplerState,
         TBN,
         localUV,
         viewDir,
         materialInfo.heightMapScale,
+        16u,
         localDUdx,
         localDUdy
     );

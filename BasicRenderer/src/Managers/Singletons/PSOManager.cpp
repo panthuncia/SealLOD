@@ -1796,6 +1796,12 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
         macro.Name = L"PSO_PARALLAX";
         defines.insert(defines.begin(), macro);
 	}
+    if (materialFlags & MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_HEIGHT_FROM_BASE_ALPHA";
+        defines.insert(defines.begin(), macro);
+	}
     if (materialFlags & MaterialCompileFlags::MaterialCompileGeometricDisplacement) {
         DxcDefine macro;
         macro.Value = L"1";

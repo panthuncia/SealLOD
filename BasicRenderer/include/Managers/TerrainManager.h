@@ -20,9 +20,11 @@ inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
 inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
 inline constexpr float kDefaultTerrainStochasticScale = 3.4641016f;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
+inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA = 1u << 1;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
+inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_HEIGHT = 1u << 3;
 
 struct TerrainStochasticTextureDesc
 {
@@ -40,6 +42,7 @@ struct TerrainLayerStochasticDesc
 {
     TerrainStochasticTextureDesc diffuse;
     TerrainStochasticTextureDesc normal;
+    TerrainStochasticTextureDesc height;
     float scale = kDefaultTerrainStochasticScale;
 };
 
@@ -47,6 +50,7 @@ struct TerrainLayerDesc
 {
     std::shared_ptr<TextureAsset> diffuse;
     std::shared_ptr<TextureAsset> normal;
+    std::shared_ptr<TextureAsset> height;
     TerrainLayerStochasticDesc stochastic;
     DirectX::XMFLOAT4 fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
     float uvScale = kDefaultTerrainLayerUvScale;

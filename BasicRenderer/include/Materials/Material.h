@@ -84,7 +84,10 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
     if (d.opacity.texture) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpacityTexture;
     }
-	if (d.heightMap.texture) {
+	if (d.heightMap.texture || (d.heightMapFromBaseColorAlpha && d.baseColor.texture)) {
+        if (d.heightMapFromBaseColorAlpha && d.baseColor.texture) {
+            tech.compileFlags |= MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
+        }
         if (d.enableGeometricDisplacement) {
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileGeometricDisplacement;
             tech.rasterFlags |= MaterialRasterFlags::MaterialRasterFlagsGeometricDisplacement;
@@ -116,6 +119,7 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
          d.normal.texture ||
          d.aoMap.texture ||
          d.heightMap.texture ||
+         (d.heightMapFromBaseColorAlpha && d.baseColor.texture) ||
          d.metallic.texture ||
          d.roughness.texture ||
          d.emissive.texture ||
@@ -163,7 +167,13 @@ public:
         if (desc.normal.texture) {
             materialFlags |= MaterialFlags::MATERIAL_NORMAL_MAP | MaterialFlags::MATERIAL_TEXTURED;
         }
-        if (desc.enableGeometricDisplacement && desc.heightMap.texture) {
+        if (desc.heightMapFromBaseColorAlpha && desc.baseColor.texture) {
+            materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED | MaterialFlags::MATERIAL_HEIGHT_FROM_BASE_ALPHA;
+        }
+        if (desc.heightMap.texture) {
+            materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED;
+        }
+        if (desc.enableGeometricDisplacement && (desc.heightMap.texture || (desc.heightMapFromBaseColorAlpha && desc.baseColor.texture))) {
             materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         }
         auto diffuseColor = desc.diffuseColor;
@@ -207,7 +217,7 @@ public:
             desc.baseColor.texture,
             desc.normal.texture,
             desc.aoMap.texture,
-            desc.heightMap.texture,
+            desc.heightMapFromBaseColorAlpha && !desc.heightMap.texture ? desc.baseColor.texture : desc.heightMap.texture,
             desc.metallic.texture,
             desc.roughness.texture,
             desc.emissive.texture,
@@ -219,14 +229,14 @@ public:
             desc.baseColor.channels,
             desc.normal.channels,
             desc.aoMap.channels,
-            desc.heightMap.channels,
+            desc.heightMapFromBaseColorAlpha && !desc.heightMap.texture ? std::vector<uint32_t>{ 3u } : desc.heightMap.channels,
             desc.metallic.channels,
             desc.roughness.channels,
             desc.emissive.channels,
             desc.baseColor.uvSetIndex,
             desc.normal.uvSetIndex,
             desc.aoMap.uvSetIndex,
-            desc.heightMap.uvSetIndex,
+            desc.heightMapFromBaseColorAlpha && !desc.heightMap.texture ? desc.baseColor.uvSetIndex : desc.heightMap.uvSetIndex,
             desc.metallic.uvSetIndex,
             desc.roughness.uvSetIndex,
             desc.emissive.uvSetIndex,
