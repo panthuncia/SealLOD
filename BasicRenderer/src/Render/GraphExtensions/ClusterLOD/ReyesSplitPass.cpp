@@ -98,8 +98,7 @@ void ReyesSplitPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CullingCameraBuffer,
-            Builtin::CameraBuffer,
-			Builtin::Shadows::CLodCompactShadowCameras)
+            Builtin::CameraBuffer)
 		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(

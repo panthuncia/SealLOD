@@ -358,7 +358,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//auto quad = LoadModel("models/quad.usdz");
 	
-	//auto cubes = LoadModel("models/cubes/suspicious_cubes.usda");
+	auto cubes = LoadModel("models/cubes/suspicious_cubes.usda");
 
     //auto cherry = LoadModel("models/Trees/CherryTree.usd");
 
@@ -367,11 +367,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto needles = LoadModel("models/Trees/PineTree.usd");
 
-	auto farmhouse = LoadModel("models/iceberglarge.nif");
+	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
     renderer.SetCurrentScene(baseScene);
 
-	renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
+	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
@@ -379,7 +379,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(cubes->Clone());
+	renderer.GetCurrentScene()->AppendScene(cubes->Clone());
     
 	//renderer.GetCurrentScene()->AppendScene(carScene->Clone());
 

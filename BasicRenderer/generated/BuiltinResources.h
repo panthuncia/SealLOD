@@ -88,15 +88,6 @@ struct Builtin {
     inline static constexpr std::string_view TextureStreamingFeedbackBuffer = "Builtin::Material::TextureStreamingFeedbackBuffer";
     inline static constexpr std::string_view TextureStreamingMetadataBuffer = "Builtin::Material::TextureStreamingMetadataBuffer";
   };
-  struct Terrain {
-    inline static constexpr std::string_view LayerRefs = "Builtin::Terrain::LayerRefs";
-    inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
-    inline static constexpr std::string_view Regions = "Builtin::Terrain::Regions";
-    inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
-    inline static constexpr std::string_view StochasticLayers = "Builtin::Terrain::StochasticLayers";
-    inline static constexpr std::string_view TextureGroup = "Builtin::Terrain::TextureGroup";
-    inline static constexpr std::string_view WeightBlocks = "Builtin::Terrain::WeightBlocks";
-};
   struct Noise {
     inline static constexpr std::string_view BlueNoise2D = "Builtin::Noise::BlueNoise2D";
   };
@@ -151,6 +142,15 @@ struct Builtin {
     inline static constexpr std::string_view InverseBindMatrices = "Builtin::SkeletonResources::InverseBindMatrices";
     inline static constexpr std::string_view InverseSkinMatrices = "Builtin::SkeletonResources::InverseSkinMatrices";
     inline static constexpr std::string_view SkinningInstanceInfo = "Builtin::SkeletonResources::SkinningInstanceInfo";
+  };
+  struct Terrain {
+    inline static constexpr std::string_view LayerRefs = "Builtin::Terrain::LayerRefs";
+    inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
+    inline static constexpr std::string_view Regions = "Builtin::Terrain::Regions";
+    inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
+    inline static constexpr std::string_view StochasticLayers = "Builtin::Terrain::StochasticLayers";
+    inline static constexpr std::string_view TextureGroup = "Builtin::Terrain::TextureGroup";
+    inline static constexpr std::string_view WeightBlocks = "Builtin::Terrain::WeightBlocks";
   };
 };
 
