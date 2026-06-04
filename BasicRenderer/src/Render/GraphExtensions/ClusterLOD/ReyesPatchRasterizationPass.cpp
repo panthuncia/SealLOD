@@ -81,13 +81,21 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
 			Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Material::TextureGroup,
+            Builtin::Terrain::Sets,
+            Builtin::Terrain::Layers,
+            Builtin::Terrain::StochasticLayers,
+            Builtin::Terrain::LayerRefs,
+            Builtin::Terrain::Regions,
+            Builtin::Terrain::WeightBlocks,
+            Builtin::Terrain::TextureGroup,
 			Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
 		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(m_telemetryBuffer);
+        .WithUnorderedAccess(m_telemetryBuffer)
+        .WithConstantBuffer(Builtin::PerFrameBuffer);
 
     for (const auto& visibilityBuffer : m_visibilityBuffers) {
         builder->WithUnorderedAccess(visibilityBuffer);

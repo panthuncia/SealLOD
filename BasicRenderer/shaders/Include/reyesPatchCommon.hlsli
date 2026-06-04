@@ -2,6 +2,7 @@
 #define __REYES_PATCH_COMMON_HLSLI__
 
 #include "include/dynamicSwizzle.hlsli"
+#include "include/terrainCommon.hlsli"
 
 static const uint REYES_PATCH_BARYCENTRIC_COORD_MAX = (1u << 15u);
 static const float REYES_PATCH_BARYCENTRIC_COORD_SCALE = float(REYES_PATCH_BARYCENTRIC_COORD_MAX);
@@ -483,7 +484,7 @@ float2 ReyesInterpolateFloat2Precise(float2 value0, float2 value1, float2 value2
     return result;
 }
 
-float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float2 uv)
+float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
     {
@@ -497,7 +498,7 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float2 uv)
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
-float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv)
+float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
     {
@@ -509,17 +510,49 @@ float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv)
     const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
     const float heightValue = saturate(DynamicSwizzle(heightSample, materialInfo.heightChannel));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float heightValue = saturate(TerrainSampleGeometricHeight(materialInfo.terrainSetIndex, positionOS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv);
+}
+
+float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float heightValue = saturate(TerrainSampleGeometricHeight(materialInfo.terrainSetIndex, positionOS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv);
 }
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, uv);
+    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
 float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, uv);
+    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 

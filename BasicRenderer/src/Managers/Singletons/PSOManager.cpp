@@ -2141,8 +2141,25 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
             vertexBuffer,
             computeBuffer),
     };
+    const bool logMaterialEvalCache =
+        info.computeShader.has_value()
+        && info.computeShader->filename == L"shaders/VisUtilEvaluate.hlsl";
     if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
+        if (logMaterialEvalCache) {
+            spdlog::info(
+                "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
+                cacheKey.identityHash,
+                buildConfigHash,
+                ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
+        }
         return *cachedBundle;
+    }
+    if (logMaterialEvalCache) {
+        spdlog::info(
+            "VisUtil material eval shader artifact cache miss; compiling identity=0x{:X} build=0x{:X} file='{}'",
+            cacheKey.identityHash,
+            buildConfigHash,
+            ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
     }
 
     auto prepareSlot = [&](const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer)

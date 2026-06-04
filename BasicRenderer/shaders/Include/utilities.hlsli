@@ -444,6 +444,7 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
 {
     materialInputs.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     materialInputs.selectedMaterialMipMaxLevel = 0u;
+    materialInputs.parallaxApplied = 0u;
 }
 
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)
@@ -1174,7 +1175,9 @@ uint MaterialSlotStreamingTextureID(MaterialInfo materialInfo, MaterialTextureSl
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveStreamingTextureID;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightStreamingTextureID;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorStreamingTextureID
+            : materialInfo.heightStreamingTextureID;
     default:
         return 0u;
     }
@@ -1199,7 +1202,9 @@ uint MaterialSlotStreamingTextureID(MaterialEvalInfo materialInfo, MaterialTextu
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return materialInfo.emissiveStreamingTextureID;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return materialInfo.heightStreamingTextureID;
+        return (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u
+            ? materialInfo.baseColorStreamingTextureID
+            : materialInfo.heightStreamingTextureID;
     default:
         return 0u;
     }
@@ -1821,6 +1826,7 @@ void SampleMaterialFromUvCache(
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
         }
     }
 #endif
@@ -2051,6 +2057,7 @@ void SampleMaterialEvalFromUvCache(
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
         }
     }
 #endif
@@ -2332,6 +2339,7 @@ void SampleMaterialFromUvCacheRuntime(
             parallaxDUdx = heightUv.dUVdx;
             parallaxDUdy = heightUv.dUVdy;
             hasParallaxResolvedUv = true;
+            ret.parallaxApplied = 1u;
         }
     }
 
@@ -2872,6 +2880,7 @@ void GetFragmentInfoScreenSpace(in uint2 pixelCoordinates, in float3 viewWS, in 
     ret.fragPosWorldSpace = fragPosWorldSpace;
     ret.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     ret.selectedMaterialMipMaxLevel = 0u;
+    ret.parallaxApplied = 0u;
     
     // Gather textures
     Texture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
@@ -2943,6 +2952,7 @@ void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialIn
     ret.materialFlags = materialFlags;
     ret.selectedMaterialMipLevel = materialInfo.selectedMaterialMipLevel;
     ret.selectedMaterialMipMaxLevel = materialInfo.selectedMaterialMipMaxLevel;
+    ret.parallaxApplied = materialInfo.parallaxApplied;
     float perceptualRoughness = materialInfo.roughness;
     ret.perceptualRoughnessUnclamped = perceptualRoughness;
     // Clamp the roughness to a minimum value to avoid divisions by 0 during lighting

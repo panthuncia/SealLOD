@@ -726,6 +726,7 @@ struct FragmentInfo {
     uint materialFlags;
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
+    uint parallaxApplied;
 };
 
 struct EnvironmentInfo {
@@ -770,6 +771,7 @@ struct MaterialInputs
     uint openPBRMaterialDataIndex;
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
+    uint parallaxApplied;
 };
 
 struct SkinningInstanceGPUInfo

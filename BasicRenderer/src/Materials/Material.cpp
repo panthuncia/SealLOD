@@ -307,6 +307,11 @@ void Material::SetOpenPBRMaterialDataIndex(uint32_t index) {
 void Material::SetTerrainSetIndex(uint32_t index) {
     m_materialData.materialFlags |= MaterialFlags::MATERIAL_TERRAIN;
     m_materialData.terrainSetIndex = index;
+    if (m_materialData.geometricDisplacementEnabled != 0u) {
+        m_materialData.materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
+        m_technique.compileFlags |= MaterialCompileFlags::MaterialCompileGeometricDisplacement;
+        m_technique.rasterFlags |= MaterialRasterFlags::MaterialRasterFlagsGeometricDisplacement;
+    }
 }
 
 void Material::SetRasterBucketIndex(uint32_t index) {

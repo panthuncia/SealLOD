@@ -2,6 +2,8 @@
 #include <vector>
 #include <cstdint>
 
+#include <spdlog/spdlog.h>
+
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/CommandSignatureManager.h"
@@ -234,8 +236,9 @@ public:
 
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes, avoid in-frame compile
 			unsigned int slot = ctx.materialManager->GetCompileFlagsSlot(flags);
+            const MaterialCompileFlags shaderKey = GetMaterialEvalShaderKey(flags);
 			// Bind pipeline for this material compile flag set
-            auto psoIter = m_psoCache.find(flags);
+            auto psoIter = m_psoCache.find(shaderKey);
             if (psoIter == m_psoCache.end()) {
                 auto shaderDefines = psoMgr.GetShaderDefines(0, flags);
                 shaderDefines.push_back({L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1"});
@@ -243,8 +246,14 @@ public:
                 if (flags & MaterialCompileFlags::MaterialCompileDoubleSided) {
                     shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
                 }
+                spdlog::info(
+                    "EvaluateMaterialGroupsPass: creating material eval PSO flags=0x{:X} shaderKey=0x{:X} slot={} defines={}",
+                    static_cast<uint64_t>(flags),
+                    static_cast<uint64_t>(shaderKey),
+                    slot,
+                    shaderDefines.size());
                 auto [newIter, _] = m_psoCache.emplace(
-                    flags,
+                    shaderKey,
                     psoMgr.MakeComputePipeline(
                         psoMgr.GetComputeRootSignature().GetHandle(),
                         L"shaders/VisUtilEvaluate.hlsl",
@@ -292,6 +301,31 @@ public:
     }
 
 private:
+    static MaterialCompileFlags GetMaterialEvalShaderKey(MaterialCompileFlags flags) {
+        constexpr uint64_t shaderAffectingFlags =
+            MaterialCompileFlags::MaterialCompileBlend |
+            MaterialCompileFlags::MaterialCompileAlphaTest |
+            MaterialCompileFlags::MaterialCompileDoubleSided |
+            MaterialCompileFlags::MaterialCompileBaseColorTexture |
+            MaterialCompileFlags::MaterialCompileNormalMap |
+            MaterialCompileFlags::MaterialCompileMetallicTexture |
+            MaterialCompileFlags::MaterialCompileRoughnessTexture |
+            MaterialCompileFlags::MaterialCompileAOTexture |
+            MaterialCompileFlags::MaterialCompileEmissiveTexture |
+            MaterialCompileFlags::MaterialCompileParallax |
+            MaterialCompileFlags::MaterialCompileGeometricDisplacement |
+            MaterialCompileFlags::MaterialCompileOpacityTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRCoatColorTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRCoatWeightTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRCoatRoughnessTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRFuzzColorTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRFuzzWeightTexture |
+            MaterialCompileFlags::MaterialCompileOpenPBRFuzzRoughnessTexture |
+            MaterialCompileFlags::MaterialCompileTextureStreaming |
+            MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
+        return static_cast<MaterialCompileFlags>(static_cast<uint64_t>(flags) & shaderAffectingFlags);
+    }
+
     std::unordered_map<MaterialCompileFlags, PipelineState> m_psoCache;
     Resource* m_materialEvalCmds;
     flecs::query<> m_visibleClustersQuery;

@@ -97,6 +97,13 @@ void ReyesDeepVisibilityRasterizationPass::DeclareResourceUsages(ComputePassBuil
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Material::TextureGroup,
+            Builtin::Terrain::Sets,
+            Builtin::Terrain::Layers,
+            Builtin::Terrain::StochasticLayers,
+            Builtin::Terrain::LayerRefs,
+            Builtin::Terrain::Regions,
+            Builtin::Terrain::WeightBlocks,
+            Builtin::Terrain::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
@@ -107,7 +114,8 @@ void ReyesDeepVisibilityRasterizationPass::DeclareResourceUsages(ComputePassBuil
             m_telemetryBuffer,
             m_deepVisibilityNodesBuffer,
             m_deepVisibilityCounterBuffer,
-            m_deepVisibilityOverflowCounterBuffer);
+            m_deepVisibilityOverflowCounterBuffer)
+        .WithConstantBuffer(Builtin::PerFrameBuffer);
 
     for (const auto& visibilityBuffer : m_visibilityBuffers) {
         builder->WithShaderResource(visibilityBuffer);

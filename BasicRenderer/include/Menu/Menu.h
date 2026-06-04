@@ -695,6 +695,9 @@ private:
     bool m_terrainParallaxOcclusionMappingEnabled = true;
     std::function<bool()> getTerrainParallaxOcclusionMappingEnabled;
     std::function<void(bool)> setTerrainParallaxOcclusionMappingEnabled;
+    bool m_terrainReyesDisplacementEnabled = true;
+    std::function<bool()> getTerrainReyesDisplacementEnabled;
+    std::function<void(bool)> setTerrainReyesDisplacementEnabled;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1212,6 +1215,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainParallaxOcclusionMapping");
     m_terrainParallaxOcclusionMappingEnabled = getTerrainParallaxOcclusionMappingEnabled();
     observerSetting(m_terrainParallaxOcclusionMappingEnabled, "enableTerrainParallaxOcclusionMapping");
+    setTerrainReyesDisplacementEnabled = settingsManager.getSettingSetter<bool>("enableTerrainReyesDisplacement");
+    getTerrainReyesDisplacementEnabled = settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement");
+    m_terrainReyesDisplacementEnabled = getTerrainReyesDisplacementEnabled();
+    observerSetting(m_terrainReyesDisplacementEnabled, "enableTerrainReyesDisplacement");
     setTerrainParallaxHeightScale = settingsManager.getSettingSetter<float>("terrainParallaxHeightScale");
     getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
     m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
@@ -1865,6 +1872,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Terrain Parallax Occlusion Mapping", &m_terrainParallaxOcclusionMappingEnabled)) {
             setTerrainParallaxOcclusionMappingEnabled(m_terrainParallaxOcclusionMappingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Reyes Displacement", &m_terrainReyesDisplacementEnabled)) {
+            setTerrainReyesDisplacementEnabled(m_terrainReyesDisplacementEnabled);
         }
         if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
             setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);

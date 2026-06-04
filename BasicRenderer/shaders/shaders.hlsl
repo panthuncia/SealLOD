@@ -293,6 +293,9 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
                     payload = PackDebugUint2(fragmentInfo.selectedMaterialMipLevel, fragmentInfo.selectedMaterialMipMaxLevel);
                 }
                 break;
+            case OUTPUT_PARALLAX_PIXELS:
+                payload = PackDebugFloat3(fragmentInfo.parallaxApplied != 0u ? 1.0f.xxx : 0.0f.xxx);
+                break;
         }
         if (payload.x != DEBUG_SENTINEL) {
             WriteDebugPixel(debugVisTex, pixel, payload);

@@ -112,26 +112,18 @@ struct TerrainStochasticContext
 };
 
 TerrainStochasticContext TerrainBuildStochasticContext(
-    Texture2D<float4> lodTexture,
-    SamplerState lodSampler,
     float2 uv,
     float2 duDx,
     float2 duDy,
     float stochasticScale,
-    float blendCurve)
+    float blendCurve,
+    float lod)
 {
     TerrainStochasticContext ctx;
     ctx.uv = uv;
     ctx.duDx = duDx;
     ctx.duDy = duDy;
-    uint textureWidth = 1u;
-    uint textureHeight = 1u;
-    lodTexture.GetDimensions(textureWidth, textureHeight);
-    float2 textureSize = float2(max(textureWidth, 1u), max(textureHeight, 1u));
-    float2 dxTexels = duDx * textureSize;
-    float2 dyTexels = duDy * textureSize;
-    float maxFootprintSq = max(dot(dxTexels, dxTexels), dot(dyTexels, dyTexels));
-    ctx.lod = max(0.0f, 0.5f * log2(max(maxFootprintSq, 1.0e-8f)));
+    ctx.lod = max(lod, 0.0f);
 
     float scale = max(stochasticScale, 0.001f);
     float2 grid = uv * scale;
@@ -164,6 +156,36 @@ TerrainStochasticContext TerrainBuildStochasticContext(
     ctx.offsets1 = TerrainHash2(v1);
     ctx.offsets2 = TerrainHash2(v2);
     return ctx;
+}
+
+float TerrainEstimateTextureLod(Texture2D<float4> lodTexture, float2 duDx, float2 duDy)
+{
+    uint textureWidth = 1u;
+    uint textureHeight = 1u;
+    lodTexture.GetDimensions(textureWidth, textureHeight);
+    float2 textureSize = float2(max(textureWidth, 1u), max(textureHeight, 1u));
+    float2 dxTexels = duDx * textureSize;
+    float2 dyTexels = duDy * textureSize;
+    float maxFootprintSq = max(dot(dxTexels, dxTexels), dot(dyTexels, dyTexels));
+    return max(0.0f, 0.5f * log2(max(maxFootprintSq, 1.0e-8f)));
+}
+
+TerrainStochasticContext TerrainBuildStochasticContext(
+    Texture2D<float4> lodTexture,
+    SamplerState lodSampler,
+    float2 uv,
+    float2 duDx,
+    float2 duDy,
+    float stochasticScale,
+    float blendCurve)
+{
+    return TerrainBuildStochasticContext(
+        uv,
+        duDx,
+        duDy,
+        stochasticScale,
+        blendCurve,
+        TerrainEstimateTextureLod(lodTexture, duDx, duDy));
 }
 
 float3 TerrainVariancePreservingBlend(float3 a, float3 b, float3 c, float3 weights)
@@ -298,6 +320,43 @@ bool TerrainLayerUsesExplicitHeight(TerrainLayerInfo layer)
 bool TerrainCanSampleHeight(TerrainLayerInfo layer)
 {
     return TerrainLayerUsesDiffuseAlphaHeight(layer) || TerrainLayerUsesExplicitHeight(layer);
+}
+
+bool TerrainTryBuildLayerStochasticContext(
+    TerrainLayerInfo layer,
+    float2 uv,
+    float2 duDx,
+    float2 duDy,
+    float stochasticScale,
+    float blendCurve,
+    out TerrainStochasticContext ctx)
+{
+    ctx = (TerrainStochasticContext)0;
+    if (layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+    {
+        Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+        SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        return true;
+    }
+
+    if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+    {
+        Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
+        SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        return true;
+    }
+
+    if (layer.heightTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.heightSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+    {
+        Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+        SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        return true;
+    }
+
+    return false;
 }
 
 float TerrainSampleLayerHeight(
@@ -584,6 +643,106 @@ float TerrainInterpolateLayerWeight(
     return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
 
+float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
+{
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
+    StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
+    StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
+    StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
+    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+
+    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    if (terrain.regionSizeWorld <= 0.0f ||
+        terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
+    {
+        return 0.0f;
+    }
+
+    float2 skyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+    int2 regionCoord = int2(floor(skyrimXY / terrain.regionSizeWorld));
+    uint2 localRegion;
+    localRegion.x = (uint)(regionCoord.x - terrain.minRegionX);
+    localRegion.y = (uint)(regionCoord.y - terrain.minRegionY);
+    if (regionCoord.x < terrain.minRegionX || regionCoord.y < terrain.minRegionY ||
+        localRegion.x >= terrain.regionCountX || localRegion.y >= terrain.regionCountY)
+    {
+        return 0.0f;
+    }
+
+    uint regionIndex = terrain.regionBase + localRegion.y * terrain.regionCountX + localRegion.x;
+    if (regionIndex >= terrain.regionBase + terrain.regionCount)
+    {
+        return 0.0f;
+    }
+
+    TerrainRegionInfo region = terrainRegions[regionIndex];
+    if (region.layerRefCount == 0u || region.weightSampleSide < 2u)
+    {
+        return 0.0f;
+    }
+
+    float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
+    float2 regionLocal = skyrimXY - regionOrigin;
+    bool terrainStochasticSamplingEnabled = perFrameBuffer.terrainStochasticSamplingEnabled != 0u;
+    bool terrainStochasticHeightEnabled =
+        terrainStochasticSamplingEnabled &&
+        perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
+    float2 zeroDerivative = 0.0f.xx;
+
+    float heightSum = 0.0f;
+    float weightSum = 0.0f;
+    [loop]
+    for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
+    {
+        float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
+        if (weight <= 0.0001f)
+        {
+            continue;
+        }
+
+        uint layerRefIndex = terrain.layerRefBase + region.layerRefStart + localLayer;
+        if (layerRefIndex >= terrain.layerRefBase + terrain.layerRefCount)
+        {
+            continue;
+        }
+
+        uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
+        TerrainLayerInfo layer = terrainLayers[layerIndex];
+        if (!TerrainCanSampleHeight(layer))
+        {
+            continue;
+        }
+
+        float2 layerUv = skyrimXY * layer.uvScale;
+        bool hasStochasticLayer = layer.stochasticLayerIndex != TERRAIN_INVALID_DESCRIPTOR;
+        TerrainStochasticLayerInfo stochasticLayer = (TerrainStochasticLayerInfo)0;
+        float contextScale = TERRAIN_DEFAULT_STOCHASTIC_SCALE;
+        if (hasStochasticLayer)
+        {
+            stochasticLayer = terrainStochasticLayers[layer.stochasticLayerIndex];
+            contextScale = max(stochasticLayer.stochasticScale, 0.001f);
+        }
+
+        float layerHeight = TerrainSampleLayerHeight(
+            layer,
+            stochasticLayer,
+            hasStochasticLayer,
+            terrainStochasticHeightEnabled,
+            terrainStochasticHeightEnabled,
+            contextScale,
+            perFrameBuffer.terrainStochasticBlendCurve,
+            layerUv,
+            zeroDerivative,
+            zeroDerivative);
+        heightSum += layerHeight * weight * max(layer.heightScale, 0.0f);
+        weightSum += weight;
+    }
+
+    return weightSum > 1.0e-4f ? heightSum / weightSum : 0.0f;
+}
+
 float3x3 TerrainBasis(float3 normalWS)
 {
     float3 tangentWS = cross(float3(0.0f, 0.0f, -1.0f), normalWS);
@@ -626,7 +785,9 @@ void ApplyTerrainMaterialInternal(
     bool terrainStochasticHeightEnabled = terrainStochasticDiffuseEnabled;
     bool terrainStochasticDerivativeNormalsEnabled = terrainStochasticNormalEnabled &&
         perFrameBuffer.terrainStochasticDerivativeNormalsEnabled != 0u;
-    bool terrainParallaxEnabled = perFrameBuffer.parallaxOcclusionMappingEnabled != 0u &&
+    const bool terrainGeometricDisplacementEnabled = (materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
+    bool terrainParallaxEnabled = !terrainGeometricDisplacementEnabled &&
+        perFrameBuffer.parallaxOcclusionMappingEnabled != 0u &&
         perFrameBuffer.terrainParallaxOcclusionMappingEnabled != 0u &&
         perFrameBuffer.terrainParallaxHeightScale > 0.0f;
     uint terrainParallaxMaxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
@@ -717,6 +878,7 @@ void ApplyTerrainMaterialInternal(
                 layerDUdx,
                 layerDUdy);
             layerUv = parallaxUvHeight.xy;
+            inputs.parallaxApplied = 1u;
         }
         bool wantsDerivativeNormalContext = terrainStochasticDerivativeNormalsEnabled &&
             layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
@@ -728,34 +890,14 @@ void ApplyTerrainMaterialInternal(
         TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
         if (wantsStochasticContext)
         {
-            if (layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
-            {
-                Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
-                SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-                stochasticContext = TerrainBuildStochasticContext(
-                    lodTex,
-                    lodSampler,
-                    layerUv,
-                    layerDUdx,
-                    layerDUdy,
-                    contextScale,
-                    perFrameBuffer.terrainStochasticBlendCurve);
-                hasStochasticContext = true;
-            }
-            else if (layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR && layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
-            {
-                Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
-                SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
-                stochasticContext = TerrainBuildStochasticContext(
-                    lodTex,
-                    lodSampler,
-                    layerUv,
-                    layerDUdx,
-                    layerDUdy,
-                    contextScale,
-                    perFrameBuffer.terrainStochasticBlendCurve);
-                hasStochasticContext = true;
-            }
+            hasStochasticContext = TerrainTryBuildLayerStochasticContext(
+                layer,
+                layerUv,
+                layerDUdx,
+                layerDUdy,
+                contextScale,
+                perFrameBuffer.terrainStochasticBlendCurve,
+                stochasticContext);
         }
 
         float3 layerBaseColor = layer.fallbackColor.rgb;

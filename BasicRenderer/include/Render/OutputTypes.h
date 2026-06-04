@@ -37,6 +37,7 @@ enum OutputType {
 	MATERIAL_SELECTED_MIP = 33,
 	VOXEL_GEOMETRY_PATH = 34,
 	GEOMETRY_GROUP = 35,
+	PARALLAX_PIXELS = 36,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -76,4 +77,5 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Material Selected Mip",
 	"Voxel Geometry Path",
 	"Geometry Group",
+	"Parallax Pixels",
 };
