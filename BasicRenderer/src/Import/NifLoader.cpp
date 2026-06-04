@@ -592,9 +592,12 @@ std::optional<fs::path> ResolveCachedTexturePath(
     }
 
     candidateRoots.emplace_back(fs::current_path(ec));
-    if (const char* tempEnv = std::getenv("LOCALAPPDATA"); tempEnv && *tempEnv) {
+    char* tempEnv = nullptr;
+    std::size_t tempEnvLength = 0;
+    if (_dupenv_s(&tempEnv, &tempEnvLength, "LOCALAPPDATA") == 0 && tempEnv && *tempEnv) {
         candidateRoots.emplace_back(fs::path(tempEnv) / "Temp" / "SARP" / "ResourceCache");
     }
+    std::free(tempEnv);
     candidateRoots.emplace_back(fs::temp_directory_path(ec) / "SARP" / "ResourceCache");
 
     for (const fs::path& root : candidateRoots) {
