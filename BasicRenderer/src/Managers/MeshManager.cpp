@@ -414,6 +414,18 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		{
 			const auto& summary = mesh->GetCLodRuntimeSummary();
 			sharedState->parentGroupByLocal = summary.parentGroupByLocal;
+			sharedState->childrenByLocalParent.resize(sharedState->parentGroupByLocal.size());
+			for (uint32_t childLocal = 0; childLocal < static_cast<uint32_t>(sharedState->parentGroupByLocal.size()); ++childLocal) {
+				const int32_t parentLocal = sharedState->parentGroupByLocal[childLocal];
+				if (parentLocal < 0) {
+					continue;
+				}
+				const uint32_t parentLocalU32 = static_cast<uint32_t>(parentLocal);
+				if (parentLocalU32 >= sharedState->childrenByLocalParent.size() || parentLocalU32 == childLocal) {
+					continue;
+				}
+				sharedState->childrenByLocalParent[parentLocalU32].push_back(childLocal);
+			}
 			sharedState->groupErrorByLocal = summary.groupErrorByLocal;
 			sharedState->coarsestRanges = summary.coarsestRanges;
 		}
@@ -498,7 +510,7 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 		m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
 		m_clodSharedStreamingRangesDirty = true;
-		m_clodStreamingStructureDirty = true;
+		PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::SharedMeshAdded, sharedState);
 	}
 
 	mesh->SetCLodBufferViews(
@@ -676,11 +688,13 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 				state.groupCount = sharedState->groupCount;
 				state.sharedMeshState = sharedState;
 				m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
+				if (wasInactive) {
+					PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
+				}
 			}
 		}
 	}
 
-	m_clodStreamingStructureDirty = true;
 	return registrations;
 }
 
@@ -707,10 +721,11 @@ void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 		sharedState = sharedStateIt->second;
 	}
 
+	bool sharedStateWasInactive = false;
 	if (sharedState) {
-		const bool wasInactive = sharedState->activeInstanceCount == 0u;
+		sharedStateWasInactive = sharedState->activeInstanceCount == 0u;
 		sharedState->activeInstanceCount++;
-		if (wasInactive && sharedState->mesh != nullptr) {
+		if (sharedStateWasInactive && sharedState->mesh != nullptr) {
 			const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
 			uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
 			while (meshTraversalDepth > cachedDepth
@@ -740,6 +755,9 @@ void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 
 		m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
 		m_clodStreamingInstanceIndexByPtr[mesh] = static_cast<uint32_t>(mesh->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
+		if (sharedStateWasInactive) {
+			PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
+		}
 	}
 }
 
@@ -782,7 +800,7 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 					// TODO: add an explicit streaming-system retire callback if
 					// the asset cache starts evicting shared Mesh objects.
 					m_clodSharedStreamingRangesDirty = true;
-					m_clodStreamingStructureDirty = true;
+					PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeRemoved, sharedMeshState);
 					if (removedTraversalDepth >= m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire)) {
 						RecomputeCLodActiveMaxTraversalDepth();
 					}
@@ -916,6 +934,119 @@ void MeshManager::RebuildCLodSharedStreamingRangeIndex() {
 	});
 
 	m_clodSharedStreamingRangesDirty = false;
+}
+
+void MeshManager::PublishCLodStreamingDomainEvent(CLodStreamingDomainEvent event) {
+	if (event.groupCount == 0u && event.kind != CLodStreamingDomainEventKind::FullReset) {
+		return;
+	}
+
+	{
+		std::lock_guard lock(m_clodStreamingDomainEventsMutex);
+		m_clodStreamingDomainEvents.push_back(std::move(event));
+	}
+	m_clodStreamingDomainEventGeneration.fetch_add(1u, std::memory_order_release);
+	m_clodStreamingStructureDirty.store(true, std::memory_order_release);
+}
+
+void MeshManager::PublishCLodStreamingDomainEventForSharedState(
+	CLodStreamingDomainEventKind kind,
+	const std::shared_ptr<CLodSharedStreamingState>& sharedState) {
+	if (sharedState == nullptr || sharedState->groupCount == 0u) {
+		return;
+	}
+
+	CLodStreamingDomainEvent event{};
+	event.kind = kind;
+	event.groupsBase = sharedState->groupsBase;
+	event.groupCount = sharedState->groupCount;
+	event.coarsestRanges.reserve(sharedState->coarsestRanges.size());
+	for (const auto& localRange : sharedState->coarsestRanges) {
+		if (localRange.groupCount == 0u || localRange.firstGroup >= sharedState->groupCount) {
+			continue;
+		}
+		const uint32_t clampedCount = std::min<uint32_t>(
+			localRange.groupCount,
+			sharedState->groupCount - localRange.firstGroup);
+		if (clampedCount == 0u) {
+			continue;
+		}
+		CLodActiveGroupRange range{};
+		range.groupsBase = sharedState->groupsBase + localRange.firstGroup;
+		range.groupCount = clampedCount;
+		event.coarsestRanges.push_back(range);
+	}
+	PublishCLodStreamingDomainEvent(std::move(event));
+}
+
+void MeshManager::DrainCLodStreamingDomainEvents(std::vector<CLodStreamingDomainEvent>& outEvents, uint64_t& outGeneration) {
+	outEvents.clear();
+	{
+		std::lock_guard lock(m_clodStreamingDomainEventsMutex);
+		outEvents.swap(m_clodStreamingDomainEvents);
+	}
+	outGeneration = m_clodStreamingDomainEventGeneration.load(std::memory_order_acquire);
+	if (!outEvents.empty()) {
+		m_clodStreamingStructureDirty.store(false, std::memory_order_release);
+	}
+}
+
+bool MeshManager::TryResolveCLodGroup(
+	uint32_t groupGlobalIndex,
+	uint32_t& outGroupsBase,
+	uint32_t& outGroupLocalIndex,
+	uint32_t* outGroupCount) const {
+	uint32_t localIndex = 0u;
+	auto sharedState = const_cast<MeshManager*>(this)->FindCLodSharedStreamingStateByGlobalGroup(groupGlobalIndex, localIndex);
+	if (sharedState == nullptr || localIndex >= sharedState->groupCount) {
+		return false;
+	}
+
+	outGroupsBase = sharedState->groupsBase;
+	outGroupLocalIndex = localIndex;
+	if (outGroupCount != nullptr) {
+		*outGroupCount = sharedState->groupCount;
+	}
+	return true;
+}
+
+bool MeshManager::TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const {
+	uint32_t localIndex = 0u;
+	auto sharedState = const_cast<MeshManager*>(this)->FindCLodSharedStreamingStateByGlobalGroup(groupGlobalIndex, localIndex);
+	if (sharedState == nullptr || localIndex >= sharedState->parentGroupByLocal.size()) {
+		return false;
+	}
+
+	const int32_t parentLocal = sharedState->parentGroupByLocal[localIndex];
+	if (parentLocal < 0) {
+		return false;
+	}
+
+	const uint32_t parentLocalU32 = static_cast<uint32_t>(parentLocal);
+	if (parentLocalU32 >= sharedState->groupCount || parentLocalU32 == localIndex) {
+		return false;
+	}
+
+	outParentGlobalIndex = sharedState->groupsBase + parentLocalU32;
+	return true;
+}
+
+void MeshManager::GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vector<uint32_t>& outChildGroups) const {
+	outChildGroups.clear();
+
+	uint32_t localIndex = 0u;
+	auto sharedState = const_cast<MeshManager*>(this)->FindCLodSharedStreamingStateByGlobalGroup(parentGroupGlobalIndex, localIndex);
+	if (sharedState == nullptr || localIndex >= sharedState->childrenByLocalParent.size()) {
+		return;
+	}
+
+	const auto& localChildren = sharedState->childrenByLocalParent[localIndex];
+	outChildGroups.reserve(localChildren.size());
+	for (uint32_t childLocal : localChildren) {
+		if (childLocal < sharedState->groupCount) {
+			outChildGroups.push_back(sharedState->groupsBase + childLocal);
+		}
+	}
 }
 
 std::shared_ptr<MeshManager::CLodSharedStreamingState> MeshManager::FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex) {

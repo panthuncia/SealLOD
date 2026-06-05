@@ -81,7 +81,8 @@ private:
     bool TryQueuePendingLoadRequest(const CLodStreamingRequest& req, uint32_t priority);
     uint32_t QueueLoadRequestWithParents(const CLodStreamingRequest& requestedLoad, uint32_t requestedPriority);
     void EnsureStreamingStorageCapacity(uint32_t requiredGroupCount);
-    void RefreshStreamingActiveGroupDomain();
+    void ProcessStreamingDomainEvents();
+    void RebuildStreamingDomainFromSnapshot(MeshManager* meshManager);
     bool IsStreamingRequestInProgress(uint32_t groupIndex) const;
     void MarkStreamingRequestPending(uint32_t groupIndex);
     void MarkStreamingRequestDiskIo(uint32_t groupIndex);
@@ -225,11 +226,8 @@ private:
     std::vector<uint32_t> m_streamingResidencyInitializedBitsCpu;
     std::vector<uint32_t> m_usedGroupsBitsCpu; // groups reported as visible by the GPU last frame
     std::vector<uint64_t> m_groupLastUsedTick;
-    std::vector<int32_t> m_streamingParentGroupByGlobal;
-	std::unordered_map<uint32_t, std::vector<uint32_t>> m_childGroupsByGlobal; // parent to children
     std::unordered_map<uint32_t, CachedChildGroupLayout> m_prefetchedChildLayoutsByGroup;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_prefetchedChildLayoutKeysByOwner;
-    std::vector<float> m_groupOriginalErrorByGlobal;
     std::unordered_set<uint32_t> m_errorOverriddenGroups; // groups whose GPU error is currently 0
     CLodPageLRU m_pageLru;
 	std::vector<int32_t> m_pageOwnerGroup;       // page ID to group global index (-1 = unowned)
@@ -284,11 +282,13 @@ private:
     std::vector<uint32_t> m_pendingStreamingRequestHeapIndexByGroup;
     std::vector<uint32_t> m_pendingStreamingRequestGenerationByGroup;
     CLodPriorityMode m_priorityMode = CLodPriorityMode::Max;
-    bool m_streamingDomainDirty = true;
     uint64_t m_streamingDiagnosticTick = 0;
     std::unordered_map<uint32_t, uint64_t> m_lastInProgressSuppressionLogTick;
 
-    MeshManager::CLodStreamingDomainSnapshot m_cachedDomainSnapshot;
+    std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
+    std::vector<uint32_t> m_childGroupsScratch;
+    uint64_t m_lastStreamingDomainEventGeneration = 0;
+    bool m_streamingDomainFullResetPending = false;
 
     // Worker-owned streaming residency state is protected by this mutex when
     // the main thread publishes upload snapshots or handles registry resets.

@@ -125,6 +125,25 @@ public:
 	};
 	void GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& outSnapshot) const;
 
+	enum class CLodStreamingDomainEventKind : uint8_t {
+		SharedMeshAdded,
+		ActiveRangeAdded,
+		ActiveRangeRemoved,
+		FullReset,
+	};
+
+	struct CLodStreamingDomainEvent {
+		CLodStreamingDomainEventKind kind = CLodStreamingDomainEventKind::FullReset;
+		uint32_t groupsBase = 0;
+		uint32_t groupCount = 0;
+		std::vector<CLodActiveGroupRange> coarsestRanges;
+	};
+
+	void DrainCLodStreamingDomainEvents(std::vector<CLodStreamingDomainEvent>& outEvents, uint64_t& outGeneration);
+	bool TryResolveCLodGroup(uint32_t groupGlobalIndex, uint32_t& outGroupsBase, uint32_t& outGroupLocalIndex, uint32_t* outGroupCount = nullptr) const;
+	bool TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const;
+	void GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vector<uint32_t>& outChildGroups) const;
+
 	// Patch a single group's error field in the GPU groups buffer.
 	// Used by the streaming system to override error for residency transitions.
 	void PatchCLodGroupError(uint32_t groupGlobalIndex, float error);
@@ -300,6 +319,7 @@ private:
 		// domain snapshot always has reliable data regardless of mesh
 		// object lifetime or summary state.
 		std::vector<int32_t> parentGroupByLocal;
+		std::vector<std::vector<uint32_t>> childrenByLocalParent;
 		std::vector<float> groupErrorByLocal;
 		std::vector<ClusterLODRuntimeSummary::GroupRange> coarsestRanges;
 
@@ -329,7 +349,10 @@ private:
 	std::unordered_map<const Mesh*, std::shared_ptr<CLodSharedStreamingState>> m_clodSharedStreamingStateByMesh;
 	std::vector<CLodSharedStreamingRange> m_clodSharedStreamingRanges;
 	bool m_clodSharedStreamingRangesDirty = true;
-	// Set whenever mesh/instance structural changes occur; consumed by CLodExtension.
+	mutable std::mutex m_clodStreamingDomainEventsMutex;
+	std::vector<CLodStreamingDomainEvent> m_clodStreamingDomainEvents;
+	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
+	// Legacy fallback flag for old snapshot consumers.
 	std::atomic<bool> m_clodStreamingStructureDirty{true};
 	std::atomic<bool> m_clodStreamingDirectStorageEnabled{true};
 	SettingsManager::Subscription m_clodStreamingDirectStorageSubscription;
@@ -469,6 +492,8 @@ private:
 	bool ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool clearPageMapEntries);
 
 	void RebuildCLodSharedStreamingRangeIndex();
+	void PublishCLodStreamingDomainEvent(CLodStreamingDomainEvent event);
+	void PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind kind, const std::shared_ptr<CLodSharedStreamingState>& sharedState);
 	void RecomputeCLodActiveMaxTraversalDepth();
 	std::shared_ptr<CLodSharedStreamingState> FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex);
 	std::vector<uint32_t> GetCLodGroupMeshPageIndices(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
