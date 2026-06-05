@@ -1663,18 +1663,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float interpNY = InterpolateWithDeriv(bary, n0.y, n1.y, n2.y).x;
     float interpNZ = InterpolateWithDeriv(bary, n0.z, n1.z, n2.z).x;
     float3 normalOS = normalize(float3(interpNX, interpNY, interpNZ));
-    if (isReyesPatch && materialInfo.geometricDisplacementEnabled != 0u)
-    {
-        const float3 geometricNormalOS = normalize(cross(evalPos1 - evalPos0, evalPos2 - evalPos0));
-        if (all(isfinite(geometricNormalOS)) && dot(geometricNormalOS, normalOS) < 0.0f)
-        {
-            normalOS = -geometricNormalOS;
-        }
-        else if (all(isfinite(geometricNormalOS)))
-        {
-            normalOS = geometricNormalOS;
-        }
-    }
     float3 vertexColor = 1.0f.xxx;
     if (hasVertexColor)
     {

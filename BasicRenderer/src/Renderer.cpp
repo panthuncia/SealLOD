@@ -1349,7 +1349,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainStochasticBlendCurve", 0.65f);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
@@ -1461,7 +1461,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName, CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayLengthScaleDirectional);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName, CLodVirtualShadowDefaultSmrtMaxTraceDistanceWorld);
-	settingsManager.registerSetting<uint32_t>(CLodReyesResourceBudgetBytesSettingName, 512u*1024u*1024u*4u); // 2GB for reyes
+	settingsManager.registerSetting<uint32_t>(CLodReyesResourceBudgetBytesSettingName, 512u*1024u*1024u*2u); // 2GB for reyes
 	settingsManager.registerSetting<uint32_t>("usdPointInstancerMaxInstances", 10000u);
     getShadowResolution = settingsManager.getSettingGetter<uint16_t>("shadowResolution");
     setCameraSpeed = settingsManager.getSettingSetter<float>("cameraSpeed");

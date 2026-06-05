@@ -491,10 +491,14 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
         return 0.0f;
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
     const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const float heightValue = saturate(DynamicSwizzle(heightSample, materialInfo.heightChannel));
+    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
+    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
@@ -505,10 +509,14 @@ float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float
         return 0.0f;
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
     const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const float heightValue = saturate(DynamicSwizzle(heightSample, materialInfo.heightChannel));
+    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
+    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 

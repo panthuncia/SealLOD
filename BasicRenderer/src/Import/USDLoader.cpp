@@ -984,6 +984,14 @@ namespace USDLoader {
 			const uint32_t shaderFlags1 = shader->value("shaderFlags1", 0u);
 			const uint32_t shaderFlags2 = shader->value("shaderFlags2", 0u);
 			result.brniflyVertexAlpha = result.brniflyVertexAlpha || ((shaderFlags1 & (1u << 3)) != 0u);
+			const bool hasParallax =
+				(shaderFlags1 & (1u << 11)) != 0u ||
+				(shaderFlags1 & (1u << 28)) != 0u ||
+				(shaderFlags2 & (1u << 24)) != 0u;
+			if (hasParallax && result.heightMap.sourcePath.empty()) {
+				result.heightMapFromBaseColorAlpha = true;
+				MarkDisplacementEnabled(result, result.heightMapScale);
+			}
 			if ((shaderFlags1 & (1u << 12)) != 0u) {
 				DisableModelSpaceNormalMap(result);
 			}
