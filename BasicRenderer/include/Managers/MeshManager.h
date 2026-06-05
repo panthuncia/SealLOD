@@ -112,15 +112,12 @@ public:
 
 	void GetCLodActiveUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges, uint32_t& outMaxGroupIndex) const;
 	void GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGroupRange>& outRanges) const;
-	void GetCLodUniqueAssetParentMap(std::vector<int32_t>& outParentGroupByGlobal, uint32_t& outMaxGroupIndex) const;
 
-	// Fused single-pass snapshot that combines GetCLodActiveUniqueAssetGroupRanges,
-	// GetCLodCoarsestUniqueAssetGroupRanges, and GetCLodUniqueAssetParentMap.
+	// Slow fallback snapshot for registry/device reset recovery. Normal CLod
+	// streaming consumes incremental domain events instead.
 	struct CLodStreamingDomainSnapshot {
 		std::vector<CLodActiveGroupRange> activeRanges;
 		std::vector<CLodActiveGroupRange> coarsestRanges;
-		std::vector<int32_t> parentGroupByGlobal;
-		std::vector<float> groupOriginalErrorByGlobal;
 		uint32_t maxGroupIndex = 0;
 	};
 	void GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& outSnapshot) const;
@@ -140,19 +137,12 @@ public:
 	};
 
 	void DrainCLodStreamingDomainEvents(std::vector<CLodStreamingDomainEvent>& outEvents, uint64_t& outGeneration);
-	bool TryResolveCLodGroup(uint32_t groupGlobalIndex, uint32_t& outGroupsBase, uint32_t& outGroupLocalIndex, uint32_t* outGroupCount = nullptr) const;
 	bool TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const;
 	void GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vector<uint32_t>& outChildGroups) const;
 
 	// Patch a single group's error field in the GPU groups buffer.
 	// Used by the streaming system to override error for residency transitions.
 	void PatchCLodGroupError(uint32_t groupGlobalIndex, float error);
-
-	// Returns true when mesh/instance adds or removes have changed the
-	// streaming structure since the last call.  After returning true the
-	// flag is cleared automatically so subsequent calls return false until
-	// the next structural change.
-	bool ConsumeCLodStreamingStructureDirty();
 
 	CLodStreamingDebugStats GetCLodStreamingDebugStats() const;
 	void GetCLodRayTracingResidencySnapshot(CLodRayTracingResidencySnapshot& outSnapshot) const;
@@ -352,8 +342,6 @@ private:
 	mutable std::mutex m_clodStreamingDomainEventsMutex;
 	std::vector<CLodStreamingDomainEvent> m_clodStreamingDomainEvents;
 	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
-	// Legacy fallback flag for old snapshot consumers.
-	std::atomic<bool> m_clodStreamingStructureDirty{true};
 	std::atomic<bool> m_clodStreamingDirectStorageEnabled{true};
 	SettingsManager::Subscription m_clodStreamingDirectStorageSubscription;
 

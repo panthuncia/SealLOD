@@ -946,7 +946,6 @@ void MeshManager::PublishCLodStreamingDomainEvent(CLodStreamingDomainEvent event
 		m_clodStreamingDomainEvents.push_back(std::move(event));
 	}
 	m_clodStreamingDomainEventGeneration.fetch_add(1u, std::memory_order_release);
-	m_clodStreamingStructureDirty.store(true, std::memory_order_release);
 }
 
 void MeshManager::PublishCLodStreamingDomainEventForSharedState(
@@ -986,28 +985,6 @@ void MeshManager::DrainCLodStreamingDomainEvents(std::vector<CLodStreamingDomain
 		outEvents.swap(m_clodStreamingDomainEvents);
 	}
 	outGeneration = m_clodStreamingDomainEventGeneration.load(std::memory_order_acquire);
-	if (!outEvents.empty()) {
-		m_clodStreamingStructureDirty.store(false, std::memory_order_release);
-	}
-}
-
-bool MeshManager::TryResolveCLodGroup(
-	uint32_t groupGlobalIndex,
-	uint32_t& outGroupsBase,
-	uint32_t& outGroupLocalIndex,
-	uint32_t* outGroupCount) const {
-	uint32_t localIndex = 0u;
-	auto sharedState = const_cast<MeshManager*>(this)->FindCLodSharedStreamingStateByGlobalGroup(groupGlobalIndex, localIndex);
-	if (sharedState == nullptr || localIndex >= sharedState->groupCount) {
-		return false;
-	}
-
-	outGroupsBase = sharedState->groupsBase;
-	outGroupLocalIndex = localIndex;
-	if (outGroupCount != nullptr) {
-		*outGroupCount = sharedState->groupCount;
-	}
-	return true;
 }
 
 bool MeshManager::TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const {
@@ -2130,58 +2107,9 @@ void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<CLodActiveGr
 	}
 }
 
-void MeshManager::GetCLodUniqueAssetParentMap(std::vector<int32_t>& outParentGroupByGlobal, uint32_t& outMaxGroupIndex) const {
-	outParentGroupByGlobal.clear();
-	outMaxGroupIndex = 0u;
-
-	std::unordered_set<uint64_t> seenRanges;
-	seenRanges.reserve(m_clodStreamingStateByInstanceIndex.size());
-
-	for (const auto& [_, state] : m_clodStreamingStateByInstanceIndex) {
-		if (state.groupCount == 0u || state.sharedMeshState == nullptr) {
-			continue;
-		}
-
-		const uint64_t key = (static_cast<uint64_t>(state.groupsBase) << 32ull) | static_cast<uint64_t>(state.groupCount);
-		if (!seenRanges.insert(key).second) {
-			continue;
-		}
-
-		const auto& parentMap = state.sharedMeshState->parentGroupByLocal;
-		const uint32_t localGroupCount = std::min<uint32_t>(state.groupCount, static_cast<uint32_t>(parentMap.size()));
-		if (localGroupCount == 0u) {
-			continue;
-		}
-
-		const uint32_t rangeEnd = state.groupsBase + localGroupCount;
-		outMaxGroupIndex = std::max(outMaxGroupIndex, rangeEnd);
-		if (outParentGroupByGlobal.size() < rangeEnd) {
-			outParentGroupByGlobal.resize(rangeEnd, -1);
-		}
-
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
-			const int32_t parentLocal = parentMap[groupLocalIndex];
-			if (parentLocal < 0) {
-				continue;
-			}
-
-			const uint32_t parentLocalU32 = static_cast<uint32_t>(parentLocal);
-			if (parentLocalU32 >= localGroupCount) {
-				continue;
-			}
-
-			const uint32_t parentGlobal = state.groupsBase + parentLocalU32;
-			const uint32_t childGlobal = state.groupsBase + groupLocalIndex;
-			outParentGroupByGlobal[childGlobal] = static_cast<int32_t>(parentGlobal);
-		}
-	}
-}
-
 void MeshManager::GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& outSnapshot) const {
 	outSnapshot.activeRanges.clear();
 	outSnapshot.coarsestRanges.clear();
-	outSnapshot.parentGroupByGlobal.clear();
-	outSnapshot.groupOriginalErrorByGlobal.clear();
 	outSnapshot.maxGroupIndex = 0;
 
 	std::unordered_set<uint64_t> seenRanges;
@@ -2226,49 +2154,7 @@ void MeshManager::GetCLodStreamingDomainSnapshot(CLodStreamingDomainSnapshot& ou
 			coarsest.groupCount = clampedCount;
 			outSnapshot.coarsestRanges.push_back(coarsest);
 		}
-
-		// Prefer the parent map cached in the shared streaming state.
-		const auto& parentMap = state.sharedMeshState->parentGroupByLocal;
-		const uint32_t localGroupCount = std::min<uint32_t>(state.groupCount, static_cast<uint32_t>(parentMap.size()));
-		if (localGroupCount == 0u) {
-			continue;
-		}
-		const uint32_t parentRangeEnd = state.groupsBase + localGroupCount;
-		outSnapshot.maxGroupIndex = std::max(outSnapshot.maxGroupIndex, parentRangeEnd);
-		if (outSnapshot.parentGroupByGlobal.size() < parentRangeEnd) {
-			outSnapshot.parentGroupByGlobal.resize(parentRangeEnd, -1);
-		}
-		if (outSnapshot.groupOriginalErrorByGlobal.size() < parentRangeEnd) {
-			outSnapshot.groupOriginalErrorByGlobal.resize(parentRangeEnd, 0.0f);
-		}
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
-			const int32_t parentLocal = parentMap[groupLocalIndex];
-			if (parentLocal < 0) {
-				continue;
-			}
-			const uint32_t parentLocalU32 = static_cast<uint32_t>(parentLocal);
-			if (parentLocalU32 >= localGroupCount) {
-				continue;
-			}
-			const uint32_t parentGlobal = state.groupsBase + parentLocalU32;
-			const uint32_t childGlobal = state.groupsBase + groupLocalIndex;
-			outSnapshot.parentGroupByGlobal[childGlobal] = static_cast<int32_t>(parentGlobal);
-		}
-
-		// Original error values for residency-driven error override
-		const auto& errorMap = state.sharedMeshState->groupErrorByLocal;
-		const uint32_t errorLocalCount = std::min<uint32_t>(localGroupCount, static_cast<uint32_t>(errorMap.size()));
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < errorLocalCount; ++groupLocalIndex) {
-			const uint32_t globalIndex = state.groupsBase + groupLocalIndex;
-			if (globalIndex < outSnapshot.groupOriginalErrorByGlobal.size()) {
-				outSnapshot.groupOriginalErrorByGlobal[globalIndex] = errorMap[groupLocalIndex];
-			}
-		}
 	}
-}
-
-bool MeshManager::ConsumeCLodStreamingStructureDirty() {
-	return m_clodStreamingStructureDirty.exchange(false);
 }
 
 void MeshManager::PatchCLodGroupError(uint32_t groupGlobalIndex, float error) {
