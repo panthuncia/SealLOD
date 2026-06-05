@@ -101,6 +101,7 @@ RenderableAsset RenderableAssetFromPayload(USDLoader::ImportedAssetPayload&& pay
 {
 	RenderableAsset asset;
 	asset.meshes = std::move(payload.meshes);
+	asset.meshMaterialHashes = std::move(payload.meshMaterialHashes);
 	asset.parts.reserve(payload.parts.size());
 	for (auto& payloadPart : payload.parts) {
 		RenderableAssetPart part;

@@ -36,6 +36,7 @@ namespace USDLoader {
 
 	struct ImportedAssetPayload {
 		std::vector<std::shared_ptr<Mesh>> meshes;
+		std::vector<std::uint64_t> meshMaterialHashes;
 		std::vector<RenderablePartPayload> parts;
 	};
 

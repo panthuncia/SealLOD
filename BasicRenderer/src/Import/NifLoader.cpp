@@ -15,11 +15,13 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include "Import/BRNiflyClient.h"
 #include "Import/CLodCache.h"
@@ -189,13 +191,152 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 18u;
+constexpr std::uint32_t kPayloadCacheVersion = 19u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
     bool manifestLoaded{ false };
     std::unordered_map<std::string, std::vector<fs::path>> byPathHash;
 };
+
+template <class T>
+void HashPod(std::uint64_t& hash, const T& value)
+{
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto* bytes = reinterpret_cast<const unsigned char*>(std::addressof(value));
+    for (std::size_t i = 0; i < sizeof(T); ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+}
+
+void HashString(std::uint64_t& hash, const std::string& value)
+{
+    const auto size = static_cast<std::uint64_t>(value.size());
+    HashPod(hash, size);
+    for (unsigned char ch : value) {
+        hash ^= ch;
+        hash *= 1099511628211ull;
+    }
+}
+
+void HashChannels(std::uint64_t& hash, const std::vector<std::uint32_t>& channels)
+{
+    const auto size = static_cast<std::uint64_t>(channels.size());
+    HashPod(hash, size);
+    for (const auto channel : channels) {
+        HashPod(hash, channel);
+    }
+}
+
+void HashBinding(std::uint64_t& hash, const TextureAndConstant& binding)
+{
+    HashString(hash, binding.sourcePath);
+    HashPod(hash, binding.factor.Get());
+    HashChannels(hash, binding.channels);
+    HashPod(hash, binding.uvSetIndex);
+    HashString(hash, binding.uvSetName);
+}
+
+void HashOpenPBR(std::uint64_t& hash, const OpenPBRMaterialParameters& pbr)
+{
+    HashPod(hash, pbr.baseWeight);
+    HashPod(hash, pbr.baseColor);
+    HashPod(hash, pbr.baseDiffuseRoughness);
+    HashPod(hash, pbr.baseMetalness);
+    HashPod(hash, pbr.subsurfaceWeight);
+    HashPod(hash, pbr.subsurfaceColor);
+    HashPod(hash, pbr.subsurfaceRadius);
+    HashPod(hash, pbr.subsurfaceRadiusScale);
+    HashPod(hash, pbr.subsurfaceScatterAnisotropy);
+    HashPod(hash, pbr.specularWeight);
+    HashPod(hash, pbr.specularColor);
+    HashPod(hash, pbr.specularRoughness);
+    HashPod(hash, pbr.specularRoughnessAnisotropy);
+    HashPod(hash, pbr.specularIor);
+    HashPod(hash, pbr.specularAnisotropyRotationCosSin);
+    HashPod(hash, pbr.coatWeight);
+    HashPod(hash, pbr.coatColor);
+    HashPod(hash, pbr.coatRoughness);
+    HashPod(hash, pbr.coatRoughnessAnisotropy);
+    HashPod(hash, pbr.coatIor);
+    HashPod(hash, pbr.coatDarkening);
+    HashPod(hash, pbr.coatAnisotropyRotationCosSin);
+    HashPod(hash, pbr.fuzzWeight);
+    HashPod(hash, pbr.fuzzColor);
+    HashPod(hash, pbr.fuzzRoughness);
+    HashPod(hash, pbr.transmissionWeight);
+    HashPod(hash, pbr.transmissionColor);
+    HashPod(hash, pbr.transmissionDepth);
+    HashPod(hash, pbr.transmissionScatter);
+    HashPod(hash, pbr.transmissionScatterAnisotropy);
+    HashPod(hash, pbr.transmissionDispersionScale);
+    HashPod(hash, pbr.transmissionDispersionAbbeNumber);
+    HashPod(hash, pbr.thinFilmWeight);
+    HashPod(hash, pbr.thinFilmThickness);
+    HashPod(hash, pbr.thinFilmIor);
+    HashPod(hash, pbr.emissionLuminance);
+    HashPod(hash, pbr.emissionColor);
+    HashPod(hash, pbr.geometryOpacity);
+    HashPod(hash, pbr.geometryThinWalled);
+}
+
+std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
+{
+    std::uint64_t hash = 14695981039346656037ull;
+    HashPod(hash, desc.materialModel);
+    HashString(hash, desc.name);
+    HashPod(hash, desc.diffuseColor);
+    HashPod(hash, desc.emissiveColor);
+    HashPod(hash, desc.alphaCutoff);
+    HashPod(hash, desc.heightMapScale);
+    HashPod(hash, desc.geometricDisplacementMin);
+    HashPod(hash, desc.geometricDisplacementMax);
+    HashPod(hash, desc.negateNormals);
+    HashPod(hash, desc.invertNormalGreen);
+    HashPod(hash, desc.forceDoubleSided);
+    HashPod(hash, desc.enableGeometricDisplacement);
+    HashPod(hash, desc.brniflyVertexAlpha);
+    HashPod(hash, desc.brniflyZBufferWrite);
+    HashPod(hash, desc.brniflyDecal);
+    HashPod(hash, desc.brniflyDynamicDecal);
+    HashPod(hash, desc.brniflyModelSpaceNormals);
+    HashPod(hash, desc.heightMapFromBaseColorAlpha);
+    HashPod(hash, desc.blendState);
+    HashBinding(hash, desc.baseColor);
+    HashBinding(hash, desc.metallic);
+    HashBinding(hash, desc.roughness);
+    HashBinding(hash, desc.emissive);
+    HashBinding(hash, desc.opacity);
+    HashBinding(hash, desc.aoMap);
+    HashBinding(hash, desc.heightMap);
+    HashBinding(hash, desc.normal);
+    HashOpenPBR(hash, desc.openPBR);
+    HashBinding(hash, desc.openPBRTextures.coatColor);
+    HashBinding(hash, desc.openPBRTextures.coatWeight);
+    HashBinding(hash, desc.openPBRTextures.coatRoughness);
+    HashBinding(hash, desc.openPBRTextures.fuzzColor);
+    HashBinding(hash, desc.openPBRTextures.fuzzWeight);
+    HashBinding(hash, desc.openPBRTextures.fuzzRoughness);
+    return hash;
+}
+
+void EnsurePayloadMaterialHashes(USDLoader::ImportedAssetPayload& payload)
+{
+    if (payload.meshMaterialHashes.size() == payload.meshes.size()) {
+        return;
+    }
+
+    payload.meshMaterialHashes.clear();
+    payload.meshMaterialHashes.reserve(payload.meshes.size());
+    for (const auto& mesh : payload.meshes) {
+        if (!mesh || !mesh->material) {
+            payload.meshMaterialHashes.push_back(0);
+            continue;
+        }
+        payload.meshMaterialHashes.push_back(ComputeMaterialHash(mesh->material->ToCacheDescription()));
+    }
+}
 
 AssetCacheIndex& GetAssetCacheIndex()
 {
@@ -729,13 +870,18 @@ bool ReadTextureBinding(
 
             const std::wstring conditionedCachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
             if (!conditionedCachePath.empty()) {
-                binding.texture = LoadTextureFromFile(conditionedCachePath, nullptr, texturePreferSRGB);
+                TextureFileMeta deferredMeta = cacheProbeMeta;
+                deferredMeta.filePath = ws2s(conditionedCachePath);
+                deferredMeta.isProcessingCacheArtifact = true;
+                binding.texture = LoadTextureFromFileDeferred(conditionedCachePath, nullptr, texturePreferSRGB, std::addressof(deferredMeta));
                 if (binding.texture) {
                     binding.texture->Meta().filePath = texturePath;
                     binding.texture->Meta().isProcessingCacheArtifact = true;
                 }
             } else {
-                binding.texture = LoadTextureFromFile(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB);
+                TextureFileMeta deferredMeta = cacheProbeMeta;
+                deferredMeta.filePath = resolvedTexturePath->string();
+                binding.texture = LoadTextureFromFileDeferred(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB, std::addressof(deferredMeta));
                 if (binding.texture) {
                     binding.texture->Meta().filePath = texturePath;
                 }
@@ -758,6 +904,8 @@ bool ReadTextureBinding(
 
 void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& desc)
 {
+    ZoneScopedN("NifLoader::WriteMaterialDescription");
+    ZoneText(desc.name.data(), desc.name.size());
     writer.Pod(static_cast<std::uint32_t>(desc.materialModel));
     writer.String(desc.name);
     writer.Pod(desc.diffuseColor);
@@ -799,6 +947,7 @@ bool ReadMaterialDescription(
     MaterialDescription& desc,
     const std::vector<std::string>& textureSearchRoots)
 {
+    ZoneScopedN("NifLoader::ReadMaterialDescription");
     std::uint32_t model = 0;
     std::uint32_t blend = 0;
     if (!reader.Pod(model) ||
@@ -901,6 +1050,11 @@ bool WritePayloadCache(
     const std::vector<std::string>& textureSearchRoots,
     const USDLoader::ImportedAssetPayload& payload)
 {
+    ZoneScopedN("NifLoader::WritePayloadCache");
+    ZoneText(normalizedCacheKey.data(), normalizedCacheKey.size());
+    TracyPlot("SARP.Import.NifMeta.Write.MeshCount", static_cast<int64_t>(payload.meshes.size()));
+    TracyPlot("SARP.Import.NifMeta.Write.PartCount", static_cast<int64_t>(payload.parts.size()));
+
     if (payload.meshes.empty() || payload.parts.empty()) {
         spdlog::warn(
             "nif_asset_payload_cache: refusing to cache empty renderable payload for '{}'",
@@ -926,65 +1080,85 @@ bool WritePayloadCache(
     WriteStringVector(writer, textureSearchRoots);
 
     std::unordered_map<const Mesh*, std::uint32_t> meshIndices;
-    for (std::uint32_t i = 0; i < payload.meshes.size(); ++i) {
-        meshIndices[payload.meshes[i].get()] = i;
+    {
+        ZoneScopedN("NifLoader::WritePayloadCache::BuildMeshIndex");
+        for (std::uint32_t i = 0; i < payload.meshes.size(); ++i) {
+            meshIndices[payload.meshes[i].get()] = i;
+        }
     }
 
     const std::uint64_t meshCount = payload.meshes.size();
     writer.Pod(meshCount);
     for (std::uint64_t meshIndex = 0; meshIndex < payload.meshes.size(); ++meshIndex) {
+        ZoneScopedN("NifLoader::WritePayloadCache::Mesh");
         const auto& mesh = payload.meshes[static_cast<std::size_t>(meshIndex)];
         if (!mesh || !mesh->material) {
             return false;
         }
         MaterialDescription desc = mesh->material->ToCacheDescription();
-        WriteMaterialDescription(writer, desc);
-        WritePrebuilt(writer, mesh->GetClusterLODPrebuiltData());
-        const auto& meshCB = mesh->GetPerMeshCBData();
-        writer.Pod(meshCB.vertexFlags);
-        writer.Pod(meshCB.vertexByteSize);
-        writer.Pod(meshCB.skinningVertexByteSize);
-        WriteStringVector(writer, mesh->GetSkinJointNames());
-        writer.PodVector(mesh->GetSkinJointSourceIndices());
-        const auto& inverseBinds = mesh->GetSkinInverseBindMatrices();
-        const std::uint64_t inverseBindCount = inverseBinds.size();
-        writer.Pod(inverseBindCount);
-        for (const auto& matrix : inverseBinds) {
-            WriteMatrix(writer, matrix);
+        ZoneText(desc.name.data(), desc.name.size());
+        std::uint64_t materialHash = 0;
+        {
+            ZoneScopedN("NifLoader::WritePayloadCache::Mesh::ComputeMaterialHash");
+            materialHash = ComputeMaterialHash(desc);
         }
-        std::uint8_t hasSkeleton = mesh->HasBaseSkin() ? 1u : 0u;
-        writer.Pod(hasSkeleton);
-        if (hasSkeleton) {
-            const auto skeleton = mesh->GetBaseSkin();
-            const auto boneNames = skeleton->GetBoneNames();
-            const auto parents = skeleton->GetParentIndices();
-            const auto skeletonInverseBinds = skeleton->GetInverseBindMatrices();
-            const std::uint64_t boneCount = boneNames.size();
-            writer.Pod(boneCount);
-            for (const auto& name : boneNames) {
-                writer.String(name);
-            }
-            writer.PodVector(std::vector<std::int32_t>(parents.begin(), parents.end()));
-            const std::uint64_t skeletonBindCount = skeletonInverseBinds.size();
-            writer.Pod(skeletonBindCount);
-            for (const auto& matrix : skeletonInverseBinds) {
+        WriteMaterialDescription(writer, desc);
+        {
+            ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
+            writer.Pod(materialHash);
+            WritePrebuilt(writer, mesh->GetClusterLODPrebuiltData());
+        }
+        const auto& meshCB = mesh->GetPerMeshCBData();
+        {
+            ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WriteSkinning");
+            writer.Pod(meshCB.vertexFlags);
+            writer.Pod(meshCB.vertexByteSize);
+            writer.Pod(meshCB.skinningVertexByteSize);
+            WriteStringVector(writer, mesh->GetSkinJointNames());
+            writer.PodVector(mesh->GetSkinJointSourceIndices());
+            const auto& inverseBinds = mesh->GetSkinInverseBindMatrices();
+            const std::uint64_t inverseBindCount = inverseBinds.size();
+            writer.Pod(inverseBindCount);
+            for (const auto& matrix : inverseBinds) {
                 WriteMatrix(writer, matrix);
+            }
+            std::uint8_t hasSkeleton = mesh->HasBaseSkin() ? 1u : 0u;
+            writer.Pod(hasSkeleton);
+            if (hasSkeleton) {
+                const auto skeleton = mesh->GetBaseSkin();
+                const auto boneNames = skeleton->GetBoneNames();
+                const auto parents = skeleton->GetParentIndices();
+                const auto skeletonInverseBinds = skeleton->GetInverseBindMatrices();
+                const std::uint64_t boneCount = boneNames.size();
+                writer.Pod(boneCount);
+                for (const auto& name : boneNames) {
+                    writer.String(name);
+                }
+                writer.PodVector(std::vector<std::int32_t>(parents.begin(), parents.end()));
+                const std::uint64_t skeletonBindCount = skeletonInverseBinds.size();
+                writer.Pod(skeletonBindCount);
+                for (const auto& matrix : skeletonInverseBinds) {
+                    WriteMatrix(writer, matrix);
+                }
             }
         }
     }
 
     const std::uint64_t partCount = payload.parts.size();
     writer.Pod(partCount);
-    for (const auto& part : payload.parts) {
-        writer.String(part.name);
-        WriteMatrix(writer, part.localMatrix);
-        writer.Pod(part.skinnedShapeIndex);
-        const std::uint64_t partMeshCount = part.meshes.size();
-        writer.Pod(partMeshCount);
-        for (const auto& mesh : part.meshes) {
-            auto it = meshIndices.find(mesh.get());
-            const std::uint32_t meshIndex = it == meshIndices.end() ? UINT32_MAX : it->second;
-            writer.Pod(meshIndex);
+    {
+        ZoneScopedN("NifLoader::WritePayloadCache::Parts");
+        for (const auto& part : payload.parts) {
+            writer.String(part.name);
+            WriteMatrix(writer, part.localMatrix);
+            writer.Pod(part.skinnedShapeIndex);
+            const std::uint64_t partMeshCount = part.meshes.size();
+            writer.Pod(partMeshCount);
+            for (const auto& mesh : part.meshes) {
+                auto it = meshIndices.find(mesh.get());
+                const std::uint32_t meshIndex = it == meshIndices.end() ? UINT32_MAX : it->second;
+                writer.Pod(meshIndex);
+            }
         }
     }
     return writer.Good();
@@ -996,6 +1170,9 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     const std::string& pathHash,
     const std::string& contentHash)
 {
+    ZoneScopedN("NifLoader::TryLoadPayloadCache");
+    const auto cachePathText = cachePath.string();
+    ZoneText(cachePathText.data(), cachePathText.size());
     BinaryReader reader(cachePath);
     if (!reader) {
         return std::nullopt;
@@ -1023,33 +1200,45 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         return std::nullopt;
     }
     payload.meshes.reserve(static_cast<std::size_t>(meshCount));
+    payload.meshMaterialHashes.reserve(static_cast<std::size_t>(meshCount));
+    TracyPlot("SARP.Import.NifMeta.Read.MeshCount", static_cast<int64_t>(meshCount));
     for (std::uint64_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
+        ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh");
         MaterialDescription desc{};
         ClusterLODPrebuiltData prebuilt{};
-        if (!ReadMaterialDescription(reader, desc, textureSearchRoots) || !ReadPrebuilt(reader, prebuilt)) {
-            return std::nullopt;
+        std::uint64_t materialHash = 0;
+        {
+            ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
+            if (!ReadMaterialDescription(reader, desc, textureSearchRoots) || !reader.Pod(materialHash) || !ReadPrebuilt(reader, prebuilt)) {
+                return std::nullopt;
+            }
         }
+        ZoneText(desc.name.data(), desc.name.size());
         std::uint32_t vertexFlags = 0;
         std::uint32_t vertexByteSize = 0;
         std::uint32_t skinningVertexByteSize = 0;
         if (!reader.Pod(vertexFlags) || !reader.Pod(vertexByteSize) || !reader.Pod(skinningVertexByteSize)) {
             return std::nullopt;
         }
-        auto material = Material::CreateShared(desc);
-        auto vertices = std::make_unique<std::vector<std::byte>>();
-        std::vector<UINT32> indices;
-        std::vector<MeshUvSetData> uvSets;
-        auto mesh = Mesh::CreateSharedFromIngest(
-            std::move(vertices),
-            vertexByteSize,
-            std::nullopt,
-            skinningVertexByteSize,
-            std::move(indices),
-            std::move(uvSets),
-            material,
-            vertexFlags,
-            std::move(prebuilt),
-            MeshCpuDataPolicy::ReleaseAfterUpload);
+        std::shared_ptr<Mesh> mesh;
+        {
+            ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::CreateMesh");
+            auto material = Material::CreateShared(desc);
+            auto vertices = std::make_unique<std::vector<std::byte>>();
+            std::vector<UINT32> indices;
+            std::vector<MeshUvSetData> uvSets;
+            mesh = Mesh::CreateSharedFromIngest(
+                std::move(vertices),
+                vertexByteSize,
+                std::nullopt,
+                skinningVertexByteSize,
+                std::move(indices),
+                std::move(uvSets),
+                material,
+                vertexFlags,
+                std::move(prebuilt),
+                MeshCpuDataPolicy::ReleaseAfterUpload);
+        }
         if (!mesh) {
             return std::nullopt;
         }
@@ -1106,31 +1295,36 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
             mesh->SetBaseSkin(std::make_shared<Skeleton>(std::move(boneNames), std::move(parents), std::move(skeletonInverseBinds)));
         }
         payload.meshes.push_back(std::move(mesh));
+        payload.meshMaterialHashes.push_back(materialHash);
     }
 
     std::uint64_t partCount = 0;
     if (!reader.Pod(partCount) || partCount > 100000u) {
         return std::nullopt;
     }
-    payload.parts.reserve(static_cast<std::size_t>(partCount));
-    for (std::uint64_t partIndex = 0; partIndex < partCount; ++partIndex) {
-        USDLoader::RenderablePartPayload part;
-        if (!reader.String(part.name) || !ReadMatrix(reader, part.localMatrix) || !reader.Pod(part.skinnedShapeIndex)) {
-            return std::nullopt;
-        }
-        std::uint64_t partMeshCount = 0;
-        if (!reader.Pod(partMeshCount) || partMeshCount > 100000u) {
-            return std::nullopt;
-        }
-        part.meshes.reserve(static_cast<std::size_t>(partMeshCount));
-        for (std::uint64_t i = 0; i < partMeshCount; ++i) {
-            std::uint32_t meshIndex = UINT32_MAX;
-            if (!reader.Pod(meshIndex) || meshIndex >= payload.meshes.size()) {
+    {
+        ZoneScopedN("NifLoader::TryLoadPayloadCache::Parts");
+        TracyPlot("SARP.Import.NifMeta.Read.PartCount", static_cast<int64_t>(partCount));
+        payload.parts.reserve(static_cast<std::size_t>(partCount));
+        for (std::uint64_t partIndex = 0; partIndex < partCount; ++partIndex) {
+            USDLoader::RenderablePartPayload part;
+            if (!reader.String(part.name) || !ReadMatrix(reader, part.localMatrix) || !reader.Pod(part.skinnedShapeIndex)) {
                 return std::nullopt;
             }
-            part.meshes.push_back(payload.meshes[meshIndex]);
+            std::uint64_t partMeshCount = 0;
+            if (!reader.Pod(partMeshCount) || partMeshCount > 100000u) {
+                return std::nullopt;
+            }
+            part.meshes.reserve(static_cast<std::size_t>(partMeshCount));
+            for (std::uint64_t i = 0; i < partMeshCount; ++i) {
+                std::uint32_t meshIndex = UINT32_MAX;
+                if (!reader.Pod(meshIndex) || meshIndex >= payload.meshes.size()) {
+                    return std::nullopt;
+                }
+                part.meshes.push_back(payload.meshes[meshIndex]);
+            }
+            payload.parts.push_back(std::move(part));
         }
-        payload.parts.push_back(std::move(part));
     }
     return payload;
 }
@@ -1139,6 +1333,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
+    ZoneScopedN("NifLoader::TryLoadCachedImportedAsset");
+    ZoneText(cacheKey.data(), cacheKey.size());
     (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
@@ -1150,7 +1346,12 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     }
 
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
-    auto candidates = FindCachedAssets(pathHash);
+    std::vector<fs::path> candidates;
+    {
+        ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::FindCachedAssets");
+        candidates = FindCachedAssets(pathHash);
+    }
+    TracyPlot("SARP.Import.NifMeta.CandidateCount", static_cast<int64_t>(candidates.size()));
     if (candidates.empty()) {
         spdlog::debug("nif_meta_cache=miss game='{}' path_hash='{}' reason='no nif metadata found'", normalizedCacheKey, pathHash);
         if (stats) {
@@ -1160,6 +1361,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     }
 
     for (const auto& cachePath : candidates) {
+        ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
 
         if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash)) {
@@ -1188,6 +1390,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
 
 std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
+    ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey");
+    ZoneText(cacheKey.empty() ? filePath.data() : cacheKey.data(), cacheKey.empty() ? filePath.size() : cacheKey.size());
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey.empty() ? filePath : cacheKey);
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     if (IsKnownNonRenderableNif(normalizedCacheKey)) {
@@ -1198,7 +1402,12 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
     std::string errorMessage;
     const auto brniflyBegin = std::chrono::steady_clock::now();
     BRNiflyClient::TimingStats brniflyTiming{};
-    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
+    std::optional<BRNiflyClient::UsdAssetPackage> package;
+    {
+        ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey::BRNiflyConvertNifToUsd");
+        ZoneText(normalizedCacheKey.data(), normalizedCacheKey.size());
+        package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
+    }
     if (stats) {
         stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
         stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
@@ -1237,7 +1446,11 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         package->textureSearchRoots,
         "brnifly_" + package->contentHash + ".usda");
     const auto extractBegin = std::chrono::steady_clock::now();
-    auto payload = USDLoader::LoadImportedAssetFromUsdBytes(package->rootLayerText, options, settings);
+    std::optional<USDLoader::ImportedAssetPayload> payload;
+    {
+        ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey::LoadUsdPayload");
+        payload = USDLoader::LoadImportedAssetFromUsdBytes(package->rootLayerText, options, settings);
+    }
     if (stats) {
         const auto elapsed = ElapsedMs(extractBegin, std::chrono::steady_clock::now());
         stats->usdExtractMs += elapsed;
@@ -1245,6 +1458,10 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         stats->usdLoadMs += elapsed;
     }
     if (payload) {
+        {
+            ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey::EnsurePayloadMaterialHashes");
+            EnsurePayloadMaterialHashes(*payload);
+        }
         const fs::path cachePath = CLodCache::GetCacheFilePathForSource(
             s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, package->contentHash)),
             stableSourceIdentifier);

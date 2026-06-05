@@ -43,7 +43,9 @@ enum class TextureLoadPathTelemetry : uint8_t {
     DirectStorageGpuDirect,
     DirectStorageSystemMemoryRead,
     CpuFileRead,
+    MemoryMappedFileRead,
     InMemoryContainer,
+    DeferredFileReference,
 };
 
 enum class TextureUploadPathTelemetry : uint8_t {
@@ -54,6 +56,7 @@ enum class TextureUploadPathTelemetry : uint8_t {
     AsyncProcessingReadyUpload,
     ProcessingCacheUpload,
     ProcessingFailedFallback,
+    DeferredPlaceholder,
 };
 
 struct TextureProcessingSettings {

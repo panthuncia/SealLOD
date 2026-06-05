@@ -9,12 +9,16 @@
 #include <functional>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <mutex>
+#include <unordered_set>
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <optional>
 #include <gsl/gsl>
 #include <rhi_helpers.h>
 #include <rhi_conversions_dx12.h>
+#include <tracy/Tracy.hpp>
 
 #include "Utilities/ProcessedTextureCache.h"
 
@@ -29,6 +33,7 @@
 #include "Mesh/VertexLayout.h"
 #include "Scene/Components.h"
 #include "Resources/PixelBuffer.h"
+#include "Resources/Texture.h"
 
 using namespace DirectX;
 
@@ -364,7 +369,177 @@ namespace detail {
     struct ReadFileBytesResult {
         std::vector<std::byte> data;
         bool usedDirectStorage = false;
+        bool usedMemoryMapping = false;
         std::string detail;
+    };
+
+    std::string FormatWin32Error(DWORD error)
+    {
+        LPSTR message = nullptr;
+        const DWORD length = FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr,
+            error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPSTR>(&message),
+            0,
+            nullptr);
+        std::string result = length != 0 && message != nullptr
+            ? std::string(message, length)
+            : "unknown Win32 error";
+        if (message) {
+            LocalFree(message);
+        }
+        while (!result.empty() && (result.back() == '\r' || result.back() == '\n' || result.back() == '.')) {
+            result.pop_back();
+        }
+        return result + " (GetLastError=" + std::to_string(error) + ")";
+    }
+
+    void WarnOnce(std::string key, std::string message)
+    {
+        static std::mutex mutex;
+        static std::unordered_set<std::string> seen;
+        std::scoped_lock lock(mutex);
+        if (seen.insert(std::move(key)).second) {
+            spdlog::warn("{}", message);
+        }
+    }
+
+    class MappedFileView {
+    public:
+        MappedFileView() = default;
+        ~MappedFileView()
+        {
+            Reset();
+        }
+
+        MappedFileView(const MappedFileView&) = delete;
+        MappedFileView& operator=(const MappedFileView&) = delete;
+
+        MappedFileView(MappedFileView&& other) noexcept
+        {
+            MoveFrom(std::move(other));
+        }
+
+        MappedFileView& operator=(MappedFileView&& other) noexcept
+        {
+            if (this != &other) {
+                Reset();
+                MoveFrom(std::move(other));
+            }
+            return *this;
+        }
+
+        static std::optional<MappedFileView> Open(const std::wstring& path, std::string* outError = nullptr)
+        {
+            ZoneScopedN("MappedFileView::Open");
+            if (outError) {
+                outError->clear();
+            }
+
+            HANDLE file = CreateFileW(
+                path.c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                nullptr);
+            if (file == INVALID_HANDLE_VALUE) {
+                if (outError) {
+                    *outError = "CreateFileW failed: " + FormatWin32Error(GetLastError());
+                }
+                return std::nullopt;
+            }
+
+            LARGE_INTEGER size{};
+            if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
+                if (outError) {
+                    *outError = "GetFileSizeEx failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+            if (size.QuadPart == 0) {
+                if (outError) {
+                    *outError = "file is empty";
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+            if (static_cast<unsigned long long>(size.QuadPart) > static_cast<unsigned long long>((std::numeric_limits<size_t>::max)())) {
+                if (outError) {
+                    *outError = "file is too large to map into address space";
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+            if (mapping == nullptr) {
+                if (outError) {
+                    *outError = "CreateFileMappingW failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if (view == nullptr) {
+                if (outError) {
+                    *outError = "MapViewOfFile failed: " + FormatWin32Error(GetLastError());
+                }
+                CloseHandle(mapping);
+                CloseHandle(file);
+                return std::nullopt;
+            }
+
+            MappedFileView result;
+            result.m_file = file;
+            result.m_mapping = mapping;
+            result.m_view = view;
+            result.m_size = static_cast<size_t>(size.QuadPart);
+            return result;
+        }
+
+        const void* Data() const noexcept { return m_view; }
+        size_t Size() const noexcept { return m_size; }
+
+    private:
+        void Reset()
+        {
+            if (m_view) {
+                UnmapViewOfFile(m_view);
+                m_view = nullptr;
+            }
+            if (m_mapping) {
+                CloseHandle(m_mapping);
+                m_mapping = nullptr;
+            }
+            if (m_file != INVALID_HANDLE_VALUE) {
+                CloseHandle(m_file);
+                m_file = INVALID_HANDLE_VALUE;
+            }
+            m_size = 0;
+        }
+
+        void MoveFrom(MappedFileView&& other) noexcept
+        {
+            m_file = other.m_file;
+            m_mapping = other.m_mapping;
+            m_view = other.m_view;
+            m_size = other.m_size;
+            other.m_file = INVALID_HANDLE_VALUE;
+            other.m_mapping = nullptr;
+            other.m_view = nullptr;
+            other.m_size = 0;
+        }
+
+        HANDLE m_file = INVALID_HANDLE_VALUE;
+        HANDLE m_mapping = nullptr;
+        void* m_view = nullptr;
+        size_t m_size = 0;
     };
 
     bool IsDDSPath(const std::wstring& filePath) {
@@ -682,6 +857,23 @@ namespace detail {
             }
         }
 
+        std::string mapError;
+        {
+            ZoneScopedN("ReadFileBytes::MemoryMappedFallback");
+            if (auto mapped = MappedFileView::Open(path, &mapError)) {
+                result.data.resize(mapped->Size());
+                std::memcpy(result.data.data(), mapped->Data(), mapped->Size());
+                result.usedMemoryMapping = true;
+                result.detail = "file bytes copied from memory-mapped file view";
+                TracyPlot("SARP.Texture.MMap.Bytes", static_cast<int64_t>(mapped->Size()));
+                return result;
+            }
+        }
+
+        WarnOnce(
+            "mmap|" + ws2s(path) + "|" + mapError,
+            "LoadTextureFromFile: memory-mapped read failed for '" + ws2s(path) + "' because " + mapError + "; falling back to std::ifstream");
+
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) { throw std::runtime_error("Failed to open file: " + ws2s(path)); }
         const auto size = static_cast<size_t>(f.tellg());
@@ -842,6 +1034,7 @@ LoadTextureFromFile(const std::wstring& filePath,
     if (detail::IsProcessedTextureCachePath(filePath)) {
         std::string processedCacheFailureReason;
         if (!detail::kForceCpuTextureLoadPath) {
+            ZoneScopedN("TryLoadProcessedTextureCacheToVRAM");
             if (auto conditionedTexture = detail::TryLoadProcessedTextureCacheToVRAM(filePath, sampler, allowRTV, allowUAV, &processedCacheFailureReason)) {
                 conditionedTexture->Meta().preferSRGB = preferSRGB;
                 return conditionedTexture;
@@ -851,6 +1044,7 @@ LoadTextureFromFile(const std::wstring& filePath,
         std::filesystem::path ddsFallbackPath = std::filesystem::path(filePath).replace_extension(L".dds");
         std::error_code ec;
         if (std::filesystem::exists(ddsFallbackPath, ec) && !ec) {
+            ZoneScopedN("LoadTextureFromFile fallback to sibling DDS");
             spdlog::info(
                 "LoadTextureFromFile: conditioned cache '{}' fell back to sibling DDS '{}' because {}",
                 ws2s(filePath),
@@ -868,6 +1062,7 @@ LoadTextureFromFile(const std::wstring& filePath,
     }
 
     if (!detail::kForceCpuTextureLoadPath && detail::IsDDSPath(filePath)) {
+        ZoneScopedN("TryLoadDDSDirectToVRAM");
         if (auto directStorageTexture = detail::TryLoadDDSDirectToVRAM(filePath, sampler, preferSRGB, localFlags, false, allowRTV, allowUAV)) {
             directStorageTexture->Meta().filePath = utf8;
             directStorageTexture->Meta().preferSRGB = preferSRGB;
@@ -875,15 +1070,76 @@ LoadTextureFromFile(const std::wstring& filePath,
         }
     }
 
-    const auto fileBytes = detail::ReadFileBytes(filePath);
-    auto texture = LoadTextureFromMemory(fileBytes.data.data(), fileBytes.data.size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+    ZoneScopedN("LoadTextureFromFile fallback to CPU decode");
+    std::shared_ptr<TextureAsset> texture;
+    std::string mapError;
+    if (auto mapped = detail::MappedFileView::Open(filePath, &mapError)) {
+        ZoneScopedN("LoadTextureFromFile fallback mmap decode");
+        TracyPlot("SARP.Texture.MMap.DecodeBytes", static_cast<int64_t>(mapped->Size()));
+        texture = LoadTextureFromMemory(mapped->Data(), mapped->Size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+        if (texture) {
+            texture->RecordLoadPath(TextureLoadPathTelemetry::MemoryMappedFileRead, "texture decoded directly from memory-mapped file view");
+        }
+    } else {
+        detail::WarnOnce(
+            "mmap-decode|" + utf8 + "|" + mapError,
+            "LoadTextureFromFile: memory-mapped decode failed for '" + utf8 + "' because " + mapError + "; falling back to copied file bytes");
+        const auto fileBytes = detail::ReadFileBytes(filePath);
+        texture = LoadTextureFromMemory(fileBytes.data.data(), fileBytes.data.size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
+        if (texture) {
+            texture->RecordLoadPath(
+                fileBytes.usedDirectStorage ? TextureLoadPathTelemetry::DirectStorageSystemMemoryRead :
+                fileBytes.usedMemoryMapping ? TextureLoadPathTelemetry::MemoryMappedFileRead :
+                TextureLoadPathTelemetry::CpuFileRead,
+                fileBytes.detail);
+        }
+    }
     if (texture) {
         texture->Meta().filePath = utf8;
         texture->Meta().preferSRGB = preferSRGB;
-        texture->RecordLoadPath(
-            fileBytes.usedDirectStorage ? TextureLoadPathTelemetry::DirectStorageSystemMemoryRead : TextureLoadPathTelemetry::CpuFileRead,
-            fileBytes.detail);
     }
+    return texture;
+}
+
+std::shared_ptr<TextureAsset>
+LoadTextureFromFileDeferred(
+    const std::wstring& filePath,
+    std::shared_ptr<Sampler> sampler,
+    bool preferSRGB,
+    const TextureFileMeta* metaOverride,
+    bool allowRTV,
+    bool allowUAV)
+{
+    ZoneScopedN("LoadTextureFromFileDeferred");
+    const std::string utf8 = ws2s(filePath);
+    ZoneText(utf8.data(), utf8.size());
+
+    TextureFileMeta meta = metaOverride ? *metaOverride : TextureFileMeta{};
+    if (meta.filePath.empty()) {
+        meta.filePath = utf8;
+    }
+    meta.preferSRGB = preferSRGB;
+
+    TextureDescription desc{};
+    desc.channels = 4;
+    desc.format = preferSRGB
+        ? rhi::Format::R8G8B8A8_UNorm_sRGB
+        : rhi::Format::R8G8B8A8_UNorm;
+    desc.hasRTV = allowRTV;
+    desc.hasUAV = allowUAV;
+    desc.generateMipMaps = false;
+
+    ImageDimensions dims{};
+    dims.width = 1;
+    dims.height = 1;
+    dims.rowPitch = 4;
+    dims.slicePitch = 4;
+    desc.imageDimensions.push_back(dims);
+
+    auto texture = TextureAsset::CreateShared(desc, utf8, std::move(sampler), std::move(meta));
+    texture->RecordLoadPath(TextureLoadPathTelemetry::DeferredFileReference, "texture load deferred; source path retained for async upload");
+    texture->RecordUploadPath(TextureUploadPathTelemetry::DeferredPlaceholder, "deferred texture will use a semantic placeholder until async upload completes");
+    TracyPlot("SARP.Texture.DeferredQueued", static_cast<int64_t>(1));
     return texture;
 }
 

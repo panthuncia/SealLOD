@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include <nlohmann/json.hpp>
+#include <tracy/Tracy.hpp>
 
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolver.h>
@@ -1148,7 +1149,10 @@ namespace USDLoader {
 					cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, false, normalConvention);
 					const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
 					if (!cachePath.empty()) {
-						auto tex = LoadTextureFromFile(cachePath, nullptr, preferSRGB);
+						TextureFileMeta deferredMeta = cacheProbeMeta;
+						deferredMeta.filePath = ws2s(cachePath);
+						deferredMeta.isProcessingCacheArtifact = true;
+						auto tex = LoadTextureFromFileDeferred(cachePath, nullptr, preferSRGB, std::addressof(deferredMeta));
 						tex->Meta().filePath = cacheProbeMeta.filePath;
 						tex->Meta().isProcessingCacheArtifact = true;
 						tex->Meta().preferSRGB = preferSRGB;
@@ -1497,10 +1501,13 @@ namespace USDLoader {
 	}
 
 	void ProcessMaterial(const pxr::UsdShadeMaterial& material, const pxr::UsdStageRefPtr& stage, bool isUSDZ, const std::string& directory) {
+		ZoneScopedN("USDLoader::ProcessMaterial");
 		if (!material) {
 			return;
 		}
 
+		const auto materialPath = material.GetPrim().GetPath().GetString();
+		ZoneText(materialPath.data(), materialPath.size());
 		if (loadingCache.materialTemplateCache.contains(material.GetPrim().GetPath().GetString())) {
 			spdlog::debug("Material {} already processed, skipping.", material.GetPrim().GetPath().GetString());
 			return; // Already processed
@@ -1508,10 +1515,17 @@ namespace USDLoader {
 
 		spdlog::debug("Processing material: {}", material.GetPrim().GetPath().GetString());
 
-		auto materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ);
+		MaterialDescription materialDesc;
+		{
+			ZoneScopedN("USDLoader::ProcessMaterial::ParseMaterialGraph");
+			materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ);
+		}
         MaterialTemplateRecord record;
         record.desc = std::move(materialDesc);
-        record.referencedUvSetNames = CollectReferencedUvSetNames(record.desc);
+		{
+			ZoneScopedN("USDLoader::ProcessMaterial::CollectReferencedUvSetNames");
+			record.referencedUvSetNames = CollectReferencedUvSetNames(record.desc);
+		}
 		loadingCache.materialTemplateCache[material.GetPrim().GetPath().GetString()] = std::move(record);
 	}
 
@@ -1690,13 +1704,7 @@ namespace USDLoader {
 			return static_cast<char>(std::tolower(ch));
 		});
 
-		return name.starts_with("l1_") ||
-			name.starts_with("l2_") ||
-			name.starts_with("l3_") ||
-			name.contains("_l1_") ||
-			name.contains("_l2_") ||
-			name.contains("_l3_") ||
-			name.starts_with("lod_") ||
+		return name.starts_with("lod_") ||
 			name.starts_with("billboard_") ||
 			name.ends_with("_lod") ||
 			name.ends_with("_lod_0") ||
@@ -1716,9 +1724,9 @@ namespace USDLoader {
 		if (IsBelowInactiveBrNiflyLOD0Branch(prim)) {
 			return true;
 		}
-		if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
-			return true;
-		}
+		// if (IsBrNiflyLODMeshName(prim.GetName().GetString())) {
+		// 	return true;
+		// }
 
 		const std::string blockName = GetPrimCustomString(prim, TfToken("brnifly:blockName"));
 		if (blockName == "BSLODTriShape") {
@@ -1983,6 +1991,8 @@ namespace USDLoader {
 		const ImportSettings& importSettings,
 		const std::string& sourceIdentifierOverride = {})
 	{
+		ZoneScopedN("USDLoader::PreprocessAllMeshes");
+		ZoneText(sourceIdentifierOverride.data(), sourceIdentifierOverride.size());
 		struct MeshPreprocessWorkItem {
 			std::string meshPath;
 			UsdGeomMesh mesh;
@@ -2141,12 +2151,18 @@ namespace USDLoader {
 				gatherMeshJobs(child);
 			}
 		};
-		gatherMeshJobs(stage->GetPseudoRoot());
+		{
+			ZoneScopedN("USDLoader::PreprocessAllMeshes::GatherMeshJobs");
+			gatherMeshJobs(stage->GetPseudoRoot());
+		}
 
 		spdlog::debug("USD mesh preprocessing: gathered {} mesh/subset job(s).", workItems.size());
+		TracyPlot("SARP.Import.USD.Preprocess.WorkItems", static_cast<int64_t>(workItems.size()));
 		std::vector<std::optional<MeshPreprocessResult>> preprocessed(workItems.size());
 		TaskSchedulerManager::GetInstance().ParallelFor("USDLoader::PreprocessMeshes", workItems.size(), [&](size_t workIndex) {
+			ZoneScopedN("USDLoader::PreprocessAllMeshes::ExtractSubMesh");
 			const MeshPreprocessWorkItem& workItem = workItems[workIndex];
+			ZoneText(workItem.meshPath.data(), workItem.meshPath.size());
 			preprocessed[workIndex] = USDGeometryExtractor::ExtractSubMesh(
 				workItem.mesh,
 				workItem.subset,
@@ -2163,15 +2179,18 @@ namespace USDLoader {
 				workItem.extractOptions);
 			});
 
-		for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
-			if (!preprocessed[workIndex].has_value()) {
-				throw std::runtime_error("Missing preprocessed USD mesh data");
-			}
+		{
+			ZoneScopedN("USDLoader::PreprocessAllMeshes::PublishPreprocessedResults");
+			for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+				if (!preprocessed[workIndex].has_value()) {
+					throw std::runtime_error("Missing preprocessed USD mesh data");
+				}
 
-			const MeshPreprocessWorkItem& workItem = workItems[workIndex];
-			auto& record = loadingCache.preprocessedMeshCache[workItem.meshPath];
-			record.authoredDoubleSided = workItem.authoredDoubleSided;
-			record.subsets.emplace_back(workItem.material, std::move(preprocessed[workIndex].value()), workItem.inferredDoubleSided);
+				const MeshPreprocessWorkItem& workItem = workItems[workIndex];
+				auto& record = loadingCache.preprocessedMeshCache[workItem.meshPath];
+				record.authoredDoubleSided = workItem.authoredDoubleSided;
+				record.subsets.emplace_back(workItem.material, std::move(preprocessed[workIndex].value()), workItem.inferredDoubleSided);
+			}
 		}
 	}
 
@@ -2186,6 +2205,9 @@ namespace USDLoader {
 		VtTokenArray& skelJointOrderRaw,
 		VtTokenArray& skelJointOrderMapped)
 	{
+		ZoneScopedN("USDLoader::ProcessMesh");
+		const auto meshPathText = mesh.GetPrim().GetPath().GetString();
+		ZoneText(meshPathText.data(), meshPathText.size());
 		(void)stage;
 		(void)metersPerUnit;
 		(void)upRot;
@@ -2197,6 +2219,7 @@ namespace USDLoader {
 
 		auto& cacheKey = mesh.GetPrim().GetPath().GetString();
 		if (loadingCache.meshCache.contains(cacheKey)) {
+			ZoneScopedN("USDLoader::ProcessMesh::MeshCacheHit");
 			return loadingCache.meshCache[cacheKey];
 		}
 
@@ -2210,26 +2233,39 @@ namespace USDLoader {
 
 		PreprocessedMeshRecord& record = preprocessedIt->second;
 		outMeshes.reserve(record.subsets.size());
+		TracyPlot("SARP.Import.USD.ProcessMesh.Subsets", static_cast<int64_t>(record.subsets.size()));
 		for (PreprocessedMeshSubset& subset : record.subsets) {
+			ZoneScopedN("USDLoader::ProcessMesh::Subset");
 			auto& result = subset.result;
-			auto material = ResolveMaterialForMesh(
-				subset.material,
-				result.ingest.GetUvSets(),
-				record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
-				mesh.GetPrim());
-			auto mPtr = result.ingest.Build(material, std::move(result.prebuiltData), MeshCpuDataPolicy::ReleaseAfterUpload);
+			std::shared_ptr<Material> material;
+			{
+				ZoneScopedN("USDLoader::ProcessMesh::Subset::ResolveMaterialForMesh");
+				material = ResolveMaterialForMesh(
+					subset.material,
+					result.ingest.GetUvSets(),
+					record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
+					mesh.GetPrim());
+			}
+			std::shared_ptr<Mesh> mPtr;
+			{
+				ZoneScopedN("USDLoader::ProcessMesh::Subset::BuildMeshFromIngest");
+				mPtr = result.ingest.Build(material, std::move(result.prebuiltData), MeshCpuDataPolicy::ReleaseAfterUpload);
+			}
 			if (mPtr != nullptr) {
-				auto jointNames = GetBrNiflyJointNames(mesh.GetPrim());
-				if (!jointNames.empty()) {
-					mPtr->SetSkinJointNames(std::move(jointNames));
-				}
-				auto jointSourceIndices = GetBrNiflyJointSourceIndices(mesh.GetPrim());
-				if (!jointSourceIndices.empty()) {
-					mPtr->SetSkinJointSourceIndices(std::move(jointSourceIndices));
-				}
-				auto skinToBoneTransforms = GetBrNiflySkinToBoneTransforms(mesh.GetPrim());
-				if (!skinToBoneTransforms.empty()) {
-					mPtr->SetSkinInverseBindMatrices(std::move(skinToBoneTransforms));
+				{
+					ZoneScopedN("USDLoader::ProcessMesh::Subset::ApplyBrNiflySkinMetadata");
+					auto jointNames = GetBrNiflyJointNames(mesh.GetPrim());
+					if (!jointNames.empty()) {
+						mPtr->SetSkinJointNames(std::move(jointNames));
+					}
+					auto jointSourceIndices = GetBrNiflyJointSourceIndices(mesh.GetPrim());
+					if (!jointSourceIndices.empty()) {
+						mPtr->SetSkinJointSourceIndices(std::move(jointSourceIndices));
+					}
+					auto skinToBoneTransforms = GetBrNiflySkinToBoneTransforms(mesh.GetPrim());
+					if (!skinToBoneTransforms.empty()) {
+						mPtr->SetSkinInverseBindMatrices(std::move(skinToBoneTransforms));
+					}
 				}
 				outMeshes.push_back(mPtr);
 			}
@@ -2377,6 +2413,9 @@ namespace USDLoader {
 		const UsdSkelSkeletonQuery& skelQuery,
 		double metersPerUnit)
 	{
+		ZoneScopedN("USDLoader::BuildPayloadSkeleton");
+		const auto skeletonPath = skel.GetPrim().GetPath().GetString();
+		ZoneText(skeletonPath.data(), skeletonPath.size());
 		if (loadingCache.skeletonMap.contains(skel.GetPrim().GetPath().GetString())) {
 			return loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()];
 		}
@@ -2421,6 +2460,9 @@ namespace USDLoader {
 		const std::string& directory,
 		bool isUSDZ)
 	{
+		ZoneScopedN("USDLoader::ProcessMeshForPayload");
+		const auto primPath = prim.GetPath().GetString();
+		ZoneText(primPath.data(), primPath.size());
 		UsdGeomMesh mesh(prim);
 		if (!mesh || IsUnsupportedBrNiflySkinnedMesh(mesh)) {
 			return {};
@@ -2433,7 +2475,11 @@ namespace USDLoader {
 			return {};
 		}
 
-		auto skinningQuery = USDGeometryExtractor::GetSkinningQuery(mesh, skelCache);
+		std::optional<UsdSkelSkinningQuery> skinningQuery;
+		{
+			ZoneScopedN("USDLoader::ProcessMeshForPayload::GetSkinningQuery");
+			skinningQuery = USDGeometryExtractor::GetSkinningQuery(mesh, skelCache);
+		}
 		UsdSkelBindingAPI bindingAPI(prim);
 		std::shared_ptr<Skeleton> skeleton;
 		VtTokenArray skelJointOrderRaw;
@@ -2464,6 +2510,7 @@ namespace USDLoader {
 
 		auto processedMeshes = ProcessMesh(mesh, stage, metersPerUnit, upRot, directory, isUSDZ, skelCache, skelJointOrderRaw, skelJointOrderMapped);
 		if (skeleton) {
+			ZoneScopedN("USDLoader::ProcessMeshForPayload::AttachSkeleton");
 			for (auto& processedMesh : processedMeshes) {
 				if (processedMesh) {
 					processedMesh->SetBaseSkin(skeleton);
@@ -2854,6 +2901,7 @@ namespace USDLoader {
 		UsdSkelCache& skelCache,
 		bool isUSDZ)
 	{
+		ZoneScopedN("USDLoader::ParseImportedAssetPayload");
 		ImportedAssetPayload payload;
 		std::unordered_set<std::uint64_t> meshIDs;
 		std::uint32_t skinnedShapeIndex = 0;
@@ -2927,7 +2975,12 @@ namespace USDLoader {
 				}
 			};
 
-		recurse(stage->GetPseudoRoot(), DirectX::XMMatrixIdentity(), false);
+		{
+			ZoneScopedN("USDLoader::ParseImportedAssetPayload::TraverseStage");
+			recurse(stage->GetPseudoRoot(), DirectX::XMMatrixIdentity(), false);
+		}
+		TracyPlot("SARP.Import.USD.Payload.Meshes", static_cast<int64_t>(payload.meshes.size()));
+		TracyPlot("SARP.Import.USD.Payload.Parts", static_cast<int64_t>(payload.parts.size()));
 		return payload;
 	}
 
@@ -2978,6 +3031,8 @@ namespace USDLoader {
 		const UsdStageRefPtr& stage,
 		const InMemoryStageOptions& options,
 		const ImportSettings& importSettings) {
+		ZoneScopedN("USDLoader::LoadImportedAssetFromStage");
+		ZoneText(options.sourceIdentifier.data(), options.sourceIdentifier.size());
 		if (!stage) {
 			spdlog::error("USD payload stage open failed for in-memory source '{}'", options.sourceIdentifier);
 			return std::nullopt;
@@ -2993,10 +3048,14 @@ namespace USDLoader {
 
 			PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options.sourceIdentifier);
 			auto payload = ParseImportedAssetPayload(stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
-			loadingCache.Clear();
+			{
+				ZoneScopedN("USDLoader::LoadImportedAssetFromStage::ClearLoadingCache");
+				loadingCache.Clear();
+			}
 			return payload;
 		}
 		catch (...) {
+			ZoneScopedN("USDLoader::LoadImportedAssetFromStage::ClearLoadingCacheAfterException");
 			loadingCache.Clear();
 			throw;
 		}
@@ -3023,7 +3082,13 @@ namespace USDLoader {
 		const std::string& filePath,
 		const InMemoryStageOptions& options,
 		const ImportSettings& importSettings) {
-		UsdStageRefPtr stage = UsdStage::Open(filePath);
+		ZoneScopedN("USDLoader::LoadImportedAssetFromFile");
+		ZoneText(filePath.data(), filePath.size());
+		UsdStageRefPtr stage;
+		{
+			ZoneScopedN("USDLoader::LoadImportedAssetFromFile::UsdStageOpen");
+			stage = UsdStage::Open(filePath);
+		}
 		if (!stage) {
 			spdlog::error("USD payload stage open failed for {}", filePath);
 			return std::nullopt;
@@ -3049,14 +3114,24 @@ namespace USDLoader {
 		const std::string& usdText,
 		const InMemoryStageOptions& options,
 		const ImportSettings& importSettings) {
+		ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes");
+		ZoneText(options.sourceIdentifier.data(), options.sourceIdentifier.size());
+		TracyPlot("SARP.Import.USD.InMemoryBytes", static_cast<int64_t>(usdText.size()));
 		const std::string identifierHint = options.layerIdentifierHint.empty() ? std::string("in_memory.usda") : options.layerIdentifierHint;
 		SdfLayerRefPtr rootLayer = SdfLayer::CreateAnonymous(identifierHint);
-		if (!rootLayer || !rootLayer->ImportFromString(usdText)) {
-			spdlog::error("Failed to import in-memory USD payload layer '{}'.", identifierHint);
-			return std::nullopt;
+		{
+			ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes::ImportLayerFromString");
+			if (!rootLayer || !rootLayer->ImportFromString(usdText)) {
+				spdlog::error("Failed to import in-memory USD payload layer '{}'.", identifierHint);
+				return std::nullopt;
+			}
 		}
 
-		UsdStageRefPtr stage = UsdStage::Open(rootLayer);
+		UsdStageRefPtr stage;
+		{
+			ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes::UsdStageOpen");
+			stage = UsdStage::Open(rootLayer);
+		}
 		if (!stage) {
 			spdlog::error("Failed to open in-memory USD payload stage '{}'.", identifierHint);
 			return std::nullopt;

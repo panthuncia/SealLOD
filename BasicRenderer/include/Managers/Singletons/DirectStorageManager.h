@@ -82,6 +82,9 @@ struct DirectStorageAsyncRequestStatus {
     DirectStorageAsyncRequestState state = DirectStorageAsyncRequestState::Invalid;
     ID3D12Fence* fence = nullptr;
     uint64_t fenceValue = 0;
+    uint32_t hresult = 0;
+    DirectStorageQueueKind queueKind = DirectStorageQueueKind::Gpu;
+    std::string debugLabel;
     std::string message;
 };
 

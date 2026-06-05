@@ -5,9 +5,15 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <mutex>
+#include <optional>
 #include <sstream>
+#include <unordered_set>
 
 #include <DirectXTex.h>
+#include <tracy/Tracy.hpp>
+#include <windows.h>
 
 #include <spdlog/spdlog.h>
 
@@ -58,8 +64,12 @@ const char* ToString(TextureLoadPathTelemetry path) {
 		return "directstorage_system_memory_read";
 	case TextureLoadPathTelemetry::CpuFileRead:
 		return "cpu_file_read";
+	case TextureLoadPathTelemetry::MemoryMappedFileRead:
+		return "memory_mapped_file_read";
 	case TextureLoadPathTelemetry::InMemoryContainer:
 		return "in_memory_container";
+	case TextureLoadPathTelemetry::DeferredFileReference:
+		return "deferred_file_reference";
 	default:
 		return "unknown";
 	}
@@ -96,10 +106,175 @@ const char* ToString(TextureUploadPathTelemetry path) {
 		return "processing_cache_upload";
 	case TextureUploadPathTelemetry::ProcessingFailedFallback:
 		return "processing_failed_fallback";
+	case TextureUploadPathTelemetry::DeferredPlaceholder:
+		return "deferred_placeholder";
 	default:
 		return "unknown";
 	}
 }
+
+std::string FormatWin32Error(DWORD error)
+{
+	LPSTR message = nullptr;
+	const DWORD length = FormatMessageA(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		nullptr,
+		error,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		reinterpret_cast<LPSTR>(&message),
+		0,
+		nullptr);
+	std::string result = length != 0 && message != nullptr
+		? std::string(message, length)
+		: "unknown Win32 error";
+	if (message) {
+		LocalFree(message);
+	}
+	while (!result.empty() && (result.back() == '\r' || result.back() == '\n' || result.back() == '.')) {
+		result.pop_back();
+	}
+	return result + " (GetLastError=" + std::to_string(error) + ")";
+}
+
+void WarnOnce(std::string key, std::string message)
+{
+	static std::mutex mutex;
+	static std::unordered_set<std::string> seen;
+	std::scoped_lock lock(mutex);
+	if (seen.insert(std::move(key)).second) {
+		spdlog::warn("{}", message);
+	}
+}
+
+class MappedFileView {
+public:
+	MappedFileView() = default;
+	~MappedFileView()
+	{
+		Reset();
+	}
+
+	MappedFileView(const MappedFileView&) = delete;
+	MappedFileView& operator=(const MappedFileView&) = delete;
+
+	MappedFileView(MappedFileView&& other) noexcept
+	{
+		MoveFrom(std::move(other));
+	}
+
+	MappedFileView& operator=(MappedFileView&& other) noexcept
+	{
+		if (this != &other) {
+			Reset();
+			MoveFrom(std::move(other));
+		}
+		return *this;
+	}
+
+	static std::optional<MappedFileView> Open(const std::wstring& path, std::string* outError = nullptr)
+	{
+		ZoneScopedN("TextureAsset::MappedFileView::Open");
+		if (outError) {
+			outError->clear();
+		}
+
+		HANDLE file = CreateFileW(
+			path.c_str(),
+			GENERIC_READ,
+			FILE_SHARE_READ,
+			nullptr,
+			OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+			nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			if (outError) {
+				*outError = "CreateFileW failed: " + FormatWin32Error(GetLastError());
+			}
+			return std::nullopt;
+		}
+
+		LARGE_INTEGER size{};
+		if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0) {
+			if (outError) {
+				*outError = "GetFileSizeEx failed or file is empty: " + FormatWin32Error(GetLastError());
+			}
+			CloseHandle(file);
+			return std::nullopt;
+		}
+		if (static_cast<unsigned long long>(size.QuadPart) > static_cast<unsigned long long>((std::numeric_limits<size_t>::max)())) {
+			if (outError) {
+				*outError = "file is too large to map into address space";
+			}
+			CloseHandle(file);
+			return std::nullopt;
+		}
+
+		HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+		if (mapping == nullptr) {
+			if (outError) {
+				*outError = "CreateFileMappingW failed: " + FormatWin32Error(GetLastError());
+			}
+			CloseHandle(file);
+			return std::nullopt;
+		}
+
+		void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+		if (view == nullptr) {
+			if (outError) {
+				*outError = "MapViewOfFile failed: " + FormatWin32Error(GetLastError());
+			}
+			CloseHandle(mapping);
+			CloseHandle(file);
+			return std::nullopt;
+		}
+
+		MappedFileView result;
+		result.m_file = file;
+		result.m_mapping = mapping;
+		result.m_view = view;
+		result.m_size = static_cast<size_t>(size.QuadPart);
+		TracyPlot("SARP.Texture.MMap.Bytes", static_cast<int64_t>(result.m_size));
+		return result;
+	}
+
+	const void* Data() const noexcept { return m_view; }
+	size_t Size() const noexcept { return m_size; }
+
+private:
+	void Reset()
+	{
+		if (m_view) {
+			UnmapViewOfFile(m_view);
+			m_view = nullptr;
+		}
+		if (m_mapping) {
+			CloseHandle(m_mapping);
+			m_mapping = nullptr;
+		}
+		if (m_file != INVALID_HANDLE_VALUE) {
+			CloseHandle(m_file);
+			m_file = INVALID_HANDLE_VALUE;
+		}
+		m_size = 0;
+	}
+
+	void MoveFrom(MappedFileView&& other) noexcept
+	{
+		m_file = other.m_file;
+		m_mapping = other.m_mapping;
+		m_view = other.m_view;
+		m_size = other.m_size;
+		other.m_file = INVALID_HANDLE_VALUE;
+		other.m_mapping = nullptr;
+		other.m_view = nullptr;
+		other.m_size = 0;
+	}
+
+	HANDLE m_file = INVALID_HANDLE_VALUE;
+	HANDLE m_mapping = nullptr;
+	void* m_view = nullptr;
+	size_t m_size = 0;
+};
 
 const char* ToString(TextureProcessingJobState state) {
 	switch (state) {
@@ -320,6 +495,8 @@ bool BuildProcessedTextureCacheLayouts(
 }
 
 std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(const std::string& path) {
+	ZoneScopedN("TextureAsset::BuildSourceDataFromConditionedCacheFilePath");
+	ZoneText(path.data(), path.size());
 	const std::wstring widePath = std::filesystem::path(path).wstring();
 	br::processed_texture_cache::FileHeader header{};
 	std::string error;
@@ -334,15 +511,36 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(c
 		throw std::runtime_error(error.empty() ? "failed to compute conditioned texture cache layout" : error);
 	}
 
-	std::ifstream file(widePath, std::ios::binary);
-	if (!file) {
-		throw std::runtime_error("failed to open conditioned texture cache payload");
+	std::string mapError;
+	auto mapped = MappedFileView::Open(widePath, &mapError);
+	if (!mapped) {
+		WarnOnce(
+			"texture-conditioned-mmap|" + path + "|" + mapError,
+			"TextureAsset: memory-mapped conditioned cache read failed for '" + path + "' because " + mapError + "; falling back to std::ifstream");
 	}
-	file.seekg(static_cast<std::streamoff>(header.dataOffset), std::ios::beg);
-	std::vector<uint8_t> payload(static_cast<size_t>(header.dataSizeBytes), 0u);
-	file.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-	if (!file || static_cast<size_t>(file.gcount()) != payload.size()) {
-		throw std::runtime_error("failed to read conditioned texture cache payload");
+	std::vector<uint8_t> payload;
+	const uint8_t* payloadBase = nullptr;
+	size_t payloadSize = 0;
+	if (mapped) {
+		if (header.dataOffset > mapped->Size() || header.dataSizeBytes > mapped->Size() - static_cast<size_t>(header.dataOffset)) {
+			throw std::runtime_error("conditioned texture cache mapped file ended before payload");
+		}
+		payloadBase = static_cast<const uint8_t*>(mapped->Data()) + static_cast<size_t>(header.dataOffset);
+		payloadSize = static_cast<size_t>(header.dataSizeBytes);
+	}
+	else {
+		std::ifstream file(widePath, std::ios::binary);
+		if (!file) {
+			throw std::runtime_error("failed to open conditioned texture cache payload");
+		}
+		file.seekg(static_cast<std::streamoff>(header.dataOffset), std::ios::beg);
+		payload.resize(static_cast<size_t>(header.dataSizeBytes), 0u);
+		file.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+		if (!file || static_cast<size_t>(file.gcount()) != payload.size()) {
+			throw std::runtime_error("failed to read conditioned texture cache payload");
+		}
+		payloadBase = payload.data();
+		payloadSize = payload.size();
 	}
 
 	auto result = std::make_shared<TextureSourceData>();
@@ -373,7 +571,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(c
 		const size_t sourceSpan = rowCount == 0u
 			? 0u
 			: sourceRowPitch * (rowCount - 1u) + rowPitch;
-		if (offset > payload.size() || sourceSpan > payload.size() - offset) {
+		if (offset > payloadSize || sourceSpan > payloadSize - offset) {
 			throw std::runtime_error("conditioned texture cache payload ended before expected subresource data");
 		}
 
@@ -385,7 +583,7 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(c
 		result->desc.imageDimensions.push_back(dims);
 
 		auto bytes = std::make_shared<std::vector<uint8_t>>(slicePitch, 0u);
-		const uint8_t* srcBase = payload.data() + offset;
+		const uint8_t* srcBase = payloadBase + offset;
 		uint8_t* dstBase = bytes->data();
 		for (size_t row = 0; row < rowCount; ++row) {
 			std::memcpy(
@@ -585,10 +783,29 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 }
 
 std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::string& path, bool preferSRGB) {
+	ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath");
+	ZoneText(path.data(), path.size());
 	DirectX::ScratchImage image;
 	DirectX::TexMetadata metadata{};
 	const std::wstring widePath = std::filesystem::path(path).wstring();
-	const HRESULT hr = DirectX::LoadFromDDSFile(widePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
+	HRESULT hr = E_FAIL;
+	std::string mapError;
+	if (auto mapped = MappedFileView::Open(widePath, &mapError)) {
+		ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath::LoadFromMappedMemory");
+		hr = DirectX::LoadFromDDSMemory(
+			static_cast<const uint8_t*>(mapped->Data()),
+			mapped->Size(),
+			DirectX::DDS_FLAGS_NONE,
+			&metadata,
+			image);
+	}
+	else {
+		WarnOnce(
+			"texture-dds-mmap|" + path + "|" + mapError,
+			"TextureAsset: memory-mapped DDS read failed for '" + path + "' because " + mapError + "; falling back to DirectXTex file load");
+		ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath::LoadFromDDSFile");
+		hr = DirectX::LoadFromDDSFile(widePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
+	}
 	if (FAILED(hr)) {
 		throw std::runtime_error("Failed to load DDS from file path: " + path);
 	}
@@ -642,9 +859,13 @@ std::shared_ptr<TextureReloadJobHandle> RequestReloadSourceDataAsync(
 	handle->state.store(TextureReloadJobState::Queued, std::memory_order_release);
 
 	TaskSchedulerManager::GetInstance().RunBackgroundTask("TextureAsset::RequestReloadSourceDataAsync", [handle, filePath = std::move(filePath), preferSRGB, targetTopMip, streamingEnabled]() mutable {
+		ZoneScopedN("TextureAsset::RequestReloadSourceDataAsync::BuildSourceData");
+		ZoneText(filePath.data(), filePath.size());
 		handle->state.store(TextureReloadJobState::BuildingSourceData, std::memory_order_release);
 		try {
-			auto sourceData = BuildSourceDataFromDDSFilePath(filePath, preferSRGB);
+			auto sourceData = IsConditionedCacheFilePath(filePath)
+				? BuildSourceDataFromConditionedCacheFilePath(filePath)
+				: BuildSourceDataFromDDSFilePath(filePath, preferSRGB);
 			const uint32_t fullMipCount = CalcMipCountFromDescription(sourceData->desc);
 			const uint32_t clippedTopMip = (streamingEnabled && fullMipCount > 1u)
 				? (std::min)(targetTopMip, fullMipCount - 1u)
@@ -1621,6 +1842,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		m_streamingState.enabled &&
 		isParticipatingMaterialTexture &&
 		DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu);
+	const bool shouldProcessTexture = TextureProcessingManager::GetInstance().ShouldProcess(m_meta);
 	auto ensureProcessingPlaceholder = [&](const std::string& detail) {
 		if (HasUsableImage() || !m_meta.processing.allowAsyncPlaceholder) {
 			return false;
@@ -1719,6 +1941,24 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 				return true;
 			}
 			else if (state == TextureDirectStorageReloadJobState::Failed) {
+				std::string directStorageError;
+				{
+					std::scoped_lock lock(m_directStorageReloadHandle->mutex);
+					directStorageError = m_directStorageReloadHandle->error;
+				}
+				if (!directStorageError.empty()) {
+					if (directStorageError.find("block-compressed DDS textures do not use this DirectStorage GPU-direct path") != std::string::npos) {
+						spdlog::debug(
+							"TextureAsset: DirectStorage texture upload skipped for '{}' because {}",
+							TextureTelemetryLabel(*this),
+							directStorageError);
+					}
+					else {
+						WarnOnce(
+							"texture-directstorage-failed|" + TextureTelemetryLabel(*this) + "|" + directStorageError,
+							"TextureAsset: DirectStorage texture upload failed for '" + TextureTelemetryLabel(*this) + "': " + directStorageError);
+					}
+				}
 				m_directStorageReloadHandle.reset();
 				return false;
 			}
@@ -1849,10 +2089,21 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 	}
 
 	std::shared_ptr<TextureSourceData> sourceData;
+	bool reloadFailedThisFrame = false;
 	if (m_reloadHandle && m_reloadHandle->targetTopMip != desiredResidentTopMip) {
 		m_reloadHandle.reset();
 	}
-	if (!m_reloadHandle && !useConditionedCacheResidency && std::holds_alternative<std::string>(m_initialStorage)) {
+	if (!m_reloadHandle && shouldProcessTexture && std::holds_alternative<std::string>(m_initialStorage)) {
+		const auto& filePath = std::get<std::string>(m_initialStorage);
+		if (!filePath.empty()) {
+			m_reloadHandle = RequestReloadSourceDataAsync(
+				filePath,
+				m_meta.preferSRGB,
+				0u,
+				false);
+		}
+	}
+	if (!m_reloadHandle && !shouldProcessTexture && !useConditionedCacheResidency && std::holds_alternative<std::string>(m_initialStorage)) {
 		const auto& filePath = std::get<std::string>(m_initialStorage);
 		if (!filePath.empty() && !IsConditionedCacheFilePath(filePath)) {
 			m_reloadHandle = RequestReloadSourceDataAsync(
@@ -1879,11 +2130,26 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			m_reloadHandle.reset();
 		}
 		else if (reloadState == TextureReloadJobState::Failed) {
+			std::string reloadError;
+			{
+				std::scoped_lock lock(m_reloadHandle->mutex);
+				reloadError = m_reloadHandle->error;
+			}
+			if (!reloadError.empty()) {
+				WarnOnce(
+					"texture-reload-failed|" + TextureTelemetryLabel(*this) + "|" + reloadError,
+					"TextureAsset: async source-data build failed for '" + TextureTelemetryLabel(*this) + "': " + reloadError);
+			}
 			m_reloadHandle.reset();
+			reloadFailedThisFrame = true;
 		}
 	}
 
-	if (TextureProcessingManager::GetInstance().ShouldProcess(m_meta)) {
+	if (shouldProcessTexture) {
+		if (!sourceData && (m_reloadHandle || reloadFailedThisFrame)) {
+			ensureProcessingPlaceholder("async source-data build pending; placeholder texture uploaded");
+			return;
+		}
 		sourceData = sourceData ? sourceData : BuildSourceData();
 		if (!m_processingHandle && !TextureProcessingManager::GetInstance().NeedsProcessing(*sourceData, m_meta)) {
 			const uint32_t residentMipCount = CalcMipCountFromDescription(sourceData->desc);
@@ -1964,7 +2230,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		}
 	}
 
-	if (TextureProcessingManager::GetInstance().ShouldProcess(m_meta)) {
+	if (shouldProcessTexture) {
 		if (!sourceData && m_reloadHandle) {
 			ensureProcessingPlaceholder("async reload source build pending; placeholder texture uploaded");
 
@@ -1974,7 +2240,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !HasUsableImage() && sourceData) {
 			if (!m_processingHandle) {
 				try {
-					m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(BuildProcessingSourceData(), m_meta);
+					m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(sourceData, m_meta);
 				}
 				catch (const std::exception& ex) {
 					spdlog::warn(
@@ -1991,8 +2257,10 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			}
 		}
 
-		const auto processingSourceData = BuildProcessingSourceData();
-		m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(processingSourceData, m_meta);
+		if (!m_processingHandle) {
+			const auto processingSourceData = sourceData ? sourceData : BuildProcessingSourceData();
+			m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(processingSourceData, m_meta);
+		}
 
 		if (m_processingHandle) {
 			const TextureProcessingJobState state = m_processingHandle->state.load(std::memory_order_acquire);

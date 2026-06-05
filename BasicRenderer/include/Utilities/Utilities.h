@@ -30,6 +30,7 @@
 class DescriptorHeap;
 class Sampler;
 class TextureAsset;
+struct TextureFileMeta;
 class Buffer;
 
 void ThrowIfFailed(HRESULT hr);
@@ -55,6 +56,14 @@ std::shared_ptr<TextureAsset> LoadTextureFromFile(
 	std::shared_ptr<Sampler> sampler = nullptr,
 	bool preferSRGB = false,
 	const LoadFlags& flags = {}, bool allowRTV = false, bool allowUAV = false);
+
+std::shared_ptr<TextureAsset> LoadTextureFromFileDeferred(
+	const std::wstring& filePath,
+	std::shared_ptr<Sampler> sampler = nullptr,
+	bool preferSRGB = false,
+	const TextureFileMeta* metaOverride = nullptr,
+	bool allowRTV = false,
+	bool allowUAV = false);
 
 std::shared_ptr<TextureAsset> LoadTextureFromMemory(
 	const void* bytes,

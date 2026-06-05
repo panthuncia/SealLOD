@@ -33,6 +33,7 @@ struct RenderableAsset
 
 	std::shared_ptr<Scene> scene;
 	std::vector<std::shared_ptr<Mesh>> meshes;
+	std::vector<std::uint64_t> meshMaterialHashes;
 	std::vector<RenderableAssetPart> parts;
 };
 
