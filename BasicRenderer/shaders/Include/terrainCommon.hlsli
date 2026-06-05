@@ -4,6 +4,7 @@
 #include "structs.hlsli"
 #include "materialFlags.hlsli"
 #include "parallax.hlsli"
+#include "utilities.hlsli"
 
 static const float TERRAIN_CELL_SIZE = 4096.0f;
 static const float TERRAIN_QUADRANT_SIZE = 2048.0f;
@@ -254,11 +255,11 @@ float3 TerrainSampleStochasticDiffuse(TerrainStochasticLayerInfo stochastic, Ter
     return saturate(color);
 }
 
-float3 TerrainSampleMikkelsenDiffuse(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, TerrainStochasticContext ctx)
+float3 TerrainSampleMikkelsenDiffuse(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, uint streamingTextureID, TerrainStochasticContext ctx)
 {
-    float3 c0 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).rgb;
-    float3 c1 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).rgb;
-    float3 c2 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).rgb;
+    float3 c0 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).rgb;
+    float3 c1 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).rgb;
+    float3 c2 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).rgb;
     return saturate(c0 * ctx.weights.x + c1 * ctx.weights.y + c2 * ctx.weights.z);
 }
 
@@ -292,19 +293,19 @@ float TerrainSampleStochasticHeight(TerrainStochasticLayerInfo stochastic, Terra
     return saturate(TerrainInverseLut1(inverseLut, lutSampler, gaussian, ctx.lod, stochastic.heightLutHeight));
 }
 
-float TerrainSampleStochasticDiffuseAlpha(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, TerrainStochasticContext ctx)
+float TerrainSampleStochasticDiffuseAlpha(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, uint streamingTextureID, TerrainStochasticContext ctx)
 {
-    float a0 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).a;
-    float a1 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a;
-    float a2 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a;
+    float a0 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).a;
+    float a1 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a;
+    float a2 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a;
     return saturate(a0 * ctx.weights.x + a1 * ctx.weights.y + a2 * ctx.weights.z);
 }
 
-float TerrainSampleMikkelsenHeight(Texture2D<float4> heightTex, SamplerState heightSampler, TerrainStochasticContext ctx)
+float TerrainSampleMikkelsenHeight(Texture2D<float4> heightTex, SamplerState heightSampler, uint streamingTextureID, TerrainStochasticContext ctx)
 {
-    float h0 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
-    float h1 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
-    float h2 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
+    float h0 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
+    float h1 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
+    float h2 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
     return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
 }
 
@@ -402,9 +403,9 @@ float TerrainSampleLayerHeight(
                 duDy,
                 stochasticScale,
                 blendCurve);
-            return TerrainSampleStochasticDiffuseAlpha(diffuseTex, diffuseSampler, ctx);
+            return TerrainSampleStochasticDiffuseAlpha(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx);
         }
-        return diffuseTex.SampleGrad(diffuseSampler, uv, duDx, duDy).a;
+        return SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy).a;
     }
 
     if (TerrainLayerUsesExplicitHeight(layer))
@@ -423,7 +424,7 @@ float TerrainSampleLayerHeight(
                 duDy,
                 stochasticScale,
                 blendCurve);
-            return TerrainSampleMikkelsenHeight(heightTex, heightSampler, ctx);
+            return TerrainSampleMikkelsenHeight(heightTex, heightSampler, layer.heightStreamingTextureID, ctx);
         }
         if (terrainStochasticHeightEnabled &&
             terrainGaussianStochasticEnabled &&
@@ -444,7 +445,7 @@ float TerrainSampleLayerHeight(
                 blendCurve);
             return TerrainSampleStochasticHeight(stochasticLayer, ctx, heightSampler);
         }
-        return heightTex.SampleGrad(heightSampler, uv, duDx, duDy).r;
+        return SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy).r;
     }
 
     return 1.0f;
@@ -538,12 +539,19 @@ float3 TerrainParallaxCoordsAndHeight(
 float3 TerrainSampleStochasticNormalDerivative(
     Texture2D<float4> normalTex,
     SamplerState normalSampler,
+    uint streamingTextureID,
     TerrainStochasticContext ctx,
     uint3 normalChannels)
 {
-    float3 n0 = TerrainDecodeNormal(normalTex.SampleGrad(normalSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy), normalChannels);
-    float3 n1 = TerrainDecodeNormal(normalTex.SampleGrad(normalSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy), normalChannels);
-    float3 n2 = TerrainDecodeNormal(normalTex.SampleGrad(normalSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy), normalChannels);
+    float3 n0 = TerrainDecodeNormal(
+        SampleMaterialTexture2DGrad(normalTex, normalSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy),
+        normalChannels);
+    float3 n1 = TerrainDecodeNormal(
+        SampleMaterialTexture2DGrad(normalTex, normalSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy),
+        normalChannels);
+    float3 n2 = TerrainDecodeNormal(
+        SampleMaterialTexture2DGrad(normalTex, normalSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy),
+        normalChannels);
 
     float2 d0 = TerrainNormalToDerivative(n0);
     float2 d1 = TerrainNormalToDerivative(n1);
@@ -916,7 +924,7 @@ void ApplyTerrainMaterialInternal(
         {
             Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
             SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-            layerBaseColor = TerrainSampleMikkelsenDiffuse(diffuseTex, diffuseSampler, stochasticContext);
+            layerBaseColor = TerrainSampleMikkelsenDiffuse(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, stochasticContext);
         }
         else if (terrainStochasticDiffuseEnabled &&
             terrainGaussianStochasticEnabled &&
@@ -935,7 +943,7 @@ void ApplyTerrainMaterialInternal(
         {
             Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
             SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-            layerBaseColor = diffuseTex.SampleGrad(diffuseSampler, layerUv, layerDUdx, layerDUdy).rgb;
+            layerBaseColor = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, layerUv, layerDUdx, layerDUdy, inputs).rgb;
         }
         blendedBaseColor += layerBaseColor * weight;
 
@@ -947,7 +955,7 @@ void ApplyTerrainMaterialInternal(
         {
             Texture2D<float4> normalTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
             SamplerState normalSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
-            layerNormalTS = TerrainSampleStochasticNormalDerivative(normalTex, normalSampler, stochasticContext, layer.normalChannels);
+            layerNormalTS = TerrainSampleStochasticNormalDerivative(normalTex, normalSampler, layer.normalStreamingTextureID, stochasticContext, layer.normalChannels);
         }
         else if (terrainStochasticNormalEnabled &&
             terrainGaussianStochasticEnabled &&
@@ -969,7 +977,9 @@ void ApplyTerrainMaterialInternal(
         {
             Texture2D<float4> normalTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
             SamplerState normalSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
-            layerNormalTS = TerrainDecodeNormal(normalTex.SampleGrad(normalSampler, layerUv, layerDUdx, layerDUdy), layer.normalChannels);
+            layerNormalTS = TerrainDecodeNormal(
+                SampleMaterialTexture2DGrad(normalTex, normalSampler, layer.normalStreamingTextureID, layerUv, layerDUdx, layerDUdy, inputs),
+                layer.normalChannels);
         }
         blendedNormalTS += layerNormalTS * weight;
     }

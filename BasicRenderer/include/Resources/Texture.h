@@ -62,6 +62,7 @@ struct TextureProcessingSettings {
     bool requestMipChain = false;
     bool requestBlockCompression = false;
     bool allowAsyncPlaceholder = false;
+    bool allowCpuBootstrapBeforeAsyncProcessing = false;
     bool preferSRGB = false;
     bool preservePackedChannels = false;
     NormalMapConvention normalConvention = NormalMapConvention::DirectX;
@@ -245,7 +246,7 @@ public:
             std::move(meta)
 		));
     }
-    
+
 	// Resolve to a vector of bytes
     const BytesList& ResolveToBytes() const
     {
@@ -312,6 +313,7 @@ public:
     uint32_t GetFullMip0Height() const { return m_sourceFullHeight != 0u ? m_sourceFullHeight : GetHeight(); }
     bool ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0, bool forceResidencyChange = false);
     void EnableMipStreaming(bool enabled);
+    void SetMipStreamingSuppressed(bool suppressed);
 
     void AdoptUploadedImage(std::shared_ptr<PixelBuffer> image);
     void RecordLoadPath(TextureLoadPathTelemetry path, std::string detail = {});
@@ -364,7 +366,7 @@ private:
             m_originalSourceBytes = std::get<BytesList>(m_initialStorage);
         }
         RefreshStreamingStateFromDescription();
-        if (m_streamingState.eligible && IsMaterialTextureStreamingEnabledSetting()) {
+        if (m_streamingState.eligible && !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting()) {
             m_streamingState.enabled = true;
 			ApplyStreamingBootstrapTopMip();
             InvalidateResidentImageForStreamingRequest();
@@ -378,6 +380,7 @@ private:
     std::shared_ptr<TextureReloadJobHandle> m_reloadHandle;
     std::shared_ptr<TextureDirectStorageReloadJobHandle> m_directStorageReloadHandle;
     TextureStreamingState m_streamingState;
+    bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;
     uint32_t m_sourceFullHeight = 0;

@@ -15,6 +15,8 @@
 #include "Resources/Texture.h"
 
 class TextureFactory;
+class MaterialManager;
+class TextureStreamingManager;
 
 inline constexpr float kDefaultTerrainLayerUvScale = 24.0f / 4096.0f;
 inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
@@ -87,7 +89,7 @@ class TerrainManager : public IResourceProvider
 public:
     static std::unique_ptr<TerrainManager> CreateUnique();
 
-    std::uint32_t SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory);
+    std::uint32_t SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager = nullptr);
     void ClearActiveTerrain();
 
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -97,6 +99,15 @@ public:
 
 private:
     TerrainManager();
+    enum class TerrainTextureSlot : std::uint8_t {
+        Diffuse,
+        Normal,
+        Height
+    };
+    void RefreshTerrainLayerTextureBinding(
+        std::uint32_t layerIndex,
+        TerrainTextureSlot slot,
+        const std::shared_ptr<TextureAsset>& texture);
 
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerGPU>> m_layers;
@@ -106,4 +117,7 @@ private:
     std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_weightBlocks;
     std::shared_ptr<ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
+    std::vector<TerrainLayerGPU> m_layerData;
+    std::vector<std::uint64_t> m_streamingBindingIDs;
+    TextureStreamingManager* m_textureStreamingManager = nullptr;
 };

@@ -406,6 +406,10 @@ struct TerrainLayerInfo {
     uint normalSamplerIndex;
     uint heightTextureIndex;
     uint heightSamplerIndex;
+    uint diffuseStreamingTextureID;
+    uint normalStreamingTextureID;
+    uint heightStreamingTextureID;
+    uint pad0;
     uint3 normalChannels;
     uint flags;
     float4 fallbackColor;

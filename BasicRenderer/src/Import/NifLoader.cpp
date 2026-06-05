@@ -624,6 +624,7 @@ void WriteTextureProcessingSettings(BinaryWriter& writer, const TextureProcessin
     writer.Pod(settings.requestMipChain);
     writer.Pod(settings.requestBlockCompression);
     writer.Pod(settings.allowAsyncPlaceholder);
+    writer.Pod(settings.allowCpuBootstrapBeforeAsyncProcessing);
     writer.Pod(settings.preferSRGB);
     writer.Pod(settings.preservePackedChannels);
     writer.Pod(static_cast<std::uint32_t>(settings.normalConvention));
@@ -639,6 +640,7 @@ bool ReadTextureProcessingSettings(BinaryReader& reader, TextureProcessingSettin
         !reader.Pod(settings.requestMipChain) ||
         !reader.Pod(settings.requestBlockCompression) ||
         !reader.Pod(settings.allowAsyncPlaceholder) ||
+        !reader.Pod(settings.allowCpuBootstrapBeforeAsyncProcessing) ||
         !reader.Pod(settings.preferSRGB) ||
         !reader.Pod(settings.preservePackedChannels) ||
         !reader.Pod(normalConvention) ||

@@ -303,13 +303,17 @@ struct TerrainLayerGPU {
     unsigned int normalSamplerIndex;
     unsigned int heightTextureIndex;
     unsigned int heightSamplerIndex;
+    unsigned int diffuseStreamingTextureID;
+    unsigned int normalStreamingTextureID;
+    unsigned int heightStreamingTextureID;
+    unsigned int pad0;
     DirectX::XMUINT3 normalChannels;
     unsigned int flags;
     DirectX::XMFLOAT4 fallbackColor;
     float uvScale;
     unsigned int stochasticLayerIndex;
     float heightScale;
-    float pad0;
+    float pad1;
 };
 
 struct TerrainStochasticLayerGPU {

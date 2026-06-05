@@ -1128,10 +1128,14 @@ void TextureAsset::RefreshStreamingStateFromDescription() {
 
 	m_streamingState.eligible = m_meta.processing.isParticipatingMaterialTexture && totalMipCount > 1u && HasStreamingSourceData();
 	if (!wasEligible && m_streamingState.eligible) {
-		m_streamingState.enabled = IsMaterialTextureStreamingEnabledSetting();
+		m_streamingState.enabled = !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting();
 	}
 	else {
-		m_streamingState.enabled = m_streamingState.enabled && m_streamingState.eligible && IsMaterialTextureStreamingEnabledSetting();
+		m_streamingState.enabled =
+			m_streamingState.enabled &&
+			m_streamingState.eligible &&
+			!m_suppressMipStreaming &&
+			IsMaterialTextureStreamingEnabledSetting();
 	}
 	m_streamingState.residency.totalMipCount = totalMipCount;
 	m_streamingState.residency.residentTopMip = (std::min)(m_streamingState.residency.residentTopMip, totalMipCount - 1u);
@@ -1340,7 +1344,7 @@ void TextureAsset::SetProcessingSettings(TextureProcessingSettings settings) {
 	m_meta.processing = std::move(settings);
 	RefreshStreamingStateFromDescription();
 	if (m_streamingState.eligible) {
-		m_streamingState.enabled = IsMaterialTextureStreamingEnabledSetting();
+		m_streamingState.enabled = !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting();
 		if (!wasEligible) {
 			ApplyStreamingBootstrapTopMip();
 		}
@@ -1448,7 +1452,7 @@ bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIn
 }
 
 void TextureAsset::EnableMipStreaming(bool enabled) {
-	const bool newEnabled = enabled && m_streamingState.eligible && IsMaterialTextureStreamingEnabledSetting();
+	const bool newEnabled = enabled && !m_suppressMipStreaming && m_streamingState.eligible && IsMaterialTextureStreamingEnabledSetting();
 	if (m_streamingState.enabled == newEnabled) {
 		return;
 	}
@@ -1458,6 +1462,21 @@ void TextureAsset::EnableMipStreaming(bool enabled) {
 	}
 	BumpStreamingStateRevision();
 	InvalidateResidentImageForStreamingRequest();
+}
+
+void TextureAsset::SetMipStreamingSuppressed(bool suppressed) {
+	if (m_suppressMipStreaming == suppressed) {
+		return;
+	}
+	m_suppressMipStreaming = suppressed;
+	if (m_suppressMipStreaming && m_streamingState.enabled) {
+		m_streamingState.enabled = false;
+		BumpStreamingStateRevision();
+		InvalidateResidentImageForStreamingRequest();
+	}
+	else if (!m_suppressMipStreaming) {
+		EnableMipStreaming(true);
+	}
 }
 
 void TextureAsset::SetRequestedTopMip(uint32_t topMip, uint64_t frameIndex) {
@@ -1599,7 +1618,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 	const uint32_t desiredResidentTopMip = GetDesiredResidentTopMip();
 	const bool isParticipatingMaterialTexture = m_meta.processing.isParticipatingMaterialTexture;
 	const bool useConditionedCacheResidency =
-		IsMaterialTextureStreamingEnabledSetting() &&
+		m_streamingState.enabled &&
 		isParticipatingMaterialTexture &&
 		DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu);
 	auto ensureProcessingPlaceholder = [&](const std::string& detail) {
@@ -1950,6 +1969,26 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			ensureProcessingPlaceholder("async reload source build pending; placeholder texture uploaded");
 
 			return;
+		}
+
+		if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !HasUsableImage() && sourceData) {
+			if (!m_processingHandle) {
+				try {
+					m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(BuildProcessingSourceData(), m_meta);
+				}
+				catch (const std::exception& ex) {
+					spdlog::warn(
+						"TextureAsset: failed to queue async processing while bootstrapping '{}': {}",
+						TextureTelemetryLabel(*this),
+						ex.what());
+				}
+			}
+			if (uploadSourceDataThroughFactory(
+					sourceData,
+					TextureUploadPathTelemetry::CpuImmediateUpload,
+					"texture data uploaded through TextureFactory as bootstrap while async processing/cache preparation continues")) {
+				return;
+			}
 		}
 
 		const auto processingSourceData = BuildProcessingSourceData();

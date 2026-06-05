@@ -5,6 +5,7 @@
 #include <chrono>
 
 #include "Materials/Material.h"
+#include "Managers/TextureStreamingManager.h"
 #include "Interfaces/IResourceProvider.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/ResourceGroup.h"
@@ -16,18 +17,6 @@ class IReadbackService;
 }
 
 class TextureFactory;
-
-struct MaterialTextureStreamingStats {
-	uint32_t uniqueMaterialTextureCount = 0;
-	uint32_t uniqueStreamableTextureCount = 0;
-	uint32_t uniqueStreamingEnabledTextureCount = 0;
-	uint32_t fullResolutionResidentTextureCount = 0;
-	uint32_t streamableFullResolutionResidentTextureCount = 0;
-	uint32_t pendingReloadTextureCount = 0;
-	uint64_t totalResidentBytes = 0;
-	uint64_t streamableResidentBytes = 0;
-	std::vector<uint32_t> residentTopMipHistogram = {};
-};
 
 // Manages buffers for per-material-compile-flag work (e.g., visibility buffer per-material)
 class MaterialManager : public IResourceProvider {
@@ -46,6 +35,8 @@ public:
 	void ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory);
 	void RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService);
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
+	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
+	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }
 
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
@@ -83,15 +74,10 @@ private:
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
 	void RefreshMaterialTextureUsage(const Material& material);
 	void UpdateTrackedMaterialTextureRefs(const std::vector<std::shared_ptr<Resource>>& textures, int delta);
-	void TrackMaterialTextureAssets(const Material& material, int delta);
-	void UpdateTextureStreamingMetadata(const Material& material);
-	void UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture);
-	void MarkTextureStreamingMetadataDirty(const std::shared_ptr<TextureAsset>& texture, bool needsUploadAdvance = false, const char* reason = "unknown");
-	void RecordTextureDirtyReason(const char* reason);
+	void TrackMaterialTextureAssets(const Material& material, int delta, TextureFactory* textureFactory = nullptr);
 	void FlushDirtyMaterial(Material& material, TextureFactory* textureFactory = nullptr);
-	void FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture);
-	void EnsureTextureUploadAdvanced(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
+	std::vector<std::shared_ptr<Resource>> CollectActiveMaterialTextureResources() const;
 
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
@@ -99,8 +85,7 @@ private:
 	std::unordered_map<uint64_t, uint32_t> m_materialTextureUsageCounts;
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
-	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialStreamingTextureIDs;
-	std::unordered_map<uint32_t, std::unordered_set<uint32_t>> m_streamingTextureMaterialIDs;
+	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map <MaterialCompileFlags, unsigned int> m_compileFlagsSlotMapping;
 	std::atomic<unsigned int> m_nextCompileFlagsSlot;
 	std::vector<unsigned int> m_freeCompileFlagsSlots;
@@ -147,27 +132,8 @@ private:
 	std::shared_ptr<DynamicStructuredBuffer<PerMaterialCB>> m_perMaterialDataBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<PerMaterialEvalCB>> m_perMaterialEvalDataBuffer;
 	std::shared_ptr<DynamicStructuredBuffer<PerMaterialOpenPBRCB>> m_perMaterialOpenPBRDataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<TextureStreamingGPUInfo>> m_textureStreamingMetadataBuffer;
-	std::shared_ptr<DynamicStructuredBuffer<uint32_t>> m_textureStreamingFeedbackBuffer;
-	std::unordered_map<uint64_t, std::weak_ptr<TextureAsset>> m_materialTextureAssetsByImageResourceID;
-	std::unordered_map<uint32_t, std::weak_ptr<TextureAsset>> m_streamingTexturesByID;
-	std::unordered_map<uint32_t, uint64_t> m_textureStreamingMetadataRevisions;
-	std::vector<uint32_t> m_activeTextureStreamingFeedbackIDs;
-	std::unordered_set<uint32_t> m_activeTextureStreamingFeedbackIDSet;
-	std::mutex m_textureStreamingFeedbackMutex;
-	std::vector<std::pair<uint32_t, uint32_t>> m_pendingTextureStreamingFeedback;
+	std::unique_ptr<TextureStreamingManager> m_textureStreamingManager;
 	std::vector<uint32_t> m_dirtyMaterialIDs;
 	std::unordered_set<uint32_t> m_dirtyMaterialIDSet;
-	std::vector<uint32_t> m_dirtyTextureStreamingIDs;
-	std::unordered_set<uint32_t> m_dirtyTextureStreamingIDSet;
-	std::vector<uint32_t> m_texturesNeedingUploadAdvance;
-	std::unordered_set<uint32_t> m_texturesNeedingUploadAdvanceSet;
 	std::chrono::steady_clock::time_point m_lastMaterialUpdateStatsLog = {};
-	uint64_t m_textureDirtyReasonFeedback = 0;
-	uint64_t m_textureDirtyReasonIdleCoarsen = 0;
-	uint64_t m_textureDirtyReasonTrackMaterial = 0;
-	uint64_t m_textureDirtyReasonUploadStateRevision = 0;
-	uint64_t m_textureDirtyReasonUploadPending = 0;
-	uint64_t m_textureDirtyReasonOther = 0;
-	uint32_t m_textureStreamingMetadataCapacity = 1u;
 };

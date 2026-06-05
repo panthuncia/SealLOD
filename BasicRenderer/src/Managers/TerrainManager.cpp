@@ -1,6 +1,7 @@
 #include "Managers/TerrainManager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <limits>
 #include <unordered_map>
@@ -9,6 +10,8 @@
 
 #include "../generated/BuiltinResources.h"
 #include "Factories/TextureFactory.h"
+#include "Managers/MaterialManager.h"
+#include "Managers/TextureStreamingManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
@@ -145,6 +148,7 @@ namespace {
     bool UploadTerrainTexture(
         const std::shared_ptr<TextureAsset>& texture,
         TextureFactory* textureFactory,
+        MaterialManager* materialManager,
         std::shared_ptr<ResourceGroup>& textureGroup,
         std::vector<std::shared_ptr<TextureAsset>>& retainedTextures,
         bool generateMipmaps,
@@ -159,16 +163,70 @@ namespace {
 
         texture->SetGenerateMipmaps(generateMipmaps);
         if (textureFactory) {
-            texture->EnsureUploaded(*textureFactory);
+            if (materialManager) {
+                materialManager->RegisterStreamingTexture(texture, *textureFactory);
+            }
+            else {
+                texture->EnsureUploaded(*textureFactory);
+            }
         }
         if (auto image = texture->ImagePtr()) {
             textureIndex = image->GetSRVInfo(0).slot.index;
             samplerIndex = texture->SamplerDescriptorIndex();
+            if (texture->IsUsingFallbackImage()) {
+                static std::atomic_uint32_t fallbackImageWarningCount{ 0 };
+                const uint32_t warningIndex = fallbackImageWarningCount.fetch_add(1, std::memory_order_relaxed);
+                if (warningIndex < 64u) {
+                    const auto info = texture->GetPendingDebugInfo();
+                    spdlog::warn(
+                        "TerrainManager: terrain texture bound fallback image label='{}' source='{}' file='{}' streamingID={} textureIndex={} samplerIndex={} requestedTopMip={} pendingTopMip={} residentTopMip={} hasPlaceholder={} processing={} reload={} directStorage={}",
+                        info.label,
+                        info.sourceIdentity,
+                        info.filePath,
+                        info.streamingTextureID,
+                        textureIndex,
+                        samplerIndex,
+                        info.requestedTopMip,
+                        info.pendingTopMip,
+                        info.residentTopMip,
+                        info.hasPlaceholder,
+                        info.processingState,
+                        info.reloadState,
+                        info.directStorageState);
+                }
+            }
             textureGroup->AddResource(image);
             retainedTextures.push_back(texture);
             return true;
         }
+        static std::atomic_uint32_t missingImageWarningCount{ 0 };
+        const uint32_t warningIndex = missingImageWarningCount.fetch_add(1, std::memory_order_relaxed);
+        if (warningIndex < 64u) {
+            const auto info = texture->GetPendingDebugInfo();
+            spdlog::warn(
+                "TerrainManager: terrain texture has no image after upload/register label='{}' source='{}' file='{}' initial='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} residentMipCount={} totalMipCount={} hasFinal={} hasPlaceholder={} processing={} reload={} directStorage={}",
+                info.label,
+                info.sourceIdentity,
+                info.filePath,
+                info.initialData,
+                info.streamingTextureID,
+                info.requestedTopMip,
+                info.pendingTopMip,
+                info.residentTopMip,
+                info.residentMipCount,
+                info.totalMipCount,
+                info.hasFinalImage,
+                info.hasPlaceholder,
+                info.processingState,
+                info.reloadState,
+                info.directStorageState);
+        }
         return false;
+    }
+
+    std::uint32_t TerrainStreamingTextureID(const std::shared_ptr<TextureAsset>& texture)
+    {
+        return texture ? texture->GetStreamingTextureID() : 0u;
     }
 
 }
@@ -201,10 +259,11 @@ TerrainManager::TerrainManager()
     m_weightBlocks->UpdateAt(0u, MakeFallbackWeightBlock());
 }
 
-std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory)
+std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager)
 {
     const auto totalBegin = std::chrono::steady_clock::now();
     ClearActiveTerrain();
+    m_textureStreamingManager = materialManager ? materialManager->GetTextureStreamingManager() : nullptr;
 
     const auto denseBegin = std::chrono::steady_clock::now();
     std::int32_t minRegionX = 0;
@@ -225,6 +284,12 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     stochasticLayers.reserve(desc.layers.size());
     std::uint32_t snowLayerCount = 0;
     std::uint32_t stochasticLayerCount = 0;
+    struct PendingTerrainTextureBinding {
+        std::uint32_t layerIndex = 0;
+        TerrainTextureSlot slot = TerrainTextureSlot::Diffuse;
+        std::shared_ptr<TextureAsset> texture;
+    };
+    std::vector<PendingTerrainTextureBinding> pendingTextureBindings;
     const auto layersBegin = std::chrono::steady_clock::now();
     for (std::uint32_t i = 0; i < layerCount; ++i) {
         TerrainLayerGPU layer = MakeFallbackLayer();
@@ -239,14 +304,20 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             UploadTerrainTexture(
                 source.diffuse,
                 textureFactory,
+                nullptr,
                 m_textureGroup,
                 m_layerTextures,
                 true,
                 layer.diffuseTextureIndex,
                 layer.diffuseSamplerIndex);
+            layer.diffuseStreamingTextureID = TerrainStreamingTextureID(source.diffuse);
+            if (source.diffuse) {
+                pendingTextureBindings.push_back({ i, TerrainTextureSlot::Diffuse, source.diffuse });
+            }
             if (UploadTerrainTexture(
                     source.normal,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -254,14 +325,23 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                     layer.normalSamplerIndex)) {
                 layer.normalChannels = NormalChannelsForTexture(source.normal);
             }
+            layer.normalStreamingTextureID = TerrainStreamingTextureID(source.normal);
+            if (source.normal) {
+                pendingTextureBindings.push_back({ i, TerrainTextureSlot::Normal, source.normal });
+            }
             UploadTerrainTexture(
                 source.height,
                 textureFactory,
+                nullptr,
                 m_textureGroup,
                 m_layerTextures,
                 true,
                 layer.heightTextureIndex,
                 layer.heightSamplerIndex);
+            layer.heightStreamingTextureID = TerrainStreamingTextureID(source.height);
+            if (source.height) {
+                pendingTextureBindings.push_back({ i, TerrainTextureSlot::Height, source.height });
+            }
 
             TerrainStochasticLayerGPU stochastic = MakeFallbackStochasticLayer();
             stochastic.stochasticScale = source.stochastic.scale > 0.0f
@@ -273,6 +353,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.diffuse.gaussian,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -285,6 +366,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.diffuse.inverseLut,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -329,6 +411,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.normal.gaussian,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -341,6 +424,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.normal.inverseLut,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -359,6 +443,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.height.gaussian,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     true,
@@ -371,6 +456,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             if (UploadTerrainTexture(
                     source.stochastic.height.inverseLut,
                     textureFactory,
+                    nullptr,
                     m_textureGroup,
                     m_layerTextures,
                     false,
@@ -395,7 +481,26 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         }
         layers.push_back(layer);
     }
-    m_layers->ReplaceData(std::move(layers));
+    m_layerData = std::move(layers);
+    m_layers->ReplaceData(m_layerData);
+    if (m_textureStreamingManager && textureFactory) {
+        m_streamingBindingIDs.reserve(pendingTextureBindings.size());
+        for (const auto& pending : pendingTextureBindings) {
+            const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
+                pending.texture,
+                *textureFactory,
+                [this,
+                 layerIndex = pending.layerIndex,
+                 slot = pending.slot,
+                 texture = pending.texture](TextureAsset&) {
+                    RefreshTerrainLayerTextureBinding(layerIndex, slot, texture);
+                },
+                "terrain-layer:" + std::to_string(pending.layerIndex));
+            if (bindingID != 0u) {
+                m_streamingBindingIDs.push_back(bindingID);
+            }
+        }
+    }
     const auto layersEnd = std::chrono::steady_clock::now();
 
     if (stochasticLayers.empty()) {
@@ -470,8 +575,77 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     return 0u;
 }
 
+void TerrainManager::RefreshTerrainLayerTextureBinding(
+    std::uint32_t layerIndex,
+    TerrainTextureSlot slot,
+    const std::shared_ptr<TextureAsset>& texture)
+{
+    if (!texture || layerIndex >= m_layerData.size()) {
+        return;
+    }
+
+    auto image = texture->ImagePtr();
+    if (!image) {
+        return;
+    }
+    if (texture->IsUsingFallbackImage()) {
+        static std::atomic_uint32_t fallbackRefreshWarningCount{ 0 };
+        const uint32_t warningIndex = fallbackRefreshWarningCount.fetch_add(1, std::memory_order_relaxed);
+        if (warningIndex < 64u) {
+            const auto info = texture->GetPendingDebugInfo();
+            spdlog::warn(
+                "TerrainManager: terrain texture refresh still using fallback image layer={} slot={} label='{}' source='{}' file='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} hasPlaceholder={} processing={} reload={} directStorage={}",
+                layerIndex,
+                static_cast<std::uint32_t>(slot),
+                info.label,
+                info.sourceIdentity,
+                info.filePath,
+                info.streamingTextureID,
+                info.requestedTopMip,
+                info.pendingTopMip,
+                info.residentTopMip,
+                info.hasPlaceholder,
+                info.processingState,
+                info.reloadState,
+                info.directStorageState);
+        }
+    }
+
+    TerrainLayerGPU& layer = m_layerData[layerIndex];
+    const std::uint32_t textureIndex = image->GetSRVInfo(0).slot.index;
+    const std::uint32_t samplerIndex = texture->SamplerDescriptorIndex();
+    const std::uint32_t streamingTextureID = texture->GetStreamingTextureID();
+    switch (slot) {
+    case TerrainTextureSlot::Diffuse:
+        layer.diffuseTextureIndex = textureIndex;
+        layer.diffuseSamplerIndex = samplerIndex;
+        layer.diffuseStreamingTextureID = streamingTextureID;
+        break;
+    case TerrainTextureSlot::Normal:
+        layer.normalTextureIndex = textureIndex;
+        layer.normalSamplerIndex = samplerIndex;
+        layer.normalStreamingTextureID = streamingTextureID;
+        layer.normalChannels = NormalChannelsForTexture(texture);
+        break;
+    case TerrainTextureSlot::Height:
+        layer.heightTextureIndex = textureIndex;
+        layer.heightSamplerIndex = samplerIndex;
+        layer.heightStreamingTextureID = streamingTextureID;
+        break;
+    }
+
+    m_textureGroup->AddResource(image);
+    m_layerTextures.push_back(texture);
+    m_layers->UpdateAt(layerIndex, layer);
+}
+
 void TerrainManager::ClearActiveTerrain()
 {
+    if (m_textureStreamingManager) {
+        m_textureStreamingManager->UnregisterTextureBindings(m_streamingBindingIDs);
+    }
+    m_streamingBindingIDs.clear();
+    m_textureStreamingManager = nullptr;
     if (m_textureGroup) {
         for (auto& texture : m_layerTextures) {
             if (texture && texture->ImagePtr()) {
@@ -480,6 +654,7 @@ void TerrainManager::ClearActiveTerrain()
         }
     }
     m_layerTextures.clear();
+    m_layerData.clear();
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
     m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());
