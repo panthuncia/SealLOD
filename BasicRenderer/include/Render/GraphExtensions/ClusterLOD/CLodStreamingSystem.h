@@ -117,7 +117,9 @@ private:
     void PollCompletedReadbackSlots();
     void StreamingWorkerMain();
     void ProcessStreamingRequestsBudgeted();
-    void PrepareStreamingFrameWork();
+    void RequestStreamingFrameWork();
+    void PublishStreamingFrameWorkForFrame();
+    void RunStreamingServiceWorkOnWorker();
     bool EnsureParallelSortResources();
     void DestroyParallelSortResources();
 
@@ -283,11 +285,22 @@ private:
     std::vector<uint32_t> m_pendingStreamingRequestGenerationByGroup;
     CLodPriorityMode m_priorityMode = CLodPriorityMode::Max;
     bool m_streamingDomainDirty = true;
-    bool m_streamingFrameWorkPrepared = false;
     uint64_t m_streamingDiagnosticTick = 0;
     std::unordered_map<uint32_t, uint64_t> m_lastInProgressSuppressionLogTick;
 
     MeshManager::CLodStreamingDomainSnapshot m_cachedDomainSnapshot;
+
+    // Worker-owned streaming residency state is protected by this mutex when
+    // the main thread publishes upload snapshots or handles registry resets.
+    std::mutex m_streamingServiceMutex;
+    std::atomic<bool> m_streamingServiceRequested{true};
+    std::atomic<bool> m_streamingServiceRunning{false};
+    std::atomic<uint64_t> m_streamingServiceRequestCounter{0};
+    uint64_t m_streamingServicePublishedGeneration = 0;
+    std::mutex m_streamingPublishMutex;
+    std::vector<uint32_t> m_publishedActiveGroupsBits;
+    uint32_t m_publishedActiveGroupScanCount = 0;
+    bool m_publishedActiveGroupsBitsUploadPending = true;
 
     // Self-managed readback pipeline 
     // Dedicated fence signalled when a readback copy completes on the copy queue.

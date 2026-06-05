@@ -71,22 +71,17 @@ namespace {
 
     class CLodStructuralStreamingUploadPass final : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
     public:
-        using PrepareFrameWorkFn = std::function<void()>;
         using ConsumeUploadsFn = std::function<std::vector<StreamingUploadDescriptor>()>;
         using MakePoolResolverFn = std::function<std::unique_ptr<IResourceResolver>()>;
 
         CLodStructuralStreamingUploadPass(
-            PrepareFrameWorkFn prepareFrameWork,
             ConsumeUploadsFn consumeUploads,
             MakePoolResolverFn makePoolResolver)
-            : m_prepareFrameWork(std::move(prepareFrameWork))
-            , m_consumeUploads(std::move(consumeUploads))
+            : m_consumeUploads(std::move(consumeUploads))
             , m_makePoolResolver(std::move(makePoolResolver)) {}
 
         bool DeclaredResourcesChanged() const override {
-            if (m_prepareFrameWork) {
-                m_prepareFrameWork();
-            }
+            ZoneScopedN("CLodStructuralStreamingUploadPass::DeclaredResourcesChanged::SnapshotOnly");
 
             if (!m_uploadSnapshotValid) {
                 m_uploadSnapshot = m_consumeUploads ? m_consumeUploads() : std::vector<StreamingUploadDescriptor>{};
@@ -131,7 +126,6 @@ namespace {
         void Cleanup() override {}
 
     private:
-        PrepareFrameWorkFn m_prepareFrameWork;
         ConsumeUploadsFn m_consumeUploads;
         MakePoolResolverFn m_makePoolResolver;
         mutable std::vector<StreamingUploadDescriptor> m_uploadSnapshot;
@@ -143,22 +137,17 @@ namespace {
 
     class CLodStructuralAsyncUploadPass final : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
     public:
-        using PrepareFrameWorkFn = std::function<void()>;
         using GetUploadInstanceFn = std::function<UploadInstance*()>;
         using MakePoolResolverFn = std::function<std::unique_ptr<IResourceResolver>()>;
 
         CLodStructuralAsyncUploadPass(
-            PrepareFrameWorkFn prepareFrameWork,
             GetUploadInstanceFn getUploadInstance,
             MakePoolResolverFn makePoolResolver)
-            : m_prepareFrameWork(std::move(prepareFrameWork))
-            , m_getUploadInstance(std::move(getUploadInstance))
+            : m_getUploadInstance(std::move(getUploadInstance))
             , m_makePoolResolver(std::move(makePoolResolver)) {}
 
         bool DeclaredResourcesChanged() const override {
-            if (m_prepareFrameWork) {
-                m_prepareFrameWork();
-            }
+            ZoneScopedN("CLodStructuralAsyncUploadPass::DeclaredResourcesChanged::SnapshotOnly");
 
             CLodAsyncUploadInputs nextInputs{};
             nextInputs.uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
@@ -199,7 +188,6 @@ namespace {
         void Cleanup() override {}
 
     private:
-        PrepareFrameWorkFn m_prepareFrameWork;
         GetUploadInstanceFn m_getUploadInstance;
         MakePoolResolverFn m_makePoolResolver;
         mutable CLodAsyncUploadInputs m_inputs;
@@ -220,22 +208,17 @@ namespace {
 
     class CLodStructuralStreamingReadbackCopyPass final : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
     public:
-        using PrepareFrameWorkFn = std::function<void()>;
         using TryAcquireSnapshotFn = std::function<bool(CLodStreamingReadbackSnapshot&)>;
         using CompleteSnapshotFn = std::function<PassReturn(uint32_t)>;
 
         CLodStructuralStreamingReadbackCopyPass(
-            PrepareFrameWorkFn prepareFrameWork,
             TryAcquireSnapshotFn tryAcquireSnapshot,
             CompleteSnapshotFn completeSnapshot)
-            : m_prepareFrameWork(std::move(prepareFrameWork))
-            , m_tryAcquireSnapshot(std::move(tryAcquireSnapshot))
+            : m_tryAcquireSnapshot(std::move(tryAcquireSnapshot))
             , m_completeSnapshot(std::move(completeSnapshot)) {}
 
         bool DeclaredResourcesChanged() const override {
-            if (m_prepareFrameWork) {
-                m_prepareFrameWork();
-            }
+            ZoneScopedN("CLodStructuralStreamingReadbackCopyPass::DeclaredResourcesChanged::SnapshotOnly");
 
             CLodStreamingReadbackSnapshot nextSnapshot{};
             const bool armed = m_tryAcquireSnapshot && m_tryAcquireSnapshot(nextSnapshot);
@@ -309,7 +292,6 @@ namespace {
             }
         }
 
-        PrepareFrameWorkFn m_prepareFrameWork;
         TryAcquireSnapshotFn m_tryAcquireSnapshot;
         CompleteSnapshotFn m_completeSnapshot;
         mutable CLodStreamingReadbackSnapshot m_snapshot;
@@ -816,6 +798,7 @@ CLodStreamingSystem::~CLodStreamingSystem() {
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     (void)reg;
+    std::lock_guard serviceLock(m_streamingServiceMutex);
 
     auto releaseBufferBacking = [](const std::shared_ptr<Buffer>& buffer) {
         if (buffer) {
@@ -928,6 +911,13 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_streamingActiveGroupScanCount = 0u;
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
+    {
+        std::lock_guard publishLock(m_streamingPublishMutex);
+        m_publishedActiveGroupsBits.clear();
+        m_publishedActiveGroupScanCount = 0u;
+        m_publishedActiveGroupsBitsUploadPending = true;
+    }
+    m_streamingServicePublishedGeneration = 0;
     m_streamingDomainDirty = true;
 
     // Discard any stale decoded readback data from the worker thread.
@@ -938,11 +928,15 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     }
 
     // Clear in-flight flags so the worker thread doesn't process stale readback data.
-    for (auto& slot : m_readbackStagingSlots) {
-        slot.inFlight = false;
-        slot.fenceValue = 0;
+    {
+        std::lock_guard workerLock(m_streamingWorkerMutex);
+        for (auto& slot : m_readbackStagingSlots) {
+            slot.inFlight = false;
+            slot.fenceValue = 0;
+        }
+        m_readbackStagingCursor = 0;
     }
-    m_readbackStagingCursor = 0;
+    m_streamingServiceRequested.store(true, std::memory_order_release);
 }
 
 void CLodStreamingSystem::Initialize(RenderGraph& rg) {
@@ -960,28 +954,85 @@ void CLodStreamingSystem::Initialize(RenderGraph& rg) {
     EnsureParallelSortResources();
 }
 
-void CLodStreamingSystem::PrepareStreamingFrameWork() {
-    if (m_streamingFrameWorkPrepared) {
+void CLodStreamingSystem::RequestStreamingFrameWork() {
+    ZoneScopedN("CLodStreamingSystem::RequestStreamingFrameWork");
+    m_streamingServiceRequested.store(true, std::memory_order_release);
+    TracyPlot("CLodStreaming.Service.RequestGeneration", static_cast<int64_t>(
+        m_streamingServiceRequestCounter.fetch_add(1, std::memory_order_acq_rel) + 1));
+    m_streamingWorkerCV.notify_one();
+}
+
+void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
+    ZoneScopedN("CLodStreamingSystem::PublishStreamingFrameWorkForFrame");
+    if (m_streamingServiceRunning.load(std::memory_order_acquire)) {
+        TracyPlot("CLodStreaming.Service.SkippedPublishWorkerRunning", static_cast<int64_t>(1));
+    }
+
+    std::unique_lock serviceLock(m_streamingServiceMutex, std::try_to_lock);
+    if (!serviceLock.owns_lock()) {
+        TracyPlot("CLodStreaming.Service.SkippedPublishLockBusy", static_cast<int64_t>(1));
         return;
     }
-    m_streamingFrameWorkPrepared = true;
+    if (m_publishedActiveGroupsBitsUploadPending || m_streamingActiveGroupsBitsUploadPending) {
+        std::lock_guard publishLock(m_streamingPublishMutex);
+        m_publishedActiveGroupsBits = m_streamingActiveGroupsBitsCpu;
+        m_publishedActiveGroupScanCount = m_streamingActiveGroupScanCount;
+        m_publishedActiveGroupsBitsUploadPending = true;
+        m_streamingActiveGroupsBitsUploadPending = false;
+    }
+    ++m_streamingServicePublishedGeneration;
+    TracyPlot("CLodStreaming.Service.PublishGeneration", static_cast<int64_t>(m_streamingServicePublishedGeneration));
+    TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
+}
+
+void CLodStreamingSystem::RunStreamingServiceWorkOnWorker() {
+    ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork");
+    std::unique_lock serviceLock(m_streamingServiceMutex, std::defer_lock);
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::AcquireServiceLock");
+        serviceLock.lock();
+    }
 
     MeshManager* meshManager = nullptr;
-    if (m_getMeshManager) {
-        meshManager = m_getMeshManager();
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::GetMeshManager");
+        if (m_getMeshManager) {
+            meshManager = m_getMeshManager();
+        }
     }
 
-    if (meshManager != nullptr && meshManager->ConsumeCLodStreamingStructureDirty()) {
-        m_streamingDomainDirty = true;
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::ConsumeStructureDirty");
+        if (meshManager != nullptr && meshManager->ConsumeCLodStreamingStructureDirty()) {
+            m_streamingDomainDirty = true;
+        }
     }
 
-    RefreshStreamingActiveGroupDomain();
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::RefreshStreamingActiveGroupDomain");
+        RefreshStreamingActiveGroupDomain();
+    }
 
     if (meshManager != nullptr) {
-        PollCompletedReadbackSlots();
-        ProcessStreamingRequestsBudgeted();
+        {
+            ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::PollCompletedReadbackSlots");
+            PollCompletedReadbackSlots();
+        }
+        {
+            ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::ProcessStreamingRequestsBudgeted");
+            ProcessStreamingRequestsBudgeted();
+        }
     }
-    QueuePendingNonResidentBitsUpload();
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::QueuePendingNonResidentBitsUpload");
+        QueuePendingNonResidentBitsUpload();
+    }
+
+    {
+        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::PublishTelemetry");
+        TracyPlot("CLodStreaming.Service.PendingDecodedGroups", static_cast<int64_t>(m_readbackBatchScratch.size()));
+        TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
+    }
 }
 
 void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) {
@@ -994,9 +1045,6 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
 
-    auto prepareFrameWork = [this]() {
-        PrepareStreamingFrameWork();
-    };
     auto makePoolResolver = [this]() -> std::unique_ptr<IResourceResolver> {
         MeshManager* mm = m_getMeshManager ? m_getMeshManager() : nullptr;
         if (!mm) {
@@ -1023,7 +1071,6 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
         RenderGraph::ExternalPassDesc::Copy(
             "CLod::StreamingUpload",
             std::make_shared<CLodStructuralStreamingUploadPass>(
-                prepareFrameWork,
                 []() {
                     return rg::runtime::ConsumeStreamingUploadsDispatch();
                 },
@@ -1040,7 +1087,6 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
         RenderGraph::ExternalPassDesc::Copy(
             "CLod::AsyncUpload",
             std::make_shared<CLodStructuralAsyncUploadPass>(
-                prepareFrameWork,
                 [this]() -> UploadInstance* {
                     return m_uploadInstance.get();
                 },
@@ -1064,18 +1110,23 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
             return false;
 		},
 		[this](std::vector<uint32_t>& outBits, uint32_t& outActiveScanCount) {
-			outActiveScanCount = m_streamingActiveGroupScanCount;
-            if (!m_streamingActiveGroupsBitsUploadPending) {
+            std::lock_guard publishLock(m_streamingPublishMutex);
+            outActiveScanCount = m_publishedActiveGroupScanCount;
+            if (!m_publishedActiveGroupsBitsUploadPending) {
                 outBits.clear();
                 return false;
             }
 
-			outBits = m_streamingActiveGroupsBitsCpu;
-            m_streamingActiveGroupsBitsUploadPending = false;
+            outBits = m_publishedActiveGroupsBits;
+            m_publishedActiveGroupsBitsUploadPending = false;
             return true;
 		},
-		[]() {},
-		[]() {});
+        [this]() {
+            PublishStreamingFrameWorkForFrame();
+        },
+        [this]() {
+            RequestStreamingFrameWork();
+        });
 
     auto streamingBeginPassDesc = RenderGraph::ExternalPassDesc::Compute(
         "CLod::StreamingBeginFramePass",
@@ -1114,9 +1165,6 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
     }
 
     auto readbackPass = std::make_shared<CLodStructuralStreamingReadbackCopyPass>(
-        [this]() {
-            PrepareStreamingFrameWork();
-        },
         [this](CLodStreamingReadbackSnapshot& snapshot) -> bool {
             if (!m_streamingReadbackFenceHandle.IsValid() || m_readbackStagingSlots.empty()) {
                 return false;
@@ -1197,7 +1245,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
 
 void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) {
     (void)rg;
-    PrepareStreamingFrameWork();
+    PublishStreamingFrameWorkForFrame();
 
     MeshManager* meshManager = nullptr;
     if (m_getMeshManager) {
@@ -1261,7 +1309,7 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
                 .PreferQueue(QueueKind::Graphics));
     }
 
-    m_streamingFrameWorkPrepared = false;
+    RequestStreamingFrameWork();
 }
 
 uint32_t CLodStreamingSystem::BitWordAddress(uint32_t key) {
@@ -1730,6 +1778,7 @@ void CLodStreamingSystem::RecordNonResidentBitsUploadQueued() {
 }
 
 void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
+    ZoneScopedN("CLodStreamingWorker::QueueNonResidentBitsUpload");
     if (m_uploadInstance == nullptr || !m_streamingNonResidentBitsUploadPending) {
         return;
     }
@@ -3414,186 +3463,249 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
 }
 
 void CLodStreamingSystem::RefreshStreamingActiveGroupDomain() {
+    ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain");
     MeshManager* meshManager = nullptr;
-    if (m_getMeshManager) {
-        meshManager = m_getMeshManager();
+    {
+        ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::GetMeshManager");
+        if (m_getMeshManager) {
+            meshManager = m_getMeshManager();
+        }
     }
 
     if (meshManager == nullptr) {
         return;
     }
 
-    InitializePageLru(meshManager);
+    {
+        ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::InitializePageLru");
+        InitializePageLru(meshManager);
+    }
 
     bool rebuiltDomain = false;
     if (m_streamingDomainDirty) {
+        ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain");
         m_streamingDomainDirty = false;
         rebuiltDomain = true;
 
-        std::fill(m_streamingActiveGroupsBitsCpu.begin(), m_streamingActiveGroupsBitsCpu.end(), 0u);
-        std::fill(m_streamingPinnedGroupsBitsCpu.begin(), m_streamingPinnedGroupsBitsCpu.end(), 0u);
-        m_streamingActiveGroupScanCount = 0u;
-
-        meshManager->GetCLodStreamingDomainSnapshot(m_cachedDomainSnapshot);
-
-        const uint32_t maxGroupIndex = m_cachedDomainSnapshot.maxGroupIndex;
-        EnsureStreamingStorageCapacity(maxGroupIndex);
-        std::fill(m_streamingParentGroupByGlobal.begin(), m_streamingParentGroupByGlobal.end(), -1);
-
-        if (!m_cachedDomainSnapshot.parentGroupByGlobal.empty()) {
-            const size_t copyCount = std::min(m_cachedDomainSnapshot.parentGroupByGlobal.size(), m_streamingParentGroupByGlobal.size());
-            std::copy_n(m_cachedDomainSnapshot.parentGroupByGlobal.begin(), copyCount, m_streamingParentGroupByGlobal.begin());
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::ResetBitsets");
+            std::fill(m_streamingActiveGroupsBitsCpu.begin(), m_streamingActiveGroupsBitsCpu.end(), 0u);
+            std::fill(m_streamingPinnedGroupsBitsCpu.begin(), m_streamingPinnedGroupsBitsCpu.end(), 0u);
+            m_streamingActiveGroupScanCount = 0u;
         }
 
-        ClearPrefetchedChildLayouts();
-        m_childGroupsByGlobal.clear();
-        for (uint32_t childGlobal = 0; childGlobal < static_cast<uint32_t>(m_streamingParentGroupByGlobal.size()); ++childGlobal) {
-            const int32_t parent = m_streamingParentGroupByGlobal[childGlobal];
-            if (parent >= 0) {
-                m_childGroupsByGlobal[static_cast<uint32_t>(parent)].push_back(childGlobal);
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::GetDomainSnapshot");
+            meshManager->GetCLodStreamingDomainSnapshot(m_cachedDomainSnapshot);
+            TracyPlot("CLodStreaming.Domain.ActiveRanges", static_cast<int64_t>(m_cachedDomainSnapshot.activeRanges.size()));
+            TracyPlot("CLodStreaming.Domain.CoarsestRanges", static_cast<int64_t>(m_cachedDomainSnapshot.coarsestRanges.size()));
+            TracyPlot("CLodStreaming.Domain.MaxGroupIndex", static_cast<int64_t>(m_cachedDomainSnapshot.maxGroupIndex));
+        }
+
+        const uint32_t maxGroupIndex = m_cachedDomainSnapshot.maxGroupIndex;
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::EnsureCapacityAndCopyParents");
+            EnsureStreamingStorageCapacity(maxGroupIndex);
+            std::fill(m_streamingParentGroupByGlobal.begin(), m_streamingParentGroupByGlobal.end(), -1);
+
+            if (!m_cachedDomainSnapshot.parentGroupByGlobal.empty()) {
+                const size_t copyCount = std::min(m_cachedDomainSnapshot.parentGroupByGlobal.size(), m_streamingParentGroupByGlobal.size());
+                std::copy_n(m_cachedDomainSnapshot.parentGroupByGlobal.begin(), copyCount, m_streamingParentGroupByGlobal.begin());
             }
         }
 
-        // Copy original error values (retained for potential future use)
-        m_groupOriginalErrorByGlobal.assign(m_streamingStorageGroupCapacity, 0.0f);
-        if (!m_cachedDomainSnapshot.groupOriginalErrorByGlobal.empty()) {
-            const size_t errorCopyCount = std::min(
-                m_cachedDomainSnapshot.groupOriginalErrorByGlobal.size(),
-                m_groupOriginalErrorByGlobal.size());
-            std::copy_n(m_cachedDomainSnapshot.groupOriginalErrorByGlobal.begin(), errorCopyCount, m_groupOriginalErrorByGlobal.begin());
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::BuildChildGroups");
+            ClearPrefetchedChildLayouts();
+            m_childGroupsByGlobal.clear();
+            for (uint32_t childGlobal = 0; childGlobal < static_cast<uint32_t>(m_streamingParentGroupByGlobal.size()); ++childGlobal) {
+                const int32_t parent = m_streamingParentGroupByGlobal[childGlobal];
+                if (parent >= 0) {
+                    m_childGroupsByGlobal[static_cast<uint32_t>(parent)].push_back(childGlobal);
+                }
+            }
+            TracyPlot("CLodStreaming.Domain.ParentGroupCount", static_cast<int64_t>(m_childGroupsByGlobal.size()));
         }
-        m_errorOverriddenGroups.clear();
+
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::CopyErrorState");
+            // Copy original error values (retained for potential future use)
+            m_groupOriginalErrorByGlobal.assign(m_streamingStorageGroupCapacity, 0.0f);
+            if (!m_cachedDomainSnapshot.groupOriginalErrorByGlobal.empty()) {
+                const size_t errorCopyCount = std::min(
+                    m_cachedDomainSnapshot.groupOriginalErrorByGlobal.size(),
+                    m_groupOriginalErrorByGlobal.size());
+                std::copy_n(m_cachedDomainSnapshot.groupOriginalErrorByGlobal.begin(), errorCopyCount, m_groupOriginalErrorByGlobal.begin());
+            }
+            m_errorOverriddenGroups.clear();
+        }
 
         m_streamingActiveGroupScanCount = maxGroupIndex;
 
-        for (const auto& range : m_cachedDomainSnapshot.activeRanges) {
-            const uint32_t rangeBegin = std::min(range.groupsBase, m_streamingStorageGroupCapacity);
-            const uint32_t rangeEnd = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
-            for (uint32_t groupIndex = rangeBegin; groupIndex < rangeEnd; ++groupIndex) {
-                m_streamingActiveGroupsBitsCpu[BitWordAddress(groupIndex)] |= BitMask(groupIndex);
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::MarkActiveRanges");
+            uint64_t markedGroups = 0;
+            for (const auto& range : m_cachedDomainSnapshot.activeRanges) {
+                const uint32_t rangeBegin = std::min(range.groupsBase, m_streamingStorageGroupCapacity);
+                const uint32_t rangeEnd = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
+                markedGroups += rangeEnd > rangeBegin ? static_cast<uint64_t>(rangeEnd - rangeBegin) : 0ull;
+                for (uint32_t groupIndex = rangeBegin; groupIndex < rangeEnd; ++groupIndex) {
+                    m_streamingActiveGroupsBitsCpu[BitWordAddress(groupIndex)] |= BitMask(groupIndex);
+                }
             }
+            TracyPlot("CLodStreaming.Domain.MarkedActiveGroups", static_cast<int64_t>(markedGroups));
         }
         MarkStreamingActiveGroupsBitsDirty();
 
-        for (const auto& range : m_cachedDomainSnapshot.coarsestRanges) {
-            const uint32_t rangeBegin = std::min(range.groupsBase, m_streamingStorageGroupCapacity);
-            const uint32_t rangeEnd = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
-            for (uint32_t groupIndex = rangeBegin; groupIndex < rangeEnd; ++groupIndex) {
-                const uint32_t wa = BitWordAddress(groupIndex);
-                const uint32_t bm = BitMask(groupIndex);
-                m_streamingPinnedGroupsBitsCpu[wa] |= bm;
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::MarkPinnedRanges");
+            uint64_t markedGroups = 0;
+            for (const auto& range : m_cachedDomainSnapshot.coarsestRanges) {
+                const uint32_t rangeBegin = std::min(range.groupsBase, m_streamingStorageGroupCapacity);
+                const uint32_t rangeEnd = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
+                markedGroups += rangeEnd > rangeBegin ? static_cast<uint64_t>(rangeEnd - rangeBegin) : 0ull;
+                for (uint32_t groupIndex = rangeBegin; groupIndex < rangeEnd; ++groupIndex) {
+                    const uint32_t wa = BitWordAddress(groupIndex);
+                    const uint32_t bm = BitMask(groupIndex);
+                    m_streamingPinnedGroupsBitsCpu[wa] |= bm;
+                }
             }
+            TracyPlot("CLodStreaming.Domain.MarkedPinnedGroups", static_cast<int64_t>(markedGroups));
         }
 
         std::vector<uint32_t> groupsToRelease;
-        groupsToRelease.reserve(m_groupOwnedPages.size());
-        for (const auto& [groupIndex, _] : m_groupOwnedPages) {
-            if (!UsesPinnedStorage(groupIndex)) {
-                continue;
-            }
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::FindPinnedGroupsToRelease");
+            groupsToRelease.reserve(m_groupOwnedPages.size());
+            for (const auto& [groupIndex, _] : m_groupOwnedPages) {
+                if (!UsesPinnedStorage(groupIndex)) {
+                    continue;
+                }
 
-            const uint32_t wa = BitWordAddress(groupIndex);
-            const uint32_t mask = BitMask(groupIndex);
-            const bool stillActive = wa < m_streamingActiveGroupsBitsCpu.size() && (m_streamingActiveGroupsBitsCpu[wa] & mask) != 0u;
-            const bool stillPinned = wa < m_streamingPinnedGroupsBitsCpu.size() && (m_streamingPinnedGroupsBitsCpu[wa] & mask) != 0u;
-            if (!stillActive || !stillPinned) {
-                groupsToRelease.push_back(groupIndex);
+                const uint32_t wa = BitWordAddress(groupIndex);
+                const uint32_t mask = BitMask(groupIndex);
+                const bool stillActive = wa < m_streamingActiveGroupsBitsCpu.size() && (m_streamingActiveGroupsBitsCpu[wa] & mask) != 0u;
+                const bool stillPinned = wa < m_streamingPinnedGroupsBitsCpu.size() && (m_streamingPinnedGroupsBitsCpu[wa] & mask) != 0u;
+                if (!stillActive || !stillPinned) {
+                    groupsToRelease.push_back(groupIndex);
+                }
             }
+            TracyPlot("CLodStreaming.Domain.PinnedResidentGroupsToRelease", static_cast<int64_t>(groupsToRelease.size()));
         }
 
-        for (uint32_t groupIndex : groupsToRelease) {
-            const uint32_t wa = BitWordAddress(groupIndex);
-            const uint32_t mask = BitMask(groupIndex);
-            if (IsGroupResident(groupIndex)) {
-                meshManager->EvictCLodGroupResidency(groupIndex, true);
-            }
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::ReleasePinnedResidentGroups");
+            for (uint32_t groupIndex : groupsToRelease) {
+                const uint32_t wa = BitWordAddress(groupIndex);
+                const uint32_t mask = BitMask(groupIndex);
+                if (IsGroupResident(groupIndex)) {
+                    meshManager->EvictCLodGroupResidency(groupIndex, true);
+                }
 
-            ReleaseOwnedPagesForGroup(groupIndex, meshManager);
-            if (wa < m_streamingNonResidentBitsCpu.size()) {
-                SetGroupResidentBit(groupIndex, false);
-                m_streamingResidencyInitializedBitsCpu[wa] &= ~mask;
+                ReleaseOwnedPagesForGroup(groupIndex, meshManager);
+                if (wa < m_streamingNonResidentBitsCpu.size()) {
+                    SetGroupResidentBit(groupIndex, false);
+                    m_streamingResidencyInitializedBitsCpu[wa] &= ~mask;
+                }
+                ClearStreamingRequestInProgress(groupIndex);
+                ClearPendingLoadPriority(groupIndex);
             }
-            ClearStreamingRequestInProgress(groupIndex);
-            ClearPendingLoadPriority(groupIndex);
         }
 
         std::vector<uint32_t> preAllocatedGroupsToRelease;
-        preAllocatedGroupsToRelease.reserve(m_preAllocatedPagesByGroup.size());
-        for (const auto& [groupIndex, pages] : m_preAllocatedPagesByGroup) {
-            if (!pages.usesPinnedStorage) {
-                continue;
-            }
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::FindPinnedPreallocationsToRelease");
+            preAllocatedGroupsToRelease.reserve(m_preAllocatedPagesByGroup.size());
+            for (const auto& [groupIndex, pages] : m_preAllocatedPagesByGroup) {
+                if (!pages.usesPinnedStorage) {
+                    continue;
+                }
 
-            const uint32_t wa = BitWordAddress(groupIndex);
-            const uint32_t mask = BitMask(groupIndex);
-            const bool stillActive = wa < m_streamingActiveGroupsBitsCpu.size() && (m_streamingActiveGroupsBitsCpu[wa] & mask) != 0u;
-            const bool stillPinned = wa < m_streamingPinnedGroupsBitsCpu.size() && (m_streamingPinnedGroupsBitsCpu[wa] & mask) != 0u;
-            if (!stillActive || !stillPinned) {
-                preAllocatedGroupsToRelease.push_back(groupIndex);
+                const uint32_t wa = BitWordAddress(groupIndex);
+                const uint32_t mask = BitMask(groupIndex);
+                const bool stillActive = wa < m_streamingActiveGroupsBitsCpu.size() && (m_streamingActiveGroupsBitsCpu[wa] & mask) != 0u;
+                const bool stillPinned = wa < m_streamingPinnedGroupsBitsCpu.size() && (m_streamingPinnedGroupsBitsCpu[wa] & mask) != 0u;
+                if (!stillActive || !stillPinned) {
+                    preAllocatedGroupsToRelease.push_back(groupIndex);
+                }
             }
+            TracyPlot("CLodStreaming.Domain.PinnedPreallocationsToRelease", static_cast<int64_t>(preAllocatedGroupsToRelease.size()));
         }
 
-        for (uint32_t groupIndex : preAllocatedGroupsToRelease) {
-            auto it = m_preAllocatedPagesByGroup.find(groupIndex);
-            if (it == m_preAllocatedPagesByGroup.end()) {
-                continue;
-            }
-            if (IsStreamingRequestInProgress(groupIndex)) {
-                continue;
-            }
+        {
+            ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::RebuildDomain::ReleasePinnedPreallocations");
+            for (uint32_t groupIndex : preAllocatedGroupsToRelease) {
+                auto it = m_preAllocatedPagesByGroup.find(groupIndex);
+                if (it == m_preAllocatedPagesByGroup.end()) {
+                    continue;
+                }
+                if (IsStreamingRequestInProgress(groupIndex)) {
+                    continue;
+                }
 
-            ReleasePreAllocatedPages(it->second, meshManager);
-            m_preAllocatedPagesByGroup.erase(it);
+                ReleasePreAllocatedPages(it->second, meshManager);
+                m_preAllocatedPagesByGroup.erase(it);
 
-            const uint32_t wa = BitWordAddress(groupIndex);
-            const uint32_t mask = BitMask(groupIndex);
-            if (wa < m_streamingNonResidentBitsCpu.size()) {
-                SetGroupResidentBit(groupIndex, false);
-                m_streamingResidencyInitializedBitsCpu[wa] &= ~mask;
+                const uint32_t wa = BitWordAddress(groupIndex);
+                const uint32_t mask = BitMask(groupIndex);
+                if (wa < m_streamingNonResidentBitsCpu.size()) {
+                    SetGroupResidentBit(groupIndex, false);
+                    m_streamingResidencyInitializedBitsCpu[wa] &= ~mask;
+                }
+                ClearStreamingRequestInProgress(groupIndex);
+                ClearPendingLoadPriority(groupIndex);
             }
-            ClearStreamingRequestInProgress(groupIndex);
-            ClearPendingLoadPriority(groupIndex);
         }
     }
 
     const uint32_t scanWordCount = CLodBitsetWordCount(m_streamingActiveGroupScanCount);
-    for (uint32_t w = 0u; w < scanWordCount; ++w) {
-        uint32_t pending = m_streamingActiveGroupsBitsCpu[w] & ~m_streamingResidencyInitializedBitsCpu[w];
-        if (pending == 0u) {
-            continue;
-        }
-        m_streamingResidencyInitializedBitsCpu[w] |= pending;
-        const uint32_t pinnedWord = m_streamingPinnedGroupsBitsCpu[w];
-
-        while (pending != 0u) {
-            const int bit = std::countr_zero(pending);
-            pending &= pending - 1u;
-            const uint32_t groupIndex = (w << 5u) | static_cast<uint32_t>(bit);
-            if (groupIndex >= m_streamingActiveGroupScanCount) {
-                break;
-            }
-            const uint32_t bitMask = 1u << bit;
-            const uint32_t wordAddress = w;
-            const bool pinned = (pinnedWord & bitMask) != 0u;
-
-            if (!pinned) {
-                // Non-pinned groups: just mark as non-resident.
-                SetGroupResidentBit(groupIndex, false);
+    {
+        ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::InitializeNewActiveResidency");
+        uint32_t initializedGroups = 0;
+        uint32_t queuedPinnedGroups = 0;
+        for (uint32_t w = 0u; w < scanWordCount; ++w) {
+            uint32_t pending = m_streamingActiveGroupsBitsCpu[w] & ~m_streamingResidencyInitializedBitsCpu[w];
+            if (pending == 0u) {
                 continue;
             }
+            m_streamingResidencyInitializedBitsCpu[w] |= pending;
+            const uint32_t pinnedWord = m_streamingPinnedGroupsBitsCpu[w];
 
-            const bool queued = meshManager->QueueCLodGroupDiskIO(groupIndex);
-            if (queued) {
-                MarkStreamingRequestDiskIo(groupIndex);
-                SetGroupResidentBit(groupIndex, false);
-            } else {
-                SetGroupResidentBit(groupIndex, false);
-                m_streamingResidencyInitializedBitsCpu[wordAddress] &= ~bitMask;
+            while (pending != 0u) {
+                const int bit = std::countr_zero(pending);
+                pending &= pending - 1u;
+                const uint32_t groupIndex = (w << 5u) | static_cast<uint32_t>(bit);
+                if (groupIndex >= m_streamingActiveGroupScanCount) {
+                    break;
+                }
+                ++initializedGroups;
+                const uint32_t bitMask = 1u << bit;
+                const uint32_t wordAddress = w;
+                const bool pinned = (pinnedWord & bitMask) != 0u;
+
+                if (!pinned) {
+                    // Non-pinned groups: just mark as non-resident.
+                    SetGroupResidentBit(groupIndex, false);
+                    continue;
+                }
+
+                const bool queued = meshManager->QueueCLodGroupDiskIO(groupIndex);
+                if (queued) {
+                    ++queuedPinnedGroups;
+                    MarkStreamingRequestDiskIo(groupIndex);
+                    SetGroupResidentBit(groupIndex, false);
+                } else {
+                    SetGroupResidentBit(groupIndex, false);
+                    m_streamingResidencyInitializedBitsCpu[wordAddress] &= ~bitMask;
+                }
             }
         }
+        TracyPlot("CLodStreaming.Domain.InitializedActiveGroups", static_cast<int64_t>(initializedGroups));
+        TracyPlot("CLodStreaming.Domain.QueuedPinnedGroups", static_cast<int64_t>(queuedPinnedGroups));
     }
 
     if (rebuiltDomain) {
+        ZoneScopedN("CLodStreamingSystem::RefreshStreamingActiveGroupDomain::CountResidentGroups");
         uint32_t residentCount = 0u;
         for (uint32_t w = 0u; w < scanWordCount; ++w) {
             const uint32_t activeWord = m_streamingActiveGroupsBitsCpu[w];
@@ -3605,6 +3717,7 @@ void CLodStreamingSystem::RefreshStreamingActiveGroupDomain() {
         }
 
         m_streamingResidentGroupsCount = residentCount;
+        TracyPlot("CLodStreaming.Domain.ResidentGroupsAfterRebuild", static_cast<int64_t>(residentCount));
     }
 }
 
@@ -4278,10 +4391,13 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
     uint32_t queuedCount = 0;
     {
         ZoneScopedN("CLodStreamingSystem::PollCompletedReadbackSlots::QueueLoadRequests");
-        for (const auto& [groupIndex, priority] : m_readbackBatchScratch) {
-            CLodStreamingRequest req{};
-            req.groupGlobalIndex = groupIndex;
-            queuedCount += QueueLoadRequestWithParents(req, priority);
+        {
+            ZoneScopedN("CLodStreamingWorker::QueueLoadRequests");
+            for (const auto& [groupIndex, priority] : m_readbackBatchScratch) {
+                CLodStreamingRequest req{};
+                req.groupGlobalIndex = groupIndex;
+                queuedCount += QueueLoadRequestWithParents(req, priority);
+            }
         }
     }
 
@@ -4294,30 +4410,38 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
 
 void CLodStreamingSystem::StreamingWorkerMain() {
     uint64_t lastProcessed = 0;
+    uint64_t lastServiceRequest = 0;
 
     while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-        // Wait until there is a new fence value to process.
+        // Wait until there is a new fence value to process or service work to run.
         {
             std::unique_lock lock(m_streamingWorkerMutex);
             m_streamingWorkerCV.wait(lock, [&] {
                 return m_streamingWorkerQuit.load(std::memory_order_relaxed)
-                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed;
+                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed
+                    || m_streamingServiceRequestCounter.load(std::memory_order_relaxed) > lastServiceRequest
+                    || m_streamingServiceRequested.load(std::memory_order_relaxed);
             });
         }
         if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
 
         const uint64_t target = m_streamingReadbackFenceCounter.load(std::memory_order_acquire);
-        if (target <= lastProcessed) continue;
+        const uint64_t serviceTarget = m_streamingServiceRequestCounter.load(std::memory_order_acquire);
+        const bool hasFenceWork = target > lastProcessed;
 
-        // HostWait with a timeout so we can check for shutdown periodically.
-        while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-            auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
-            if (result != rhi::Result::WaitTimeout) break;
+        if (hasFenceWork) {
+            ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
+            // HostWait with a timeout so we can check for shutdown periodically.
+            while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
+                auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
+                if (result != rhi::Result::WaitTimeout) break;
+            }
+            if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
         }
-        if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
 
         // Process all completed staging slots under the mutex.
-        {
+        if (hasFenceWork) {
+            ZoneScopedN("CLodStreamingWorker::DecodeReadbackSlots");
             std::lock_guard lock(m_streamingWorkerMutex);
 
             std::vector<std::pair<uint32_t, uint32_t>> decodedRequests;
@@ -4469,9 +4593,22 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     m_decodedUsedGroupsBatch.push_back(g);
                 }
             }
+
+            TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
+            TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
         }
 
-        lastProcessed = target;
+        if (hasFenceWork) {
+            lastProcessed = target;
+        }
+
+        const bool serviceRequested = m_streamingServiceRequested.exchange(false, std::memory_order_acq_rel);
+        if (hasFenceWork || serviceRequested || serviceTarget > lastServiceRequest) {
+            m_streamingServiceRunning.store(true, std::memory_order_release);
+            RunStreamingServiceWorkOnWorker();
+            m_streamingServiceRunning.store(false, std::memory_order_release);
+            lastServiceRequest = std::max(lastServiceRequest, serviceTarget);
+        }
     }
 }
 
@@ -4510,7 +4647,10 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ProcessDiskStreamingIO");
-            meshManager->ProcessCLodDiskStreamingIO();
+            {
+                ZoneScopedN("CLodStreamingWorker::ProcessDiskStreamingIO");
+                meshManager->ProcessCLodDiskStreamingIO();
+            }
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ApplyDiskStreamingCompletions");
@@ -4562,7 +4702,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
     uint32_t processed = 0;
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::SelectAndPrepareRequests");
-        while (processed < budget && !m_pendingStreamingRequests.empty()) {
+        {
+            ZoneScopedN("CLodStreamingWorker::SelectAndPrepareRequests");
+            while (processed < budget && !m_pendingStreamingRequests.empty()) {
             PendingStreamingRequest pending{};
             {
                 ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::PopPendingRequest");
@@ -4679,45 +4821,50 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
             }
 
             processed++;
+            }
         }
     }
 
     if (meshManager != nullptr && !diskIoBatch.empty()) {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch");
-
-        std::vector<MeshManager::CLodGroupDiskIOBatchRequest> batchRequests;
         {
-            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::BuildRequests");
-            batchRequests.reserve(diskIoBatch.size());
-            for (const auto& candidate : diskIoBatch) {
-                batchRequests.push_back(candidate.request);
+            ZoneScopedN("CLodStreamingWorker::QueueDiskIoBatch");
+            TracyPlot("CLodStreaming.Service.DiskIoBatchSize", static_cast<int64_t>(diskIoBatch.size()));
+
+            std::vector<MeshManager::CLodGroupDiskIOBatchRequest> batchRequests;
+            {
+                ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::BuildRequests");
+                batchRequests.reserve(diskIoBatch.size());
+                for (const auto& candidate : diskIoBatch) {
+                    batchRequests.push_back(candidate.request);
+                }
             }
-        }
 
-        std::vector<bool> queuedByRequest;
-        {
-            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::Submit");
-            meshManager->QueueCLodGroupDiskIOBatch(batchRequests, &queuedByRequest);
-        }
+            std::vector<bool> queuedByRequest;
+            {
+                ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::Submit");
+                meshManager->QueueCLodGroupDiskIOBatch(batchRequests, &queuedByRequest);
+            }
 
-        {
-            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::ApplyResults");
-            for (uint32_t i = 0; i < static_cast<uint32_t>(diskIoBatch.size()); ++i) {
-                const uint32_t groupIndex = diskIoBatch[i].groupIndex;
-                const bool queued = i < queuedByRequest.size() && queuedByRequest[i];
-                if (queued) {
-                    MarkStreamingRequestDiskIo(groupIndex);
-                    continue;
+            {
+                ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::ApplyResults");
+                for (uint32_t i = 0; i < static_cast<uint32_t>(diskIoBatch.size()); ++i) {
+                    const uint32_t groupIndex = diskIoBatch[i].groupIndex;
+                    const bool queued = i < queuedByRequest.size() && queuedByRequest[i];
+                    if (queued) {
+                        MarkStreamingRequestDiskIo(groupIndex);
+                        continue;
+                    }
+
+                    frameStats.loadFailed++;
+                    auto paIt = m_preAllocatedPagesByGroup.find(groupIndex);
+                    if (paIt != m_preAllocatedPagesByGroup.end()) {
+                        ReleasePreAllocatedPages(paIt->second, meshManager);
+                        m_preAllocatedPagesByGroup.erase(paIt);
+                    }
+                    ClearStreamingRequestInProgress(groupIndex);
+                    ClearPendingLoadPriority(groupIndex);
                 }
-
-                frameStats.loadFailed++;
-                auto paIt = m_preAllocatedPagesByGroup.find(groupIndex);
-                if (paIt != m_preAllocatedPagesByGroup.end()) {
-                    ReleasePreAllocatedPages(paIt->second, meshManager);
-                    m_preAllocatedPagesByGroup.erase(paIt);
-                }
-                ClearStreamingRequestInProgress(groupIndex);
-                ClearPendingLoadPriority(groupIndex);
             }
         }
     }
