@@ -11,6 +11,8 @@
 #include <limits>
 #include <unordered_set>
 
+#include <tracy/Tracy.hpp>
+
 namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
@@ -358,28 +360,39 @@ void MaterialManager::MarkMaterialDirty(Material& material) {
 }
 
 void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory) {
+	ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates");
 	const auto updateStart = std::chrono::steady_clock::now();
 	const auto streamingStart = std::chrono::steady_clock::now();
 	if (m_textureStreamingManager) {
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
 		m_textureStreamingManager->ProcessPendingTextureUpdates(frameIndex, textureFactory);
 	}
 	const auto streamingEnd = std::chrono::steady_clock::now();
 
 	std::vector<uint32_t> dirtyMaterialIDs;
-	dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
-	m_dirtyMaterialIDSet.clear();
+	{
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::CollectDirtyMaterials");
+		dirtyMaterialIDs.swap(m_dirtyMaterialIDs);
+		m_dirtyMaterialIDSet.clear();
+		TracyPlot("MaterialManager.DirtyMaterialCount", static_cast<int64_t>(dirtyMaterialIDs.size()));
+	}
 	const auto dirtyMaterialStart = std::chrono::steady_clock::now();
 	std::size_t dirtyMaterialsVisited = 0;
 	std::size_t dirtyMaterialsFlushed = 0;
-	for (const uint32_t materialID : dirtyMaterialIDs) {
-		++dirtyMaterialsVisited;
-		auto materialIt = m_activeMaterialsByID.find(materialID);
-		if (materialIt == m_activeMaterialsByID.end() || materialIt->second == nullptr) {
-			continue;
-		}
+	{
+		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials");
+		for (const uint32_t materialID : dirtyMaterialIDs) {
+			ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::FlushDirtyMaterials::Material");
+			ZoneValue(materialID);
+			++dirtyMaterialsVisited;
+			auto materialIt = m_activeMaterialsByID.find(materialID);
+			if (materialIt == m_activeMaterialsByID.end() || materialIt->second == nullptr) {
+				continue;
+			}
 
-		FlushDirtyMaterial(*materialIt->second, &textureFactory);
-		++dirtyMaterialsFlushed;
+			FlushDirtyMaterial(*materialIt->second, &textureFactory);
+			++dirtyMaterialsFlushed;
+		}
 	}
 	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
 
@@ -446,39 +459,84 @@ void MaterialManager::UpdateMaterialDataBuffer(Material& material) {
 }
 
 void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* textureFactory) {
+	ZoneScopedN("MaterialManager::FlushDirtyMaterial");
+	ZoneValue(material.GetMaterialID());
 	const unsigned int materialSlot = GetMaterialSlot(material.GetMaterialID());
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
 	const bool refreshedTextures = textureFactory != nullptr;
 	if (textureFactory) {
-		TrackMaterialTextureAssets(material, -1);
-		TrackMaterialTextureAssets(material, 1, textureFactory);
-		material.EnsureTexturesUploaded(*textureFactory, TextureUploadAdvanceMode::NonBlocking);
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UntrackTextureBindings");
+			TrackMaterialTextureAssets(material, -1);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::TrackTextureBindings");
+			TrackMaterialTextureAssets(material, 1, textureFactory);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::EnsureTexturesUploaded");
+			material.EnsureTexturesUploaded(*textureFactory, TextureUploadAdvanceMode::NonBlocking);
+		}
 	}
 
-	const PerMaterialCB materialData = material.GetData();
-	const PerMaterialEvalCB evalData = BuildMaterialEvalData(material);
-	const PerMaterialOpenPBRCB openPBRData = BuildOpenPBRMaterialData(material);
+	PerMaterialCB materialData{};
+	PerMaterialEvalCB evalData{};
+	PerMaterialOpenPBRCB openPBRData{};
+	{
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs");
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Base");
+			materialData = material.GetData();
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Eval");
+			evalData = BuildMaterialEvalData(material);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::OpenPBR");
+			openPBRData = BuildOpenPBRMaterialData(material);
+		}
+	}
 	if (materialSlot >= m_materialUploadSignatures.size()) {
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::ResizeSignatures");
 		m_materialUploadSignatures.resize(static_cast<size_t>(materialSlot) + 1u);
 	}
 
 	auto& signature = m_materialUploadSignatures[materialSlot];
-	const bool dataChanged =
-		!signature.valid ||
-		!BytewiseEqual(signature.materialData, materialData) ||
-		!BytewiseEqual(signature.evalData, evalData) ||
-		!BytewiseEqual(signature.openPBRData, openPBRData);
+	bool dataChanged = false;
+	{
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::CompareUploadSignature");
+		dataChanged =
+			!signature.valid ||
+			!BytewiseEqual(signature.materialData, materialData) ||
+			!BytewiseEqual(signature.evalData, evalData) ||
+			!BytewiseEqual(signature.openPBRData, openPBRData);
+	}
 	if (dataChanged) {
-		m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
-		m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
-		signature.materialData = materialData;
-		signature.evalData = evalData;
-		signature.openPBRData = openPBRData;
-		signature.valid = true;
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs");
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");
+			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Eval");
+			m_perMaterialEvalDataBuffer->UpdateAt(materialSlot, evalData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::OpenPBR");
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(materialSlot, openPBRData);
+		}
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::StoreUploadSignature");
+			signature.materialData = materialData;
+			signature.evalData = evalData;
+			signature.openPBRData = openPBRData;
+			signature.valid = true;
+		}
 	}
 
 	if (dataChanged || refreshedTextures) {
+		ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureUsage");
 		RefreshMaterialTextureUsage(material);
 	}
 }
@@ -542,13 +600,23 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 }
 
 void MaterialManager::TrackMaterialTextureAssets(const Material& material, int delta, TextureFactory* textureFactory) {
+	ZoneScopedN("MaterialManager::TrackMaterialTextureAssets");
 	const uint32_t materialID = material.GetMaterialID();
+	ZoneValue(materialID);
 	if (delta > 0) {
 		if (!m_textureStreamingManager || !textureFactory) {
 			return;
 		}
 		std::vector<uint64_t> bindingIDs;
-		for (const auto& texture : CollectMaterialTextureAssets(material)) {
+		std::vector<std::shared_ptr<TextureAsset>> textureAssets;
+		{
+			ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::CollectAssets");
+			textureAssets = CollectMaterialTextureAssets(material);
+			TracyPlot("MaterialManager.TrackedTextureAssetCount", static_cast<int64_t>(textureAssets.size()));
+		}
+		for (const auto& texture : textureAssets) {
+			ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::RegisterBinding");
+			ZoneValue(materialID);
 			if (!texture) {
 				continue;
 			}
@@ -557,6 +625,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 			if (streamingTextureID == 0u) {
 				continue;
 			}
+			TracyPlot("MaterialManager.RegisterBinding.StreamingTextureID", static_cast<int64_t>(streamingTextureID));
 
 			const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
 				texture,
@@ -572,6 +641,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 				bindingIDs.push_back(bindingID);
 			}
 		}
+		TracyPlot("MaterialManager.RegisteredBindingCountForMaterial", static_cast<int64_t>(bindingIDs.size()));
 		m_materialTextureStreamingBindingIDs[materialID] = std::move(bindingIDs);
 		return;
 	}
@@ -582,6 +652,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 	}
 
 	if (m_textureStreamingManager) {
+		ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::UnregisterBindings");
 		m_textureStreamingManager->UnregisterTextureBindings(trackedIt->second);
 	}
 

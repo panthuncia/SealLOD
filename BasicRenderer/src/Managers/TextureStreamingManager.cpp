@@ -11,6 +11,8 @@
 #include <cstring>
 #include <limits>
 
+#include <tracy/Tracy.hpp>
+
 namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
@@ -73,6 +75,10 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	BindingChangedCallback onBindingChanged,
 	std::string debugLabel)
 {
+	ZoneScopedN("TextureStreamingManager::RegisterTextureBinding");
+	if (!debugLabel.empty()) {
+		ZoneText(debugLabel.c_str(), debugLabel.size());
+	}
 	if (!texture) {
 		return 0u;
 	}
@@ -81,24 +87,44 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	if (streamingTextureID == 0u) {
 		return 0u;
 	}
+	ZoneValue(streamingTextureID);
+	TracyPlot("TextureStreamingManager.BindingCount", static_cast<int64_t>(m_bindingsByID.size()));
 
 	const uint64_t bindingID = m_nextBindingID++;
-	m_bindingsByID.emplace(bindingID, TextureBindingOwner{
-		.bindingID = bindingID,
-		.streamingTextureID = streamingTextureID,
-		.texture = texture,
-		.onBindingChanged = std::move(onBindingChanged),
-		.debugLabel = std::move(debugLabel)
-	});
-	m_bindingIDsByStreamingTextureID[streamingTextureID].push_back(bindingID);
-	TrackTexture(texture);
-	EnsureTextureUploadAdvanced(texture, textureFactory);
-	FlushDirtyTextureMetadata(texture);
+	{
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::InsertBinding");
+		m_bindingsByID.emplace(bindingID, TextureBindingOwner{
+			.bindingID = bindingID,
+			.streamingTextureID = streamingTextureID,
+			.texture = texture,
+			.onBindingChanged = std::move(onBindingChanged),
+			.debugLabel = std::move(debugLabel)
+		});
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::AppendOwner");
+		auto& ownerIDs = m_bindingIDsByStreamingTextureID[streamingTextureID];
+		TracyPlot("TextureStreamingManager.OwnerCountBeforeAppend", static_cast<int64_t>(ownerIDs.size()));
+		ownerIDs.push_back(bindingID);
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::TrackTexture");
+		TrackTexture(texture);
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::EnsureTextureUploadAdvanced");
+		EnsureTextureUploadAdvanced(texture, textureFactory);
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::FlushDirtyTextureMetadata");
+		FlushDirtyTextureMetadata(texture);
+	}
 	return bindingID;
 }
 
 void TextureStreamingManager::UnregisterTextureBinding(uint64_t bindingID)
 {
+	ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding");
 	if (bindingID == 0u) {
 		return;
 	}
@@ -109,11 +135,20 @@ void TextureStreamingManager::UnregisterTextureBinding(uint64_t bindingID)
 	}
 
 	const uint32_t streamingTextureID = bindingIt->second.streamingTextureID;
-	m_bindingsByID.erase(bindingIt);
+	ZoneValue(streamingTextureID);
+	{
+		ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseBinding");
+		m_bindingsByID.erase(bindingIt);
+	}
 	auto ownersIt = m_bindingIDsByStreamingTextureID.find(streamingTextureID);
 	if (ownersIt != m_bindingIDsByStreamingTextureID.end()) {
-		std::erase(ownersIt->second, bindingID);
+		{
+			ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseOwner");
+			TracyPlot("TextureStreamingManager.OwnerCountBeforeErase", static_cast<int64_t>(ownersIt->second.size()));
+			std::erase(ownersIt->second, bindingID);
+		}
 		if (ownersIt->second.empty()) {
+			ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseTextureState");
 			m_bindingIDsByStreamingTextureID.erase(ownersIt);
 			m_streamingTexturesByID.erase(streamingTextureID);
 			m_textureStreamingMetadataRevisions.erase(streamingTextureID);
@@ -129,6 +164,8 @@ void TextureStreamingManager::UnregisterTextureBinding(uint64_t bindingID)
 
 void TextureStreamingManager::UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs)
 {
+	ZoneScopedN("TextureStreamingManager::UnregisterTextureBindings");
+	TracyPlot("TextureStreamingManager.UnregisterBindingBatchSize", static_cast<int64_t>(bindingIDs.size()));
 	for (uint64_t bindingID : bindingIDs) {
 		UnregisterTextureBinding(bindingID);
 	}
@@ -334,29 +371,42 @@ void TextureStreamingManager::EnsureTextureUploadAdvanced(
 	const std::shared_ptr<TextureAsset>& texture,
 	TextureFactory& textureFactory)
 {
+	ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced");
 	if (!texture) {
 		return;
 	}
 
 	const uint64_t previousBindingRevision = texture->GetBindingRevision();
 	const uint64_t previousStreamingRevision = texture->GetStreamingStateRevision();
-	texture->SetGenerateMipmaps(true);
-	texture->EnsureUploaded(textureFactory, TextureUploadAdvanceMode::NonBlocking);
+	ZoneValue(texture->GetStreamingTextureID());
+	{
+		ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced::SetGenerateMipmaps");
+		texture->SetGenerateMipmaps(true);
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced::TextureEnsureUploaded");
+		texture->EnsureUploaded(textureFactory, TextureUploadAdvanceMode::NonBlocking);
+	}
 
 	if (texture->GetStreamingStateRevision() != previousStreamingRevision) {
+		ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced::MarkStateDirty");
 		MarkTextureStreamingMetadataDirty(texture, false, "upload_state_revision");
 	}
 	if (texture->HasPendingUploadWork()) {
+		ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced::MarkPendingDirty");
 		MarkTextureStreamingMetadataDirty(texture, true, "upload_pending");
 	}
 	if (texture->GetBindingRevision() != previousBindingRevision) {
+		ZoneScopedN("TextureStreamingManager::EnsureTextureUploadAdvanced::NotifyBindingChanged");
 		NotifyBindingChanged(*texture);
 	}
 }
 
 void TextureStreamingManager::NotifyBindingChanged(TextureAsset& texture)
 {
+	ZoneScopedN("TextureStreamingManager::NotifyBindingChanged");
 	const uint32_t streamingTextureID = texture.GetStreamingTextureID();
+	ZoneValue(streamingTextureID);
 	auto ownersIt = m_bindingIDsByStreamingTextureID.find(streamingTextureID);
 	if (ownersIt == m_bindingIDsByStreamingTextureID.end() || ownersIt->second.empty()) {
 		++m_textureBindingChangedWithoutOwnerCount;
@@ -367,8 +417,14 @@ void TextureStreamingManager::NotifyBindingChanged(TextureAsset& texture)
 		return;
 	}
 
-	std::vector<uint64_t> bindingIDs = ownersIt->second;
+	std::vector<uint64_t> bindingIDs;
+	{
+		ZoneScopedN("TextureStreamingManager::NotifyBindingChanged::CopyOwnerList");
+		TracyPlot("TextureStreamingManager.NotifyOwnerCount", static_cast<int64_t>(ownersIt->second.size()));
+		bindingIDs = ownersIt->second;
+	}
 	for (uint64_t bindingID : bindingIDs) {
+		ZoneScopedN("TextureStreamingManager::NotifyBindingChanged::Owner");
 		auto bindingIt = m_bindingsByID.find(bindingID);
 		if (bindingIt == m_bindingsByID.end()) {
 			continue;
@@ -383,6 +439,7 @@ void TextureStreamingManager::NotifyBindingChanged(TextureAsset& texture)
 
 void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture)
 {
+	ZoneScopedN("TextureStreamingManager::FlushDirtyTextureMetadata");
 	if (!texture) {
 		return;
 	}
@@ -391,6 +448,7 @@ void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<Te
 	if (streamingTextureID == 0u) {
 		return;
 	}
+	ZoneValue(streamingTextureID);
 
 	const uint64_t revision = texture->GetStreamingStateRevision();
 	auto revisionIt = m_textureStreamingMetadataRevisions.find(streamingTextureID);
@@ -404,6 +462,7 @@ void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<Te
 
 void TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture)
 {
+	ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata");
 	if (!texture) {
 		return;
 	}
@@ -412,24 +471,39 @@ void TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 	if (streamingTextureID == 0u) {
 		return;
 	}
+	ZoneValue(streamingTextureID);
 
 	if (streamingTextureID >= m_textureStreamingMetadataCapacity) {
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ResizeBuffers");
 		uint32_t newCapacity = m_textureStreamingMetadataCapacity;
 		while (streamingTextureID >= newCapacity) {
 			newCapacity *= 2u;
 		}
+		TracyPlot("TextureStreamingManager.MetadataCapacityBeforeResize", static_cast<int64_t>(m_textureStreamingMetadataCapacity));
+		TracyPlot("TextureStreamingManager.MetadataCapacityAfterResize", static_cast<int64_t>(newCapacity));
 		m_textureStreamingMetadataBuffer->Resize(newCapacity);
 		m_textureStreamingFeedbackBuffer->Resize(newCapacity);
 		m_textureStreamingMetadataCapacity = newCapacity;
 	}
 
-	m_textureStreamingMetadataBuffer->UpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture));
-	m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
+	{
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::UploadMetadata");
+		m_textureStreamingMetadataBuffer->UpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture));
+	}
+	{
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ResetFeedback");
+		m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
+	}
 	if (auto image = texture->ImagePtr()) {
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::TrackImageResource");
 		m_textureAssetsByImageResourceID[image->GetGlobalResourceID()] = texture;
 	}
-	TrackTexture(texture);
+	{
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::TrackTexture");
+		TrackTexture(texture);
+	}
 	if (m_activeTextureStreamingFeedbackIDSet.insert(streamingTextureID).second) {
+		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ActivateFeedbackID");
 		m_activeTextureStreamingFeedbackIDs.push_back(streamingTextureID);
 	}
 }
