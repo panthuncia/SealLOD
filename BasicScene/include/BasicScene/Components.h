@@ -116,11 +116,6 @@ namespace Components {
         std::vector<std::array<ClippingPlane, 6>> frustumPlanes;
     };
 
-    struct IndirectCommandBuffers {
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingIndirectCommandBuffer;
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingResetIndirectCommandBuffer;
-    };
-
     struct SceneNode {};
     struct GlobalMeshLibrary {
         std::unordered_map<uint64_t, std::weak_ptr<Mesh>> meshes;

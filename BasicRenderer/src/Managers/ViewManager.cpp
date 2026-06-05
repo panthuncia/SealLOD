@@ -113,7 +113,7 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
 
     // Indirect buffers
     if (m_indirectManager) {
-        v.gpu.indirectCommandBuffers = m_indirectManager->CreateBuffersForView(id);
+        m_indirectManager->CreateBuffersForView(id);
     }
 
     // Camera buffer view

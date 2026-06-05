@@ -1,22 +1,15 @@
 #pragma once
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
 #include <memory>
-#include <span>
-#include <spdlog/spdlog.h>
-#include <OpenRenderGraph/OpenRenderGraph.h>
 
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
 
 class DynamicGloballyIndexedResource;
 class ResourceGroup;
-class Resource;
-class Buffer;
 
 struct RenderPhase; // forward
-struct ResourceIdentifier;
 
 // Hash for MaterialCompileFlags
 struct MaterialCompileFlagsHash {
@@ -36,7 +29,7 @@ struct IndirectBufferEntry {
     IndirectWorkload workload;
 };
 
-class IndirectCommandBufferManager : public IResourceProvider {
+class IndirectCommandBufferManager {
 public:
     ~IndirectCommandBufferManager();
 
@@ -51,9 +44,8 @@ public:
     // RenderPhase -> [workloadKey].
     void RegisterWorkload(const DrawWorkloadKey& workloadKey);
 
-    // Ensure we have buffers for all known flags combinations for this view.
-    // Returns a light-weight struct mapping flags->buffers plus the meshlet pair.
-    Components::IndirectCommandBuffers CreateBuffersForView(uint64_t viewID);
+    // Ensure we have buffers for all known workloads for this view.
+    void CreateBuffersForView(uint64_t viewID);
 
     // Remove buffers associated with a view
     void UnregisterBuffers(uint64_t viewID);
@@ -71,12 +63,6 @@ public:
     std::vector<std::pair<MaterialCompileFlags, IndirectWorkload>>
         GetBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
 
-    // Get every per-view indirect buffer (all views, all flags)
-    std::vector<IndirectBufferEntry> GetAllIndirectBuffers() const;
-
-    // Filtered: all buffers that participate in a phase (across all views)
-    std::vector<IndirectBufferEntry> GetIndirectBuffersForRenderPhase(const RenderPhase& phase, bool clodOnly = false) const;
-
     // per-view version of phase query, but returning viewID too
     std::vector<IndirectBufferEntry> GetViewIndirectBuffersForRenderPhase(uint64_t viewID, const RenderPhase& phase, bool clodOnly = false) const;
 
@@ -90,25 +76,6 @@ public:
         }
     }
 
-    // Filtered across all views:
-    template<class F>
-    void ForEachIndirectBufferInPhase(const RenderPhase& phase, bool clodOnly, F&& f) const {
-        for (auto const& [viewID, perView] : m_viewIDToBuffers) {
-            for (auto const& [key, wl] : perView.buffersByWorkload) {
-                if (key.renderPhase == phase && key.clodOnly == clodOnly) {
-                    std::forward<F>(f)(viewID, key, wl);
-                }
-            }
-        }
-    }
-
-
-    // ---- IResourceProvider ---------------------------------------------------
-    std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
-    std::vector<ResourceIdentifier> GetSupportedKeys() override;
-    std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
-    std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
-
 private:
     IndirectCommandBufferManager();
 
@@ -118,15 +85,7 @@ private:
         std::unordered_map<DrawWorkloadKey,
             IndirectWorkload,
             DrawWorkloadKey::Hasher> buffersByWorkload;
-
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingIndirectCommandBuffer;
-        std::shared_ptr<DynamicGloballyIndexedResource> meshletCullingResetIndirectCommandBuffer;
     };
-
-    // RenderPhase -> list of draw workloads that participate in that phase (inverted index)
-    std::unordered_map<RenderPhase,
-        std::vector<DrawWorkloadKey>,
-        RenderPhase::Hasher> m_phaseToFlags;
 
     // Per-workload current capacity (rounded to increment)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToCapacity;
@@ -137,26 +96,15 @@ private:
     // Single group that owns all indirect command buffers (regardless of flags)
     std::shared_ptr<ResourceGroup> m_indirectCommandsResourceGroup;
 
-    // Provider plumbing
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
-
     // ViewID -> buffers
     std::unordered_map<uint64_t, PerViewBuffers> m_viewIDToBuffers;
 
-    // Sum of capacities for all flags (used as size for meshlet buffers)
-    unsigned int m_totalIndirectCommands = 0;
-
     // Growth granularity
     unsigned int m_incrementSize = 1000;
-
-    std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
 
     // Helpers
     unsigned int RoundUp(unsigned int x) const {
         return ((x + m_incrementSize - 1) / m_incrementSize) * m_incrementSize;
     }
-    void RecomputeTotal();
-    void RecreateMeshletBuffersForAllViews();
-    void EnsurePerViewFlagsBuffers(uint64_t viewID);
     void EnsureWorkloadRegistered(const DrawWorkloadKey& workloadKey);
 };

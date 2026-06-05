@@ -526,10 +526,6 @@ private:
 	std::function<bool()> getOcclusionCullingEnabled;
 	std::function<void(bool)> setOcclusionCullingEnabled;
 
-	bool meshletCulling = true;
-	std::function<bool()> getMeshletCullingEnabled;
-	std::function<void(bool)> setMeshletCullingEnabled;
-
     bool m_clodFrustumCulling = true;
     std::function<bool()> getCLodFrustumCulling;
     std::function<void(bool)> setCLodFrustumCulling;
@@ -1006,11 +1002,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	setOcclusionCullingEnabled = settingsManager.getSettingSetter<bool>("enableOcclusionCulling");
 	occlusionCulling = getOcclusionCullingEnabled();
 	observerSetting(occlusionCulling, "enableOcclusionCulling");
-
-	getMeshletCullingEnabled = settingsManager.getSettingGetter<bool>("enableMeshletCulling");
-	setMeshletCullingEnabled = settingsManager.getSettingSetter<bool>("enableMeshletCulling");
-	meshletCulling = getMeshletCullingEnabled();
-	observerSetting(meshletCulling, "enableMeshletCulling");
 
     getCLodFrustumCulling = settingsManager.getSettingGetter<bool>(CLodFrustumCullingSettingName);
     setCLodFrustumCulling = settingsManager.getSettingSetter<bool>(CLodFrustumCullingSettingName);
@@ -1583,9 +1574,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Occlusion Culling", &occlusionCulling)) {
             setOcclusionCullingEnabled(occlusionCulling);
         }
-		if (ImGui::Checkbox("Meshlet Culling", &meshletCulling)) {
-			setMeshletCullingEnabled(meshletCulling);
-		}
         if (ImGui::Checkbox("CLod Frustum Culling", &m_clodFrustumCulling)) {
             setCLodFrustumCulling(m_clodFrustumCulling);
         }

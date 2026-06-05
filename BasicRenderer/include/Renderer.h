@@ -230,7 +230,6 @@ private:
 	bool m_gtaoEnabled = true;
 	bool m_visibilityRendering = true;
 	bool m_occlusionCulling = true;
-	bool m_meshletCulling = true;
     bool m_bloom = false;
     bool m_jitter = true;
 	bool m_screenSpaceReflections = false;

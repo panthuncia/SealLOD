@@ -53,8 +53,6 @@ struct ViewResources {
 	std::shared_ptr<BufferView> cullingCameraBufferView;
     uint32_t cameraBufferIndex = 0;
 
-    Components::IndirectCommandBuffers indirectCommandBuffers;
-
 	std::shared_ptr<PixelBuffer> depthMap = nullptr;
     std::shared_ptr<PixelBuffer> linearDepthMap = nullptr;
     std::shared_ptr<PixelBuffer> lastFrameLinearDepthMap = nullptr;

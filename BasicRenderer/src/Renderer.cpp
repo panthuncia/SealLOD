@@ -1377,7 +1377,6 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableIndirectDraws", meshShaderSupported);
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
-	settingsManager.registerSetting<bool>("enableMeshletCulling", m_meshletCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
@@ -1581,10 +1580,6 @@ void Renderer::SetSettings() {
         (void)newValue;
         rebuildRenderGraph = true;
         }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableMeshletCulling", [this](const bool& newValue) {
-		m_meshletCulling = newValue;
-		rebuildRenderGraph = true;
-		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableBloom", [this](const bool& newValue) {
         m_bloom = newValue;
         rebuildRenderGraph = true;
@@ -1686,14 +1681,8 @@ void Renderer::SetSettings() {
 	// Indirect draws require mesh shaders (due to not having implemented indirect draws with traditional pipelines)
 	settingsManager.addImplicationConstraint("enableIndirectDraws", "enableMeshShader");
 
-	// Occlusion culling requires meshlet culling (due to object occlusion and meshlet occlusion not being separate yet)
-	settingsManager.addImplicationConstraint("enableOcclusionCulling", "enableMeshletCulling");
-
 	// Visibility rendering requires mesh shaders (due to not having implemented visibility VS)
     settingsManager.addImplicationConstraint("enableVisibilityRendering", "enableMeshShader");
-
-    // Visibility rendering requires meshlet culling (due to reliance on visible clusters list)
-	settingsManager.addImplicationConstraint("enableVisibilityRendering", "enableMeshletCulling");
 
     //Visibility rendering requires indirect draws (because of a bug) TODO: fix
 	settingsManager.addImplicationConstraint("enableVisibilityRendering", "enableIndirectDraws");
@@ -2918,7 +2907,6 @@ void Renderer::CreateRenderGraph() {
     newGraph->RegisterProvider(m_pViewManager.get());
     newGraph->RegisterProvider(m_pLightManager.get());
     newGraph->RegisterProvider(m_pEnvironmentManager.get());
-    newGraph->RegisterProvider(m_pIndirectCommandBufferManager.get());
 	newGraph->RegisterProvider(m_pMaterialManager.get());
     newGraph->RegisterProvider(m_pTerrainManager.get());
 	newGraph->RegisterProvider(m_pSkeletonManager.get());
