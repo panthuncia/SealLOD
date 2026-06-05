@@ -199,27 +199,50 @@ namespace {
             retainedTextures.push_back(texture);
             return true;
         }
-        static std::atomic_uint32_t missingImageWarningCount{ 0 };
-        const uint32_t warningIndex = missingImageWarningCount.fetch_add(1, std::memory_order_relaxed);
-        if (warningIndex < 64u) {
-            const auto info = texture->GetPendingDebugInfo();
-            spdlog::warn(
-                "TerrainManager: terrain texture has no image after upload/register label='{}' source='{}' file='{}' initial='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} residentMipCount={} totalMipCount={} hasFinal={} hasPlaceholder={} processing={} reload={} directStorage={}",
-                info.label,
-                info.sourceIdentity,
-                info.filePath,
-                info.initialData,
-                info.streamingTextureID,
-                info.requestedTopMip,
-                info.pendingTopMip,
-                info.residentTopMip,
-                info.residentMipCount,
-                info.totalMipCount,
-                info.hasFinalImage,
-                info.hasPlaceholder,
-                info.processingState,
-                info.reloadState,
-                info.directStorageState);
+        const auto info = texture->GetPendingDebugInfo();
+        if (texture->HasPendingUploadWork()) {
+            static std::atomic_uint32_t pendingImageDebugCount{ 0 };
+            const uint32_t debugIndex = pendingImageDebugCount.fetch_add(1, std::memory_order_relaxed);
+            if (debugIndex < 64u) {
+                spdlog::debug(
+                    "TerrainManager: terrain texture image pending after upload/register label='{}' source='{}' file='{}' initial='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} residentMipCount={} totalMipCount={} processing={} reload={} directStorage={}",
+                    info.label,
+                    info.sourceIdentity,
+                    info.filePath,
+                    info.initialData,
+                    info.streamingTextureID,
+                    info.requestedTopMip,
+                    info.pendingTopMip,
+                    info.residentTopMip,
+                    info.residentMipCount,
+                    info.totalMipCount,
+                    info.processingState,
+                    info.reloadState,
+                    info.directStorageState);
+            }
+        }
+        else {
+            static std::atomic_uint32_t missingImageWarningCount{ 0 };
+            const uint32_t warningIndex = missingImageWarningCount.fetch_add(1, std::memory_order_relaxed);
+            if (warningIndex < 64u) {
+                spdlog::warn(
+                    "TerrainManager: terrain texture has no image after upload/register label='{}' source='{}' file='{}' initial='{}' streamingID={} requestedTopMip={} pendingTopMip={} residentTopMip={} residentMipCount={} totalMipCount={} hasFinal={} hasPlaceholder={} processing={} reload={} directStorage={}",
+                    info.label,
+                    info.sourceIdentity,
+                    info.filePath,
+                    info.initialData,
+                    info.streamingTextureID,
+                    info.requestedTopMip,
+                    info.pendingTopMip,
+                    info.residentTopMip,
+                    info.residentMipCount,
+                    info.totalMipCount,
+                    info.hasFinalImage,
+                    info.hasPlaceholder,
+                    info.processingState,
+                    info.reloadState,
+                    info.directStorageState);
+            }
         }
         return false;
     }

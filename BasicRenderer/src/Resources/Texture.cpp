@@ -92,6 +92,91 @@ bool IsDirectStorageGpuTextureUploadDisabled() {
 	return disabled;
 }
 
+void WarnOnce(std::string key, std::string message);
+
+enum class DirectStorageTexturePreflightResult : uint8_t {
+	Eligible = 0,
+	Disabled,
+	QueueUnavailable,
+	UnsupportedFileType,
+	UnsupportedFormat,
+	InvalidMetadata,
+	InvalidLayout,
+	InvalidRequest,
+	ResourceCreateFailed,
+	EnqueueFailed,
+};
+
+const char* ToString(DirectStorageTexturePreflightResult result) {
+	switch (result) {
+	case DirectStorageTexturePreflightResult::Eligible:
+		return "eligible";
+	case DirectStorageTexturePreflightResult::Disabled:
+		return "disabled";
+	case DirectStorageTexturePreflightResult::QueueUnavailable:
+		return "queue_unavailable";
+	case DirectStorageTexturePreflightResult::UnsupportedFileType:
+		return "unsupported_file_type";
+	case DirectStorageTexturePreflightResult::UnsupportedFormat:
+		return "unsupported_format";
+	case DirectStorageTexturePreflightResult::InvalidMetadata:
+		return "invalid_metadata";
+	case DirectStorageTexturePreflightResult::InvalidLayout:
+		return "invalid_layout";
+	case DirectStorageTexturePreflightResult::InvalidRequest:
+		return "invalid_request";
+	case DirectStorageTexturePreflightResult::ResourceCreateFailed:
+		return "resource_create_failed";
+	case DirectStorageTexturePreflightResult::EnqueueFailed:
+		return "enqueue_failed";
+	default:
+		return "unknown";
+	}
+}
+
+void RecordDirectStorageTexturePreflight(
+	DirectStorageTexturePreflightResult result,
+	const std::string& path,
+	const std::string& detail = {})
+{
+	static std::atomic_uint64_t eligibleCount{ 0 };
+	static std::atomic_uint64_t skipCount{ 0 };
+	static std::atomic_uint64_t failureCount{ 0 };
+
+	if (result == DirectStorageTexturePreflightResult::Eligible) {
+		TracyPlot("SARP.Texture.DirectStorage.Preflight.Eligible", static_cast<int64_t>(eligibleCount.fetch_add(1, std::memory_order_relaxed) + 1u));
+		return;
+	}
+
+	const bool failure =
+		result == DirectStorageTexturePreflightResult::ResourceCreateFailed ||
+		result == DirectStorageTexturePreflightResult::EnqueueFailed;
+	const uint64_t count = failure
+		? failureCount.fetch_add(1, std::memory_order_relaxed) + 1u
+		: skipCount.fetch_add(1, std::memory_order_relaxed) + 1u;
+	if (failure) {
+		TracyPlot("SARP.Texture.DirectStorage.Preflight.Failures", static_cast<int64_t>(count));
+	}
+	else {
+		TracyPlot("SARP.Texture.DirectStorage.Preflight.Skips", static_cast<int64_t>(count));
+	}
+
+	if (failure) {
+		WarnOnce(
+			"texture-ds-preflight-failure|" + path + "|" + ToString(result) + "|" + detail,
+			"TextureAsset: DirectStorage texture preflight failed for '" + path + "' result=" + ToString(result) +
+				(detail.empty() ? std::string{} : " detail='" + detail + "'"));
+		return;
+	}
+
+	const std::string detailText = detail.empty() ? std::string{} : " detail='" + detail + "'";
+	spdlog::debug(
+		"TextureAsset: DirectStorage texture preflight skipped '{}' result={}{}",
+		path,
+		ToString(result),
+		detailText);
+}
+
 const char* ToString(TextureUploadPathTelemetry path) {
 	switch (path) {
 	case TextureUploadPathTelemetry::DirectStorageGpuDirect:
@@ -902,9 +987,16 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() ||
-		IsDirectStorageGpuTextureUploadDisabled() ||
-		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidRequest, path, "empty texture path");
+		return {};
+	}
+	if (IsDirectStorageGpuTextureUploadDisabled()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Disabled, path, "texture upload disabled by environment");
+		return {};
+	}
+	if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::QueueUnavailable, path, "GPU queue unavailable");
 		return {};
 	}
 
@@ -912,6 +1004,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	std::wstring extension = filePath.extension().wstring();
 	std::transform(extension.begin(), extension.end(), extension.begin(), towlower);
 	if (extension != L".dds") {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::UnsupportedFileType, path, "only DDS files are supported");
 		return {};
 	}
 
@@ -919,6 +1012,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	DirectX::TexMetadata metadata{};
 	const HRESULT loadHr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
 	if (FAILED(loadHr) || metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.depth != 1) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidMetadata, path, "failed to load 2D DDS metadata");
 		return {};
 	}
 
@@ -930,6 +1024,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 		(std::numeric_limits<size_t>::max)(),
 		headerSize);
 	if (FAILED(headerHr) || headerSize == 0) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidMetadata, path, "failed to encode DDS header");
 		return {};
 	}
 
@@ -937,6 +1032,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
 	desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
 	if (rhi::helpers::IsBlockCompressed(desc.format)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::UnsupportedFormat, path, "block-compressed DDS uses packed block rows incompatible with this region-copy path");
 		return {};
 	}
 
@@ -956,6 +1052,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	const DirectX::Image* images = image.GetImages();
 	const size_t imageCount = image.GetImageCount();
 	if (images == nullptr || imageCount != static_cast<size_t>(arraySlices) * fullMipCount) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "DDS image count did not match array slices and mips");
 		return {};
 	}
 
@@ -972,6 +1069,7 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 			srcImage.height > static_cast<size_t>((std::numeric_limits<uint32_t>::max)()) ||
 			srcImage.slicePitch == 0 ||
 			srcImage.slicePitch > static_cast<size_t>((std::numeric_limits<uint32_t>::max)())) {
+			RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "DDS image dimensions exceeded upload limits");
 			return {};
 		}
 
@@ -999,18 +1097,25 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 	}
 
 	if (regions.empty()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "no upload regions were produced");
 		return {};
 	}
 
 	auto pixelBuffer = PixelBuffer::CreateShared(desc);
+	if (!pixelBuffer) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
+		return {};
+	}
 	std::string directStorageMessage;
 	if (!DirectStorageManager::GetInstance().UploadTextureRegionsFromFile(filePath.wstring(), pixelBuffer->GetAPIResource(), regions, &directStorageMessage)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::EnqueueFailed, path, directStorageMessage);
 		if (!directStorageMessage.empty()) {
 			spdlog::debug("TextureAsset: DirectStorage fallback for '{}' because {}", path, directStorageMessage);
 		}
 		return {};
 	}
 
+	RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Eligible, path);
 	return pixelBuffer;
 }
 
@@ -1020,9 +1125,16 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() ||
-		IsDirectStorageGpuTextureUploadDisabled() ||
-		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidRequest, path, "empty conditioned cache path");
+		return {};
+	}
+	if (IsDirectStorageGpuTextureUploadDisabled()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Disabled, path, "texture upload disabled by environment");
+		return {};
+	}
+	if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::QueueUnavailable, path, "GPU queue unavailable");
 		return {};
 	}
 
@@ -1031,6 +1143,7 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 	uint32_t clampedTopMip = 0u;
 	std::string error;
 	if (!TryBuildConditionedCacheResidentUpload(path, topMip, allowRTV, allowUAV, desc, range, clampedTopMip, error)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, error);
 		if (!error.empty()) {
 			spdlog::debug("TextureAsset: conditioned cache DirectStorage fallback for '{}' because {}", path, error);
 		}
@@ -1039,6 +1152,7 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 
 	auto pixelBuffer = PixelBuffer::CreateShared(desc);
 	if (!pixelBuffer) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 		return {};
 	}
 
@@ -1048,12 +1162,14 @@ std::shared_ptr<PixelBuffer> TryUploadConditionedCacheFilePathDirectToVRAM(
 			pixelBuffer->GetAPIResource(),
 			range,
 			&directStorageMessage)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::EnqueueFailed, path, directStorageMessage);
 		if (!directStorageMessage.empty()) {
 			spdlog::debug("TextureAsset: conditioned cache DirectStorage fallback for '{}' because {}", path, directStorageMessage);
 		}
 		return {};
 	}
 
+	RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Eligible, path);
 	return pixelBuffer;
 }
 
@@ -1064,9 +1180,16 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() ||
-		IsDirectStorageGpuTextureUploadDisabled() ||
-		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidRequest, path, "empty texture path");
+		return {};
+	}
+	if (IsDirectStorageGpuTextureUploadDisabled()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Disabled, path, "texture upload disabled by environment");
+		return {};
+	}
+	if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::QueueUnavailable, path, "GPU queue unavailable");
 		return {};
 	}
 
@@ -1086,6 +1209,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			std::wstring extension = filePath.extension().wstring();
 			std::transform(extension.begin(), extension.end(), extension.begin(), towlower);
 			if (extension != L".dds") {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::UnsupportedFileType, path, "only DDS files are supported");
 				throw std::runtime_error("only DDS files support DirectStorage GPU-direct texture upload");
 			}
 
@@ -1093,6 +1217,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			DirectX::TexMetadata metadata{};
 			const HRESULT loadHr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
 			if (FAILED(loadHr) || metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.depth != 1) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidMetadata, path, "failed to load 2D DDS metadata");
 				throw std::runtime_error("failed to load DDS metadata for DirectStorage GPU-direct texture upload");
 			}
 
@@ -1104,6 +1229,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 				(std::numeric_limits<size_t>::max)(),
 				headerSize);
 			if (FAILED(headerHr) || headerSize == 0) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidMetadata, path, "failed to encode DDS header");
 				throw std::runtime_error("failed to encode DDS header for DirectStorage GPU-direct texture upload");
 			}
 
@@ -1111,6 +1237,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
 			desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(desc.format));
 			if (rhi::helpers::IsBlockCompressed(desc.format)) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::UnsupportedFormat, path, "block-compressed DDS uses packed block rows incompatible with this region-copy path");
 				throw std::runtime_error("block-compressed DDS textures do not use this DirectStorage GPU-direct path");
 			}
 
@@ -1130,6 +1257,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			const DirectX::Image* images = image.GetImages();
 			const size_t imageCount = image.GetImageCount();
 			if (images == nullptr || imageCount != static_cast<size_t>(arraySlices) * fullMipCount) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "DDS image count did not match array slices and mips");
 				throw std::runtime_error("DDS image layout did not match expected subresource count for DirectStorage GPU-direct texture upload");
 			}
 			if (handle->cancelRequested.load(std::memory_order_acquire)) {
@@ -1149,6 +1277,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 					srcImage.height > static_cast<size_t>((std::numeric_limits<uint32_t>::max)()) ||
 					srcImage.slicePitch == 0 ||
 					srcImage.slicePitch > static_cast<size_t>((std::numeric_limits<uint32_t>::max)())) {
+					RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "DDS image dimensions exceeded upload limits");
 					throw std::runtime_error("DDS image dimensions exceeded DirectStorage GPU-direct texture upload limits");
 				}
 
@@ -1176,11 +1305,13 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			}
 
 			if (regions.empty()) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, "no upload regions were produced");
 				throw std::runtime_error("no texture regions were produced for DirectStorage GPU-direct texture upload");
 			}
 
 			auto uploadedImage = PixelBuffer::CreateShared(desc);
 			if (!uploadedImage) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 				throw std::runtime_error("failed to create resident PixelBuffer for DirectStorage GPU-direct texture upload");
 			}
 			if (handle->cancelRequested.load(std::memory_order_acquire)) {
@@ -1194,6 +1325,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 				regions,
 				&directStorageMessage);
 			if (!requestHandle.IsValid()) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::EnqueueFailed, path, directStorageMessage);
 				throw std::runtime_error(directStorageMessage.empty()
 					? "failed to enqueue DirectStorage GPU-direct texture upload"
 					: directStorageMessage);
@@ -1208,6 +1340,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 			}
 
 			handle->state.store(TextureDirectStorageReloadJobState::Uploading, std::memory_order_release);
+			RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Eligible, path);
 		}
 		catch (const std::exception& ex) {
 			{
@@ -1227,9 +1360,16 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 	bool allowRTV,
 	bool allowUAV)
 {
-	if (path.empty() ||
-		IsDirectStorageGpuTextureUploadDisabled() ||
-		!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+	if (path.empty()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidRequest, path, "empty conditioned cache path");
+		return {};
+	}
+	if (IsDirectStorageGpuTextureUploadDisabled()) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Disabled, path, "texture upload disabled by environment");
+		return {};
+	}
+	if (!DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::QueueUnavailable, path, "GPU queue unavailable");
 		return {};
 	}
 
@@ -1246,6 +1386,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 			preflightRange,
 			preflightClampedTopMip,
 			preflightError)) {
+		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::InvalidLayout, path, preflightError);
 		if (!preflightError.empty()) {
 			spdlog::debug("TextureAsset: conditioned cache DirectStorage preflight fallback for '{}' because {}", path, preflightError);
 		}
@@ -1270,6 +1411,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 
 			auto uploadedImage = PixelBuffer::CreateShared(desc);
 			if (!uploadedImage) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::ResourceCreateFailed, path, "failed to create destination PixelBuffer");
 				throw std::runtime_error("failed to create resident PixelBuffer for conditioned texture cache DirectStorage upload");
 			}
 			if (handle->cancelRequested.load(std::memory_order_acquire)) {
@@ -1283,6 +1425,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 				range,
 				&directStorageMessage);
 			if (!requestHandle.IsValid()) {
+				RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::EnqueueFailed, path, directStorageMessage);
 				throw std::runtime_error(directStorageMessage.empty()
 					? "failed to enqueue conditioned texture cache DirectStorage upload"
 					: directStorageMessage);
@@ -1297,6 +1440,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 			}
 
 			handle->state.store(TextureDirectStorageReloadJobState::Uploading, std::memory_order_release);
+			RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::Eligible, path);
 		}
 		catch (const std::exception& ex) {
 			{

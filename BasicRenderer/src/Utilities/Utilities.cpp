@@ -579,6 +579,73 @@ namespace detail {
         return true;
     }
 
+    std::optional<TextureDescription> TryBuildDeferredConditionedCacheDescription(
+        const std::wstring& filePath,
+        bool allowRTV,
+        bool allowUAV,
+        std::string* outFailureReason = nullptr)
+    {
+        if (outFailureReason) {
+            outFailureReason->clear();
+        }
+
+        br::processed_texture_cache::FileHeader header{};
+        if (!ReadProcessedTextureCacheHeader(filePath, header)) {
+            if (outFailureReason) {
+                *outFailureReason = "failed to read conditioned texture cache header";
+            }
+            return std::nullopt;
+        }
+
+        if (header.baseWidth == 0 || header.baseHeight == 0 || header.mipLevels == 0 ||
+            header.subresourceCount == 0 || header.totalArraySlices == 0 ||
+            header.subresourceCount != header.totalArraySlices * header.mipLevels) {
+            if (outFailureReason) {
+                *outFailureReason = "conditioned texture cache header has inconsistent dimensions";
+            }
+            return std::nullopt;
+        }
+
+        TextureDescription desc{};
+        desc.format = static_cast<rhi::Format>(header.format);
+        desc.channels = static_cast<unsigned short>(header.channels);
+        desc.isCubemap = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsCubemap);
+        desc.isArray = br::processed_texture_cache::HasFlag(header, br::processed_texture_cache::FlagIsArray);
+        desc.arraySize = desc.isCubemap
+            ? (std::max)(1u, header.totalArraySlices / 6u)
+            : (std::max)(1u, header.arraySize);
+        desc.hasRTV = allowRTV;
+        desc.hasUAV = allowUAV;
+        desc.generateMipMaps = false;
+        desc.initialLayout = rhi::ResourceLayout::Common;
+        desc.imageDimensions.reserve(header.subresourceCount);
+
+        const DXGI_FORMAT dxgiFormat = rhi::ToDxgi(desc.format);
+        for (uint32_t arraySlice = 0; arraySlice < header.totalArraySlices; ++arraySlice) {
+            for (uint32_t mip = 0; mip < header.mipLevels; ++mip) {
+                const size_t mipWidth = (std::max)(size_t(1), static_cast<size_t>(header.baseWidth) >> mip);
+                const size_t mipHeight = (std::max)(size_t(1), static_cast<size_t>(header.baseHeight) >> mip);
+                size_t rowPitch = 0;
+                size_t slicePitch = 0;
+                if (FAILED(DirectX::ComputePitch(dxgiFormat, mipWidth, mipHeight, rowPitch, slicePitch))) {
+                    if (outFailureReason) {
+                        *outFailureReason = "failed to compute conditioned texture cache pitch";
+                    }
+                    return std::nullopt;
+                }
+
+                ImageDimensions dims{};
+                dims.width = static_cast<uint32_t>(mipWidth);
+                dims.height = static_cast<uint32_t>(mipHeight);
+                dims.rowPitch = rowPitch;
+                dims.slicePitch = slicePitch;
+                desc.imageDimensions.push_back(dims);
+            }
+        }
+
+        return desc;
+    }
+
     std::shared_ptr<TextureAsset> TryLoadProcessedTextureCacheToVRAM(
         const std::wstring& filePath,
         std::shared_ptr<Sampler> sampler,
@@ -1121,23 +1188,42 @@ LoadTextureFromFileDeferred(
     meta.preferSRGB = preferSRGB;
 
     TextureDescription desc{};
-    desc.channels = 4;
-    desc.format = preferSRGB
-        ? rhi::Format::R8G8B8A8_UNorm_sRGB
-        : rhi::Format::R8G8B8A8_UNorm;
-    desc.hasRTV = allowRTV;
-    desc.hasUAV = allowUAV;
-    desc.generateMipMaps = false;
+    std::string deferredShapeDetail = "texture load deferred; source path retained for async upload";
+    if (meta.isProcessingCacheArtifact || detail::IsProcessedTextureCachePath(filePath)) {
+        std::string cacheShapeError;
+        if (auto cacheDesc = detail::TryBuildDeferredConditionedCacheDescription(filePath, allowRTV, allowUAV, &cacheShapeError)) {
+            desc = std::move(*cacheDesc);
+            meta.isProcessingCacheArtifact = true;
+            deferredShapeDetail = "texture load deferred; conditioned cache shape populated from cache header";
+            TracyPlot("SARP.Texture.DeferredConditionedCacheShape", static_cast<int64_t>(1));
+        }
+        else if (!cacheShapeError.empty()) {
+            spdlog::debug(
+                "LoadTextureFromFileDeferred: using placeholder shape for '{}' because {}",
+                utf8,
+                cacheShapeError);
+        }
+    }
 
-    ImageDimensions dims{};
-    dims.width = 1;
-    dims.height = 1;
-    dims.rowPitch = 4;
-    dims.slicePitch = 4;
-    desc.imageDimensions.push_back(dims);
+    if (desc.imageDimensions.empty()) {
+        desc.channels = 4;
+        desc.format = preferSRGB
+            ? rhi::Format::R8G8B8A8_UNorm_sRGB
+            : rhi::Format::R8G8B8A8_UNorm;
+        desc.hasRTV = allowRTV;
+        desc.hasUAV = allowUAV;
+        desc.generateMipMaps = false;
+
+        ImageDimensions dims{};
+        dims.width = 1;
+        dims.height = 1;
+        dims.rowPitch = 4;
+        dims.slicePitch = 4;
+        desc.imageDimensions.push_back(dims);
+    }
 
     auto texture = TextureAsset::CreateShared(desc, utf8, std::move(sampler), std::move(meta));
-    texture->RecordLoadPath(TextureLoadPathTelemetry::DeferredFileReference, "texture load deferred; source path retained for async upload");
+    texture->RecordLoadPath(TextureLoadPathTelemetry::DeferredFileReference, deferredShapeDetail);
     texture->RecordUploadPath(TextureUploadPathTelemetry::DeferredPlaceholder, "deferred texture will use a semantic placeholder until async upload completes");
     TracyPlot("SARP.Texture.DeferredQueued", static_cast<int64_t>(1));
     return texture;
