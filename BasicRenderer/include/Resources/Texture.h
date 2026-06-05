@@ -13,6 +13,7 @@
 #include "Factories/TextureFactory.h"
 #include "Managers/Singletons/DirectStorageManager.h"
 #include "Resources/Sampler.h"
+#include "Resources/TextureResidency.h"
 
 struct RenderContext;
 struct TextureProcessingJobHandle;
@@ -335,6 +336,7 @@ public:
 
     DirectStorageAsyncRequestHandle QueueInitialDirectStorageUploadIfNeeded();
     void EnsureUploaded(const TextureFactory& factory);
+    TextureUploadAdvanceResult EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
 
     unsigned int GetWidth() const {
         return m_desc.imageDimensions[0].width;
@@ -393,6 +395,7 @@ private:
     std::string m_name;
 	bool m_hasUploadedPlaceholder = false;
 	bool m_hasUploadedFinalImage = false;
+	bool m_processingFallbackRequested = false;
     TextureLoadPathTelemetry m_lastReportedLoadPath = TextureLoadPathTelemetry::Unknown;
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
 

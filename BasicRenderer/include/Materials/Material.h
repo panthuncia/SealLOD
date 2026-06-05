@@ -287,6 +287,7 @@ public:
     uint32_t GetMaterialID() const { return m_materialID; }
     PerMaterialCB const& GetData() const { return m_materialData; }
     void EnsureTexturesUploaded(const TextureFactory& factory);
+    void EnsureTexturesUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;
 private:
 	inline static std::atomic<uint32_t> globalMaterialCount;

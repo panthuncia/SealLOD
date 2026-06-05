@@ -16,6 +16,7 @@ namespace {
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
 	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
+	constexpr int64_t kTextureUploadAdvanceBudgetUs = 2000;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 
 	uint64_t ComputeTextureResidentBytes(const TextureDescription& desc) {
@@ -340,7 +341,7 @@ void TextureStreamingManager::EnsureTextureUploadAdvanced(
 	const uint64_t previousBindingRevision = texture->GetBindingRevision();
 	const uint64_t previousStreamingRevision = texture->GetStreamingStateRevision();
 	texture->SetGenerateMipmaps(true);
-	texture->EnsureUploaded(textureFactory);
+	texture->EnsureUploaded(textureFactory, TextureUploadAdvanceMode::NonBlocking);
 
 	if (texture->GetStreamingStateRevision() != previousStreamingRevision) {
 		MarkTextureStreamingMetadataDirty(texture, false, "upload_state_revision");
@@ -455,6 +456,7 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 	std::size_t pendingProcessingHandle = 0;
 	std::size_t pendingReloadHandle = 0;
 	std::size_t pendingDirectStorageHandle = 0;
+	std::vector<uint32_t> deferredTextureIDs;
 	struct PendingTextureSample {
 		uint32_t id = 0;
 		uint32_t requestedTopMip = 0;
@@ -480,6 +482,14 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 	std::vector<PendingTextureSample> pendingSamples;
 	pendingSamples.reserve(8);
 	for (const uint32_t streamingTextureID : texturesToAdvance) {
+		if (uploadAdvanceVisited != 0) {
+			const auto elapsedUploadUs = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - uploadStart).count();
+			if (elapsedUploadUs >= kTextureUploadAdvanceBudgetUs) {
+				deferredTextureIDs.push_back(streamingTextureID);
+				continue;
+			}
+		}
 		++uploadAdvanceVisited;
 		auto it = m_streamingTexturesByID.find(streamingTextureID);
 		if (it == m_streamingTexturesByID.end()) {
@@ -547,6 +557,11 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 					.initialData = pending.initialData
 				});
 			}
+		}
+	}
+	for (uint32_t streamingTextureID : deferredTextureIDs) {
+		if (m_texturesNeedingUploadAdvanceSet.insert(streamingTextureID).second) {
+			m_texturesNeedingUploadAdvance.push_back(streamingTextureID);
 		}
 	}
 	const auto uploadEnd = std::chrono::steady_clock::now();

@@ -421,9 +421,6 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 		&& existingSlotIt->second < m_materialUsageCounts.size()
 		&& m_materialUsageCounts[existingSlotIt->second] > 0u;
 
-	if (!alreadyResident && textureFactory) {
-		material.EnsureTexturesUploaded(*textureFactory);
-	}
 	material.SetCompileFlagsID(flagsSlot);
 	unsigned int materialSlot = alreadyResident
 		? existingSlotIt->second
@@ -453,9 +450,9 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
 	const bool refreshedTextures = textureFactory != nullptr;
 	if (textureFactory) {
-		material.EnsureTexturesUploaded(*textureFactory);
 		TrackMaterialTextureAssets(material, -1);
 		TrackMaterialTextureAssets(material, 1, textureFactory);
+		material.EnsureTexturesUploaded(*textureFactory, TextureUploadAdvanceMode::NonBlocking);
 	}
 
 	const PerMaterialCB materialData = material.GetData();

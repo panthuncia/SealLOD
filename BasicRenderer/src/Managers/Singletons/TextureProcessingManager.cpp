@@ -29,6 +29,13 @@
 using namespace DirectX;
 
 namespace {
+std::string FormatHRESULT(HRESULT hr) {
+	std::ostringstream oss;
+	oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
+		<< static_cast<uint32_t>(hr);
+	return oss.str();
+}
+
 uint32_t CalcMipCount(uint32_t width, uint32_t height) {
 	uint32_t levels = 1;
 	while (width > 1 || height > 1) {
@@ -83,6 +90,10 @@ bool ShouldPreserveAlphaCoverage(const TextureFileMeta& meta, const TextureSourc
 	}
 
 	return rhi::helpers::stripSrgb(sourceData.desc.format) == rhi::Format::R8G8B8A8_UNorm;
+}
+
+bool IsSourceBlockCompressed(const TextureSourceData& sourceData) {
+	return sourceData.isBlockCompressed || rhi::helpers::IsBlockCompressed(sourceData.desc.format);
 }
 
 void FlipNormalGreenChannel(ScratchImage& image) {
@@ -283,7 +294,7 @@ bool TryWriteConditionedTextureCache(const std::wstring& cachePath, const Textur
 	if (sourceData.hasFullMipChain) {
 		header.flags |= br::processed_texture_cache::FlagHasFullMipChain;
 	}
-	if (sourceData.isBlockCompressed) {
+	if (IsSourceBlockCompressed(sourceData)) {
 		header.flags |= br::processed_texture_cache::FlagIsBlockCompressed;
 	}
 	header.format = static_cast<uint32_t>(sourceData.desc.format);
@@ -390,7 +401,36 @@ HRESULT InitializeScratchImageFromSource(const TextureSourceData& sourceData, Sc
 				return E_INVALIDARG;
 			}
 
-			std::memcpy(const_cast<uint8_t*>(dstImage->pixels), bytes->data(), static_cast<size_t>(dims.slicePitch));
+			size_t expectedRowPitch = 0;
+			size_t expectedSlicePitch = 0;
+			if (FAILED(ComputePitch(format, dims.width, dims.height, expectedRowPitch, expectedSlicePitch)) ||
+				expectedRowPitch == 0 ||
+				expectedSlicePitch == 0)
+			{
+				return E_INVALIDARG;
+			}
+
+			const size_t srcRowPitch = static_cast<size_t>(dims.rowPitch);
+			const size_t srcSlicePitch = static_cast<size_t>(dims.slicePitch);
+			const size_t dstRowPitch = dstImage->rowPitch;
+			const size_t dstSlicePitch = dstImage->slicePitch;
+			if (srcRowPitch < expectedRowPitch ||
+				dstRowPitch < expectedRowPitch ||
+				srcSlicePitch < expectedSlicePitch ||
+				dstSlicePitch < expectedSlicePitch)
+			{
+				return E_INVALIDARG;
+			}
+
+			const size_t rowCount = expectedSlicePitch / expectedRowPitch;
+			auto* dstPixels = const_cast<uint8_t*>(dstImage->pixels);
+			const auto* srcPixels = bytes->data();
+			for (size_t row = 0; row < rowCount; ++row) {
+				std::memcpy(
+					dstPixels + row * dstRowPitch,
+					srcPixels + row * srcRowPitch,
+					expectedRowPitch);
+			}
 		}
 	}
 
@@ -408,6 +448,11 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromScratchImage(const Scratch
 		? static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize / size_t(6)))
 		: static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
 	result->desc.generateMipMaps = false;
+	result->isBlockCompressed = rhi::helpers::IsBlockCompressed(result->desc.format);
+	result->hasFullMipChain =
+		metadata.mipLevels == CalcMipCount(
+			static_cast<uint32_t>(metadata.width),
+			static_cast<uint32_t>(metadata.height));
 
 	const Image* images = image.GetImages();
 	const size_t imageCount = image.GetImageCount();
@@ -1053,7 +1098,7 @@ bool ShouldUseGpuBc7Backend(const TextureSourceData& sourceData, const TextureFi
 		return false;
 	}
 
-	if (!meta.processing.requestBlockCompression || sourceData.isBlockCompressed) {
+	if (!meta.processing.requestBlockCompression || IsSourceBlockCompressed(sourceData)) {
 		return false;
 	}
 
@@ -1086,8 +1131,9 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 	}
 
 	const bool needMipChain = meta.processing.requestMipChain && !sourceData->hasFullMipChain;
-	const bool needCompression = meta.processing.requestBlockCompression && !sourceData->isBlockCompressed;
-	const bool needDecompression = !meta.processing.requestBlockCompression && sourceData->isBlockCompressed;
+	const bool sourceIsBlockCompressed = IsSourceBlockCompressed(*sourceData);
+	const bool needCompression = meta.processing.requestBlockCompression && !sourceIsBlockCompressed;
+	const bool needDecompression = !meta.processing.requestBlockCompression && sourceIsBlockCompressed;
 	const bool needNormalConventionConversion = NeedsNormalConventionConversion(meta);
 	const bool needGpuAlphaMipChain = needMipChain && ShouldPreserveAlphaCoverage(meta, *sourceData);
 	const bool needCpuMipChain = needMipChain && !needGpuAlphaMipChain;
@@ -1103,7 +1149,7 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 	}
 
 	ScratchImage linearImage;
-	if (sourceData->isBlockCompressed) {
+	if (sourceIsBlockCompressed) {
 		hr = Decompress(
 			workingImage.GetImages(),
 			workingImage.GetImageCount(),
@@ -1208,7 +1254,23 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 		TEX_THRESHOLD_DEFAULT,
 		compressedImage);
 	if (FAILED(hr)) {
-		throw std::runtime_error("TextureProcessingManager: DirectXTex Compress failed");
+		std::ostringstream oss;
+		oss
+			<< "TextureProcessingManager: DirectXTex Compress failed"
+			<< " hr=" << FormatHRESULT(hr)
+			<< " semantic=" << TextureSemanticToString(meta.processing.semantic)
+			<< " srcFormat=" << static_cast<uint32_t>(preparedSourceData->desc.format)
+			<< " dxgiSrcFormat=" << static_cast<uint32_t>(preparedImage.GetMetadata().format)
+			<< " targetFormat=" << static_cast<uint32_t>(targetFormat)
+			<< " dims="
+			<< (preparedSourceData->desc.imageDimensions.empty() ? 0u : preparedSourceData->desc.imageDimensions[0].width)
+			<< "x"
+			<< (preparedSourceData->desc.imageDimensions.empty() ? 0u : preparedSourceData->desc.imageDimensions[0].height)
+			<< " subresources=" << preparedSourceData->subresources.size()
+			<< " imageCount=" << preparedImage.GetImageCount()
+			<< " fullMipChain=" << preparedSourceData->hasFullMipChain
+			<< " preferSRGB=" << meta.preferSRGB;
+		throw std::runtime_error(oss.str());
 	}
 
 	//const auto compressionElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1228,6 +1290,10 @@ PreparedTextureProcessingData ProcessTextureSourceData(
 {
 	PreparedTextureProcessingData prepared{};
 	prepared.preparedSourceData = PrepareTextureSourceDataForBackend(sourceData, meta);
+	if (prepared.preparedSourceData && !TextureProcessingManager::GetInstance().NeedsProcessing(*prepared.preparedSourceData, meta)) {
+		prepared.finalResult = prepared.preparedSourceData;
+		return prepared;
+	}
 	prepared.requiresGpuCompression = prepared.preparedSourceData && ShouldUseGpuBc7Backend(*prepared.preparedSourceData, meta);
 	if (!prepared.requiresGpuCompression) {
 		prepared.finalResult = FinalizeTextureSourceDataOnCpu(prepared.preparedSourceData, meta);
@@ -1258,8 +1324,9 @@ bool TextureProcessingManager::NeedsProcessing(const TextureSourceData& sourceDa
 	const uint32_t mipLevelCount = GetTextureMipLevelCount(sourceData);
 	const bool hasResidentMipChain = mipLevelCount > 1u;
 	const bool needMipChain = meta.processing.requestMipChain && !sourceData.hasFullMipChain && !hasResidentMipChain;
-	const bool needCompression = meta.processing.requestBlockCompression && !sourceData.isBlockCompressed;
-	const bool needDecompression = !meta.processing.requestBlockCompression && sourceData.isBlockCompressed;
+	const bool sourceIsBlockCompressed = IsSourceBlockCompressed(sourceData);
+	const bool needCompression = meta.processing.requestBlockCompression && !sourceIsBlockCompressed;
+	const bool needDecompression = !meta.processing.requestBlockCompression && sourceIsBlockCompressed;
 	const bool needNormalConventionConversion = NeedsNormalConventionConversion(meta);
 	return needMipChain || needCompression || needDecompression || needNormalConventionConversion;
 }
@@ -1377,7 +1444,7 @@ StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtif
 		if (FAILED(hr)) {
 			throw std::runtime_error("failed to initialize source scratch image");
 		}
-		if (sourceData->isBlockCompressed) {
+		if (IsSourceBlockCompressed(*sourceData)) {
 			ScratchImage decompressed;
 			hr = Decompress(sourceScratch.GetImages(), sourceScratch.GetImageCount(), sourceScratch.GetMetadata(), DXGI_FORMAT_UNKNOWN, decompressed);
 			if (FAILED(hr)) {
@@ -1524,7 +1591,7 @@ std::string TextureProcessingManager::BuildProcessingJobKey(
 	boost::hash_combine(seed, mipLevelCount);
 	boost::hash_combine(seed, static_cast<uint32_t>(sourceData->subresources.size()));
 	boost::hash_combine(seed, sourceData->hasFullMipChain);
-	boost::hash_combine(seed, sourceData->isBlockCompressed);
+	boost::hash_combine(seed, IsSourceBlockCompressed(*sourceData));
 	return cacheKey + "#job#" + std::to_string(seed);
 }
 

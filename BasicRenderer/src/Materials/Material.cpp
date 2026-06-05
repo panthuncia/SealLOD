@@ -343,6 +343,10 @@ std::shared_ptr<Material> Material::GetDefaultMaterial() {
 }
 
 void Material::EnsureTexturesUploaded(const TextureFactory& factory) {
+    EnsureTexturesUploaded(factory, TextureUploadAdvanceMode::AllowBlockingFallback);
+}
+
+void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
     const bool textureStreamingEnabled = IsMaterialTextureStreamingEnabledSetting();
     m_materialData.baseColorStreamingTextureID = 0u;
     m_materialData.normalStreamingTextureID = 0u;
@@ -355,41 +359,41 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory) {
 
     if (m_baseColorTexture) {
         m_baseColorTexture->SetGenerateMipmaps(true);
-        m_baseColorTexture->EnsureUploaded(factory);
+        m_baseColorTexture->EnsureUploaded(factory, mode);
     }
     if (m_normalTexture) {
         m_normalTexture->SetGenerateMipmaps(true);
-        m_normalTexture->EnsureUploaded(factory);
+        m_normalTexture->EnsureUploaded(factory, mode);
 	}
     if (m_aoMap) {
         m_aoMap->SetGenerateMipmaps(true);
-        m_aoMap->EnsureUploaded(factory);
+        m_aoMap->EnsureUploaded(factory, mode);
     }
     if (m_heightMap) {
         m_heightMap->SetGenerateMipmaps(true);
-        m_heightMap->EnsureUploaded(factory);
+        m_heightMap->EnsureUploaded(factory, mode);
     }
     if (m_metallicTexture) {
         m_metallicTexture->SetGenerateMipmaps(true);
-        m_metallicTexture->EnsureUploaded(factory);
+        m_metallicTexture->EnsureUploaded(factory, mode);
     }
     if (m_roughnessTexture) {
         m_roughnessTexture->SetGenerateMipmaps(true);
-        m_roughnessTexture->EnsureUploaded(factory);
+        m_roughnessTexture->EnsureUploaded(factory, mode);
     }
     if (m_emissiveTexture) {
         m_emissiveTexture->SetGenerateMipmaps(true);
-        m_emissiveTexture->EnsureUploaded(factory);
+        m_emissiveTexture->EnsureUploaded(factory, mode);
 	}
     if (m_opacityTexture) {
         m_opacityTexture->SetGenerateMipmaps(true);
-        m_opacityTexture->EnsureUploaded(factory);
+        m_opacityTexture->EnsureUploaded(factory, mode);
 	}
 
     auto ensureOpenPBRTexture = [&](std::shared_ptr<TextureAsset> const& texture) {
         if (texture) {
             texture->SetGenerateMipmaps(true);
-            texture->EnsureUploaded(factory);
+            texture->EnsureUploaded(factory, mode);
         }
     };
 

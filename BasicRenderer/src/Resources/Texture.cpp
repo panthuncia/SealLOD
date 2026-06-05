@@ -1707,6 +1707,7 @@ void TextureAsset::RecordUploadPath(TextureUploadPathTelemetry path, std::string
 void TextureAsset::SetProcessingSettings(TextureProcessingSettings settings) {
 	const bool wasEligible = m_streamingState.eligible;
 	m_meta.processing = std::move(settings);
+	m_processingFallbackRequested = false;
 	RefreshStreamingStateFromDescription();
 	if (m_streamingState.eligible) {
 		m_streamingState.enabled = !m_suppressMipStreaming && IsMaterialTextureStreamingEnabledSetting();
@@ -1938,21 +1939,6 @@ DirectStorageAsyncRequestHandle TextureAsset::QueueInitialDirectStorageUploadIfN
 		return {};
 	}
 
-	try {
-		auto sourceData = BuildSourceData();
-		if (!sourceData) {
-			return {};
-		}
-
-		if (TextureProcessingManager::GetInstance().ShouldProcess(m_meta) &&
-			TextureProcessingManager::GetInstance().NeedsProcessing(*sourceData, m_meta)) {
-			return {};
-		}
-	}
-	catch (const std::exception&) {
-		return {};
-	}
-
 	m_directStorageReloadHandle = IsConditionedCacheFilePath(*filePath)
 		? BeginUploadConditionedCacheFilePathDirectToVRAMAsync(
 			*filePath,
@@ -1969,6 +1955,21 @@ DirectStorageAsyncRequestHandle TextureAsset::QueueInitialDirectStorageUploadIfN
 }
 
 void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
+	EnsureUploaded(factory, TextureUploadAdvanceMode::AllowBlockingFallback);
+}
+
+TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
+	const uint64_t initialBindingRevision = GetBindingRevision();
+	bool didMainThreadUpload = false;
+	auto makeResult = [&]() {
+		return TextureUploadAdvanceResult{
+			.hasUsableImage = HasUsableImage(),
+			.hasPendingWork = HasPendingUploadWork(),
+			.bindingChanged = GetBindingRevision() != initialBindingRevision,
+			.didMainThreadUpload = didMainThreadUpload,
+		};
+	};
+	const bool allowBlockingFallback = mode == TextureUploadAdvanceMode::AllowBlockingFallback;
 	RefreshStreamingStateFromDescription();
 	const bool needsStreamingReload =
 		m_hasUploadedFinalImage &&
@@ -1977,7 +1978,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		  m_streamingState.pendingTopMip != m_streamingState.residency.residentTopMip) ||
 		 (!m_streamingState.enabled && m_streamingState.residency.residentTopMip != 0u));
 	if (m_hasUploadedFinalImage && !needsStreamingReload && HasUsableImage()) {
-		return;
+		return makeResult();
 	}
 
 	const uint32_t desiredResidentTopMip = GetDesiredResidentTopMip();
@@ -1986,15 +1987,15 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		m_streamingState.enabled &&
 		isParticipatingMaterialTexture &&
 		DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu);
-	const bool shouldProcessTexture = TextureProcessingManager::GetInstance().ShouldProcess(m_meta);
+	const bool shouldProcessTexture =
+		TextureProcessingManager::GetInstance().ShouldProcess(m_meta) &&
+		!m_processingFallbackRequested;
 	auto ensureProcessingPlaceholder = [&](const std::string& detail) {
 		if (HasUsableImage() || !m_meta.processing.allowAsyncPlaceholder) {
 			return false;
 		}
 
 		m_image = CreatePlaceholderTexture(factory, m_meta.processing);
-		m_desc = m_image->GetDescription();
-		RefreshStreamingStateFromDescription();
 		RecordUploadPath(TextureUploadPathTelemetry::AsyncProcessingPlaceholder, detail);
 		m_hasUploadedPlaceholder = true;
 		BumpBindingRevision();
@@ -2004,9 +2005,6 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 	auto tryAdvanceAsyncDirectStorageReload = [&](const std::string& detail) -> bool {
 		auto* filePath = std::get_if<std::string>(&m_initialStorage);
 		if (filePath == nullptr || filePath->empty()) {
-			return false;
-		}
-		if (IsConditionedCacheFilePath(*filePath)) {
 			return false;
 		}
 
@@ -2171,6 +2169,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		RecordUploadPath(uploadPath, detail);
 		m_hasUploadedFinalImage = true;
 		m_hasUploadedPlaceholder = false;
+		didMainThreadUpload = true;
 		BumpBindingRevision();
 		if (!m_initialDataString.empty()) {
 			m_initialStorage = m_initialDataString;
@@ -2179,6 +2178,24 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			m_initialStorage = std::monostate{};
 		}
 		return true;
+	};
+
+	auto requestAsyncSourceDataIfNeeded = [&](uint32_t targetTopMip, bool streamingEnabled) -> bool {
+		if (m_reloadHandle) {
+			return true;
+		}
+
+		auto* filePath = std::get_if<std::string>(&m_initialStorage);
+		if (filePath == nullptr || filePath->empty()) {
+			return false;
+		}
+
+		m_reloadHandle = RequestReloadSourceDataAsync(
+			*filePath,
+			m_meta.preferSRGB,
+			targetTopMip,
+			streamingEnabled);
+		return m_reloadHandle != nullptr;
 	};
 
 	const bool preferDirectStorageStreamingReload = [&]() {
@@ -2197,12 +2214,18 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 
 	if (preferDirectStorageStreamingReload &&
 		tryAdvanceAsyncDirectStorageReload("texture residency reloaded asynchronously from DDS-backed source through DirectStorage GPU queue")) {
-		return;
+		return makeResult();
 	}
 	if (useConditionedCacheResidency && m_meta.isProcessingCacheArtifact && !m_processingHandle) {
 		if (tryAdvanceAsyncDirectStorageReload("texture residency uploaded asynchronously from conditioned cache through DirectStorage GPU queue")) {
 			ensureProcessingPlaceholder("conditioned cache DirectStorage upload pending; placeholder texture uploaded");
-			return;
+			return makeResult();
+		}
+
+		if (!allowBlockingFallback) {
+			requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+			ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; async CPU fallback queued");
+			return makeResult();
 		}
 
 		std::shared_ptr<TextureSourceData> fallbackSourceData;
@@ -2225,11 +2248,11 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 					m_processingHandle.reset();
 				}
 			}
-			return;
+			return makeResult();
 		}
 
 		ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; placeholder texture kept resident");
-		return;
+		return makeResult();
 	}
 
 	std::shared_ptr<TextureSourceData> sourceData;
@@ -2289,40 +2312,63 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		}
 	}
 
+	if (m_processingFallbackRequested && sourceData) {
+		m_meta.isProcessingCacheArtifact = false;
+		if (uploadSourceDataThroughFactory(
+				sourceData,
+				TextureUploadPathTelemetry::ProcessingFailedFallback,
+				"async processing failed earlier; uploaded asynchronously rebuilt source data through TextureFactory")) {
+			m_processingFallbackRequested = false;
+			return makeResult();
+		}
+		ensureProcessingPlaceholder("async processing failed earlier; rebuilt source data could not be uploaded yet");
+		return makeResult();
+	}
+
 	if (shouldProcessTexture) {
 		if (!sourceData && (m_reloadHandle || reloadFailedThisFrame)) {
 			ensureProcessingPlaceholder("async source-data build pending; placeholder texture uploaded");
-			return;
+			return makeResult();
+		}
+		if (!sourceData && !allowBlockingFallback) {
+			requestAsyncSourceDataIfNeeded(0u, false);
+			ensureProcessingPlaceholder("async source-data build queued; placeholder texture uploaded");
+			return makeResult();
 		}
 		sourceData = sourceData ? sourceData : BuildSourceData();
 		if (!m_processingHandle && !TextureProcessingManager::GetInstance().NeedsProcessing(*sourceData, m_meta)) {
 			const uint32_t residentMipCount = CalcMipCountFromDescription(sourceData->desc);
 			if (needsStreamingReload) {
 				if (tryAdvanceAsyncDirectStorageReload("texture residency reloaded asynchronously from file-backed DDS through DirectStorage GPU queue")) {
-					return;
+					return makeResult();
 				}
 			}
 			else if (tryAdvanceAsyncDirectStorageReload("texture residency uploaded asynchronously from file-backed DDS through DirectStorage GPU queue")) {
 				ensureProcessingPlaceholder("DirectStorage texture upload pending; fallback texture uploaded");
-				return;
+				return makeResult();
 			}
 			if (useConditionedCacheResidency && m_meta.isProcessingCacheArtifact) {
 				if (uploadSourceDataThroughFactory(
 						sourceData,
 						TextureUploadPathTelemetry::ProcessingCacheUpload,
 						"conditioned cache DirectStorage residency unavailable, uploaded cache through TextureFactory")) {
-					return;
+					return makeResult();
 				}
 
 				ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; placeholder texture kept resident");
-				return;
+				return makeResult();
 			}
 			if (useConditionedCacheResidency) {
 				if (promoteStreamingSourceToProcessedCache()) {
 					m_meta.isProcessingCacheArtifact = true;
 					if (tryAdvanceAsyncDirectStorageReload("texture residency uploaded asynchronously from existing conditioned cache through DirectStorage GPU queue")) {
 						ensureProcessingPlaceholder("conditioned cache DirectStorage upload pending; placeholder texture uploaded");
-						return;
+						return makeResult();
+					}
+					if (!allowBlockingFallback) {
+						requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+						ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; async cache fallback queued");
+						return makeResult();
 					}
 					std::shared_ptr<TextureSourceData> fallbackSourceData;
 					try {
@@ -2338,10 +2384,10 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 							fallbackSourceData,
 							TextureUploadPathTelemetry::ProcessingCacheUpload,
 							"existing conditioned cache DirectStorage residency unavailable, uploaded cache through TextureFactory")) {
-						return;
+						return makeResult();
 					}
 					ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; placeholder texture kept resident");
-					return;
+					return makeResult();
 				}
 
 				// The texture is already in a renderable format, but material streaming still needs a
@@ -2362,6 +2408,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
 				SetPendingTopMip(desiredResidentTopMip);
 				RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture data uploaded through TextureFactory without async processing");
+				didMainThreadUpload = true;
 				BumpBindingRevision();
 				if (!m_initialDataString.empty()) {
 					m_initialStorage = m_initialDataString;
@@ -2369,7 +2416,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 				else {
 					m_initialStorage = std::monostate{};
 				}
-				return;
+				return makeResult();
 			}
 		}
 	}
@@ -2378,7 +2425,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 		if (!sourceData && m_reloadHandle) {
 			ensureProcessingPlaceholder("async reload source build pending; placeholder texture uploaded");
 
-			return;
+			return makeResult();
 		}
 
 		if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !HasUsableImage() && sourceData) {
@@ -2397,11 +2444,16 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 					sourceData,
 					TextureUploadPathTelemetry::CpuImmediateUpload,
 					"texture data uploaded through TextureFactory as bootstrap while async processing/cache preparation continues")) {
-				return;
+				return makeResult();
 			}
 		}
 
 		if (!m_processingHandle) {
+			if (!sourceData && !allowBlockingFallback) {
+				requestAsyncSourceDataIfNeeded(0u, false);
+				ensureProcessingPlaceholder("async processing source-data build queued; placeholder texture uploaded");
+				return makeResult();
+			}
 			const auto processingSourceData = sourceData ? sourceData : BuildProcessingSourceData();
 			m_processingHandle = TextureProcessingManager::GetInstance().RequestProcessing(processingSourceData, m_meta);
 		}
@@ -2448,7 +2500,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 					else {
 						m_initialStorage = std::monostate{};
 					}
-					return;
+					return makeResult();
 				}
 
 				if (useConditionedCacheResidency && promoteStreamingSourceToProcessedCachePath(conditionedCachePath)) {
@@ -2462,10 +2514,15 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 								? "processed texture cache hit; residency uploaded asynchronously from conditioned cache through DirectStorage GPU queue"
 								: "async processing completed; residency uploaded asynchronously from conditioned cache through DirectStorage GPU queue")) {
 						ensureProcessingPlaceholder("conditioned cache DirectStorage upload pending; placeholder texture uploaded");
-						return;
+						return makeResult();
 					}
 
 					std::shared_ptr<TextureSourceData> fallbackSourceData = result;
+					if (!fallbackSourceData && !allowBlockingFallback) {
+						requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+						ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; async cache fallback queued");
+						return makeResult();
+					}
 					if (!fallbackSourceData) {
 						try {
 							fallbackSourceData = BuildSourceData();
@@ -2484,18 +2541,23 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 								? "processed texture cache hit; DirectStorage residency unavailable, uploaded cache through TextureFactory"
 								: "async processing completed; DirectStorage residency unavailable, uploaded processed result through TextureFactory")) {
 						m_processingHandle.reset();
-						return;
+						return makeResult();
 					}
 
 					ensureProcessingPlaceholder("conditioned cache DirectStorage upload unavailable; placeholder texture kept resident");
 					m_processingHandle.reset();
-					return;
+					return makeResult();
 				}
 
 				if (!conditionedCachePath.empty()) {
 					m_meta.isProcessingCacheArtifact = loadedFromCache;
 					if (promoteStreamingSourceToProcessedCachePath(conditionedCachePath)) {
 						std::shared_ptr<TextureSourceData> fallbackSourceData = result;
+						if (!fallbackSourceData && !allowBlockingFallback) {
+							requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+							ensureProcessingPlaceholder("conditioned cache CPU upload fallback queued asynchronously");
+							return makeResult();
+						}
 						if (!fallbackSourceData) {
 							try {
 								fallbackSourceData = BuildSourceData();
@@ -2514,7 +2576,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 									? "processed texture conditioned cache hit; uploaded sibling DDS through TextureFactory"
 									: "async processing completed with conditioned cache; uploaded sibling DDS through TextureFactory")) {
 							m_processingHandle.reset();
-							return;
+							return makeResult();
 						}
 					}
 				}
@@ -2535,9 +2597,9 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 								? "async processing completed from DDS cache artifact"
 								: "async processing completed and uploaded through TextureFactory")) {
 						m_processingHandle.reset();
-						return;
+						return makeResult();
 					}
-					return;
+					return makeResult();
 				}
 			}
 			else if (state == TextureProcessingJobState::Failed) {
@@ -2554,7 +2616,17 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 						processingError.empty()
 							? "async processing failed; DirectStorage fallback upload pending"
 							: "async processing failed ('" + processingError + "'); DirectStorage fallback upload pending");
-					return;
+					return makeResult();
+				}
+				if (!allowBlockingFallback) {
+					m_processingHandle.reset();
+					m_processingFallbackRequested = true;
+					requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+					ensureProcessingPlaceholder(
+						processingError.empty()
+							? "async processing failed; async CPU fallback queued"
+							: "async processing failed ('" + processingError + "'); async CPU fallback queued");
+					return makeResult();
 				}
 				if (useConditionedCacheResidency) {
 					try {
@@ -2577,6 +2649,8 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 								: "async processing failed ('" + processingError + "'); conditioned residency unavailable, uploaded original bytes through TextureFactory");
 						m_hasUploadedFinalImage = true;
 						m_hasUploadedPlaceholder = false;
+						didMainThreadUpload = true;
+						m_processingFallbackRequested = false;
 						BumpBindingRevision();
 					}
 					catch (const std::exception& ex) {
@@ -2590,7 +2664,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 								: "async processing failed ('" + processingError + "'); keeping placeholder texture");
 					}
 					m_processingHandle.reset();
-					return;
+					return makeResult();
 				}
 				const auto fallbackSourceData = BuildSourceData();
 				const uint32_t residentMipCount = CalcMipCountFromDescription(fallbackSourceData->desc);
@@ -2611,39 +2685,55 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 						: "async processing failed ('" + processingError + "'); uploaded original bytes through TextureFactory");
 				m_hasUploadedFinalImage = true;
 				m_hasUploadedPlaceholder = false;
+				didMainThreadUpload = true;
+				m_processingFallbackRequested = false;
 				BumpBindingRevision();
 				m_processingHandle.reset();
-				return;
+				return makeResult();
 			}
 		}
 
 		ensureProcessingPlaceholder("async processing pending; placeholder texture uploaded");
 
-		return;
-	}
-
-	if (m_hasUploadedPlaceholder && sourceData) {
-		m_image.reset();
-		m_hasUploadedPlaceholder = false;
+		return makeResult();
 	}
 
 	if (m_hasUploadedPlaceholder && m_directStorageReloadHandle) {
 		if (tryAdvanceAsyncDirectStorageReload("fallback texture kept resident while DirectStorage upload advances asynchronously")) {
-			return;
+			return makeResult();
 		}
 
-		m_image.reset();
-		m_hasUploadedPlaceholder = false;
+		if (!sourceData && !allowBlockingFallback) {
+			requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+			ensureProcessingPlaceholder("DirectStorage fallback did not complete; async CPU fallback queued");
+			return makeResult();
+		}
+	}
+
+	if (m_hasUploadedPlaceholder && sourceData) {
+		if (uploadSourceDataThroughFactory(
+				sourceData,
+				TextureUploadPathTelemetry::CpuImmediateUpload,
+				"placeholder replaced with asynchronously rebuilt source data")) {
+			return makeResult();
+		}
+		ensureProcessingPlaceholder("rebuilt source data could not be uploaded; keeping placeholder resident");
+		return makeResult();
 	}
 
 	if (!HasUsableImage()) {
 		if (tryAdvanceAsyncDirectStorageReload("texture uploaded asynchronously from file-backed DDS through DirectStorage GPU queue without preprocessing")) {
 			ensureProcessingPlaceholder("DirectStorage texture upload pending; fallback texture uploaded");
-			return;
+			return makeResult();
 		}
 		if (!sourceData && m_reloadHandle) {
 			ensureProcessingPlaceholder("async reload source build pending; fallback texture uploaded");
-			return;
+			return makeResult();
+		}
+		if (!sourceData && !allowBlockingFallback) {
+			requestAsyncSourceDataIfNeeded(desiredResidentTopMip, m_streamingState.enabled);
+			ensureProcessingPlaceholder("async source-data build queued; fallback texture uploaded");
+			return makeResult();
 		}
 		const auto immediateSourceData = sourceData ? sourceData : BuildSourceData();
 		const uint32_t residentMipCount = CalcMipCountFromDescription(immediateSourceData->desc);
@@ -2655,6 +2745,8 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc));
 		RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture uploaded through TextureFactory without preprocessing");
 		m_hasUploadedFinalImage = true;
+		m_hasUploadedPlaceholder = false;
+		didMainThreadUpload = true;
 		RefreshStreamingStateFromDescription();
 		SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
 		SetPendingTopMip(desiredResidentTopMip);
@@ -2666,4 +2758,5 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 			m_initialStorage = std::monostate{};
 		}
 	}
+	return makeResult();
 }
