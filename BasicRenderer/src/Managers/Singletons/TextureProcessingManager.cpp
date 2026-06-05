@@ -132,26 +132,25 @@ std::string ResolveProcessingIdentity(const TextureFileMeta& meta) {
 }
 
 std::string TryGetSourceVersionTag(const TextureFileMeta& meta) {
-	for (const std::string* candidate : { &meta.filePath, &meta.processing.sourceIdentity }) {
-		if (!candidate || candidate->empty()) {
-			continue;
-		}
-
-		std::error_code ec;
-		const std::filesystem::path path(*candidate);
-		if (!std::filesystem::exists(path, ec) || ec) {
-			continue;
-		}
-
-		auto lastWriteTime = std::filesystem::last_write_time(path, ec);
-		if (ec) {
-			continue;
-		}
-
-		return std::to_string(lastWriteTime.time_since_epoch().count());
+	const std::string* candidate = meta.processing.sourceIdentity.empty()
+		? &meta.filePath
+		: &meta.processing.sourceIdentity;
+	if (candidate == nullptr || candidate->empty()) {
+		return {};
 	}
 
-	return {};
+	std::error_code ec;
+	const std::filesystem::path path(*candidate);
+	if (!std::filesystem::exists(path, ec) || ec) {
+		return {};
+	}
+
+	auto lastWriteTime = std::filesystem::last_write_time(path, ec);
+	if (ec) {
+		return {};
+	}
+
+	return std::to_string(lastWriteTime.time_since_epoch().count());
 }
 
 std::wstring BuildProcessingCachePath(const std::string& key) {

@@ -323,8 +323,8 @@ public:
     void RecordLoadPath(TextureLoadPathTelemetry path, std::string detail = {});
     void RecordUploadPath(TextureUploadPathTelemetry path, std::string detail = {});
 
-    std::shared_ptr<TextureSourceData> BuildSourceData();
-    std::shared_ptr<TextureSourceData> BuildProcessingSourceData();
+    std::shared_ptr<TextureSourceData> BuildSourceData(const char* reason = nullptr);
+    std::shared_ptr<TextureSourceData> BuildProcessingSourceData(const char* reason = nullptr);
 
     void SetName(const std::string& name)
     {
