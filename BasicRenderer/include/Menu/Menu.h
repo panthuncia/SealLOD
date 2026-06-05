@@ -689,6 +689,9 @@ private:
     float m_terrainStochasticBlendCurve = 0.65f;
     std::function<float()> getTerrainStochasticBlendCurve;
     std::function<void(float)> setTerrainStochasticBlendCurve;
+    bool m_terrainGaussianStochasticSamplingEnabled = false;
+    std::function<bool()> getTerrainGaussianStochasticSamplingEnabled;
+    std::function<void(bool)> setTerrainGaussianStochasticSamplingEnabled;
     bool m_parallaxOcclusionMappingEnabled = true;
     std::function<bool()> getParallaxOcclusionMappingEnabled;
     std::function<void(bool)> setParallaxOcclusionMappingEnabled;
@@ -1207,6 +1210,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainStochasticBlendCurve = settingsManager.getSettingGetter<float>("terrainStochasticBlendCurve");
     m_terrainStochasticBlendCurve = getTerrainStochasticBlendCurve();
     observerSetting(m_terrainStochasticBlendCurve, "terrainStochasticBlendCurve");
+    setTerrainGaussianStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainGaussianStochasticSampling");
+    getTerrainGaussianStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainGaussianStochasticSampling");
+    m_terrainGaussianStochasticSamplingEnabled = getTerrainGaussianStochasticSamplingEnabled();
+    observerSetting(m_terrainGaussianStochasticSamplingEnabled, "enableTerrainGaussianStochasticSampling");
     setParallaxOcclusionMappingEnabled = settingsManager.getSettingSetter<bool>("enableParallaxOcclusionMapping");
     getParallaxOcclusionMappingEnabled = settingsManager.getSettingGetter<bool>("enableParallaxOcclusionMapping");
     m_parallaxOcclusionMappingEnabled = getParallaxOcclusionMappingEnabled();
@@ -1866,6 +1873,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::SliderFloat("Terrain Stochastic Blend Curve", &m_terrainStochasticBlendCurve, 0.0f, 1.0f, "%.2f")) {
             setTerrainStochasticBlendCurve(m_terrainStochasticBlendCurve);
+        }
+        if (ImGui::Checkbox("Terrain Gaussian Stochastic Variant", &m_terrainGaussianStochasticSamplingEnabled)) {
+            setTerrainGaussianStochasticSamplingEnabled(m_terrainGaussianStochasticSamplingEnabled);
         }
         if (ImGui::Checkbox("Parallax Occlusion Mapping", &m_parallaxOcclusionMappingEnabled)) {
             setParallaxOcclusionMappingEnabled(m_parallaxOcclusionMappingEnabled);

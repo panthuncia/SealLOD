@@ -225,6 +225,8 @@ struct PerFrameBuffer {
     uint terrainStochasticNormalEnabled;
     uint terrainStochasticDerivativeNormalsEnabled;
     float terrainStochasticBlendCurve;
+    uint terrainGaussianStochasticEnabled;
+    uint3 terrainStochasticPad;
     uint parallaxOcclusionMappingEnabled;
     uint terrainParallaxOcclusionMappingEnabled;
     float terrainParallaxHeightScale;

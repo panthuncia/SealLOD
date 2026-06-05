@@ -254,6 +254,14 @@ float3 TerrainSampleStochasticDiffuse(TerrainStochasticLayerInfo stochastic, Ter
     return saturate(color);
 }
 
+float3 TerrainSampleMikkelsenDiffuse(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, TerrainStochasticContext ctx)
+{
+    float3 c0 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).rgb;
+    float3 c1 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).rgb;
+    float3 c2 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).rgb;
+    return saturate(c0 * ctx.weights.x + c1 * ctx.weights.y + c2 * ctx.weights.z);
+}
+
 float3 TerrainSampleStochasticNormal(TerrainStochasticLayerInfo stochastic, TerrainStochasticContext ctx, SamplerState textureSampler)
 {
     Texture2D<float4> gaussianTex = ResourceDescriptorHeap[NonUniformResourceIndex(stochastic.normalGaussianTextureIndex)];
@@ -290,6 +298,14 @@ float TerrainSampleStochasticDiffuseAlpha(Texture2D<float4> diffuseTex, SamplerS
     float a1 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a;
     float a2 = diffuseTex.SampleGrad(diffuseSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a;
     return saturate(a0 * ctx.weights.x + a1 * ctx.weights.y + a2 * ctx.weights.z);
+}
+
+float TerrainSampleMikkelsenHeight(Texture2D<float4> heightTex, SamplerState heightSampler, TerrainStochasticContext ctx)
+{
+    float h0 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
+    float h1 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
+    float h2 = heightTex.SampleGrad(heightSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
+    return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
 }
 
 float2 TerrainNormalToDerivative(float3 normalTS)
@@ -364,6 +380,7 @@ float TerrainSampleLayerHeight(
     TerrainStochasticLayerInfo stochasticLayer,
     bool hasStochasticLayer,
     bool terrainStochasticHeightEnabled,
+    bool terrainGaussianStochasticEnabled,
     bool useStochasticContext,
     float stochasticScale,
     float blendCurve,
@@ -396,6 +413,21 @@ float TerrainSampleLayerHeight(
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
         if (terrainStochasticHeightEnabled &&
             useStochasticContext &&
+            !terrainGaussianStochasticEnabled)
+        {
+            TerrainStochasticContext ctx = TerrainBuildStochasticContext(
+                heightTex,
+                heightSampler,
+                uv,
+                duDx,
+                duDy,
+                stochasticScale,
+                blendCurve);
+            return TerrainSampleMikkelsenHeight(heightTex, heightSampler, ctx);
+        }
+        if (terrainStochasticHeightEnabled &&
+            terrainGaussianStochasticEnabled &&
+            useStochasticContext &&
             hasStochasticLayer &&
             (stochasticLayer.heightFlags & TERRAIN_STOCHASTIC_FLAG_HEIGHT) != 0u &&
             stochasticLayer.heightGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
@@ -423,6 +455,7 @@ float3 TerrainParallaxCoordsAndHeight(
     TerrainStochasticLayerInfo stochasticLayer,
     bool hasStochasticLayer,
     bool terrainStochasticHeightEnabled,
+    bool terrainGaussianStochasticEnabled,
     bool useStochasticContext,
     float stochasticScale,
     float blendCurve,
@@ -440,14 +473,14 @@ float3 TerrainParallaxCoordsAndHeight(
     float maxHeight = max(heightmapScale, 0.0f);
     if (maxHeight <= 1.0e-5f)
     {
-        return float3(uv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, uv, dUVdx, dUVdy));
+        return float3(uv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, uv, dUVdx, dUVdy));
     }
 
     const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
     const float stepSize = rcp((float)numSteps);
     float prevBound = 1.0f;
     float2 prevUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, prevBound);
-    float prevHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, prevUv, dUVdx, dUVdy);
+    float prevHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, prevUv, dUVdx, dUVdy);
     float prevF = prevBound - prevHeight;
     float hitBound = 0.0f;
     float hitF = prevF;
@@ -459,7 +492,7 @@ float3 TerrainParallaxCoordsAndHeight(
     {
         const float currentBound = 1.0f - (float)i * stepSize;
         const float2 currentUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, currentBound);
-        const float currentHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv, dUVdx, dUVdy);
+        const float currentHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv, dUVdx, dUVdy);
         const float currentF = currentBound - currentHeight;
         if (currentF <= 0.0f)
         {
@@ -477,14 +510,14 @@ float3 TerrainParallaxCoordsAndHeight(
     if (!foundIntersection)
     {
         const float2 bottomUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, 0.0f);
-        return float3(bottomUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, bottomUv, dUVdx, dUVdy));
+        return float3(bottomUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, bottomUv, dUVdx, dUVdy));
     }
 
     [unroll] for (uint refine = 0u; refine < 3u; ++refine)
     {
         const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
         const float2 rootUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, rootBound);
-        const float rootF = rootBound - TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, rootUv, dUVdx, dUVdy);
+        const float rootF = rootBound - TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, rootUv, dUVdx, dUVdy);
         if (rootF <= 0.0f)
         {
             hitBound = rootBound;
@@ -499,7 +532,7 @@ float3 TerrainParallaxCoordsAndHeight(
 
     const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
     const float2 parallaxUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, finalBound);
-    return float3(parallaxUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, useStochasticContext, stochasticScale, blendCurve, parallaxUv, dUVdx, dUVdy));
+    return float3(parallaxUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, parallaxUv, dUVdx, dUVdy));
 }
 
 float3 TerrainSampleStochasticNormalDerivative(
@@ -649,6 +682,8 @@ float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
     bool terrainStochasticHeightEnabled =
         terrainStochasticSamplingEnabled &&
         perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
+    bool terrainGaussianStochasticEnabled = terrainStochasticHeightEnabled &&
+        perFrameBuffer.terrainGaussianStochasticEnabled != 0u;
     float2 zeroDerivative = 0.0f.xx;
 
     float heightSum = 0.0f;
@@ -690,6 +725,7 @@ float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
             stochasticLayer,
             hasStochasticLayer,
             terrainStochasticHeightEnabled,
+            terrainGaussianStochasticEnabled,
             terrainStochasticHeightEnabled,
             contextScale,
             perFrameBuffer.terrainStochasticBlendCurve,
@@ -743,6 +779,8 @@ void ApplyTerrainMaterialInternal(
     bool terrainStochasticDiffuseEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
     bool terrainStochasticNormalEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticNormalEnabled != 0u;
     bool terrainStochasticHeightEnabled = terrainStochasticDiffuseEnabled;
+    bool terrainGaussianStochasticEnabled = terrainStochasticSamplingEnabled &&
+        perFrameBuffer.terrainGaussianStochasticEnabled != 0u;
     bool terrainStochasticDerivativeNormalsEnabled = terrainStochasticNormalEnabled &&
         perFrameBuffer.terrainStochasticDerivativeNormalsEnabled != 0u;
     const bool terrainGeometricDisplacementEnabled = (materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
@@ -827,6 +865,7 @@ void ApplyTerrainMaterialInternal(
                 stochasticLayer,
                 hasStochasticLayer,
                 terrainStochasticHeightEnabled,
+                terrainGaussianStochasticEnabled,
                 terrainStochasticHeightEnabled,
                 contextScale,
                 perFrameBuffer.terrainStochasticBlendCurve,
@@ -843,8 +882,16 @@ void ApplyTerrainMaterialInternal(
         bool wantsDerivativeNormalContext = terrainStochasticDerivativeNormalsEnabled &&
             layer.normalTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
             layer.normalSamplerIndex != TERRAIN_INVALID_DESCRIPTOR;
+        bool wantsDirectDiffuseContext = terrainStochasticDiffuseEnabled &&
+            layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR;
+        bool wantsGaussianStochasticContext =
+            terrainGaussianStochasticEnabled &&
+            (terrainStochasticDiffuseEnabled || terrainStochasticNormalEnabled) &&
+            hasStochasticLayer;
         bool wantsStochasticContext =
-            ((terrainStochasticDiffuseEnabled || terrainStochasticNormalEnabled) && hasStochasticLayer) ||
+            wantsDirectDiffuseContext ||
+            wantsGaussianStochasticContext ||
             wantsDerivativeNormalContext;
         bool hasStochasticContext = false;
         TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
@@ -862,6 +909,17 @@ void ApplyTerrainMaterialInternal(
 
         float3 layerBaseColor = layer.fallbackColor.rgb;
         if (terrainStochasticDiffuseEnabled &&
+            !terrainGaussianStochasticEnabled &&
+            hasStochasticContext &&
+            layer.diffuseTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            layer.diffuseSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        {
+            Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+            SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+            layerBaseColor = TerrainSampleMikkelsenDiffuse(diffuseTex, diffuseSampler, stochasticContext);
+        }
+        else if (terrainStochasticDiffuseEnabled &&
+            terrainGaussianStochasticEnabled &&
             hasStochasticLayer &&
             hasStochasticContext &&
             (stochasticLayer.diffuseFlags & TERRAIN_STOCHASTIC_FLAG_DIFFUSE) != 0u &&
@@ -892,6 +950,7 @@ void ApplyTerrainMaterialInternal(
             layerNormalTS = TerrainSampleStochasticNormalDerivative(normalTex, normalSampler, stochasticContext, layer.normalChannels);
         }
         else if (terrainStochasticNormalEnabled &&
+            terrainGaussianStochasticEnabled &&
             hasStochasticLayer &&
             hasStochasticContext &&
             (stochasticLayer.normalFlags & TERRAIN_STOCHASTIC_FLAG_NORMAL) != 0u &&

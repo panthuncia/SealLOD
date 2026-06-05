@@ -1,6 +1,7 @@
 #include "Managers/TerrainManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <unordered_map>
 
@@ -202,8 +203,10 @@ TerrainManager::TerrainManager()
 
 std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory)
 {
+    const auto totalBegin = std::chrono::steady_clock::now();
     ClearActiveTerrain();
 
+    const auto denseBegin = std::chrono::steady_clock::now();
     std::int32_t minRegionX = 0;
     std::int32_t minRegionY = 0;
     std::uint32_t regionCountX = 0;
@@ -212,13 +215,17 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     if (denseRegions.empty()) {
         denseRegions.push_back(MakeFallbackRegion());
     }
+    const auto denseEnd = std::chrono::steady_clock::now();
 
     const std::uint32_t layerCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layers.size()));
     m_layers->Resize(layerCount);
+    std::vector<TerrainLayerGPU> layers;
+    layers.reserve(layerCount);
     std::vector<TerrainStochasticLayerGPU> stochasticLayers;
     stochasticLayers.reserve(desc.layers.size());
     std::uint32_t snowLayerCount = 0;
     std::uint32_t stochasticLayerCount = 0;
+    const auto layersBegin = std::chrono::steady_clock::now();
     for (std::uint32_t i = 0; i < layerCount; ++i) {
         TerrainLayerGPU layer = MakeFallbackLayer();
         if (i < desc.layers.size()) {
@@ -386,40 +393,42 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 ++stochasticLayerCount;
             }
         }
-        m_layers->UpdateAt(i, layer);
+        layers.push_back(layer);
     }
+    m_layers->ReplaceData(std::move(layers));
+    const auto layersEnd = std::chrono::steady_clock::now();
 
-    const auto stochasticBufferCount = (std::max)(1u, static_cast<std::uint32_t>(stochasticLayers.size()));
-    m_stochasticLayers->Resize(stochasticBufferCount);
-    for (std::uint32_t i = 0; i < stochasticBufferCount; ++i) {
-        m_stochasticLayers->UpdateAt(i, i < stochasticLayers.size() ? stochasticLayers[i] : MakeFallbackStochasticLayer());
+    if (stochasticLayers.empty()) {
+        stochasticLayers.push_back(MakeFallbackStochasticLayer());
     }
+    m_stochasticLayers->ReplaceData(std::move(stochasticLayers));
+    const auto stochasticEnd = std::chrono::steady_clock::now();
 
     const auto layerRefCount = (std::max)(1u, static_cast<std::uint32_t>(desc.layerRefs.size()));
-    m_layerRefs->Resize(layerRefCount);
+    std::vector<TerrainLayerRefGPU> layerRefs;
+    layerRefs.reserve(layerRefCount);
     for (std::uint32_t i = 0; i < layerRefCount; ++i) {
         TerrainLayerRefGPU layerRef = MakeFallbackLayerRef();
         if (i < desc.layerRefs.size()) {
             layerRef.layerIndex = desc.layerRefs[i].layerIndex;
         }
-        m_layerRefs->UpdateAt(i, layerRef);
+        layerRefs.push_back(layerRef);
     }
+    m_layerRefs->ReplaceData(std::move(layerRefs));
+    const auto layerRefsEnd = std::chrono::steady_clock::now();
 
     const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(desc.weightBlocks.size()));
-    m_weightBlocks->Resize(weightBlockCount);
-    for (std::uint32_t i = 0; i < weightBlockCount; ++i) {
-        auto weightBlock = MakeFallbackWeightBlock();
-        if (i < desc.weightBlocks.size()) {
-            weightBlock = desc.weightBlocks[i];
-        }
-        m_weightBlocks->UpdateAt(i, weightBlock);
+    if (desc.weightBlocks.empty()) {
+        m_weightBlocks->ReplaceData(std::vector<std::uint32_t>{ MakeFallbackWeightBlock() });
     }
+    else {
+        m_weightBlocks->ReplaceData(desc.weightBlocks);
+    }
+    const auto weightBlocksEnd = std::chrono::steady_clock::now();
 
     const auto regionCount = static_cast<std::uint32_t>(denseRegions.size());
-    m_regions->Resize(regionCount);
-    for (std::uint32_t i = 0; i < regionCount; ++i) {
-        m_regions->UpdateAt(i, denseRegions[i]);
-    }
+    m_regions->ReplaceData(std::move(denseRegions));
+    const auto regionsEnd = std::chrono::steady_clock::now();
 
     TerrainSetGPU set = MakeEmptySet();
     set.minRegionX = minRegionX;
@@ -436,6 +445,10 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     set.weightBlockCount = weightBlockCount;
     set.regionSizeWorld = desc.regionSizeWorld > 0.0f ? desc.regionSizeWorld : kDefaultTerrainRegionSizeWorld;
     m_sets->UpdateAt(0u, set);
+    const auto totalEnd = std::chrono::steady_clock::now();
+    const auto elapsedMs = [](auto begin, auto end) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
+    };
     spdlog::info(
         "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
         layerCount,
@@ -445,6 +458,15 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         layerRefCount,
         weightBlockCount,
         set.regionSizeWorld);
+    spdlog::info(
+        "Terrain close-landscape material timing: total={}ms denseRegions={}ms layersAndTextures={}ms stochasticUpload={}ms layerRefs={}ms weightBlocks={}ms regions={}ms",
+        elapsedMs(totalBegin, totalEnd),
+        elapsedMs(denseBegin, denseEnd),
+        elapsedMs(layersBegin, layersEnd),
+        elapsedMs(layersEnd, stochasticEnd),
+        elapsedMs(stochasticEnd, layerRefsEnd),
+        elapsedMs(layerRefsEnd, weightBlocksEnd),
+        elapsedMs(weightBlocksEnd, regionsEnd));
     return 0u;
 }
 

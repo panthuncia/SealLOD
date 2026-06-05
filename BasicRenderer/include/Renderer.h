@@ -96,6 +96,7 @@ public:
     ObjectManager::Stats GetObjectManagerStats() const;
     ManagerInterface& GetManagerInterface() { return m_managerInterface; }
     const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
+    uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
 
 private:
 	bool m_isInitialized = false;

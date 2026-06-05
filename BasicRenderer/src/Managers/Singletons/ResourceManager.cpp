@@ -92,6 +92,8 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticDerivativeNormalSampling")() ? 1u : 0u;
 	perFrameCBData.terrainStochasticBlendCurve =
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainStochasticBlendCurve")();
+	perFrameCBData.terrainGaussianStochasticEnabled =
+		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainGaussianStochasticSampling")() ? 1u : 0u;
 	perFrameCBData.parallaxOcclusionMappingEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableParallaxOcclusionMapping")() ? 1u : 0u;
 	perFrameCBData.terrainParallaxOcclusionMappingEnabled =

@@ -99,6 +99,8 @@ struct PerFrameCB {
     unsigned int terrainStochasticNormalEnabled = 1u;
     unsigned int terrainStochasticDerivativeNormalsEnabled = 1u;
     float terrainStochasticBlendCurve = 0.65f;
+    unsigned int terrainGaussianStochasticEnabled = 0u;
+    DirectX::XMUINT3 terrainStochasticPad{};
     unsigned int parallaxOcclusionMappingEnabled = 1u;
     unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
     float terrainParallaxHeightScale = 0.03f;

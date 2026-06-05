@@ -1347,6 +1347,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainStochasticNormalSampling", true);
     settingsManager.registerSetting<bool>("enableTerrainStochasticDerivativeNormalSampling", true);
     settingsManager.registerSetting<float>("terrainStochasticBlendCurve", 0.65f);
+    settingsManager.registerSetting<bool>("enableTerrainGaussianStochasticSampling", false);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);

@@ -6,6 +6,7 @@
 #include <string>
 #include <rhi.h>
 #include <memory>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -79,6 +80,18 @@ public:
         }
         m_data[index] = element;
         StageOrUpload(&element, sizeof(T), index * sizeof(T));
+    }
+
+    void ReplaceData(std::vector<T> data) {
+        const auto elementCount = data.size();
+        if (elementCount > 0u) {
+            EnsureCapacityForIndex(elementCount - 1u);
+        }
+
+        m_data = std::move(data);
+        if (!m_data.empty()) {
+            StageOrUpload(m_data.data(), m_data.size() * sizeof(T), 0u);
+        }
     }
 
     UINT Size() {
