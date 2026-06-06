@@ -1522,7 +1522,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxAgeFrames", 0u);
     settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
-    settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, true);
+    settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, false);
     settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);

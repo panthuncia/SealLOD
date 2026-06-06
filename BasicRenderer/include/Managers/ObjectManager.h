@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <mutex>
 #include <cstdint>
@@ -189,6 +190,37 @@ public:
 		std::uint64_t packetBuildUs = 0;
 	};
 
+	struct StaticImportBuildBatch {
+		PreparedStaticGroupsBulkPlan prepared;
+		std::uint64_t buildUs = 0;
+	};
+
+	enum class StaticImportReservationStatus {
+		Ready,
+		PendingResources,
+		Empty
+	};
+
+	struct StaticImportReservation {
+		std::uint64_t id = 0;
+		StaticImportBuildBatch build;
+		std::vector<std::size_t> transformCounts;
+		std::vector<std::size_t> drawRecordCounts;
+		std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
+		std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
+		std::vector<DynamicBuffer::PagedAllocation> normalMatrixRanges;
+		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
+		std::vector<std::uint32_t> drawRecordGenerations;
+		std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
+		std::size_t visibilityDirtyEnd = 0;
+		std::shared_ptr<DynamicBuffer> perObjectBuffer;
+		std::shared_ptr<DynamicBuffer> instanceTransformBuffer;
+		std::shared_ptr<DynamicBuffer> normalMatrixBuffer;
+		std::shared_ptr<DynamicBuffer> instanceDrawRecordBuffer;
+		std::uint64_t preparedBytes = 0;
+		std::uint64_t drawRecords = 0;
+	};
+
 	struct RemoveObjectsBulkOptions {
 		bool deferBufferRangeRetirement = false;
 		bool retireInstanceDrawRecordRanges = true;
@@ -215,6 +247,28 @@ public:
 		std::size_t drawInfoCount = 0;
 	};
 
+	struct MaterializedStaticImportTransaction {
+		StaticImportReservation reservation;
+		std::vector<PerObjectCB> perObjectRows;
+		std::vector<DirectX::XMFLOAT4X4> normalRows;
+		std::vector<InstanceDrawRecordCB> drawRecordRows;
+		std::vector<Components::ObjectDrawInfo> drawInfos;
+		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
+		std::uint64_t materializeUs = 0;
+	};
+
+	struct StaticImportPublishResult {
+		std::vector<Components::ObjectDrawInfo> drawInfos;
+		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
+		std::uint64_t transactionID = 0;
+		std::uint64_t groupsImported = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t preparedBytes = 0;
+	};
+
 	struct ActiveDrawSetCompactionPublishResult {
 		DrawWorkloadKey workloadKey{};
 		std::uint32_t activeSpan = 0;
@@ -238,8 +292,16 @@ public:
 	static PreparedStaticGroupsBulkPlan PrepareStaticGroupsBulkPlan(const std::vector<StaticGroupBuildInfo>& groups);
 	static StaticImportPacketPlan PrepareStaticImportPacketPlan(const std::vector<StaticGroupBuildInfo>& groups);
 	static StaticImportPacket BuildStaticImportPacket(StaticImportPacketPlan plan);
+	static StaticImportBuildBatch PrepareStaticImportBuildBatch(const std::vector<StaticGroupBuildInfo>& groups);
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
+	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
+	StaticImportReservationStatus TryReserveStaticImportTransaction(
+		StaticImportBuildBatch build,
+		StaticImportReservation& reservation);
+	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(StaticImportReservation reservation) const;
+	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
+	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
 	std::vector<Components::ObjectDrawInfo> PublishStaticImportPacket(StaticImportPacket packet);
 	std::vector<Components::ObjectDrawInfo> CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan);
@@ -355,6 +417,7 @@ private:
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
 	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
+	std::uint64_t m_nextStaticImportTransactionID = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};

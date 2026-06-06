@@ -1,6 +1,7 @@
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 
@@ -109,6 +110,74 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     }
 }
 
+void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize) {
+    if (requiredSize <= m_capacity ||
+        (m_pendingResizeValid && m_pendingResizeCapacity >= requiredSize)) {
+        return;
+    }
+
+    uint64_t newCapacity = (std::max<uint64_t>)(m_capacity, 1u);
+    while (newCapacity < requiredSize) {
+        newCapacity *= 2;
+    }
+
+    if (m_pendingResizeValid) {
+        (void)PublishReadyAsyncResize(false);
+        if (m_pendingResizeValid && m_pendingResizeCapacity >= newCapacity) {
+            return;
+        }
+        if (m_pendingResizeValid) {
+            return;
+        }
+    }
+
+    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    const auto resourceID = GetGlobalResourceID();
+    const auto unorderedAccess = m_UAV;
+    const auto bufferName = GetName();
+    m_pendingResizeCapacity = newCapacity;
+    m_pendingResizeValid = true;
+    m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, newCapacity, stride, bufferName]() {
+        spdlog::debug(
+            "SortedUnsignedIntBuffer '{}' id={} async resize backing create begin capacity={}",
+            bufferName,
+            resourceID,
+            newCapacity);
+        auto backing = GpuBufferBacking::CreateUnique(
+            rhi::HeapType::DeviceLocal,
+            newCapacity * stride,
+            resourceID,
+            unorderedAccess);
+        spdlog::debug(
+            "SortedUnsignedIntBuffer '{}' id={} async resize backing create complete capacity={}",
+            bufferName,
+            resourceID,
+            newCapacity);
+        return backing;
+    });
+}
+
+bool SortedUnsignedIntBuffer::PublishReadyAsyncResize(bool wait) {
+    if (!m_pendingResizeValid) {
+        return false;
+    }
+    if (!wait &&
+        m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return false;
+    }
+
+    auto newBacking = m_pendingResizeFuture.get();
+    const auto newCapacity = m_pendingResizeCapacity;
+    m_pendingResizeCapacity = 0;
+    m_pendingResizeValid = false;
+    if (!newBacking || newCapacity <= m_capacity) {
+        return false;
+    }
+
+    ApplyResizeBacking(std::move(newBacking), newCapacity);
+    return true;
+}
+
 void SortedUnsignedIntBuffer::AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries) {
     if (entries.empty()) {
         return;
@@ -124,6 +193,7 @@ void SortedUnsignedIntBuffer::AppendActiveEntries(const std::vector<ActiveDrawSe
     }
 
     const auto firstIndex = m_activeEntries.size();
+    (void)PublishReadyAsyncResize(false);
     EnsureCapacityForSize(firstIndex + entries.size());
     m_activeEntries.insert(m_activeEntries.end(), entries.begin(), entries.end());
     ++m_mutationRevision;
@@ -324,19 +394,17 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 	AssignDescriptorSlots();
 }
 
-void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
+void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity) {
     const uint64_t previousCapacity = m_capacity;
-    auto device = DeviceManager::GetInstance().GetDevice();
     const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
     spdlog::info(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={} activeEntryMode={}",
         GetName(),
         GetGlobalResourceID(),
         previousCapacity,
-        newSize,
+        newCapacity,
         m_activeEntryMode ? 1 : 0);
-    SetBacking(std::move(newDataBuffer), newSize * stride);
+    SetBacking(std::move(newDataBuffer), newCapacity * stride);
     spdlog::info(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
         GetName(),
@@ -364,7 +432,7 @@ void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
         }
     }
 
-    m_capacity = newSize;
+    m_capacity = newCapacity;
     AssignDescriptorSlots();
     SetName(name);
     spdlog::info(
@@ -372,6 +440,12 @@ void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
         GetName(),
         GetGlobalResourceID(),
         m_capacity);
+}
+
+void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
+    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
+    ApplyResizeBacking(std::move(newDataBuffer), newSize);
 }
 
 void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {

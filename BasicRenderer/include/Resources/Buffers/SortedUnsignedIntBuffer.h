@@ -5,11 +5,13 @@
 #include <algorithm> // For std::lower_bound, std::upper_bound
 #include <cstddef>
 #include <cstring>
+#include <future>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resource.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
+#include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
@@ -33,6 +35,8 @@ public:
     // Insert an element while maintaining sorted order (deduped)
     void Insert(unsigned int element);
     void InsertMany(const std::vector<unsigned int>& elements);
+    void RequestAsyncReserveCapacity(uint64_t requiredSize);
+    bool PublishReadyAsyncResize(bool wait = false);
     void AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries);
     void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
     std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
@@ -146,10 +150,14 @@ private:
 
     bool m_UAV = false;
     bool m_activeEntryMode = false;
+    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    uint64_t m_pendingResizeCapacity = 0;
+    bool m_pendingResizeValid = false;
 
     void CreateBuffer(uint64_t capacity);
 
     void GrowBuffer(uint64_t newSize);
+    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity);
     void EnsureCapacityForSize(uint64_t requiredSize);
 
     void SyncUploadPolicyState() {
