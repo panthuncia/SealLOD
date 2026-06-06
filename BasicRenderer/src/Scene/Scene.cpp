@@ -193,6 +193,33 @@ namespace {
 			VisitSceneDescendants(child, fn);
 		});
 	}
+
+	void UpdateIndirectWorkloadCount(
+		ManagerInterface& managerInterface,
+		const DrawWorkloadKey& workloadKey,
+		unsigned int legacyDrawStatsCount)
+	{
+		auto* indirectCommandBufferManager = managerInterface.GetIndirectCommandBufferManager();
+		if (!indirectCommandBufferManager) {
+			return;
+		}
+
+		auto count = legacyDrawStatsCount;
+		if (auto* objectManager = managerInterface.GetObjectManager()) {
+			if (const auto activeDrawSet = objectManager->TryGetActiveDrawSetIndices(workloadKey)) {
+				// Append-only active draw sets are the authoritative scan domain for
+				// clustered object culling. Legacy scene draw stats do not include
+				// direct static streaming entries, so using them here can clip shared
+				// workloads until the next static-streaming update repairs the count.
+				count = static_cast<unsigned int>((std::min<std::uint64_t>)(
+					activeDrawSet->Size(),
+					std::numeric_limits<unsigned int>::max()));
+			}
+		}
+
+		indirectCommandBufferManager->RegisterWorkload(workloadKey);
+		indirectCommandBufferManager->UpdateBuffersForWorkload(workloadKey, count);
+	}
 }
 
 std::atomic<uint64_t> Scene::globalSceneCount = 0;
@@ -432,8 +459,8 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 				if (m_renderableActivationBatchActive) {
 					m_batchedActivationWorkloads.insert(workloadKey);
 				} else {
-					m_managerInterface.GetIndirectCommandBufferManager()->RegisterWorkload(workloadKey);
-					m_managerInterface.GetIndirectCommandBufferManager()->UpdateBuffersForWorkload(
+					UpdateIndirectWorkloadCount(
+						m_managerInterface,
 						workloadKey,
 						drawStats.numDrawsPerTechnique[workloadKey]);
 				}
@@ -554,8 +581,8 @@ void Scene::EndRenderableActivationBatch() {
 	const auto flushBegin = std::chrono::steady_clock::now();
 	for (const auto& workloadKey : m_batchedActivationWorkloads) {
 		const auto it = drawStats.numDrawsPerTechnique.find(workloadKey);
-		indirectCommandBufferManager->RegisterWorkload(workloadKey);
-		indirectCommandBufferManager->UpdateBuffersForWorkload(
+		UpdateIndirectWorkloadCount(
+			m_managerInterface,
 			workloadKey,
 			it != drawStats.numDrawsPerTechnique.end() ? it->second : 0u);
 	}
@@ -764,7 +791,8 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 				--it->second;
 			}
 			if (m_managerInterface.GetIndirectCommandBufferManager()) {
-				m_managerInterface.GetIndirectCommandBufferManager()->UpdateBuffersForWorkload(
+				UpdateIndirectWorkloadCount(
+					m_managerInterface,
 					workloadKey,
 					it != drawStats.numDrawsPerTechnique.end() ? it->second : 0u);
 			}
@@ -793,13 +821,12 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 				mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB)));
 		}
 
-		if (auto* indirectCommandBufferManager = m_managerInterface.GetIndirectCommandBufferManager()) {
+		if (m_managerInterface.GetIndirectCommandBufferManager()) {
 			ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workloadKey) {
-				indirectCommandBufferManager->RegisterWorkload(workloadKey);
 				auto& drawStats = GetSceneWorld().get_mut<Components::DrawStats>();
 				auto& count = drawStats.numDrawsPerTechnique[workloadKey];
 				++count;
-				indirectCommandBufferManager->UpdateBuffersForWorkload(workloadKey, count);
+				UpdateIndirectWorkloadCount(m_managerInterface, workloadKey, count);
 			});
 		}
 

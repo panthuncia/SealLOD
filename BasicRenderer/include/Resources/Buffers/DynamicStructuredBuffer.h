@@ -269,7 +269,25 @@ private:
 
 
     void CreateBuffer(size_t capacity, size_t previousCapacity = 0) {
+        const size_t replayElements = (std::min)(m_data.size(), capacity);
+        if (previousCapacity != 0u) {
+            spdlog::info(
+                "DynamicStructuredBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={}",
+                name,
+                GetGlobalResourceID(),
+                previousCapacity,
+                capacity);
+        }
+
 		CreateAndSetBacking(rhi::HeapType::DeviceLocal, sizeof(T) * capacity, m_UAV);
+        if (previousCapacity != 0u) {
+            spdlog::info(
+                "DynamicStructuredBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
+                name,
+                GetGlobalResourceID(),
+                GetBufferSize(),
+                GetBackingGeneration());
+        }
         m_uploadPolicyState.OnBufferResized(GetBufferSize());
         SetName(name);
 
@@ -280,12 +298,38 @@ private:
         AssignDescriptorSlots(static_cast<uint32_t>(capacity));
 
         // DynamicStructuredBuffer keeps a CPU-side authoritative copy in m_data.
-        // Re-upload it after backing growth instead of queueing a GPU copy from
-        // the old backing; pending material uploads and repeated cell-streaming
-        // grows otherwise create fragile copy/upload ordering dependencies.
-        const size_t elementsToUpload = (std::min)(m_data.size(), capacity);
-        if (elementsToUpload > 0u) {
-            StageOrUpload(m_data.data(), elementsToUpload * sizeof(T), 0u);
+        // After backing replacement, descriptor users can see the new resource
+        // immediately, so replay existing rows directly to the active upload
+        // service when one is available. Falling back to retained coalescing here
+        // can leave generation/visibility sidecars temporarily zeroed after a
+        // grow, which makes append-only active draw entries look stale on GPU.
+        if (replayElements > 0u) {
+            SyncUploadPolicyState();
+            const size_t replayBytes = replayElements * sizeof(T);
+            if (rg::runtime::GetActiveUploadService() != nullptr) {
+                BUFFER_UPLOAD(m_data.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                m_uploadPolicyState.RetainExternalWrite(m_data.data(), replayBytes, 0u, GetBufferSize());
+                spdlog::debug(
+                    "DynamicStructuredBuffer '{}' id={} GrowBuffer replayed CPU rows={} bytes={}",
+                    name,
+                    GetGlobalResourceID(),
+                    replayElements,
+                    replayBytes);
+            }
+            else {
+                StageOrUpload(m_data.data(), replayBytes, 0u);
+                if (m_uploadPolicyState.HasPendingWork()) {
+                    MarkUploadPolicyDirty();
+                }
+            }
+        }
+
+        if (previousCapacity != 0u) {
+            spdlog::info(
+                "DynamicStructuredBuffer '{}' id={} GrowBuffer complete finalCapacity={}",
+                name,
+                GetGlobalResourceID(),
+                capacity);
         }
     }
 

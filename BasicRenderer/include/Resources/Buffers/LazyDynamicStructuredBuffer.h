@@ -5,6 +5,9 @@
 #include <memory>
 #include <deque>
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <utility>
 #include <spdlog/spdlog.h>
@@ -12,6 +15,8 @@
 
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Resources/Buffers/BufferView.h"
+#include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/Runtime/UploadPolicyServiceAccess.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -202,15 +207,24 @@ public:
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
-        auto handle = m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        EnsureCpuShadowSize(GetBufferSize());
+        rg::runtime::BulkWriteHandle handle{
+            reinterpret_cast<uint8_t*>(m_cpuShadowData.data()),
+            m_cpuShadowData.size()
+        };
         handle.lock = std::move(lock);
         return handle;
     }
 
     void EndBulkWrite(size_t dirtyOffset, size_t dirtySize) {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
-        m_uploadPolicyState.CommitBulkRegion(dirtyOffset, dirtySize);
-        if (m_uploadPolicyState.HasPendingWork()) {
+        if (dirtySize == 0) {
+            return;
+        }
+
+        EnsureCpuShadowSize(dirtyOffset + dirtySize);
+        StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
+        if (rg::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
         }
     }
@@ -276,6 +290,9 @@ private:
     bool m_UAV = false;
 
     std::vector<EntityComponentBundle> m_metadataBundles;
+    // Authoritative CPU bytes for backing replacement. Lazy buffers do not keep
+    // typed element storage, so the byte shadow is the resize replay source.
+    std::vector<std::byte> m_cpuShadowData;
 
     void EnsureCapacityForIndex(uint64_t index) {
         if (index >= m_capacity) {
@@ -335,15 +352,22 @@ private:
         {
             std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
             SyncUploadPolicyState();
+            EnsureCpuShadowSize(GetBufferSize());
             m_uploadPolicyState.OnBufferResized(GetBufferSize());
             const size_t previousBytes = previousCapacity * static_cast<size_t>(m_elementSize);
-            if (previousBytes > 0u) {
-                // CoalescedRetained keeps the CPU-side bytes authoritative. On grow,
-                // mark the preserved range dirty so the next upload-policy flush
-                // repopulates the new backing before any render pass observes it.
-                m_uploadPolicyState.CommitBulkRegion(0u, previousBytes);
-                if (m_uploadPolicyState.HasPendingWork()) {
-                    MarkUploadPolicyDirty();
+            const size_t replayBytes = (std::min)(previousBytes, m_cpuShadowData.size());
+            if (replayBytes > 0u) {
+                // Lazy buffers own an explicit CPU shadow. Re-upload preserved
+                // bytes from that shadow after backing replacement so sparse and
+                // bulk-written data survives buffer growth.
+                if (rg::runtime::GetActiveUploadService() != nullptr) {
+                    BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                    m_uploadPolicyState.RetainExternalWrite(m_cpuShadowData.data(), replayBytes, 0u, GetBufferSize());
+                } else {
+                    StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
+                    if (m_uploadPolicyState.HasPendingWork()) {
+                        MarkUploadPolicyDirty();
+                    }
                 }
             }
         }
@@ -371,6 +395,15 @@ private:
 
     void StageOrUpload(const void* data, size_t size, size_t offset) {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+        RetainCpuShadowWrite(data, size, offset);
+        StageOrUploadLocked(data, size, offset);
+    }
+
+    void StageOrUploadLocked(const void* data, size_t size, size_t offset) {
+        if (data == nullptr || size == 0) {
+            return;
+        }
+
         if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -396,6 +429,21 @@ private:
         }
 
         BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+    }
+
+    void EnsureCpuShadowSize(size_t size) {
+        if (m_cpuShadowData.size() < size) {
+            m_cpuShadowData.resize(size, std::byte{ 0 });
+        }
+    }
+
+    void RetainCpuShadowWrite(const void* data, size_t size, size_t offset) {
+        if (data == nullptr || size == 0) {
+            return;
+        }
+
+        EnsureCpuShadowSize(offset + size);
+        std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
     }
 
     void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {

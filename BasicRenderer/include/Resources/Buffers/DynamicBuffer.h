@@ -1,7 +1,7 @@
 #pragma once
 
-#pragma once
-
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <map>
 #include <mutex>
@@ -60,15 +60,24 @@ public:
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
-        auto handle = m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        EnsureCpuShadowSize(GetBufferSize());
+        rg::runtime::BulkWriteHandle handle{
+            reinterpret_cast<uint8_t*>(m_cpuShadowData.data()),
+            m_cpuShadowData.size()
+        };
         handle.lock = std::move(lock);
         return handle;
     }
 
     void EndBulkWrite(size_t dirtyOffset, size_t dirtySize) {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
-        m_uploadPolicyState.CommitBulkRegion(dirtyOffset, dirtySize);
-        if (m_uploadPolicyState.HasPendingWork()) {
+        if (dirtySize == 0) {
+            return;
+        }
+
+        EnsureCpuShadowSize(dirtyOffset + dirtySize);
+        StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
+        if (rg::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
         }
     }
@@ -97,6 +106,7 @@ public:
 
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
+        RetainCpuShadowWrite(data, size, offset);
         m_uploadPolicyState.RetainExternalWrite(data, size, offset, GetBufferSize());
     }
 
@@ -190,6 +200,9 @@ private:
     }
 
     void StageOrUpload(const void* data, size_t size, size_t offset);
+    void StageOrUploadLocked(const void* data, size_t size, size_t offset);
+    void EnsureCpuShadowSize(size_t size);
+    void RetainCpuShadowWrite(const void* data, size_t size, size_t offset);
 
     void ApplyMetadataComponentBundle(const EntityComponentBundle& bundle) override {
         m_metadataBundles.emplace_back(bundle);
@@ -197,6 +210,9 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    // Authoritative CPU bytes for backing replacement. The upload-policy state
+    // coalesces writes, but this shadow owns the long-lived contents.
+    std::vector<std::byte> m_cpuShadowData;
     mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
     mutable std::recursive_mutex m_allocationMutex;
     std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;

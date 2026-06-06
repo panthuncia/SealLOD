@@ -442,15 +442,17 @@ void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests)
 	m_activeDrawSetCompactionCv.notify_one();
 }
 
-void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
+std::vector<ObjectManager::ActiveDrawSetCompactionPublishResult> ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
+	std::vector<ActiveDrawSetCompactionPublishResult> published;
 	if (maxResults == 0) {
-		return;
+		return published;
 	}
 
 	PumpActiveDrawSetCompactionRequests(maxResults);
 
 	std::vector<ActiveDrawSetCompactionResult> results;
 	results.reserve(maxResults);
+	published.reserve(maxResults);
 	{
 		std::lock_guard lock(m_activeDrawSetCompactionMutex);
 		while (!m_activeDrawSetCompactionResults.empty() && results.size() < maxResults) {
@@ -485,13 +487,70 @@ void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults
 		TracyPlot("ObjectManager.ActiveCompaction.ResultStale", int64_t{ 0 });
 
 		const auto publishBegin = std::chrono::steady_clock::now();
+		const auto inputEntries = result.inputEntries;
 		buffer->AssignActiveSnapshot(std::move(result.entries));
 		m_stats.activeDrawSetCompactionJobsPublished += 1;
 		m_stats.activeDrawSetCompactionOutputEntries += buffer->LiveSize();
 		m_stats.activeDrawSetCompactionPublishUs += static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - publishBegin).count());
 		++m_drawSetDeclarationRevision;
+		published.push_back(ActiveDrawSetCompactionPublishResult{
+			.workloadKey = result.workloadKey,
+			.activeSpan = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+				buffer->Size(),
+				std::numeric_limits<std::uint32_t>::max())),
+			.inputEntries = inputEntries,
+			.outputEntries = buffer->LiveSize()
+		});
 	}
+
+	return published;
+}
+
+std::vector<ObjectManager::ActiveDrawSetDebugStats> ObjectManager::SnapshotActiveDrawSetDebugStats() const {
+	std::vector<ActiveDrawSetDebugStats> stats;
+	stats.reserve(m_activeDrawSetIndices.size());
+	for (const auto& [workloadKey, buffer] : m_activeDrawSetIndices) {
+		if (!buffer) {
+			continue;
+		}
+
+		ActiveDrawSetDebugStats row{};
+		row.workloadKey = workloadKey;
+		row.span = buffer->Size();
+		row.liveSize = buffer->LiveSize();
+		row.tombstoneEstimate = buffer->ActiveTombstoneEstimate();
+
+		if (buffer->ActiveEntryMode()) {
+			const auto entries = buffer->SnapshotActiveEntries();
+			for (const auto& entry : entries) {
+				if (entry.generation == 0u || entry.drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
+					++row.cpuGenerationOutOfRange;
+					continue;
+				}
+				if (m_drawRecordVisibilityGenerations[entry.drawRecordIndex] == entry.generation) {
+					++row.cpuGenerationMatches;
+				} else {
+					++row.cpuGenerationStale;
+				}
+			}
+		} else {
+			row.cpuGenerationMatches = row.span;
+		}
+
+		stats.push_back(row);
+	}
+
+	std::sort(stats.begin(), stats.end(), [](const auto& lhs, const auto& rhs) {
+		const auto lhsBad = lhs.cpuGenerationStale + lhs.cpuGenerationOutOfRange;
+		const auto rhsBad = rhs.cpuGenerationStale + rhs.cpuGenerationOutOfRange;
+		if (lhsBad != rhsBad) {
+			return lhsBad > rhsBad;
+		}
+		return lhs.span > rhs.span;
+	});
+
+	return stats;
 }
 
 void ObjectManager::PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames) {

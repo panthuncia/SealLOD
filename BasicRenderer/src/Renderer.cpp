@@ -57,6 +57,7 @@
 #include "Managers/Singletons/CommandSignatureManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Managers/IndirectCommandBufferManager.h"
+#include "Managers/ObjectManager.h"
 #include "Utilities/MathUtils.h"
 #include "Scene/MovementState.h"
 #include "ThirdParty/XeGTAO.h"
@@ -2333,6 +2334,56 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     m_lastCLodVisibilityTelemetryRequestFrame = requestedFrame;
     m_clodTelemetryReadbackPending = true;
     m_clodVisibleCounterReadbackPending = true;
+
+    if (auto* objectManager = m_managerInterface.GetObjectManager()) {
+        auto activeStats = objectManager->SnapshotActiveDrawSetDebugStats();
+        std::uint64_t totalSpan = 0;
+        std::uint64_t totalLive = 0;
+        std::uint64_t totalTombstoneEstimate = 0;
+        std::uint64_t totalCpuMatches = 0;
+        std::uint64_t totalCpuStale = 0;
+        std::uint64_t totalCpuOutOfRange = 0;
+        for (const auto& row : activeStats) {
+            totalSpan += row.span;
+            totalLive += row.liveSize;
+            totalTombstoneEstimate += row.tombstoneEstimate;
+            totalCpuMatches += row.cpuGenerationMatches;
+            totalCpuStale += row.cpuGenerationStale;
+            totalCpuOutOfRange += row.cpuGenerationOutOfRange;
+        }
+        spdlog::info(
+            "SARP CLOD active-set CPU telemetry: frame={} workloads={} span={} live={} tombstone_est={} cpu_match={} cpu_stale={} cpu_oob={}",
+            requestedFrame,
+            activeStats.size(),
+            totalSpan,
+            totalLive,
+            totalTombstoneEstimate,
+            totalCpuMatches,
+            totalCpuStale,
+            totalCpuOutOfRange);
+
+        const std::size_t rowsToLog = (std::min<std::size_t>)(activeStats.size(), 6u);
+        for (std::size_t i = 0; i < rowsToLog; ++i) {
+            const auto& row = activeStats[i];
+            const auto bad = row.cpuGenerationStale + row.cpuGenerationOutOfRange;
+            if (i >= 3u && bad == 0u) {
+                break;
+            }
+            spdlog::info(
+                "SARP CLOD active-set CPU workload[{}]: frame={} flags={} phase={} clodOnly={} span={} live={} tombstone_est={} cpu_match={} cpu_stale={} cpu_oob={}",
+                i,
+                requestedFrame,
+                static_cast<std::uint64_t>(row.workloadKey.compileFlags),
+                row.workloadKey.renderPhase.hash,
+                row.workloadKey.clodOnly ? 1 : 0,
+                row.span,
+                row.liveSize,
+                row.tombstoneEstimate,
+                row.cpuGenerationMatches,
+                row.cpuGenerationStale,
+                row.cpuGenerationOutOfRange);
+        }
+    }
 
     readbackService->RequestReadbackCapture(
         "CLodOpaque::RasterizeClustersPass2",

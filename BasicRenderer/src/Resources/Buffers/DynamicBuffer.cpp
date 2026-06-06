@@ -1,7 +1,9 @@
 #include "Resources/Buffers/DynamicBuffer.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <chrono>
+#include <cstring>
 
 #include <spdlog/spdlog.h>
 
@@ -493,6 +495,15 @@ void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
 
 void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
     std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
+    RetainCpuShadowWrite(data, size, offset);
+    StageOrUploadLocked(data, size, offset);
+}
+
+void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t offset) {
+    if (data == nullptr || size == 0) {
+        return;
+    }
+
     if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
         SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -518,6 +529,21 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
     }
 
     BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+}
+
+void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
+    if (m_cpuShadowData.size() < size) {
+        m_cpuShadowData.resize(size, std::byte{ 0 });
+    }
+}
+
+void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t offset) {
+    if (data == nullptr || size == 0) {
+        return;
+    }
+
+    EnsureCpuShadowSize(offset + size);
+    std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
 }
 
 void DynamicBuffer::Deallocate(const BufferView* view) {
@@ -626,6 +652,7 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
     {
         std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
+        EnsureCpuShadowSize(GetBufferSize());
         m_uploadPolicyState.OnBufferResized(GetBufferSize());
     }
 	m_blocksByOffset[0] = { 0, capacity, true };
@@ -676,24 +703,25 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
     {
         std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
+        EnsureCpuShadowSize(newSize);
         m_uploadPolicyState.OnBufferResized(GetBufferSize());
-        if (previousCapacity > 0u) {
-            // DynamicBuffer is CPU-authoritative under CoalescedRetained. Preserve
-            // logical bytes through resize by uploading the retained mirror into the
-            // new backing; do not copy from the old GPU backing because descriptor
-            // updates are immediate on DX12 and prior frames may still reference it.
-            m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
-            if (m_uploadPolicyState.HasPendingWork()) {
-                if (rg::runtime::GetActiveUploadService() != nullptr) {
-                    m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
-                    const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
-                    spdlog::debug(
-                        "DynamicBuffer '{}' id={} GrowBuffer replayed retained bytes writes={} bytes={}",
-                        m_name,
-                        GetGlobalResourceID(),
-                        replayStats.flushedWrites,
-                        replayStats.flushedBytes);
-                } else {
+        const size_t replayBytes = (std::min)(previousCapacity, m_cpuShadowData.size());
+        if (replayBytes > 0u) {
+            // DynamicBuffer owns an explicit CPU shadow. Replays after backing
+            // replacement must come from that shadow, not from the upload-policy
+            // coalescing mirror, because long-lived sparse buffers can contain
+            // bytes written through bulk or external upload paths.
+            if (rg::runtime::GetActiveUploadService() != nullptr) {
+                BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                m_uploadPolicyState.RetainExternalWrite(m_cpuShadowData.data(), replayBytes, 0u, GetBufferSize());
+                spdlog::debug(
+                    "DynamicBuffer '{}' id={} GrowBuffer replayed CPU shadow bytes={}",
+                    m_name,
+                    GetGlobalResourceID(),
+                    replayBytes);
+            } else {
+                StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
+                if (m_uploadPolicyState.HasPendingWork()) {
                     MarkUploadPolicyDirty();
                 }
             }

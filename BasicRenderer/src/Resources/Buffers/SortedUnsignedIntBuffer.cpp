@@ -326,30 +326,58 @@ void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     auto device = DeviceManager::GetInstance().GetDevice();
     const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
     auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
+    spdlog::info(
+        "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={} activeEntryMode={}",
+        GetName(),
+        GetGlobalResourceID(),
+        previousCapacity,
+        newSize,
+        m_activeEntryMode ? 1 : 0);
     SetBacking(std::move(newDataBuffer), newSize * stride);
+    spdlog::info(
+        "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
+        GetName(),
+        GetGlobalResourceID(),
+        GetBufferSize(),
+        GetBackingGeneration());
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
+    const void* replayData = nullptr;
+    size_t replayBytes = 0u;
     if (m_activeEntryMode && !m_activeEntries.empty()) {
-        StageOrUpload(m_activeEntries.data(), m_activeEntries.size() * sizeof(ActiveDrawSetEntry), 0u);
-    } else if (!m_data.empty()) {
-        StageOrUpload(m_data.data(), m_data.size() * sizeof(unsigned int), 0u);
+        replayData = m_activeEntries.data();
+        replayBytes = m_activeEntries.size() * sizeof(ActiveDrawSetEntry);
     }
-    if (previousCapacity != 0u && m_uploadPolicyState.HasPendingWork()) {
+    else if (!m_data.empty()) {
+        replayData = m_data.data();
+        replayBytes = m_data.size() * sizeof(unsigned int);
+    }
+    if (replayData && replayBytes > 0u) {
+        SyncUploadPolicyState();
         if (rg::runtime::GetActiveUploadService() != nullptr) {
-            m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
-            const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
+            BUFFER_UPLOAD(replayData, replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+            m_uploadPolicyState.RetainExternalWrite(replayData, replayBytes, 0u, GetBufferSize());
             spdlog::debug(
-                "SortedUnsignedIntBuffer '{}' GrowBuffer replayed retained bytes writes={} bytes={}",
+                "SortedUnsignedIntBuffer '{}' id={} GrowBuffer replayed CPU bytes={}",
                 GetName(),
-                replayStats.flushedWrites,
-                replayStats.flushedBytes);
-        } else {
-            MarkUploadPolicyDirty();
+                GetGlobalResourceID(),
+                replayBytes);
+        }
+        else {
+            StageOrUpload(replayData, replayBytes, 0u);
+            if (m_uploadPolicyState.HasPendingWork()) {
+                MarkUploadPolicyDirty();
+            }
         }
     }
 
     m_capacity = newSize;
     AssignDescriptorSlots();
     SetName(name);
+    spdlog::info(
+        "SortedUnsignedIntBuffer '{}' id={} GrowBuffer complete finalCapacity={}",
+        GetName(),
+        GetGlobalResourceID(),
+        m_capacity);
 }
 
 void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {

@@ -215,6 +215,23 @@ public:
 		std::size_t drawInfoCount = 0;
 	};
 
+	struct ActiveDrawSetCompactionPublishResult {
+		DrawWorkloadKey workloadKey{};
+		std::uint32_t activeSpan = 0;
+		std::uint64_t inputEntries = 0;
+		std::uint64_t outputEntries = 0;
+	};
+
+	struct ActiveDrawSetDebugStats {
+		DrawWorkloadKey workloadKey{};
+		std::uint64_t span = 0;
+		std::uint64_t liveSize = 0;
+		std::uint64_t tombstoneEstimate = 0;
+		std::uint64_t cpuGenerationMatches = 0;
+		std::uint64_t cpuGenerationStale = 0;
+		std::uint64_t cpuGenerationOutOfRange = 0;
+	};
+
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
 	std::vector<Components::ObjectDrawInfo> AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups);
@@ -238,7 +255,8 @@ public:
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
 	std::uint64_t MakeDeferredRetireFrame() const;
-	void PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
+	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
+	std::vector<ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
 	rg::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
