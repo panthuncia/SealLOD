@@ -3,13 +3,16 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
@@ -82,6 +85,77 @@ std::optional<std::string> GetCurrentExecutableDirectory()
     return fs::path(buffer).parent_path().string();
 }
 
+bool EnvironmentNameEquals(std::string_view entry, std::string_view name)
+{
+    const auto equals = entry.find('=');
+    if (equals == std::string_view::npos || equals != name.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < name.size(); ++i) {
+        const auto left = static_cast<unsigned char>(entry[i]);
+        const auto right = static_cast<unsigned char>(name[i]);
+        if (std::tolower(left) != std::tolower(right)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string MakeBRNiflyAsanOptions()
+{
+    std::vector<std::string> options;
+    if (auto current = GetEnvironmentString("ASAN_OPTIONS")) {
+        std::size_t begin = 0;
+        while (begin <= current->size()) {
+            const auto end = current->find(':', begin);
+            const auto token = current->substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            if (!token.empty() && !token.starts_with("alloc_dealloc_mismatch=")) {
+                options.push_back(token);
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            begin = end + 1;
+        }
+    }
+    options.push_back("alloc_dealloc_mismatch=0");
+
+    std::string result;
+    for (const auto& option : options) {
+        if (!result.empty()) {
+            result += ':';
+        }
+        result += option;
+    }
+    return result;
+}
+
+std::vector<char> BuildBRNiflyEnvironmentBlock()
+{
+    std::vector<std::string> entries;
+    if (_environ) {
+        for (char** cursor = _environ; *cursor; ++cursor) {
+            std::string_view entry(*cursor);
+            if (!EnvironmentNameEquals(entry, "ASAN_OPTIONS")) {
+                entries.emplace_back(entry);
+            }
+        }
+    }
+
+    entries.push_back("ASAN_OPTIONS=" + MakeBRNiflyAsanOptions());
+    std::sort(entries.begin(), entries.end(), [](const std::string& left, const std::string& right) {
+        return _stricmp(left.c_str(), right.c_str()) < 0;
+    });
+
+    std::vector<char> block;
+    for (const auto& entry : entries) {
+        block.insert(block.end(), entry.begin(), entry.end());
+        block.push_back('\0');
+    }
+    block.push_back('\0');
+    return block;
+}
+
 struct ProcessResult {
     DWORD exitCode = 1;
     std::string stdoutText;
@@ -142,6 +216,7 @@ std::optional<ProcessResult> RunProcessCapture(
 
     PROCESS_INFORMATION processInfo{};
     std::string mutableCommandLine = commandLine;
+    std::vector<char> environmentBlock = BuildBRNiflyEnvironmentBlock();
     BOOL created = CreateProcessA(
         executable.c_str(),
         mutableCommandLine.data(),
@@ -149,7 +224,7 @@ std::optional<ProcessResult> RunProcessCapture(
         nullptr,
         TRUE,
         CREATE_NO_WINDOW,
-        nullptr,
+        environmentBlock.data(),
         fs::path(executable).parent_path().string().c_str(),
         &startupInfo,
         &processInfo);

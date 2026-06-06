@@ -7,6 +7,7 @@
 #include <mutex>
 #include <set>
 #include <functional>
+#include <future>
 #include <typeinfo>
 #include <string>
 #include <utility>
@@ -14,6 +15,7 @@
 #include "Resources/Resource.h"
 #include "Resources/Buffers/BufferView.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
+#include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Resources/Buffers/MemoryBlock.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
@@ -38,6 +40,8 @@ public:
 
     std::unique_ptr<BufferView> Allocate(size_t size, size_t elementSize);
     void ReserveBytes(size_t size);
+    void RequestAsyncReserveBytes(size_t size);
+    bool PublishReadyAsyncResize(bool wait = false);
     void Deallocate(const BufferView* view);
     void DeallocateRange(size_t offset, size_t size);
     void DeallocatePages(const std::vector<PagedAllocation>& pages);
@@ -156,6 +160,9 @@ private:
 
     void CreateBuffer(size_t capacity);
     void GrowBuffer(size_t newSize);
+    size_t ComputeReserveCapacityLocked(size_t size) const;
+    bool PublishReadyAsyncResizeLocked(bool wait);
+    void ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity);
 
     void SyncUploadPolicyState() {
         const auto tag = GetUploadPolicyTag();
@@ -177,4 +184,8 @@ private:
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
     std::mutex m_uploadPolicyMirrorMutex;
+    mutable std::recursive_mutex m_allocationMutex;
+    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    size_t m_pendingResizeCapacity = 0;
+    bool m_pendingResizeValid = false;
 };

@@ -9,7 +9,12 @@
 #include <atlbase.h>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <stacktrace>
+#include <thread>
 #include <unordered_set>
 #include <typeindex>
 #include <utility>
@@ -115,6 +120,68 @@ void D3D12DebugCallback(
 }
 
 namespace {
+
+std::string RendererExceptionStacktraceString()
+{
+#if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
+    try {
+        std::ostringstream output;
+        output << std::stacktrace::current();
+        return output.str();
+    } catch (...) {
+        return "(stacktrace capture failed)";
+    }
+#else
+    return "(no <stacktrace> support in this build)";
+#endif
+}
+
+std::filesystem::path MakeRendererExceptionPath(uint64_t frameNumber, const char* stageName)
+{
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    (void)localtime_s(std::addressof(localTime), std::addressof(time));
+
+    std::ostringstream name;
+    name << "RendererException-"
+         << std::put_time(std::addressof(localTime), "%Y%m%d-%H%M%S")
+         << "-frame" << frameNumber
+         << "-" << stageName
+         << "-tid" << GetCurrentThreadId()
+         << ".txt";
+
+    std::error_code ec;
+    std::filesystem::create_directories("crashes", ec);
+    return std::filesystem::current_path() / "crashes" / name.str();
+}
+
+void WriteRendererExceptionNote(
+    const char* stageName,
+    uint64_t frameNumber,
+    uint8_t frameIndex,
+    uint64_t frameFenceValue,
+    const std::exception& ex)
+{
+    const auto path = MakeRendererExceptionPath(frameNumber, stageName);
+    std::ofstream report(path, std::ios::trunc);
+    if (!report) {
+        return;
+    }
+
+    std::ostringstream threadId;
+    threadId << std::this_thread::get_id();
+    report << "Renderer exception note\n";
+    report << "stage='" << stageName << "'\n";
+    report << "frame=" << frameNumber << "\n";
+    report << "frame_index=" << static_cast<unsigned>(frameIndex) << "\n";
+    report << "frame_fence_value=" << frameFenceValue << "\n";
+    report << "thread_id=" << threadId.str() << "\n";
+    report << "win32_thread_id=" << GetCurrentThreadId() << "\n";
+    report << "exception_type='" << typeid(ex).name() << "'\n";
+    report << "exception_what='" << ex.what() << "'\n\n";
+    report << "Catch-site stacktrace:\n" << RendererExceptionStacktraceString() << "\n";
+}
 
 void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     auto& sm = SettingsManager::GetInstance();
@@ -236,6 +303,8 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 } // namespace
 
 void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
+    BufferBase::ScopedBackingMutation initializationBackingMutation;
+
     auto& settingsManager = SettingsManager::GetInstance();
     const bool enableStreamline = !IsStreamlineDisabledByEnvironment();
     const bool enableDirectStorage = !IsDirectStorageDisabledByEnvironment();
@@ -1955,6 +2024,7 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
 
 void Renderer::Update(float elapsedSeconds) {
     ZoneScopedN("Renderer::Update");
+    BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
     BeginFrameTaskGraphCapture();
 
@@ -2495,6 +2565,15 @@ void Renderer::Render() {
         }
         catch (const std::exception& ex) {
             spdlog::critical("Renderer: frame {} RenderGraph::Execute threw: {}", m_totalFramesRendered, ex.what());
+            WriteRendererExceptionNote(
+                "RenderGraphExecute",
+                m_totalFramesRendered,
+                renderedFrameIndex,
+                m_currentFrameFenceValue,
+                ex);
+            spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& logger) {
+                logger->flush();
+            });
             throw;
         }
     });

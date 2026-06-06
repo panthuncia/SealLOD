@@ -1,6 +1,7 @@
 #include "Resources/Buffers/DynamicBuffer.h"
 
 #include <cstddef>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 
@@ -11,6 +12,7 @@
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
 std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementSize) {
+    std::lock_guard lock(m_allocationMutex);
 	size_t requiredSize = size;
 
 	// Search for a free block using the size-indexed set - O(log n)
@@ -47,6 +49,10 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
         // Return BufferView
         return BufferView::CreateUnique(m_cachedWeakPtr, blockOffset, requiredSize, elementSize);
 	}
+
+    if (PublishReadyAsyncResizeLocked(false)) {
+        return Allocate(size, elementSize);
+    }
 
 	// No suitable block found, need to grow the buffer
     spdlog::info(
@@ -85,6 +91,7 @@ std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementS
 }
 
 void DynamicBuffer::ReserveBytes(size_t size) {
+    std::lock_guard lock(m_allocationMutex);
     if (size == 0) {
         return;
     }
@@ -93,11 +100,127 @@ void DynamicBuffer::ReserveBytes(size_t size) {
         return;
     }
 
+    (void)PublishReadyAsyncResizeLocked(false);
+    if (m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end()) {
+        return;
+    }
+
     auto view = Allocate(size, m_elementSize);
     Deallocate(view.get());
 }
 
+size_t DynamicBuffer::ComputeReserveCapacityLocked(size_t size) const {
+    if (size == 0 || m_freeBlocks.lower_bound({ size, 0 }) != m_freeBlocks.end()) {
+        return m_capacity;
+    }
+
+    const size_t previousCapacity = m_capacity;
+    size_t newBlockSize = (std::max)(m_capacity, size);
+    size_t growBy = newBlockSize;
+    if (!m_blocksByOffset.empty()) {
+        auto lastIt = std::prev(m_blocksByOffset.end());
+        if (lastIt->second.isFree) {
+            growBy -= lastIt->second.size;
+        }
+    }
+    return DynamicBuffer::AlignBufferCapacity(previousCapacity + growBy, m_byteAddress);
+}
+
+void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
+    std::lock_guard lock(m_allocationMutex);
+    const size_t requestedCapacity = ComputeReserveCapacityLocked(size);
+    if (requestedCapacity <= m_capacity ||
+        (m_pendingResizeValid && m_pendingResizeCapacity >= requestedCapacity)) {
+        return;
+    }
+
+    if (m_pendingResizeValid) {
+        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            (void)PublishReadyAsyncResizeLocked(false);
+        }
+        if (m_pendingResizeValid && m_pendingResizeCapacity >= requestedCapacity) {
+            return;
+        }
+        if (m_pendingResizeValid) {
+            spdlog::debug(
+                "DynamicBuffer '{}' id={} async resize request deferred because pending resize capacity={} requestedCapacity={} mutationAllowed={}",
+                m_name,
+                GetGlobalResourceID(),
+                m_pendingResizeCapacity,
+                requestedCapacity,
+                BufferBase::IsBackingMutationAllowedOnThisThread());
+            return;
+        }
+    }
+
+    const auto resourceID = GetGlobalResourceID();
+    const bool unorderedAccess = m_UAV;
+    const auto bufferName = m_name;
+    m_pendingResizeCapacity = requestedCapacity;
+    m_pendingResizeValid = true;
+    m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, requestedCapacity, bufferName]() {
+        spdlog::debug(
+            "DynamicBuffer '{}' id={} async resize backing create begin capacity={}",
+            bufferName,
+            resourceID,
+            requestedCapacity);
+        auto backing = GpuBufferBacking::CreateUnique(
+            rhi::HeapType::DeviceLocal,
+            requestedCapacity,
+            resourceID,
+            unorderedAccess);
+        spdlog::debug(
+            "DynamicBuffer '{}' id={} async resize backing create complete capacity={}",
+            bufferName,
+            resourceID,
+            requestedCapacity);
+        return backing;
+    });
+}
+
+bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
+    std::lock_guard lock(m_allocationMutex);
+    return PublishReadyAsyncResizeLocked(wait);
+}
+
+bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
+    if (!m_pendingResizeValid) {
+        return false;
+    }
+    if (!wait &&
+        m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return false;
+    }
+
+    auto newBacking = m_pendingResizeFuture.get();
+    const size_t newCapacity = m_pendingResizeCapacity;
+    m_pendingResizeCapacity = 0;
+    m_pendingResizeValid = false;
+    if (!newBacking || newCapacity <= m_capacity) {
+        return false;
+    }
+
+    const size_t previousCapacity = m_capacity;
+    ApplyResizeBackingLocked(std::move(newBacking), newCapacity, previousCapacity);
+    size_t newBlockOffset = previousCapacity;
+    if (!m_blocksByOffset.empty()) {
+        auto lastIt = std::prev(m_blocksByOffset.end());
+        if (lastIt->second.isFree) {
+            newBlockOffset = lastIt->second.offset;
+            m_freeBlocks.erase({ lastIt->second.size, lastIt->second.offset });
+            m_blocksByOffset.erase(lastIt);
+        }
+    }
+    const size_t trackedFreeSize = m_capacity - newBlockOffset;
+    if (trackedFreeSize != 0) {
+        m_blocksByOffset[newBlockOffset] = { newBlockOffset, trackedFreeSize, true };
+        m_freeBlocks.insert({ trackedFreeSize, newBlockOffset });
+    }
+    return true;
+}
+
 std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void* data, size_t count, size_t elementSize) {
+    std::lock_guard lock(m_allocationMutex);
     std::vector<std::shared_ptr<BufferView>> views;
     if (count == 0 || elementSize == 0) {
         return views;
@@ -154,6 +277,7 @@ std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void*
 }
 
 std::pair<size_t, size_t> DynamicBuffer::AddDataRange(const void* data, size_t count, size_t elementSize) {
+    std::lock_guard lock(m_allocationMutex);
     if (count == 0 || elementSize == 0) {
         return { 0, 0 };
     }
@@ -198,6 +322,7 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
     size_t elementSize,
     size_t pageElementCount)
 {
+    std::lock_guard lock(m_allocationMutex);
     std::vector<PagedAllocation> pages;
     if (count == 0 || elementSize == 0) {
         return pages;
@@ -242,6 +367,7 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
 }
 
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
+    std::lock_guard lock(m_allocationMutex);
 	size_t actualSize = size;
     if (fullAllocationSize != 0) {
 		actualSize = fullAllocationSize;
@@ -300,6 +426,7 @@ void DynamicBuffer::Deallocate(const BufferView* view) {
 }
 
 void DynamicBuffer::DeallocateRange(size_t offset, size_t size) {
+    std::lock_guard lock(m_allocationMutex);
     if (size == 0) {
         return;
     }
@@ -388,6 +515,7 @@ void DynamicBuffer::AssignDescriptorSlots()
 }
 
 void DynamicBuffer::CreateBuffer(size_t capacity) {
+    std::lock_guard lock(m_allocationMutex);
 	auto device = DeviceManager::GetInstance().GetDevice();
 	m_capacity = capacity;
 	auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
@@ -405,6 +533,7 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
 }
 
 void DynamicBuffer::GrowBuffer(size_t newSize) {
+    std::lock_guard lock(m_allocationMutex);
     const size_t previousCapacity = m_capacity;
     spdlog::info(
         "DynamicBuffer '{}' id={} GrowBuffer begin oldCapacity={} newCapacity={} hasBacking={}",
@@ -423,6 +552,10 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
         "DynamicBuffer '{}' id={} GrowBuffer created new GPU backing",
         m_name,
         GetGlobalResourceID());
+	ApplyResizeBackingLocked(std::move(newDataBuffer), newSize, previousCapacity);
+}
+
+void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity) {
 	spdlog::info(
 		"DynamicBuffer '{}' id={} GrowBuffer SetBacking begin",
 		m_name,

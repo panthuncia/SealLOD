@@ -20,6 +20,7 @@
 #include <iterator>
 #include <limits>
 #include <span>
+#include <unordered_set>
 #include <cassert>
 #include <tracy/Tracy.hpp>
 
@@ -572,6 +573,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 		return;
 	}
 
+	PublishPreparedStaticMeshTemplateResourceResizes(false);
 	m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
 	m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 	m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
@@ -587,6 +589,77 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 		}
 		AddMesh(mesh, useMeshletReorderedVertices);
 	}
+}
+
+void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests) {
+	if (requests.empty()) {
+		return;
+	}
+
+	size_t meshRowsToAdd = 0;
+	size_t clodGroupsBytes = 0;
+	size_t clodSegmentsBytes = 0;
+	size_t clodNodesBytes = 0;
+	size_t clodSharedGroupChunkBytes = 0;
+	size_t clodHierarchyLevelInfoBytes = 0;
+	size_t clodMeshMetadataBytes = 0;
+	size_t clodPageMapBytes = 0;
+	size_t templateRowsToAdd = 0;
+	std::unordered_set<Mesh*> uniqueMeshes;
+	uniqueMeshes.reserve(requests.size());
+
+	for (const auto& request : requests) {
+		const auto& mesh = request.mesh;
+		if (!mesh) {
+			continue;
+		}
+		if (uniqueMeshes.insert(mesh.get()).second && !mesh->GetPerMeshBufferView()) {
+			++meshRowsToAdd;
+			clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
+			clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
+			clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+			clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
+			clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
+			clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
+
+			uint32_t totalPageMapEntries = 0;
+			for (const auto& group : mesh->GetCLodGroups()) {
+				totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+			}
+			clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
+		}
+		if (request.material) {
+			++templateRowsToAdd;
+		}
+	}
+
+	if (meshRowsToAdd != 0) {
+		m_perMeshBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
+		m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
+		m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
+		m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+		m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
+		m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
+		m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
+		m_clodGroupPageMap->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+	}
+	if (templateRowsToAdd != 0) {
+		m_perMeshInstanceBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(PerMeshInstanceCB), 256ull * 1024ull));
+		m_perMeshInstanceClodOffsets->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(MeshInstanceClodOffsets), 256ull * 1024ull));
+	}
+}
+
+void MeshManager::PublishPreparedStaticMeshTemplateResourceResizes(bool wait) {
+	(void)m_perMeshBuffers->PublishReadyAsyncResize(wait);
+	(void)m_clusterLODGroups->PublishReadyAsyncResize(wait);
+	(void)m_clusterLODSegments->PublishReadyAsyncResize(wait);
+	(void)m_clusterLODNodes->PublishReadyAsyncResize(wait);
+	(void)m_clodSharedGroupChunks->PublishReadyAsyncResize(wait);
+	(void)m_clodHierarchyLevelInfos->PublishReadyAsyncResize(wait);
+	(void)m_clodMeshMetadata->PublishReadyAsyncResize(wait);
+	(void)m_clodGroupPageMap->PublishReadyAsyncResize(wait);
+	(void)m_perMeshInstanceBuffers->PublishReadyAsyncResize(wait);
+	(void)m_perMeshInstanceClodOffsets->PublishReadyAsyncResize(wait);
 }
 
 std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
@@ -636,6 +709,7 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 
 	const auto perMeshInstanceBytes = perMeshInstanceRows.size() * sizeof(PerMeshInstanceCB);
 	const auto clodOffsetBytes = clodOffsetRows.size() * sizeof(MeshInstanceClodOffsets);
+	PublishPreparedStaticMeshTemplateResourceResizes(false);
 	m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
 	m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
 
