@@ -48,6 +48,9 @@ public:
     void DeallocatePages(const std::vector<PagedAllocation>& pages);
 	std::unique_ptr<BufferView> AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize = 0);
     std::pair<size_t, size_t> AddDataRange(const void* data, size_t count, size_t elementSize);
+    std::vector<PagedAllocation> AllocatePages(size_t count, size_t elementSize, size_t pageElementCount);
+    void StageWriteRange(const void* data, size_t size, size_t offset);
+    void StageWritePages(const void* data, size_t count, size_t elementSize, const std::vector<PagedAllocation>& pages, size_t pageElementCount);
     std::vector<PagedAllocation> AddDataPaged(const void* data, size_t count, size_t elementSize, size_t pageElementCount);
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;

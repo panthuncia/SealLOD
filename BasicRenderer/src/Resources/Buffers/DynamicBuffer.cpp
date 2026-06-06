@@ -322,6 +322,16 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
     size_t elementSize,
     size_t pageElementCount)
 {
+    auto pages = AllocatePages(count, elementSize, pageElementCount);
+    StageWritePages(data, count, elementSize, pages, pageElementCount);
+    return pages;
+}
+
+std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocatePages(
+    size_t count,
+    size_t elementSize,
+    size_t pageElementCount)
+{
     std::lock_guard lock(m_allocationMutex);
     std::vector<PagedAllocation> pages;
     if (count == 0 || elementSize == 0) {
@@ -332,9 +342,7 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
         pageElementCount = 1;
     }
 
-    const auto* bytes = static_cast<const std::byte*>(data);
     size_t remaining = count;
-    size_t elementCursor = 0;
     pages.reserve((count + pageElementCount - 1) / pageElementCount);
 
     while (remaining != 0) {
@@ -347,10 +355,6 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
         }
 
         const size_t offset = view->GetOffset();
-        if (bytes != nullptr) {
-            StageOrUpload(bytes + elementCursor * elementSize, usedSize, offset);
-        }
-
         pages.push_back(PagedAllocation{
             offset,
             usedSize,
@@ -359,11 +363,44 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
             pageCount
         });
 
-        elementCursor += pageCount;
         remaining -= pageCount;
     }
 
     return pages;
+}
+
+void DynamicBuffer::StageWriteRange(const void* data, size_t size, size_t offset) {
+    if (data == nullptr || size == 0) {
+        return;
+    }
+    StageOrUpload(data, size, offset);
+}
+
+void DynamicBuffer::StageWritePages(
+    const void* data,
+    size_t count,
+    size_t elementSize,
+    const std::vector<PagedAllocation>& pages,
+    size_t pageElementCount)
+{
+    if (data == nullptr || count == 0 || elementSize == 0 || pages.empty()) {
+        return;
+    }
+    if (pageElementCount == 0) {
+        pageElementCount = 1;
+    }
+
+    const auto* bytes = static_cast<const std::byte*>(data);
+    size_t elementCursor = 0;
+    for (const auto& page : pages) {
+        if (!page.IsValid() || elementCursor >= count) {
+            continue;
+        }
+        const size_t pageCount = (std::min)(page.count, count - elementCursor);
+        const size_t usedSize = pageCount * elementSize;
+        StageWriteRange(bytes + elementCursor * elementSize, usedSize, page.offset);
+        elementCursor += pageCount;
+    }
 }
 
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {

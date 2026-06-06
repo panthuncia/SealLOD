@@ -13,6 +13,7 @@
 
 #include "Resources/Buffers/LazyDynamicStructuredBuffer.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
+#include "Resources/Buffers/DynamicBuffer.h"
 #include "ShaderBuffers.h"
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 #include "Render/IndirectCommand.h"
@@ -89,6 +90,11 @@ public:
 		std::uint64_t staticDirectDrawRecordBuildUs = 0;
 		std::uint64_t staticDirectDrawRecordUploadUs = 0;
 		std::uint64_t staticDirectFinalizeUs = 0;
+		std::uint64_t staticDirectResizePublishUs = 0;
+		std::uint64_t staticDirectScopeBuildUs = 0;
+		std::uint64_t staticDirectNormalPatchUs = 0;
+		std::uint64_t staticDirectPacketBuildUs = 0;
+		std::uint64_t staticDirectPacketPublishUs = 0;
 		std::uint64_t staticDirectReserveHeadroomCalls = 0;
 		std::uint64_t staticDirectReservedHeadroomBytes = 0;
 		std::uint64_t staticDirectWorkloadCacheHits = 0;
@@ -124,6 +130,55 @@ public:
 		std::uint64_t deferredRetireWorkerUs = 0;
 	};
 
+	struct StaticImportPacketPlan {
+		PreparedStaticGroupsBulkPlan prepared;
+	};
+
+	struct StaticImportPacketAllocation {
+		std::vector<DynamicBuffer::PagedAllocation> perObjectPages;
+		std::vector<DynamicBuffer::PagedAllocation> instanceTransformPages;
+		std::vector<DynamicBuffer::PagedAllocation> normalMatrixPages;
+		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordPages;
+	};
+
+	struct StaticImportPacket {
+		struct GroupTransformRange {
+			std::size_t first = 0;
+			std::size_t count = 0;
+		};
+
+		struct PatchableDrawRecord {
+			std::size_t groupIndex = 0;
+			std::size_t scopeTransformOrdinal = 0;
+			std::uint32_t meshTemplateIndex = 0;
+			std::uint32_t clodOffsetIndex = 0;
+			std::vector<DrawWorkloadKey> workloadKeys;
+		};
+
+		struct Scope {
+			std::uint64_t id = 0;
+			std::vector<std::size_t> groupIndices;
+			std::vector<PerObjectCB> perObjectCBs;
+			std::vector<DirectX::XMFLOAT4X4> normalMatrices;
+			std::vector<PatchableDrawRecord> drawRecords;
+			StaticImportPacketAllocation allocation;
+		};
+
+		std::vector<Scope> scopes;
+		std::vector<GroupTransformRange> transformRanges;
+		std::vector<Components::ObjectDrawInfo> drawInfos;
+		std::uint64_t groupCount = 0;
+		std::uint64_t transformRows = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t preparedBytes = 0;
+		std::uint64_t prepareUs = 0;
+		std::uint64_t transformBuildUs = 0;
+		std::uint64_t workloadBuildUs = 0;
+		std::uint64_t scopeBuildUs = 0;
+		std::uint64_t drawRecordBuildUs = 0;
+		std::uint64_t packetBuildUs = 0;
+	};
+
 	struct RemoveObjectsBulkOptions {
 		bool deferBufferRangeRetirement = false;
 		std::uint64_t retireFrame = 0;
@@ -133,8 +188,12 @@ public:
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
 	std::vector<Components::ObjectDrawInfo> AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups);
 	static PreparedStaticGroupsBulkPlan PrepareStaticGroupsBulkPlan(const std::vector<StaticGroupBuildInfo>& groups);
+	static StaticImportPacketPlan PrepareStaticImportPacketPlan(const std::vector<StaticGroupBuildInfo>& groups);
+	static StaticImportPacket BuildStaticImportPacket(StaticImportPacketPlan plan);
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
+	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
+	std::vector<Components::ObjectDrawInfo> PublishStaticImportPacket(StaticImportPacket packet);
 	std::vector<Components::ObjectDrawInfo> CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan);
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
 	void RemoveObjectsBulk(
