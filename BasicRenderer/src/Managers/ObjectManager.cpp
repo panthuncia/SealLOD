@@ -23,9 +23,6 @@
 
 namespace {
 
-constexpr size_t kStaticTransformPageElements = 256;
-constexpr size_t kStaticDrawRecordPageElements = 1024;
-
 size_t ReserveBytesWithStaticImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
 	if (requestedBytes == 0) {
 		return 0;
@@ -51,33 +48,6 @@ Components::ObjectDrawInfo::BufferRange ToBufferRange(const DynamicBuffer::Paged
 		page.stride,
 		page.allocationSize != 0 && page.stride != 0 ? page.allocationSize / page.stride : 0
 	};
-}
-
-std::vector<Components::ObjectDrawInfo::BufferRange> ToBufferRanges(const std::vector<DynamicBuffer::PagedAllocation>& pages) {
-	std::vector<Components::ObjectDrawInfo::BufferRange> ranges;
-	ranges.reserve(pages.size());
-	for (const auto& page : pages) {
-		if (page.IsValid()) {
-			ranges.push_back(ToBufferRange(page));
-		}
-	}
-	return ranges;
-}
-
-size_t PagedElementOffset(
-	const std::vector<DynamicBuffer::PagedAllocation>& pages,
-	size_t elementIndex,
-	size_t pageElementCount)
-{
-	if (pages.empty() || pageElementCount == 0) {
-		return 0;
-	}
-	const size_t pageIndex = elementIndex / pageElementCount;
-	const size_t indexInPage = elementIndex % pageElementCount;
-	if (pageIndex >= pages.size()) {
-		return 0;
-	}
-	return pages[pageIndex].offset + indexInPage * pages[pageIndex].stride;
 }
 
 void AppendActiveDrawSetRemoval(
@@ -805,145 +775,219 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 		}
 	}
 
-	const auto pageUploadBegin = std::chrono::steady_clock::now();
-	{
-		ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages");
-		for (auto& scope : packet.scopes) {
-			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::Scope");
-			ZoneValue(scope.perObjectCBs.size());
-			if (scope.perObjectCBs.empty()) {
-				continue;
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocateNormalPages");
-				scope.allocation.normalMatrixPages = m_normalMatrixBuffer->AllocatePages(
-					scope.normalMatrices.size(),
-					sizeof(DirectX::XMFLOAT4X4),
-					kStaticTransformPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::PatchNormalIndices");
-				const auto normalPatchBegin = std::chrono::steady_clock::now();
-				for (size_t i = 0; i < scope.perObjectCBs.size(); ++i) {
-					scope.perObjectCBs[i].normalMatrixBufferIndex = static_cast<uint32_t>(
-						PagedElementOffset(scope.allocation.normalMatrixPages, i, kStaticTransformPageElements) / sizeof(DirectX::XMFLOAT4X4));
-				}
-				m_stats.staticDirectNormalPatchUs += static_cast<std::uint64_t>(
-					std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - normalPatchBegin).count());
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocatePerObjectPages");
-				scope.allocation.perObjectPages = m_perObjectBuffers->AllocatePages(
-					scope.perObjectCBs.size(),
-					sizeof(PerObjectCB),
-					kStaticTransformPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocateInstanceTransformPages");
-				scope.allocation.instanceTransformPages = m_perInstanceTransformBuffers->AllocatePages(
-					scope.perObjectCBs.size(),
-					sizeof(PerInstanceTransformCB),
-					kStaticTransformPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StageNormalPages");
-				m_normalMatrixBuffer->StageWritePages(
-					scope.normalMatrices.data(),
-					scope.normalMatrices.size(),
-					sizeof(DirectX::XMFLOAT4X4),
-					scope.allocation.normalMatrixPages,
-					kStaticTransformPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StagePerObjectPages");
-				m_perObjectBuffers->StageWritePages(
-					scope.perObjectCBs.data(),
-					scope.perObjectCBs.size(),
-					sizeof(PerObjectCB),
-					scope.allocation.perObjectPages,
-					kStaticTransformPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StageInstanceTransformPages");
-				m_perInstanceTransformBuffers->StageWritePages(
-					scope.perObjectCBs.data(),
-					scope.perObjectCBs.size(),
-					sizeof(PerInstanceTransformCB),
-					scope.allocation.instanceTransformPages,
-					kStaticTransformPageElements);
-			}
-			m_stats.bulkReservedPerObjectBytes += scope.perObjectCBs.size() * sizeof(PerObjectCB);
-			m_stats.bulkReservedInstanceTransformBytes += scope.perObjectCBs.size() * sizeof(PerInstanceTransformCB);
-			m_stats.bulkReservedNormalMatrixRows += scope.normalMatrices.size();
-		}
-	}
-	m_stats.staticDirectPageUploadUs += static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pageUploadBegin).count());
-
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::MoveDrawInfos");
 		drawInfos = std::move(packet.drawInfos);
 	}
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+	std::vector<StaticImportPacket::Scope*> scopeByGroup(drawInfos.size(), nullptr);
+	for (auto& scope : packet.scopes) {
+		for (const auto groupIndex : scope.groupIndices) {
+			if (groupIndex < scopeByGroup.size()) {
+				scopeByGroup[groupIndex] = &scope;
+			}
+		}
+	}
+
+	std::vector<size_t> transformCounts(drawInfos.size(), 0);
+	std::vector<size_t> transformFlatFirstByGroup(drawInfos.size(), 0);
+	std::vector<PerObjectCB> packetPerObjectRows;
+	std::vector<DirectX::XMFLOAT4X4> packetNormalRows;
+	packetPerObjectRows.reserve(static_cast<size_t>(packet.transformRows));
+	packetNormalRows.reserve(static_cast<size_t>(packet.transformRows));
+
+	std::vector<DynamicBuffer::PagedAllocation> normalMatrixRanges;
+	std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
+	std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
+	const auto pageUploadBegin = std::chrono::steady_clock::now();
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages");
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::BuildGroupRangePayloads");
+			for (size_t groupIndex = 0; groupIndex < drawInfos.size(); ++groupIndex) {
+				if (groupIndex >= packet.transformRanges.size()) {
+					continue;
+				}
+				const auto* scope = scopeByGroup[groupIndex];
+				const auto range = packet.transformRanges[groupIndex];
+				if (!scope ||
+					range.count == 0 ||
+					range.first + range.count > scope->perObjectCBs.size() ||
+					range.first + range.count > scope->normalMatrices.size()) {
+					continue;
+				}
+				transformFlatFirstByGroup[groupIndex] = packetPerObjectRows.size();
+				transformCounts[groupIndex] = range.count;
+				packetPerObjectRows.insert(
+					packetPerObjectRows.end(),
+					scope->perObjectCBs.begin() + range.first,
+					scope->perObjectCBs.begin() + range.first + range.count);
+				packetNormalRows.insert(
+					packetNormalRows.end(),
+					scope->normalMatrices.begin() + range.first,
+					scope->normalMatrices.begin() + range.first + range.count);
+			}
+		}
+
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocateNormalRangesBatch");
+			normalMatrixRanges = m_normalMatrixBuffer->AllocateRangesBatch(
+				transformCounts,
+				sizeof(DirectX::XMFLOAT4X4));
+		}
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocatePerObjectRangesBatch");
+			perObjectRanges = m_perObjectBuffers->AllocateRangesBatch(
+				transformCounts,
+				sizeof(PerObjectCB));
+		}
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::AllocateInstanceTransformRangesBatch");
+			instanceTransformRanges = m_perInstanceTransformBuffers->AllocateRangesBatch(
+				transformCounts,
+				sizeof(PerInstanceTransformCB));
+		}
+
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::PatchNormalIndices");
+			const auto normalPatchBegin = std::chrono::steady_clock::now();
+			for (size_t groupIndex = 0; groupIndex < drawInfos.size(); ++groupIndex) {
+				if (groupIndex >= normalMatrixRanges.size() || !normalMatrixRanges[groupIndex].IsValid()) {
+					continue;
+				}
+				const auto rowCount = transformCounts[groupIndex];
+				const auto flatFirst = transformFlatFirstByGroup[groupIndex];
+				for (size_t i = 0; i < rowCount; ++i) {
+					packetPerObjectRows[flatFirst + i].normalMatrixBufferIndex = static_cast<uint32_t>(
+						(normalMatrixRanges[groupIndex].offset + i * sizeof(DirectX::XMFLOAT4X4)) / sizeof(DirectX::XMFLOAT4X4));
+				}
+			}
+			m_stats.staticDirectNormalPatchUs += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - normalPatchBegin).count());
+		}
+
+		const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges) -> const DynamicBuffer::PagedAllocation* {
+			for (const auto& range : ranges) {
+				if (range.IsValid()) {
+					return &range;
+				}
+			}
+			return nullptr;
+		};
+		if (const auto* firstNormalRange = firstValidRange(normalMatrixRanges)) {
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StageNormalRange");
+			m_normalMatrixBuffer->StageWriteRange(
+				packetNormalRows.data(),
+				packetNormalRows.size() * sizeof(DirectX::XMFLOAT4X4),
+				firstNormalRange->offset);
+		}
+		if (const auto* firstPerObjectRange = firstValidRange(perObjectRanges)) {
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StagePerObjectRange");
+			m_perObjectBuffers->StageWriteRange(
+				packetPerObjectRows.data(),
+				packetPerObjectRows.size() * sizeof(PerObjectCB),
+				firstPerObjectRange->offset);
+		}
+		if (const auto* firstInstanceTransformRange = firstValidRange(instanceTransformRanges)) {
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::StageInstanceTransformRange");
+			m_perInstanceTransformBuffers->StageWriteRange(
+				packetPerObjectRows.data(),
+				packetPerObjectRows.size() * sizeof(PerInstanceTransformCB),
+				firstInstanceTransformRange->offset);
+		}
+
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::TransformPages::FinalizeGroupRanges");
+			for (size_t groupIndex = 0; groupIndex < drawInfos.size(); ++groupIndex) {
+				if (groupIndex >= perObjectRanges.size() ||
+					groupIndex >= instanceTransformRanges.size() ||
+					groupIndex >= normalMatrixRanges.size()) {
+					continue;
+				}
+				auto& drawInfo = drawInfos[groupIndex];
+				drawInfo.perObjectCBRange = ToBufferRange(perObjectRanges[groupIndex]);
+				drawInfo.perInstanceTransformRange = ToBufferRange(instanceTransformRanges[groupIndex]);
+				drawInfo.normalMatrixRange = ToBufferRange(normalMatrixRanges[groupIndex]);
+				drawInfo.perObjectCBIndex = static_cast<uint32_t>(drawInfo.perObjectCBRange.offset / sizeof(PerObjectCB));
+				drawInfo.normalMatrixIndex = static_cast<uint32_t>(drawInfo.normalMatrixRange.offset / sizeof(DirectX::XMFLOAT4X4));
+			}
+		}
+
+		m_stats.bulkReservedPerObjectBytes += packetPerObjectRows.size() * sizeof(PerObjectCB);
+		m_stats.bulkReservedInstanceTransformBytes += packetPerObjectRows.size() * sizeof(PerInstanceTransformCB);
+		m_stats.bulkReservedNormalMatrixRows += packetNormalRows.size();
+	}
+	m_stats.staticDirectPageUploadUs += static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pageUploadBegin).count());
 
 	const auto drawRecordUploadBegin = std::chrono::steady_clock::now();
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages");
-		for (auto& scope : packet.scopes) {
-			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::Scope");
-			ZoneValue(scope.drawRecords.size());
-			if (scope.drawRecords.empty()) {
-				continue;
-			}
-			std::vector<InstanceDrawRecordCB> drawRecords;
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::MaterializeRecords");
-				drawRecords.reserve(scope.drawRecords.size());
+		std::vector<std::vector<const StaticImportPacket::PatchableDrawRecord*>> drawRecordsByGroup(drawInfos.size());
+		std::vector<size_t> drawRecordCounts(drawInfos.size(), 0);
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::BuildGroupRecordLists");
+			for (const auto& scope : packet.scopes) {
 				for (const auto& sourceRecord : scope.drawRecords) {
-					InstanceDrawRecordCB drawRecord{};
-					drawRecord.meshTemplateIndex = sourceRecord.meshTemplateIndex;
-					drawRecord.instanceTransformIndex = static_cast<uint32_t>(
-						PagedElementOffset(scope.allocation.instanceTransformPages, sourceRecord.scopeTransformOrdinal, kStaticTransformPageElements) / sizeof(PerInstanceTransformCB));
-					drawRecord.clodOffsetIndex = sourceRecord.clodOffsetIndex;
-					drawRecord.flags = 0u;
-					drawRecords.push_back(drawRecord);
-				}
-			}
-			const auto drawRecordBytes = drawRecords.size() * sizeof(InstanceDrawRecordCB);
-			m_stats.bulkReservedDrawRecordBytes += drawRecordBytes;
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::AllocateDrawRecordPages");
-				scope.allocation.instanceDrawRecordPages = m_instanceDrawRecordBuffers->AllocatePages(
-					drawRecords.size(),
-					sizeof(InstanceDrawRecordCB),
-					kStaticDrawRecordPageElements);
-			}
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageDrawRecordPages");
-				m_instanceDrawRecordBuffers->StageWritePages(
-					drawRecords.data(),
-					drawRecords.size(),
-					sizeof(InstanceDrawRecordCB),
-					scope.allocation.instanceDrawRecordPages,
-					kStaticDrawRecordPageElements);
-			}
-			m_stats.instanceDrawRecordsAllocated += drawRecords.size();
-			m_stats.staticDirectDrawRecords += drawRecords.size();
-
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::PatchDrawInfosAndActiveBuckets");
-				for (size_t drawRecordIndexInScope = 0; drawRecordIndexInScope < scope.drawRecords.size(); ++drawRecordIndexInScope) {
-					const auto& sourceRecord = scope.drawRecords[drawRecordIndexInScope];
-					if (sourceRecord.groupIndex >= drawInfos.size()) {
+					if (sourceRecord.groupIndex >= drawInfos.size() || sourceRecord.groupIndex >= packet.transformRanges.size()) {
 						continue;
 					}
-					auto& drawInfo = drawInfos[sourceRecord.groupIndex];
-					const auto drawRecordOffset = PagedElementOffset(scope.allocation.instanceDrawRecordPages, drawRecordIndexInScope, kStaticDrawRecordPageElements);
+					const auto range = packet.transformRanges[sourceRecord.groupIndex];
+					if (sourceRecord.scopeTransformOrdinal < range.first ||
+						sourceRecord.scopeTransformOrdinal >= range.first + range.count) {
+						continue;
+					}
+					drawRecordsByGroup[sourceRecord.groupIndex].push_back(&sourceRecord);
+				}
+			}
+			for (size_t groupIndex = 0; groupIndex < drawRecordsByGroup.size(); ++groupIndex) {
+				drawRecordCounts[groupIndex] = drawRecordsByGroup[groupIndex].size();
+			}
+		}
+
+		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::AllocateDrawRecordRangesBatch");
+			instanceDrawRecordRanges = m_instanceDrawRecordBuffers->AllocateRangesBatch(
+				drawRecordCounts,
+				sizeof(InstanceDrawRecordCB));
+		}
+
+		std::vector<InstanceDrawRecordCB> packetDrawRecords;
+		packetDrawRecords.reserve(static_cast<size_t>(packet.drawRecords));
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::MaterializeAndPatchDrawInfos");
+			for (size_t groupIndex = 0; groupIndex < drawRecordsByGroup.size(); ++groupIndex) {
+				if (groupIndex >= instanceDrawRecordRanges.size() ||
+					groupIndex >= instanceTransformRanges.size() ||
+					groupIndex >= packet.transformRanges.size() ||
+					!instanceDrawRecordRanges[groupIndex].IsValid() ||
+					!instanceTransformRanges[groupIndex].IsValid()) {
+					continue;
+				}
+				auto& drawInfo = drawInfos[groupIndex];
+				const auto transformRange = packet.transformRanges[groupIndex];
+				const auto& drawRecordRange = instanceDrawRecordRanges[groupIndex];
+				drawInfo.instanceDrawRecordRange = ToBufferRange(drawRecordRange);
+				for (size_t drawRecordOrdinal = 0; drawRecordOrdinal < drawRecordsByGroup[groupIndex].size(); ++drawRecordOrdinal) {
+					const auto& sourceRecord = *drawRecordsByGroup[groupIndex][drawRecordOrdinal];
+					const auto localTransformOrdinal = sourceRecord.scopeTransformOrdinal - transformRange.first;
+					const auto instanceTransformOffset =
+						instanceTransformRanges[groupIndex].offset + localTransformOrdinal * sizeof(PerInstanceTransformCB);
+					const auto drawRecordOffset =
+						drawRecordRange.offset + drawRecordOrdinal * sizeof(InstanceDrawRecordCB);
 					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
 					if (drawRecordIndex > 0xFFFFFFu) {
 						spdlog::warn("ObjectManager::PublishStaticImportPacket: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
 					}
 					m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
+
+					InstanceDrawRecordCB drawRecord{};
+					drawRecord.meshTemplateIndex = sourceRecord.meshTemplateIndex;
+					drawRecord.instanceTransformIndex = static_cast<uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
+					drawRecord.clodOffsetIndex = sourceRecord.clodOffsetIndex;
+					drawRecord.flags = 0u;
+					packetDrawRecords.push_back(drawRecord);
 
 					drawInfo.drawInfo.indices.push_back(drawRecordIndex);
 					drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(sourceRecord.workloadKeys);
@@ -957,59 +1001,26 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					}
 				}
 			}
+		}
 
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::FinalizeGroupRanges");
-				for (const auto groupIndex : scope.groupIndices) {
-					if (groupIndex >= drawInfos.size() || groupIndex >= packet.transformRanges.size()) {
-						continue;
-					}
-					auto& drawInfo = drawInfos[groupIndex];
-					const auto range = packet.transformRanges[groupIndex];
-					drawInfo.perObjectCBRange = {
-						PagedElementOffset(scope.allocation.perObjectPages, range.first, kStaticTransformPageElements),
-						range.count * sizeof(PerObjectCB),
-						sizeof(PerObjectCB),
-						range.count
-					};
-					drawInfo.perInstanceTransformRange = {
-						PagedElementOffset(scope.allocation.instanceTransformPages, range.first, kStaticTransformPageElements),
-						range.count * sizeof(PerInstanceTransformCB),
-						sizeof(PerInstanceTransformCB),
-						range.count
-					};
-					drawInfo.normalMatrixRange = {
-						PagedElementOffset(scope.allocation.normalMatrixPages, range.first, kStaticTransformPageElements),
-						range.count * sizeof(DirectX::XMFLOAT4X4),
-						sizeof(DirectX::XMFLOAT4X4),
-						range.count
-					};
-					drawInfo.perObjectCBIndex = static_cast<uint32_t>(drawInfo.perObjectCBRange.offset / sizeof(PerObjectCB));
-					drawInfo.normalMatrixIndex = static_cast<uint32_t>(drawInfo.normalMatrixRange.offset / sizeof(DirectX::XMFLOAT4X4));
-
-					const auto drawCount = drawInfo.instanceDrawRecordIndices.size();
-					if (drawCount != 0) {
-						drawInfo.instanceDrawRecordRange = {
-							static_cast<uint64_t>(drawInfo.instanceDrawRecordIndices.front()) * sizeof(InstanceDrawRecordCB),
-							drawCount * sizeof(InstanceDrawRecordCB),
-							sizeof(InstanceDrawRecordCB),
-							drawCount
-						};
-					}
-				}
-			}
-
-			{
-				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::AssignOwnedPages");
-				if (!scope.groupIndices.empty()) {
-					auto& ownerDrawInfo = drawInfos[scope.groupIndices.front()];
-					ownerDrawInfo.ownedPerObjectCBPages = ToBufferRanges(scope.allocation.perObjectPages);
-					ownerDrawInfo.ownedPerInstanceTransformPages = ToBufferRanges(scope.allocation.instanceTransformPages);
-					ownerDrawInfo.ownedNormalMatrixPages = ToBufferRanges(scope.allocation.normalMatrixPages);
-					ownerDrawInfo.ownedInstanceDrawRecordPages = ToBufferRanges(scope.allocation.instanceDrawRecordPages);
-				}
+		if (!packetDrawRecords.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageDrawRecordRange");
+			const auto firstRangeIt = std::find_if(
+				instanceDrawRecordRanges.begin(),
+				instanceDrawRecordRanges.end(),
+				[](const auto& range) { return range.IsValid(); });
+			if (firstRangeIt != instanceDrawRecordRanges.end()) {
+				m_instanceDrawRecordBuffers->StageWriteRange(
+					packetDrawRecords.data(),
+					packetDrawRecords.size() * sizeof(InstanceDrawRecordCB),
+					firstRangeIt->offset);
 			}
 		}
+
+		const auto drawRecordBytes = packetDrawRecords.size() * sizeof(InstanceDrawRecordCB);
+		m_stats.bulkReservedDrawRecordBytes += drawRecordBytes;
+		m_stats.instanceDrawRecordsAllocated += packetDrawRecords.size();
+		m_stats.staticDirectDrawRecords += packetDrawRecords.size();
 	}
 	m_stats.staticDirectDrawRecordUploadUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - drawRecordUploadBegin).count());
@@ -1079,9 +1090,11 @@ void ObjectManager::RemoveObjectsBulk(
 	const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
 	const RemoveObjectsBulkOptions& options)
 {
+	ZoneScopedN("ObjectManager::RemoveObjectsBulk");
 	if (drawInfos.empty()) {
 		return;
 	}
+	ZoneValue(drawInfos.size());
 
 	const auto removeBegin = std::chrono::steady_clock::now();
 	++m_stats.bulkRemoveCalls;
@@ -1140,6 +1153,8 @@ void ObjectManager::RemoveObjectsBulk(
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
 	};
 
+	{
+		ZoneScopedN("ObjectManager::RemoveObjectsBulk::CollectRetiresAndActiveRemovals");
 	for (const auto* drawInfo : drawInfos) {
 		if (!drawInfo) {
 			continue;
@@ -1153,7 +1168,7 @@ void ObjectManager::RemoveObjectsBulk(
 		}
 	} else if (drawInfo->perObjectCBView) {
 		retireOrDeallocateView(m_perObjectBuffers, drawInfo->perObjectCBView);
-	} else if (drawInfo->perObjectCBRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+	} else if (drawInfo->perObjectCBRange.IsValid()) {
 		retireOrDeallocateRange(m_perObjectBuffers, drawInfo->perObjectCBRange.offset, drawInfo->perObjectCBRange.size);
 	}
 	if (!drawInfo->ownedPerInstanceTransformPages.empty()) {
@@ -1162,7 +1177,7 @@ void ObjectManager::RemoveObjectsBulk(
 		for (const auto& view : drawInfo->perInstanceTransformViews) {
 			retireOrDeallocateView(m_perInstanceTransformBuffers, view);
 		}
-	} else if (drawInfo->perInstanceTransformRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+	} else if (drawInfo->perInstanceTransformRange.IsValid()) {
 		retireOrDeallocateRange(m_perInstanceTransformBuffers, drawInfo->perInstanceTransformRange.offset, drawInfo->perInstanceTransformRange.size);
 	}
 
@@ -1205,13 +1220,15 @@ void ObjectManager::RemoveObjectsBulk(
 		}
 	} else if (drawInfo->normalMatrixView) {
 		retireOrDeallocateView(m_normalMatrixBuffer, drawInfo->normalMatrixView);
-	} else if (drawInfo->normalMatrixRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
+	} else if (drawInfo->normalMatrixRange.IsValid()) {
 		retireOrDeallocateRange(m_normalMatrixBuffer, drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
+	}
 	}
 	}
 
 	m_stats.bulkRemovePageDeallocUs += pageDeallocUs;
 	m_stats.bulkRemoveCollectUs += collectUs;
+	TracyPlot("ObjectManager.RemoveObjectsBulk.ActiveBuckets", static_cast<int64_t>(activeDrawSetRemoves.size()));
 
 	for (const auto& [workloadKey, indices] : activeDrawSetRemoves) {
 		if (indices.empty()) {
@@ -1227,6 +1244,8 @@ void ObjectManager::RemoveObjectsBulk(
 				workloadKey.clodOnly);
 			continue;
 		}
+		ZoneScopedN("ObjectManager::RemoveObjectsBulk::ActiveDrawSetRemoveMany");
+		ZoneValue(indices.size());
 		const auto activeRemoveBegin = std::chrono::steady_clock::now();
 		activeDrawSetIt->second->RemoveMany(indices);
 		const auto activeRemoveEnd = std::chrono::steady_clock::now();

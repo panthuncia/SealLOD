@@ -316,6 +316,71 @@ std::pair<size_t, size_t> DynamicBuffer::AddDataRange(const void* data, size_t c
     return { blockOffset, totalSize };
 }
 
+std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocateRangesBatch(
+    const std::vector<size_t>& counts,
+    size_t elementSize)
+{
+    std::lock_guard lock(m_allocationMutex);
+    std::vector<PagedAllocation> ranges(counts.size());
+    if (counts.empty() || elementSize == 0) {
+        return ranges;
+    }
+
+    size_t totalCount = 0;
+    for (const auto count : counts) {
+        totalCount += count;
+    }
+    if (totalCount == 0) {
+        return ranges;
+    }
+
+    const size_t totalSize = totalCount * elementSize;
+    auto freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    if (freeIt == m_freeBlocks.end()) {
+        ReserveBytes(totalSize);
+        freeIt = m_freeBlocks.lower_bound({ totalSize, 0 });
+    }
+    if (freeIt == m_freeBlocks.end()) {
+        return ranges;
+    }
+
+    const size_t blockOffset = freeIt->second;
+    m_freeBlocks.erase(freeIt);
+    auto blockIt = m_blocksByOffset.find(blockOffset);
+    const size_t blockSize = blockIt != m_blocksByOffset.end() ? blockIt->second.size : totalSize;
+    if (blockIt != m_blocksByOffset.end()) {
+        m_blocksByOffset.erase(blockIt);
+    }
+
+    size_t cursor = blockOffset;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        const size_t count = counts[i];
+        if (count == 0) {
+            continue;
+        }
+
+        const size_t size = count * elementSize;
+        m_blocksByOffset[cursor] = { cursor, size, false };
+        ranges[i] = PagedAllocation{
+            cursor,
+            size,
+            size,
+            elementSize,
+            count
+        };
+        cursor += size;
+    }
+
+    if (blockSize > totalSize) {
+        const size_t remainingOffset = blockOffset + totalSize;
+        const size_t remainingSize = blockSize - totalSize;
+        m_blocksByOffset[remainingOffset] = { remainingOffset, remainingSize, true };
+        m_freeBlocks.insert({ remainingSize, remainingOffset });
+    }
+
+    return ranges;
+}
+
 std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
     const void* data,
     size_t count,
