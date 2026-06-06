@@ -109,6 +109,54 @@ Renderer renderer;
 UINT default_x_res = 1920;
 UINT default_y_res = 1080;
 
+namespace {
+
+DWORD_PTR PickHighestAllowedProcessorMask(DWORD_PTR processMask) {
+    if (processMask == 0) {
+        return 0;
+    }
+
+    DWORD_PTR selectedMask = 0;
+    for (DWORD_PTR candidateMask = 1; candidateMask != 0; candidateMask <<= 1) {
+        if ((processMask & candidateMask) != 0) {
+            selectedMask = candidateMask;
+        }
+    }
+
+    return selectedMask;
+}
+
+void ConfigureMainRenderThreadScheduling() {
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask)) {
+        spdlog::warn("Failed to query process affinity mask for main render thread: {}", GetLastError());
+        return;
+    }
+
+    const DWORD_PTR renderThreadMask = PickHighestAllowedProcessorMask(processMask);
+    if (renderThreadMask == 0) {
+        spdlog::warn("Could not choose a processor affinity mask for the main render thread");
+        return;
+    }
+
+    if (SetThreadAffinityMask(GetCurrentThread(), renderThreadMask) == 0) {
+        spdlog::warn("Failed to set main render thread affinity mask {:#x}: {}", renderThreadMask, GetLastError());
+    }
+    else {
+        spdlog::info("Pinned main render thread to affinity mask {:#x}", renderThreadMask);
+    }
+
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL)) {
+        spdlog::warn("Failed to set main render thread priority above normal: {}", GetLastError());
+    }
+    else {
+        spdlog::info("Set main render thread priority to above normal");
+    }
+}
+
+}
+
 
 void ProcessRawInput(LPARAM lParam) {
     UINT dwSize = 0;
@@ -287,6 +335,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/log.txt");
     spdlog::set_default_logger(file_logger);
     file_logger->flush_on(spdlog::level::info);
+
+    ConfigureMainRenderThreadScheduling();
 
     crashlog::InstallTerminateHandler();
 

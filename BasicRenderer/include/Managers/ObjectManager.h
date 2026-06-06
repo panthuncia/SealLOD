@@ -39,6 +39,7 @@ public:
 		std::uint32_t clodOffsetIndex = 0;
 		std::shared_ptr<Mesh> mesh;
 		std::shared_ptr<Material> material;
+		std::vector<DrawWorkloadKey> workloadKeys;
 	};
 
 	struct StaticGroupBuildInfo {
@@ -46,6 +47,26 @@ public:
 		std::uint64_t allocationScopeID = 0;
 		std::vector<DirectX::XMMATRIX> instanceTransforms;
 		std::vector<StaticMeshTemplateRef> meshTemplates;
+	};
+
+	struct PreparedStaticGroupInfo {
+		std::uint64_t stableGroupID = 0;
+		std::uint64_t allocationScopeID = 0;
+		std::vector<PerObjectCB> perObjectCBs;
+		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
+		std::vector<StaticMeshTemplateRef> meshTemplates;
+		std::vector<std::vector<DrawWorkloadKey>> workloadKeysByMeshTemplate;
+	};
+
+	struct PreparedStaticGroupsBulkPlan {
+		std::vector<PreparedStaticGroupInfo> groups;
+		std::uint64_t transformRows = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t preparedBytes = 0;
+		std::uint64_t prepareUs = 0;
+		std::uint64_t transformBuildUs = 0;
+		std::uint64_t workloadBuildUs = 0;
+		std::uint64_t drawRecordBuildUs = 0;
 	};
 
 	struct Stats {
@@ -95,6 +116,8 @@ public:
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
 	std::vector<Components::ObjectDrawInfo> AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups);
+	static PreparedStaticGroupsBulkPlan PrepareStaticGroupsBulkPlan(const std::vector<StaticGroupBuildInfo>& groups);
+	std::vector<Components::ObjectDrawInfo> CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan);
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
 	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo*>& drawInfos);
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);

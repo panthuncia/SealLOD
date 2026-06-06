@@ -5,24 +5,73 @@
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 #include <tbb/task_group.h>
+#include <tbb/task_scheduler_observer.h>
 #include <tracy/TracyC.h>
 
+#include <Windows.h>
 #include <spdlog/spdlog.h>
 
 #include "Telemetry/FrameTaskGraphTelemetry.h"
 
 namespace br {
 
-struct TaskSchedulerManager::RuntimeState {
-    std::unique_ptr<tbb::global_control> parallelismControl;
-    std::unique_ptr<tbb::task_arena> workerArena;
-};
-
 namespace {
 constexpr bool kEnableFineGrainedSchedulerTracing = true;
 
 thread_local bool g_isIoWorkerThread = false;
 thread_local bool g_isBackgroundWorkerThread = false;
+
+DWORD_PTR PickHighestAllowedProcessorMask(DWORD_PTR processMask) {
+    if (processMask == 0) {
+        return 0;
+    }
+
+    DWORD_PTR selectedMask = 0;
+    for (DWORD_PTR candidateMask = 1; candidateMask != 0; candidateMask <<= 1) {
+        if ((processMask & candidateMask) != 0) {
+            selectedMask = candidateMask;
+        }
+    }
+
+    return selectedMask;
+}
+
+DWORD_PTR GetTbbWorkerAffinityMaskExcludingRenderThreadCpu() {
+    DWORD_PTR processMask = 0;
+    DWORD_PTR systemMask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask)) {
+        spdlog::warn("Failed to query process affinity mask for TBB worker affinity: {}", GetLastError());
+        return 0;
+    }
+
+    const DWORD_PTR renderThreadMask = PickHighestAllowedProcessorMask(processMask);
+    const DWORD_PTR workerMask = processMask & ~renderThreadMask;
+    if (workerMask == 0) {
+        return processMask;
+    }
+
+    return workerMask;
+}
+
+class TbbWorkerAffinityObserver final : public tbb::task_scheduler_observer {
+public:
+    TbbWorkerAffinityObserver(tbb::task_arena& arena, DWORD_PTR workerAffinityMask)
+        : tbb::task_scheduler_observer(arena),
+        m_workerAffinityMask(workerAffinityMask) {
+        observe(true);
+    }
+
+    void on_scheduler_entry(bool is_worker) override {
+        if (!is_worker || m_workerAffinityMask == 0) {
+            return;
+        }
+
+        SetThreadAffinityMask(GetCurrentThread(), m_workerAffinityMask);
+    }
+
+private:
+    DWORD_PTR m_workerAffinityMask = 0;
+};
 
 void PlotIoQueueDepth(size_t depth) {
     if constexpr (kEnableFineGrainedSchedulerTracing) {
@@ -54,6 +103,12 @@ void RecordTaskNodeForTelemetry(
 
 }
 
+struct TaskSchedulerManager::RuntimeState {
+    std::unique_ptr<tbb::global_control> parallelismControl;
+    std::unique_ptr<tbb::task_arena> workerArena;
+    std::unique_ptr<TbbWorkerAffinityObserver> affinityObserver;
+};
+
 TaskSchedulerManager& TaskSchedulerManager::GetInstance() {
     static TaskSchedulerManager instance;
     return instance;
@@ -65,14 +120,26 @@ void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroun
     }
 
     const uint32_t detectedConcurrency = (std::max)(std::thread::hardware_concurrency(), 1u);
+    constexpr uint32_t reservedRenderThreadLogicalCpuCount = 1u;
+    const uint32_t reservedLogicalCpuCount = detectedConcurrency > 1u
+        ? reservedRenderThreadLogicalCpuCount
+        : 0u;
+    const uint32_t tbbParallelism = (std::max)(detectedConcurrency - reservedLogicalCpuCount, 1u);
     const uint32_t resolvedBackgroundThreadCount =
         backgroundThreadCount != 0 ? backgroundThreadCount : (std::clamp)(detectedConcurrency / 4u, 1u, 4u);
-    m_workerThreadCount = detectedConcurrency;
+    m_workerThreadCount = tbbParallelism;
     m_runtimeState = std::make_unique<RuntimeState>();
     m_runtimeState->parallelismControl = std::make_unique<tbb::global_control>(
         tbb::global_control::max_allowed_parallelism,
         static_cast<size_t>(m_workerThreadCount));
     m_runtimeState->workerArena = std::make_unique<tbb::task_arena>(static_cast<int>(m_workerThreadCount));
+    const DWORD_PTR tbbWorkerAffinityMask = GetTbbWorkerAffinityMaskExcludingRenderThreadCpu();
+    if (tbbWorkerAffinityMask != 0) {
+        m_runtimeState->affinityObserver = std::make_unique<TbbWorkerAffinityObserver>(
+            *m_runtimeState->workerArena,
+            tbbWorkerAffinityMask);
+        spdlog::info("Pinned TBB worker threads to affinity mask {:#x}", tbbWorkerAffinityMask);
+    }
 
     m_ioShutdownRequested.store(false, std::memory_order_relaxed);
     m_backgroundShutdownRequested.store(false, std::memory_order_relaxed);
@@ -96,7 +163,9 @@ void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroun
     m_initialized = true;
 
     spdlog::info(
-        "TaskSchedulerManager initialized: workerThreads={}, ioThreads={}, backgroundThreads={}",
+        "TaskSchedulerManager initialized: detectedConcurrency={}, reservedRenderThreadLogicalCpus={}, tbbMaxParallelism={}, ioThreads={}, backgroundThreads={}",
+        detectedConcurrency,
+        reservedLogicalCpuCount,
         m_workerThreadCount,
         static_cast<uint32_t>(m_ioThreads.size()),
         static_cast<uint32_t>(m_backgroundThreads.size()));
