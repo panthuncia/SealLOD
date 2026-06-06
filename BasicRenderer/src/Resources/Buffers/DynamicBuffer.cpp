@@ -390,6 +390,7 @@ void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
 }
 
 void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
+    std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
     if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
         SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -520,8 +521,11 @@ void DynamicBuffer::CreateBuffer(size_t capacity) {
 	m_capacity = capacity;
 	auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
 	SetBacking(std::move(newDataBuffer), capacity);
-    SyncUploadPolicyState();
-	m_uploadPolicyState.OnBufferResized(GetBufferSize());
+    {
+        std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
+        SyncUploadPolicyState();
+        m_uploadPolicyState.OnBufferResized(GetBufferSize());
+    }
 	m_blocksByOffset[0] = { 0, capacity, true };
 	m_freeBlocks.insert({ capacity, 0 });
 
@@ -567,26 +571,29 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
         GetGlobalResourceID(),
         GetBufferSize(),
         GetBackingGeneration());
-    SyncUploadPolicyState();
-    m_uploadPolicyState.OnBufferResized(GetBufferSize());
-    if (previousCapacity > 0u) {
-        // DynamicBuffer is CPU-authoritative under CoalescedRetained. Preserve
-        // logical bytes through resize by uploading the retained mirror into the
-        // new backing; do not copy from the old GPU backing because descriptor
-        // updates are immediate on DX12 and prior frames may still reference it.
-        m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
-        if (m_uploadPolicyState.HasPendingWork()) {
-            if (rg::runtime::GetActiveUploadService() != nullptr) {
-                m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
-                const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
-                spdlog::debug(
-                    "DynamicBuffer '{}' id={} GrowBuffer replayed retained bytes writes={} bytes={}",
-                    m_name,
-                    GetGlobalResourceID(),
-                    replayStats.flushedWrites,
-                    replayStats.flushedBytes);
-            } else {
-                MarkUploadPolicyDirty();
+    {
+        std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
+        SyncUploadPolicyState();
+        m_uploadPolicyState.OnBufferResized(GetBufferSize());
+        if (previousCapacity > 0u) {
+            // DynamicBuffer is CPU-authoritative under CoalescedRetained. Preserve
+            // logical bytes through resize by uploading the retained mirror into the
+            // new backing; do not copy from the old GPU backing because descriptor
+            // updates are immediate on DX12 and prior frames may still reference it.
+            m_uploadPolicyState.CommitBulkRegion(0u, previousCapacity);
+            if (m_uploadPolicyState.HasPendingWork()) {
+                if (rg::runtime::GetActiveUploadService() != nullptr) {
+                    m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+                    const auto replayStats = m_uploadPolicyState.GetLastFlushStats();
+                    spdlog::debug(
+                        "DynamicBuffer '{}' id={} GrowBuffer replayed retained bytes writes={} bytes={}",
+                        m_name,
+                        GetGlobalResourceID(),
+                        replayStats.flushedWrites,
+                        replayStats.flushedBytes);
+                } else {
+                    MarkUploadPolicyDirty();
+                }
             }
         }
     }

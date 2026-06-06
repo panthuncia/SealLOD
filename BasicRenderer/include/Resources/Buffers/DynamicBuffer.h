@@ -8,6 +8,7 @@
 #include <set>
 #include <functional>
 #include <future>
+#include <memory>
 #include <typeinfo>
 #include <string>
 #include <utility>
@@ -52,12 +53,16 @@ public:
 	void UpdateView(BufferView* view, const void* data) override;
 
     rg::runtime::BulkWriteHandle BeginBulkWrite() {
+        auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
-        return m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        auto handle = m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        handle.lock = std::move(lock);
+        return handle;
     }
 
     void EndBulkWrite(size_t dirtyOffset, size_t dirtySize) {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         m_uploadPolicyState.CommitBulkRegion(dirtyOffset, dirtySize);
         if (m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
@@ -65,16 +70,19 @@ public:
     }
 
     void OnUploadPolicyBeginFrame() override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.BeginFrame();
     }
 
     void OnUploadPolicyFlush() override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
     }
 
     bool HasPendingUploadPolicyWork() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.HasPendingWork();
     }
 
@@ -83,16 +91,18 @@ public:
             return;
         }
 
-        std::scoped_lock lock(m_uploadPolicyMirrorMutex);
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.RetainExternalWrite(data, size, offset, GetBufferSize());
     }
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedWrites;
     }
 
     uint64_t GetUploadPolicyLastFlushBytes() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedBytes;
     }
 
@@ -183,7 +193,7 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
-    std::mutex m_uploadPolicyMirrorMutex;
+    mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
     mutable std::recursive_mutex m_allocationMutex;
     std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
     size_t m_pendingResizeCapacity = 0;

@@ -5,6 +5,7 @@
 #include <memory>
 #include <deque>
 #include <algorithm>
+#include <mutex>
 #include <utility>
 #include <spdlog/spdlog.h>
 #include <rhi.h>
@@ -198,12 +199,16 @@ public:
     }
 
     rg::runtime::BulkWriteHandle BeginBulkWrite() {
+        auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
-        return m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        auto handle = m_uploadPolicyState.PrepareBulkWrite(GetBufferSize());
+        handle.lock = std::move(lock);
+        return handle;
     }
 
     void EndBulkWrite(size_t dirtyOffset, size_t dirtySize) {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         m_uploadPolicyState.CommitBulkRegion(dirtyOffset, dirtySize);
         if (m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
@@ -219,24 +224,29 @@ public:
 	}
 
     void OnUploadPolicyBeginFrame() override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.BeginFrame();
     }
 
     void OnUploadPolicyFlush() override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
     }
 
     bool HasPendingUploadPolicyWork() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.HasPendingWork();
     }
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedWrites;
     }
 
     uint64_t GetUploadPolicyLastFlushBytes() const override {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedBytes;
     }
 
@@ -322,15 +332,19 @@ private:
 
     void CreateBuffer(uint64_t capacity, size_t previousCapacity = 0) {
 		CreateAndSetBacking(rhi::HeapType::DeviceLocal, m_elementSize * capacity, m_UAV);
-        m_uploadPolicyState.OnBufferResized(GetBufferSize());
-        const size_t previousBytes = previousCapacity * static_cast<size_t>(m_elementSize);
-        if (previousBytes > 0u) {
-            // CoalescedRetained keeps the CPU-side bytes authoritative. On grow,
-            // mark the preserved range dirty so the next upload-policy flush
-            // repopulates the new backing before any render pass observes it.
-            m_uploadPolicyState.CommitBulkRegion(0u, previousBytes);
-            if (m_uploadPolicyState.HasPendingWork()) {
-                MarkUploadPolicyDirty();
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
+            SyncUploadPolicyState();
+            m_uploadPolicyState.OnBufferResized(GetBufferSize());
+            const size_t previousBytes = previousCapacity * static_cast<size_t>(m_elementSize);
+            if (previousBytes > 0u) {
+                // CoalescedRetained keeps the CPU-side bytes authoritative. On grow,
+                // mark the preserved range dirty so the next upload-policy flush
+                // repopulates the new backing before any render pass observes it.
+                m_uploadPolicyState.CommitBulkRegion(0u, previousBytes);
+                if (m_uploadPolicyState.HasPendingWork()) {
+                    MarkUploadPolicyDirty();
+                }
             }
         }
 
@@ -356,6 +370,7 @@ private:
     }
 
     void StageOrUpload(const void* data, size_t size, size_t offset) {
+        std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
@@ -389,4 +404,5 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
 };
