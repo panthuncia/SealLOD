@@ -91,7 +91,14 @@ public:
     void OnUploadPolicyFlush() override {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
-        m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+        m_uploadPolicyState.FlushToUploadService(
+            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            [this](size_t offset, size_t size) -> const void* {
+                if (offset + size > m_cpuShadowData.size()) {
+                    return nullptr;
+                }
+                return m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset);
+            });
     }
 
     bool HasPendingUploadPolicyWork() const override {
@@ -100,14 +107,8 @@ public:
     }
 
     void RetainExternalUpload(const void* data, size_t size, size_t offset) {
-        if (GetUploadPolicyTag() != rg::runtime::UploadPolicyTag::CoalescedRetained) {
-            return;
-        }
-
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
-        SyncUploadPolicyState();
         RetainCpuShadowWrite(data, size, offset);
-        m_uploadPolicyState.RetainExternalWrite(data, size, offset, GetBufferSize());
     }
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
@@ -141,7 +142,7 @@ public:
 private:
     DynamicBuffer(bool byteAddress, size_t elementSize, size_t capacity, std::string name = "", bool UAV = false)
         : m_byteAddress(byteAddress), m_elementSize(elementSize), m_UAV(UAV), m_needsUpdate(false) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
+        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
 
         size_t bufferSize = AlignBufferCapacity(elementSize * capacity, m_byteAddress);
 		m_capacity = bufferSize;

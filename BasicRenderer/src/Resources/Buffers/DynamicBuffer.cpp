@@ -713,7 +713,6 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
             // bytes written through bulk or external upload paths.
             if (rg::runtime::GetActiveUploadService() != nullptr) {
                 BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
-                m_uploadPolicyState.RetainExternalWrite(m_cpuShadowData.data(), replayBytes, 0u, GetBufferSize());
                 spdlog::debug(
                     "DynamicBuffer '{}' id={} GrowBuffer replayed CPU shadow bytes={}",
                     m_name,

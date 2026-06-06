@@ -246,7 +246,14 @@ public:
     void OnUploadPolicyFlush() override {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
-        m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+        m_uploadPolicyState.FlushToUploadService(
+            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            [this](size_t offset, size_t size) -> const void* {
+                if (offset + size > m_cpuShadowData.size()) {
+                    return nullptr;
+                }
+                return m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset);
+            });
     }
 
     bool HasPendingUploadPolicyWork() const override {
@@ -267,7 +274,7 @@ public:
 private:
     LazyDynamicStructuredBuffer(UINT capacity = 64, std::string name = "", uint64_t alignment = 1, bool UAV = false)
         : m_capacity(capacity), m_UAV(UAV), m_needsUpdate(false) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
+        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
         if (alignment == 0) {
 			alignment = 1;
         }
@@ -362,7 +369,6 @@ private:
                 // bulk-written data survives buffer growth.
                 if (rg::runtime::GetActiveUploadService() != nullptr) {
                     BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
-                    m_uploadPolicyState.RetainExternalWrite(m_cpuShadowData.data(), replayBytes, 0u, GetBufferSize());
                 } else {
                     StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
                     if (m_uploadPolicyState.HasPendingWork()) {

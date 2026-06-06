@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 #include <functional>
 #include <string>
@@ -136,7 +137,7 @@ public:
 private:
     DynamicStructuredBuffer(UINT capacity = 64, std::string bufName = "", bool UAV = false)
         : m_capacity(capacity), m_UAV(UAV), m_needsUpdate(false) {
-		SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
+		SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
 		name = bufName;
         CreateBuffer(capacity);
     }
@@ -148,7 +149,15 @@ private:
 
     void OnUploadPolicyFlush() override {
         SyncUploadPolicyState();
-        m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+        m_uploadPolicyState.FlushToUploadService(
+            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            [this](size_t offset, size_t size) -> const void* {
+                const auto byteSize = m_data.size() * sizeof(T);
+                if (offset + size > byteSize) {
+                    return nullptr;
+                }
+                return reinterpret_cast<const std::byte*>(m_data.data()) + static_cast<std::ptrdiff_t>(offset);
+            });
     }
 
     bool HasPendingUploadPolicyWork() const override {
@@ -308,7 +317,6 @@ private:
             const size_t replayBytes = replayElements * sizeof(T);
             if (rg::runtime::GetActiveUploadService() != nullptr) {
                 BUFFER_UPLOAD(m_data.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
-                m_uploadPolicyState.RetainExternalWrite(m_data.data(), replayBytes, 0u, GetBufferSize());
                 spdlog::debug(
                     "DynamicStructuredBuffer '{}' id={} GrowBuffer replayed CPU rows={} bytes={}",
                     name,

@@ -3,6 +3,8 @@
 #include <vector>
 #include <string>
 #include <algorithm> // For std::lower_bound, std::upper_bound
+#include <cstddef>
+#include <cstring>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
@@ -89,7 +91,7 @@ public:
 private:
     SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
         : m_capacity(capacity), m_UAV(UAV), m_earliestModifiedIndex(0), m_activeEntryMode(activeEntryMode) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
+        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
         CreateBuffer(capacity);
         SetName(name);
     }
@@ -101,7 +103,14 @@ private:
 
     void OnUploadPolicyFlush() override {
         SyncUploadPolicyState();
-        m_uploadPolicyState.FlushToUploadService(rg::runtime::UploadTarget::FromShared(shared_from_this()));
+        m_uploadPolicyState.FlushToUploadService(
+            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            [this](size_t offset, size_t size) -> const void* {
+                if (offset + size > m_cpuShadowData.size()) {
+                    return nullptr;
+                }
+                return m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset);
+            });
     }
 
     bool HasPendingUploadPolicyWork() const override {
@@ -123,6 +132,7 @@ private:
     // Sorted list of unsigned integers
     std::vector<unsigned int> m_data;
     std::vector<ActiveDrawSetEntry> m_activeEntries;
+    std::vector<std::byte> m_cpuShadowData;
 
     uint64_t m_capacity;
     uint64_t m_liveSize = 0;
@@ -161,4 +171,18 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+
+    void EnsureCpuShadowSize(size_t size) {
+        if (m_cpuShadowData.size() < size) {
+            m_cpuShadowData.resize(size, std::byte{ 0 });
+        }
+    }
+
+    void RetainCpuShadowWrite(const void* data, size_t size, size_t offset) {
+        if (!data || size == 0) {
+            return;
+        }
+        EnsureCpuShadowSize(offset + size);
+        std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
+    }
 };

@@ -80,8 +80,8 @@ MeshManager::MeshManager() {
 	m_clusterLODNodes = DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
 	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
-	m_clodSharedGroupChunks->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
-	m_clodGroupPageMap->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
+	m_clodSharedGroupChunks->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+	m_clodGroupPageMap->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
 
 	// Tag resources for memory statistics
 	rg::memory::SetResourceUsageHint(*m_perMeshBuffers, "PerMesh, PerMeshInstance, PerObject");
