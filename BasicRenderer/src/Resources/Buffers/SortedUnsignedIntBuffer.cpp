@@ -25,7 +25,7 @@ void SortedUnsignedIntBuffer::OnSetName() {
 void SortedUnsignedIntBuffer::Insert(unsigned int element) {
     // Resize the buffer if necessary
     if (m_data.size() >= m_capacity) {
-        GrowBuffer(m_capacity * 2);
+        EnsureCapacityForSize(m_data.size() + 1);
     }
 
     // Find the insertion point
@@ -59,9 +59,7 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     sortedElements.erase(std::unique(sortedElements.begin(), sortedElements.end()), sortedElements.end());
 
     if (m_data.empty()) {
-        while (sortedElements.size() > m_capacity) {
-            GrowBuffer(m_capacity * 2);
-        }
+        EnsureCapacityForSize(sortedElements.size());
         m_data = std::move(sortedElements);
         StageOrUpload(m_data.data(), sizeof(unsigned int) * m_data.size(), 0);
         m_earliestModifiedIndex = 0;
@@ -81,9 +79,7 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
         return;
     }
 
-    while (merged.size() > m_capacity) {
-        GrowBuffer(m_capacity * 2);
-    }
+    EnsureCapacityForSize(merged.size());
 
     auto firstDiff = std::mismatch(m_data.begin(), m_data.end(), merged.begin(), merged.end());
     const auto dirtyIndex = static_cast<std::size_t>(std::distance(m_data.begin(), firstDiff.first));
@@ -255,6 +251,18 @@ void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     m_capacity = newSize;
     AssignDescriptorSlots();
     SetName(name);
+}
+
+void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {
+    if (requiredSize <= m_capacity) {
+        return;
+    }
+
+    uint64_t newCapacity = (std::max<uint64_t>)(m_capacity, 1u);
+    while (newCapacity < requiredSize) {
+        newCapacity *= 2;
+    }
+    GrowBuffer(newCapacity);
 }
 
 void SortedUnsignedIntBuffer::AssignDescriptorSlots()

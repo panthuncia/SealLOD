@@ -89,6 +89,7 @@ private:
     void CreateBuffer(uint64_t capacity);
 
     void GrowBuffer(uint64_t newSize);
+    void EnsureCapacityForSize(uint64_t requiredSize);
 
     void SyncUploadPolicyState() {
         const auto tag = GetUploadPolicyTag();

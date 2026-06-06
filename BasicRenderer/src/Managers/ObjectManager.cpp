@@ -26,6 +26,13 @@ namespace {
 constexpr size_t kStaticTransformPageElements = 256;
 constexpr size_t kStaticDrawRecordPageElements = 1024;
 
+size_t ReserveBytesWithStaticImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
+	if (requestedBytes == 0) {
+		return 0;
+	}
+	return requestedBytes + (std::max)(requestedBytes, minimumHeadroomBytes);
+}
+
 DirectX::XMFLOAT4X4 ComputeNormalMatrixStorage(const DirectX::XMMATRIX& modelMatrix) {
 	const DirectX::XMMATRIX upperLeft3x3 = DirectX::XMMatrixSet(
 		DirectX::XMVectorGetX(modelMatrix.r[0]), DirectX::XMVectorGetY(modelMatrix.r[0]), DirectX::XMVectorGetZ(modelMatrix.r[0]), 0.0f,
@@ -131,7 +138,7 @@ ObjectManager::ObjectManager() {
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
 }
 
-std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey) {
+std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity) {
 	auto it = m_activeDrawSetIndices.find(workloadKey);
 	if (it != m_activeDrawSetIndices.end()) {
 		return it->second;
@@ -141,7 +148,8 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 		"activeDrawSetIndices(flags=" + std::to_string(static_cast<uint64_t>(workloadKey.compileFlags))
 		+ ", phase=" + std::to_string(workloadKey.renderPhase.hash)
 		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
-	auto buffer = SortedUnsignedIntBuffer::CreateShared(1, debugName);
+	const auto capacity = (std::max<std::uint64_t>)(1u, static_cast<std::uint64_t>(initialCapacity));
+	auto buffer = SortedUnsignedIntBuffer::CreateShared(capacity, debugName);
 	rg::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
 	buffer->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
 	buffer->GetECSEntity().set<Components::Resource>({ buffer });
@@ -384,7 +392,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
 		if (!indices.empty()) {
 			const auto insertBegin = std::chrono::steady_clock::now();
-			EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+			EnsureActiveDrawSetIndices(workloadKey, indices.size())->InsertMany(indices);
 			const auto insertEnd = std::chrono::steady_clock::now();
 			m_stats.activeDrawSetInsertCalls += 1;
 			m_stats.activeDrawSetInsertIndices += indices.size();
@@ -448,12 +456,41 @@ ObjectManager::PreparedStaticGroupsBulkPlan ObjectManager::PrepareStaticGroupsBu
 	return plan;
 }
 
+void ObjectManager::PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan) {
+	if (plan.groups.empty()) {
+		return;
+	}
+
+	const size_t transformRows = static_cast<size_t>(plan.transformRows);
+	const size_t drawRecords = static_cast<size_t>(plan.drawRecords);
+	if (transformRows != 0) {
+		m_perObjectBuffers->RequestAsyncReserveBytes(
+			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerObjectCB), 512ull * 1024ull));
+		m_perInstanceTransformBuffers->RequestAsyncReserveBytes(
+			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerInstanceTransformCB), 512ull * 1024ull));
+		m_normalMatrixBuffer->RequestAsyncReserveBytes(
+			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(DirectX::XMFLOAT4X4), 512ull * 1024ull));
+	}
+	if (drawRecords != 0) {
+		m_instanceDrawRecordBuffers->RequestAsyncReserveBytes(
+			ReserveBytesWithStaticImportHeadroom(drawRecords * sizeof(InstanceDrawRecordCB), 1024ull * 1024ull));
+	}
+}
+
+void ObjectManager::PublishPreparedStaticGroupCommitResourceResizes(bool wait) {
+	(void)m_perObjectBuffers->PublishReadyAsyncResize(wait);
+	(void)m_perInstanceTransformBuffers->PublishReadyAsyncResize(wait);
+	(void)m_normalMatrixBuffer->PublishReadyAsyncResize(wait);
+	(void)m_instanceDrawRecordBuffers->PublishReadyAsyncResize(wait);
+}
+
 std::vector<Components::ObjectDrawInfo> ObjectManager::CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan) {
 	std::vector<Components::ObjectDrawInfo> drawInfos;
 	if (plan.groups.empty()) {
 		return drawInfos;
 	}
 
+	PublishPreparedStaticGroupCommitResourceResizes(false);
 	const auto importBegin = std::chrono::steady_clock::now();
 	++m_stats.staticDirectBulkAddCalls;
 	m_stats.staticDirectGroupsSubmitted += plan.groups.size();
@@ -702,7 +739,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::CommitPreparedStaticGroup
 	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
 		if (!indices.empty()) {
 			const auto insertBegin = std::chrono::steady_clock::now();
-			EnsureActiveDrawSetIndices(workloadKey)->InsertMany(indices);
+			EnsureActiveDrawSetIndices(workloadKey, indices.size())->InsertMany(indices);
 			const auto insertEnd = std::chrono::steady_clock::now();
 			m_stats.activeDrawSetInsertCalls += 1;
 			m_stats.activeDrawSetInsertIndices += indices.size();
