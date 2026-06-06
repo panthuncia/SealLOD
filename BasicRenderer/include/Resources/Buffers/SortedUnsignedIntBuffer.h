@@ -15,13 +15,28 @@ using Microsoft::WRL::ComPtr;
 
 class SortedUnsignedIntBuffer : public BufferBase, public IHasMemoryMetadata {
 public:
+    struct ActiveDrawSetEntry {
+        uint32_t drawRecordIndex = 0;
+        uint32_t generation = 0;
+    };
+
     static std::shared_ptr<SortedUnsignedIntBuffer> CreateShared(uint64_t capacity = 64, std::string name = "", bool UAV = false) {
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, UAV));
+    }
+
+    static std::shared_ptr<SortedUnsignedIntBuffer> CreateActiveDrawSetShared(uint64_t capacity = 64, std::string name = "") {
+        return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true));
     }
 
     // Insert an element while maintaining sorted order (deduped)
     void Insert(unsigned int element);
     void InsertMany(const std::vector<unsigned int>& elements);
+    void AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries);
+    void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
+    std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
+    uint64_t MutationRevision() const {
+        return m_mutationRevision;
+    }
 
     // Remove an element (and shift the tail on GPU)
     void Remove(unsigned int element);
@@ -37,12 +52,24 @@ public:
     }
 
     UINT Size() const {
-        return static_cast<UINT>(m_data.size());
+        return m_activeEntryMode ? static_cast<UINT>(m_activeEntries.size()) : static_cast<UINT>(m_data.size());
+    }
+
+    UINT LiveSize() const {
+        return static_cast<UINT>(m_liveSize);
+    }
+
+    void SetLiveSize(uint64_t size) {
+        m_liveSize = size;
+    }
+
+    bool ActiveEntryMode() const {
+        return m_activeEntryMode;
     }
 
 private:
-    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false)
-        : m_capacity(capacity), m_UAV(UAV), m_earliestModifiedIndex(0) {
+    SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
+        : m_capacity(capacity), m_UAV(UAV), m_earliestModifiedIndex(0), m_activeEntryMode(activeEntryMode) {
         SetUploadPolicyTag(rg::runtime::UploadPolicyTag::CoalescedRetained);
         CreateBuffer(capacity);
         SetName(name);
@@ -76,8 +103,11 @@ private:
 
     // Sorted list of unsigned integers
     std::vector<unsigned int> m_data;
+    std::vector<ActiveDrawSetEntry> m_activeEntries;
 
     uint64_t m_capacity;
+    uint64_t m_liveSize = 0;
+    uint64_t m_mutationRevision = 1;
     uint64_t m_earliestModifiedIndex; // To avoid updating the entire buffer every time
 
     std::vector<EntityComponentBundle> m_metadataBundles;
@@ -85,6 +115,7 @@ private:
     inline static std::string m_name = "SortedUnsignedIntBuffer";
 
     bool m_UAV = false;
+    bool m_activeEntryMode = false;
 
     void CreateBuffer(uint64_t capacity);
 

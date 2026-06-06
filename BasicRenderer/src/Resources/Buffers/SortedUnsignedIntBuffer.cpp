@@ -37,6 +37,7 @@ void SortedUnsignedIntBuffer::Insert(unsigned int element) {
 
     uint32_t index = static_cast<uint32_t>(std::distance(m_data.begin(), it));
     m_data.insert(it, element);
+    ++m_mutationRevision;
 
     // Update the earliest modified index
     if (index < m_earliestModifiedIndex) {
@@ -53,6 +54,18 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     if (elements.empty()) {
         return;
     }
+    if (m_activeEntryMode) {
+        std::vector<ActiveDrawSetEntry> entries;
+        entries.reserve(elements.size());
+        for (const auto element : elements) {
+            entries.push_back(ActiveDrawSetEntry{
+                .drawRecordIndex = element,
+                .generation = 1u
+            });
+        }
+        AppendActiveEntries(entries);
+        return;
+    }
 
     std::vector<unsigned int> sortedElements = elements;
     std::sort(sortedElements.begin(), sortedElements.end());
@@ -61,6 +74,7 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     if (m_data.empty()) {
         EnsureCapacityForSize(sortedElements.size());
         m_data = std::move(sortedElements);
+        ++m_mutationRevision;
         StageOrUpload(m_data.data(), sizeof(unsigned int) * m_data.size(), 0);
         m_earliestModifiedIndex = 0;
         return;
@@ -84,6 +98,7 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     auto firstDiff = std::mismatch(m_data.begin(), m_data.end(), merged.begin(), merged.end());
     const auto dirtyIndex = static_cast<std::size_t>(std::distance(m_data.begin(), firstDiff.first));
     m_data = std::move(merged);
+    ++m_mutationRevision;
 
     const unsigned int* src = m_data.data() + dirtyIndex;
     const auto count = m_data.size() - dirtyIndex;
@@ -92,6 +107,80 @@ void SortedUnsignedIntBuffer::InsertMany(const std::vector<unsigned int>& elemen
     if (dirtyIndex < m_earliestModifiedIndex) {
         m_earliestModifiedIndex = dirtyIndex;
     }
+}
+
+void SortedUnsignedIntBuffer::AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries) {
+    if (entries.empty()) {
+        return;
+    }
+    if (!m_activeEntryMode) {
+        std::vector<unsigned int> indices;
+        indices.reserve(entries.size());
+        for (const auto& entry : entries) {
+            indices.push_back(entry.drawRecordIndex);
+        }
+        InsertMany(indices);
+        return;
+    }
+
+    const auto firstIndex = m_activeEntries.size();
+    EnsureCapacityForSize(firstIndex + entries.size());
+    m_activeEntries.insert(m_activeEntries.end(), entries.begin(), entries.end());
+    ++m_mutationRevision;
+    StageOrUpload(
+        entries.data(),
+        sizeof(ActiveDrawSetEntry) * entries.size(),
+        firstIndex * sizeof(ActiveDrawSetEntry));
+}
+
+void SortedUnsignedIntBuffer::AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries) {
+    if (!m_activeEntryMode) {
+        m_data.clear();
+        m_data.reserve(entries.size());
+        for (const auto& entry : entries) {
+            m_data.push_back(entry.drawRecordIndex);
+        }
+        std::sort(m_data.begin(), m_data.end());
+        m_data.erase(std::unique(m_data.begin(), m_data.end()), m_data.end());
+        EnsureCapacityForSize(m_data.size());
+        ++m_mutationRevision;
+        if (!m_data.empty()) {
+            StageOrUpload(m_data.data(), sizeof(unsigned int) * m_data.size(), 0);
+        }
+        return;
+    }
+
+    const auto oldSize = m_activeEntries.size();
+    EnsureCapacityForSize(entries.size());
+    m_activeEntries = std::move(entries);
+    m_liveSize = m_activeEntries.size();
+    ++m_mutationRevision;
+    if (!m_activeEntries.empty()) {
+        StageOrUpload(m_activeEntries.data(), sizeof(ActiveDrawSetEntry) * m_activeEntries.size(), 0);
+    }
+    if (oldSize > m_activeEntries.size()) {
+        std::vector<ActiveDrawSetEntry> zeros(oldSize - m_activeEntries.size());
+        StageOrUpload(
+            zeros.data(),
+            sizeof(ActiveDrawSetEntry) * zeros.size(),
+            m_activeEntries.size() * sizeof(ActiveDrawSetEntry));
+    }
+}
+
+std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> SortedUnsignedIntBuffer::SnapshotActiveEntries() const {
+    if (m_activeEntryMode) {
+        return m_activeEntries;
+    }
+
+    std::vector<ActiveDrawSetEntry> entries;
+    entries.reserve(m_data.size());
+    for (const auto index : m_data) {
+        entries.push_back(ActiveDrawSetEntry{
+            .drawRecordIndex = index,
+            .generation = 1u
+        });
+    }
+    return entries;
 }
 
 void SortedUnsignedIntBuffer::Remove(unsigned int element) {
@@ -103,6 +192,7 @@ void SortedUnsignedIntBuffer::Remove(unsigned int element) {
 
         // Erase from CPU
         m_data.erase(it);
+        ++m_mutationRevision;
 
         // Update the earliest modified index
         if (index < m_earliestModifiedIndex) {
@@ -126,6 +216,9 @@ void SortedUnsignedIntBuffer::Remove(unsigned int element) {
 }
 
 void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elements) {
+    if (m_activeEntryMode) {
+        return;
+    }
     if (elements.empty() || m_data.empty()) {
         return;
     }
@@ -166,6 +259,7 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
             remaining.size());
     }
     m_data = std::move(remaining);
+    ++m_mutationRevision;
 
     if (dirtyIndex < m_earliestModifiedIndex) {
         m_earliestModifiedIndex = dirtyIndex;
@@ -214,8 +308,9 @@ void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_
 void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
     auto device = DeviceManager::GetInstance().GetDevice();
     m_capacity = capacity;
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * sizeof(unsigned int), GetGlobalResourceID(), m_UAV);
-    SetBacking(std::move(newDataBuffer), capacity * sizeof(unsigned int));
+    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV);
+    SetBacking(std::move(newDataBuffer), capacity * stride);
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
     
     for (const auto& bundle : m_metadataBundles) {
@@ -228,10 +323,13 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     const uint64_t previousCapacity = m_capacity;
     auto device = DeviceManager::GetInstance().GetDevice();
-    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * sizeof(unsigned int), GetGlobalResourceID(), m_UAV);
-    SetBacking(std::move(newDataBuffer), newSize * sizeof(unsigned int));
+    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
+    SetBacking(std::move(newDataBuffer), newSize * stride);
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
-    if (!m_data.empty()) {
+    if (m_activeEntryMode && !m_activeEntries.empty()) {
+        StageOrUpload(m_activeEntries.data(), m_activeEntries.size() * sizeof(ActiveDrawSetEntry), 0u);
+    } else if (!m_data.empty()) {
         StageOrUpload(m_data.data(), m_data.size() * sizeof(unsigned int), 0u);
     }
     if (previousCapacity != 0u && m_uploadPolicyState.HasPendingWork()) {
@@ -284,7 +382,7 @@ void SortedUnsignedIntBuffer::AssignDescriptorSlots()
             .kind = rhi::BufferViewKind::Structured,
             .firstElement = 0,
             .numElements = numElements,
-            .structureByteStride = 4,
+            .structureByteStride = static_cast<uint32_t>(m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int)),
         },
     };
 

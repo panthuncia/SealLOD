@@ -581,6 +581,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
 				ObjectCullRecord record{};
 				record.viewDataIndex = cameraBufferIndex;
 				record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
+				record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
                 record.dispatchGridX = static_cast<uint>((count + 63) / 64);
                 record.dispatchGridY = 1;

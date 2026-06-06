@@ -915,6 +915,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 				ObjectCullRecord record{};
                 record.viewDataIndex = cameraBufferIndex;
                 record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
+                record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
                 record.dispatchGridX = static_cast<uint>((count + kPureComputeObjectCullThreadsPerGroup - 1u) / kPureComputeObjectCullThreadsPerGroup);
                 record.dispatchGridY = 1;
@@ -933,6 +934,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_COUNT] = record.activeDrawCount;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = record.viewDataIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = record.activeDrawSetIndicesSRVIndex;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = record.drawRecordVisibilityGenerationSRVIndex;
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,

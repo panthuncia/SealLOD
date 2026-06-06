@@ -7,8 +7,10 @@
 #include <mutex>
 #include <cstdint>
 #include <deque>
+#include <span>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Resources/Buffers/LazyDynamicStructuredBuffer.h"
@@ -115,6 +117,14 @@ public:
 		std::uint64_t activeDrawSetRemoveCalls = 0;
 		std::uint64_t activeDrawSetRemoveIndices = 0;
 		std::uint64_t activeDrawSetRemoveUs = 0;
+		std::uint64_t activeDrawSetCompactionJobsQueued = 0;
+		std::uint64_t activeDrawSetCompactionJobsBuilt = 0;
+		std::uint64_t activeDrawSetCompactionJobsPublished = 0;
+		std::uint64_t activeDrawSetCompactionJobsStale = 0;
+		std::uint64_t activeDrawSetCompactionInputEntries = 0;
+		std::uint64_t activeDrawSetCompactionOutputEntries = 0;
+		std::uint64_t activeDrawSetCompactionWorkerUs = 0;
+		std::uint64_t activeDrawSetCompactionPublishUs = 0;
 		std::uint64_t maxDrawRecordIndex = 0;
 		std::uint64_t bulkReserveCalls = 0;
 		std::uint64_t bulkReserveUs = 0;
@@ -184,6 +194,18 @@ public:
 		std::uint64_t retireFrame = 0;
 	};
 
+	struct StaticObjectRemovalPayload {
+		struct BufferRetireRange {
+			std::shared_ptr<DynamicBuffer> buffer;
+			Components::ObjectDrawInfo::BufferRange range;
+		};
+
+		std::vector<BufferRetireRange> bufferRanges;
+		std::vector<Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
+		std::vector<std::uint32_t> drawRecordIndices;
+		std::size_t drawInfoCount = 0;
+	};
+
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
 	std::vector<Components::ObjectDrawInfo> AddObjectsBulk(const std::vector<ObjectBuildInfo>& objects);
 	std::vector<Components::ObjectDrawInfo> AddStaticGroupsBulk(const std::vector<StaticGroupBuildInfo>& groups);
@@ -195,14 +217,19 @@ public:
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
 	std::vector<Components::ObjectDrawInfo> PublishStaticImportPacket(StaticImportPacket packet);
 	std::vector<Components::ObjectDrawInfo> CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan);
+	StaticObjectRemovalPayload BuildStaticObjectRemovalPayload(std::span<const Components::ObjectDrawInfo> drawInfos) const;
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
 	void RemoveObjectsBulk(
 		const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
+		const RemoveObjectsBulkOptions& options = {});
+	void RemoveStaticObjectsBulk(
+		std::span<const StaticObjectRemovalPayload> payloads,
 		const RemoveObjectsBulkOptions& options = {});
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
 	std::uint64_t MakeDeferredRetireFrame() const;
+	void PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
 
 	rg::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
@@ -213,6 +240,10 @@ public:
 
 	std::shared_ptr<DynamicBuffer>& GetPerObjectBuffers() {
 		return m_perObjectBuffers;
+	}
+
+	std::shared_ptr<DynamicBuffer>& GetDrawRecordVisibilityGenerationBuffer() {
+		return m_drawRecordVisibilityGenerationBuffer;
 	}
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -244,6 +275,25 @@ private:
 		std::uint64_t retireFrame = 0;
 	};
 
+	struct ActiveDrawSetCompactionJob {
+		DrawWorkloadKey workloadKey;
+		std::shared_ptr<SortedUnsignedIntBuffer> buffer;
+		std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> entries;
+		std::vector<std::uint32_t> visibilityGenerations;
+		std::uint64_t activeSetRevision = 0;
+		std::uint64_t visibilityRevision = 0;
+	};
+
+	struct ActiveDrawSetCompactionResult {
+		DrawWorkloadKey workloadKey;
+		std::shared_ptr<SortedUnsignedIntBuffer> buffer;
+		std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> entries;
+		std::uint64_t activeSetRevision = 0;
+		std::uint64_t visibilityRevision = 0;
+		std::size_t inputEntries = 0;
+		std::uint64_t buildUs = 0;
+	};
+
 	void StartDeferredRetireWorker();
 	void StopDeferredRetireWorker();
 	void DeferredRetireWorkerMain();
@@ -256,14 +306,23 @@ private:
 		const std::shared_ptr<DynamicBuffer>& buffer,
 		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
 		std::uint64_t retireFrame);
+	void StartActiveDrawSetCompactionWorker();
+	void StopActiveDrawSetCompactionWorker();
+	void ActiveDrawSetCompactionWorkerMain();
+	void MaybeQueueActiveDrawSetCompaction(
+		const DrawWorkloadKey& workloadKey,
+		const std::shared_ptr<SortedUnsignedIntBuffer>& buffer);
 
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
 	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
 	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
+	std::shared_ptr<DynamicBuffer> m_drawRecordVisibilityGenerationBuffer; // Generation tokens for append-only active draw entries
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
 	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
+	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
+	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};
@@ -280,8 +339,19 @@ private:
 	std::atomic<std::uint64_t> m_deferredRetireBytesRetired{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireQueueDepth{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireWorkerUs{ 0 };
+	std::mutex m_activeDrawSetCompactionMutex;
+	std::condition_variable m_activeDrawSetCompactionCv;
+	std::deque<ActiveDrawSetCompactionJob> m_activeDrawSetCompactionJobs;
+	std::deque<ActiveDrawSetCompactionResult> m_activeDrawSetCompactionResults;
+	std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_activeDrawSetCompactionQueued;
+	std::thread m_activeDrawSetCompactionWorker;
+	std::atomic_bool m_activeDrawSetCompactionStop{ false };
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
 
 	std::shared_ptr<SortedUnsignedIntBuffer> EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity = 1);
+	std::uint32_t ActivateDrawRecordCPU(std::uint32_t drawRecordIndex);
+	std::uint32_t ActivateDrawRecord(std::uint32_t drawRecordIndex);
+	void TombstoneDrawRecord(std::uint32_t drawRecordIndex);
+	void AppendActiveDrawSetEntries(const DrawWorkloadKey& workloadKey, const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>& entries);
 };

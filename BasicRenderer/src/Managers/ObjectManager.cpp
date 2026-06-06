@@ -90,6 +90,7 @@ ObjectManager::ObjectManager() {
 	m_perObjectBuffers = DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
 	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
 	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
+	m_drawRecordVisibilityGenerationBuffer = DynamicBuffer::CreateShared(sizeof(std::uint32_t), 10000, "drawRecordVisibilityGenerationBuffer<uint>");
 	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
 	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
@@ -97,6 +98,7 @@ ObjectManager::ObjectManager() {
 	rg::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
 	rg::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
 	rg::memory::SetResourceUsageHint(*m_instanceDrawRecordBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
+	rg::memory::SetResourceUsageHint(*m_drawRecordVisibilityGenerationBuffer, "PerMesh, InstanceDrawRecord, VisibilityGeneration");
 	rg::memory::SetResourceUsageHint(*m_normalMatrixBuffer, "PerMesh, PerMeshInstance, PerObject");
 
 	rg::memory::SetResourceUsageHint(*m_masterIndirectCommandsBuffer, "Indirect command buffers");
@@ -108,9 +110,11 @@ ObjectManager::ObjectManager() {
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
 
 	StartDeferredRetireWorker();
+	StartActiveDrawSetCompactionWorker();
 }
 
 ObjectManager::~ObjectManager() {
+	StopActiveDrawSetCompactionWorker();
 	StopDeferredRetireWorker();
 }
 
@@ -250,6 +254,159 @@ void ObjectManager::EnqueueDeferredBufferRangeRetires(
 	}
 }
 
+void ObjectManager::StartActiveDrawSetCompactionWorker() {
+	m_activeDrawSetCompactionStop.store(false, std::memory_order_release);
+	m_activeDrawSetCompactionWorker = std::thread([this]() {
+		ActiveDrawSetCompactionWorkerMain();
+	});
+}
+
+void ObjectManager::StopActiveDrawSetCompactionWorker() {
+	m_activeDrawSetCompactionStop.store(true, std::memory_order_release);
+	m_activeDrawSetCompactionCv.notify_all();
+	if (m_activeDrawSetCompactionWorker.joinable()) {
+		m_activeDrawSetCompactionWorker.join();
+	}
+
+	std::lock_guard lock(m_activeDrawSetCompactionMutex);
+	m_activeDrawSetCompactionJobs.clear();
+	m_activeDrawSetCompactionResults.clear();
+	m_activeDrawSetCompactionQueued.clear();
+}
+
+void ObjectManager::ActiveDrawSetCompactionWorkerMain() {
+	while (true) {
+		ActiveDrawSetCompactionJob job;
+		{
+			std::unique_lock lock(m_activeDrawSetCompactionMutex);
+			m_activeDrawSetCompactionCv.wait(lock, [this]() {
+				return m_activeDrawSetCompactionStop.load(std::memory_order_acquire) ||
+					!m_activeDrawSetCompactionJobs.empty();
+			});
+			if (m_activeDrawSetCompactionStop.load(std::memory_order_acquire)) {
+				break;
+			}
+			job = std::move(m_activeDrawSetCompactionJobs.front());
+			m_activeDrawSetCompactionJobs.pop_front();
+		}
+
+		ZoneScopedN("ObjectManager::ActiveDrawSetCompactionWorker");
+		ZoneValue(job.entries.size());
+		const auto begin = std::chrono::steady_clock::now();
+		std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> compacted;
+		compacted.reserve(job.entries.size());
+		for (const auto& entry : job.entries) {
+			if (entry.generation == 0u || entry.drawRecordIndex >= job.visibilityGenerations.size()) {
+				continue;
+			}
+			if (job.visibilityGenerations[entry.drawRecordIndex] == entry.generation) {
+				compacted.push_back(entry);
+			}
+		}
+
+		ActiveDrawSetCompactionResult result;
+		result.workloadKey = job.workloadKey;
+		result.buffer = std::move(job.buffer);
+		result.entries = std::move(compacted);
+		result.activeSetRevision = job.activeSetRevision;
+		result.visibilityRevision = job.visibilityRevision;
+		result.inputEntries = job.entries.size();
+		result.buildUs = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+
+		{
+			std::lock_guard lock(m_activeDrawSetCompactionMutex);
+			m_activeDrawSetCompactionResults.push_back(std::move(result));
+		}
+	}
+}
+
+void ObjectManager::MaybeQueueActiveDrawSetCompaction(
+	const DrawWorkloadKey& workloadKey,
+	const std::shared_ptr<SortedUnsignedIntBuffer>& buffer)
+{
+	if (!buffer || !buffer->ActiveEntryMode()) {
+		return;
+	}
+
+	const auto totalEntries = static_cast<std::uint64_t>(buffer->Size());
+	const auto liveEntries = static_cast<std::uint64_t>(buffer->LiveSize());
+	if (totalEntries < 65536u || totalEntries <= liveEntries) {
+		return;
+	}
+
+	const auto staleEntries = totalEntries - liveEntries;
+	if (staleEntries < 16384u && staleEntries * 100u < totalEntries * 35u) {
+		return;
+	}
+
+	ActiveDrawSetCompactionJob job;
+	job.workloadKey = workloadKey;
+	job.buffer = buffer;
+	job.activeSetRevision = buffer->MutationRevision();
+	job.visibilityRevision = m_drawRecordVisibilityRevision;
+	job.entries = buffer->SnapshotActiveEntries();
+	job.visibilityGenerations = m_drawRecordVisibilityGenerations;
+
+	{
+		std::lock_guard lock(m_activeDrawSetCompactionMutex);
+		if (m_activeDrawSetCompactionQueued.contains(workloadKey)) {
+			return;
+		}
+		m_activeDrawSetCompactionQueued.insert(workloadKey);
+		m_activeDrawSetCompactionJobs.push_back(std::move(job));
+	}
+	++m_stats.activeDrawSetCompactionJobsQueued;
+	m_stats.activeDrawSetCompactionInputEntries += totalEntries;
+	m_activeDrawSetCompactionCv.notify_one();
+}
+
+void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
+	if (maxResults == 0) {
+		return;
+	}
+
+	std::vector<ActiveDrawSetCompactionResult> results;
+	results.reserve(maxResults);
+	{
+		std::lock_guard lock(m_activeDrawSetCompactionMutex);
+		while (!m_activeDrawSetCompactionResults.empty() && results.size() < maxResults) {
+			results.push_back(std::move(m_activeDrawSetCompactionResults.front()));
+			m_activeDrawSetCompactionResults.pop_front();
+		}
+	}
+
+	for (auto& result : results) {
+		ZoneScopedN("ObjectManager::PublishActiveDrawSetCompactionResult");
+		ZoneValue(result.entries.size());
+		{
+			std::lock_guard lock(m_activeDrawSetCompactionMutex);
+			m_activeDrawSetCompactionQueued.erase(result.workloadKey);
+		}
+		++m_stats.activeDrawSetCompactionJobsBuilt;
+		m_stats.activeDrawSetCompactionWorkerUs += result.buildUs;
+
+		auto buffer = result.buffer;
+		if (!buffer ||
+			buffer->MutationRevision() != result.activeSetRevision ||
+			m_drawRecordVisibilityRevision != result.visibilityRevision) {
+			++m_stats.activeDrawSetCompactionJobsStale;
+			if (buffer) {
+				MaybeQueueActiveDrawSetCompaction(result.workloadKey, buffer);
+			}
+			continue;
+		}
+
+		const auto publishBegin = std::chrono::steady_clock::now();
+		buffer->AssignActiveSnapshot(std::move(result.entries));
+		m_stats.activeDrawSetCompactionJobsPublished += 1;
+		m_stats.activeDrawSetCompactionOutputEntries += buffer->LiveSize();
+		m_stats.activeDrawSetCompactionPublishUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - publishBegin).count());
+		++m_drawSetDeclarationRevision;
+	}
+}
+
 void ObjectManager::PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames) {
 	m_deferredRetireDelayFrames.store((std::max<std::uint64_t>)(1u, retireDelayFrames), std::memory_order_release);
 	auto observed = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
@@ -292,7 +449,7 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 		+ ", phase=" + std::to_string(workloadKey.renderPhase.hash)
 		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
 	const auto capacity = (std::max<std::uint64_t>)(1u, static_cast<std::uint64_t>(initialCapacity));
-	auto buffer = SortedUnsignedIntBuffer::CreateShared(capacity, debugName);
+	auto buffer = SortedUnsignedIntBuffer::CreateActiveDrawSetShared(capacity, debugName);
 	rg::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
 	buffer->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
 	buffer->GetECSEntity().set<Components::Resource>({ buffer });
@@ -307,6 +464,55 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 	m_activeDrawSetIndices[workloadKey] = buffer;
 	++m_drawSetDeclarationRevision;
 	return buffer;
+}
+
+std::uint32_t ObjectManager::ActivateDrawRecordCPU(std::uint32_t drawRecordIndex) {
+	if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
+		m_drawRecordVisibilityGenerations.resize(static_cast<std::size_t>(drawRecordIndex) + 1u, 0u);
+	}
+	auto generation = m_drawRecordVisibilityGenerations[drawRecordIndex] + 1u;
+	if (generation == 0u) {
+		generation = 1u;
+	}
+	m_drawRecordVisibilityGenerations[drawRecordIndex] = generation;
+	++m_drawRecordVisibilityRevision;
+	return generation;
+}
+
+std::uint32_t ObjectManager::ActivateDrawRecord(std::uint32_t drawRecordIndex) {
+	const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
+	const auto requiredBytes = (static_cast<std::size_t>(drawRecordIndex) + 1u) * sizeof(std::uint32_t);
+	m_drawRecordVisibilityGenerationBuffer->ReserveBytes(requiredBytes);
+	m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
+		&generation,
+		sizeof(generation),
+		static_cast<std::size_t>(drawRecordIndex) * sizeof(std::uint32_t));
+	return generation;
+}
+
+void ObjectManager::TombstoneDrawRecord(std::uint32_t drawRecordIndex) {
+	if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
+		return;
+	}
+	m_drawRecordVisibilityGenerations[drawRecordIndex] = 0u;
+	++m_drawRecordVisibilityRevision;
+	const std::uint32_t zero = 0u;
+	m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
+		&zero,
+		sizeof(zero),
+		static_cast<std::size_t>(drawRecordIndex) * sizeof(std::uint32_t));
+}
+
+void ObjectManager::AppendActiveDrawSetEntries(
+	const DrawWorkloadKey& workloadKey,
+	const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>& entries)
+{
+	if (entries.empty()) {
+		return;
+	}
+	auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
+	buffer->AppendActiveEntries(entries);
+	buffer->SetLiveSize(buffer->LiveSize() + entries.size());
 }
 
 Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
@@ -394,7 +600,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 
 	std::vector<InstanceDrawRecordCB> drawRecords;
 	std::vector<PendingDrawRecord> pendingDrawRecords;
-	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 
 	size_t expectedDraws = 0;
 	for (const auto& object : objects) {
@@ -516,6 +722,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 				spdlog::warn("ObjectManager::AddObjectsBulk: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
 			}
 			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
+			const auto drawRecordGeneration = ActivateDrawRecord(drawRecordIndex);
 
 			drawInfo.drawInfo.indices.push_back(drawRecordIndex);
 			drawInfo.drawInfo.views.push_back(view);
@@ -523,7 +730,10 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
 			drawInfo.instanceDrawRecordViews.push_back(view);
 			for (const auto& workloadKey : pendingDrawRecord.workloadKeys) {
-				activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
+				activeDrawSetInserts[workloadKey].push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
+					.drawRecordIndex = drawRecordIndex,
+					.generation = drawRecordGeneration
+				});
 				AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
 			}
 		}
@@ -532,13 +742,13 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	++m_stats.bulkReserveCalls;
 	m_stats.bulkReserveUs += reserveUs;
 
-	for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
-		if (!indices.empty()) {
+	for (const auto& [workloadKey, entries] : activeDrawSetInserts) {
+		if (!entries.empty()) {
 			const auto insertBegin = std::chrono::steady_clock::now();
-			EnsureActiveDrawSetIndices(workloadKey, indices.size())->InsertMany(indices);
+			AppendActiveDrawSetEntries(workloadKey, entries);
 			const auto insertEnd = std::chrono::steady_clock::now();
 			m_stats.activeDrawSetInsertCalls += 1;
-			m_stats.activeDrawSetInsertIndices += indices.size();
+			m_stats.activeDrawSetInsertIndices += entries.size();
 			m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(insertEnd - insertBegin).count());
 		}
@@ -779,7 +989,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::MoveDrawInfos");
 		drawInfos = std::move(packet.drawInfos);
 	}
-	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 	std::vector<StaticImportPacket::Scope*> scopeByGroup(drawInfos.size(), nullptr);
 	for (auto& scope : packet.scopes) {
 		for (const auto groupIndex : scope.groupIndices) {
@@ -955,6 +1165,31 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 
 		std::vector<InstanceDrawRecordCB> packetDrawRecords;
 		packetDrawRecords.reserve(static_cast<size_t>(packet.drawRecords));
+		std::vector<std::uint32_t> packetVisibilityGenerations;
+		packetVisibilityGenerations.reserve(static_cast<size_t>(packet.drawRecords));
+		std::uint32_t firstVisibilityGenerationIndex = 0;
+		{
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::ReserveVisibilityGenerationRange");
+			const auto firstRangeIt = std::find_if(
+				instanceDrawRecordRanges.begin(),
+				instanceDrawRecordRanges.end(),
+				[](const auto& range) { return range.IsValid(); });
+			if (firstRangeIt != instanceDrawRecordRanges.end()) {
+				const auto lastRangeIt = std::find_if(
+					instanceDrawRecordRanges.rbegin(),
+					instanceDrawRecordRanges.rend(),
+					[](const auto& range) { return range.IsValid(); });
+				firstVisibilityGenerationIndex = static_cast<std::uint32_t>(
+					firstRangeIt->offset / sizeof(InstanceDrawRecordCB));
+				const auto maxDrawRecordIndexExclusive = static_cast<std::size_t>(
+					(lastRangeIt->offset + lastRangeIt->size) / sizeof(InstanceDrawRecordCB));
+				if (maxDrawRecordIndexExclusive > m_drawRecordVisibilityGenerations.size()) {
+					m_drawRecordVisibilityGenerations.resize(maxDrawRecordIndexExclusive, 0u);
+				}
+				m_drawRecordVisibilityGenerationBuffer->ReserveBytes(
+					maxDrawRecordIndexExclusive * sizeof(std::uint32_t));
+			}
+		}
 		{
 			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::MaterializeAndPatchDrawInfos");
 			for (size_t groupIndex = 0; groupIndex < drawRecordsByGroup.size(); ++groupIndex) {
@@ -981,6 +1216,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 						spdlog::warn("ObjectManager::PublishStaticImportPacket: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
 					}
 					m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
+					const auto drawRecordGeneration = ActivateDrawRecordCPU(drawRecordIndex);
+					packetVisibilityGenerations.push_back(drawRecordGeneration);
 
 					InstanceDrawRecordCB drawRecord{};
 					drawRecord.meshTemplateIndex = sourceRecord.meshTemplateIndex;
@@ -996,11 +1233,22 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 						++m_stats.staticDirectWorkloadCacheHits;
 					}
 					for (const auto& workloadKey : sourceRecord.workloadKeys) {
-						activeDrawSetInserts[workloadKey].push_back(drawRecordIndex);
+						activeDrawSetInserts[workloadKey].push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
+							.drawRecordIndex = drawRecordIndex,
+							.generation = drawRecordGeneration
+						});
 						AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
 					}
 				}
 			}
+		}
+
+		if (!packetVisibilityGenerations.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageVisibilityGenerationRange");
+			m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
+				packetVisibilityGenerations.data(),
+				packetVisibilityGenerations.size() * sizeof(std::uint32_t),
+				static_cast<std::size_t>(firstVisibilityGenerationIndex) * sizeof(std::uint32_t));
 		}
 
 		if (!packetDrawRecords.empty()) {
@@ -1030,15 +1278,15 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::ActiveDrawSetInserts");
 		TracyPlot("ObjectManager.StaticImportPacket.ActiveWorkloadBuckets", static_cast<int64_t>(activeDrawSetInserts.size()));
-		for (const auto& [workloadKey, indices] : activeDrawSetInserts) {
-			if (!indices.empty()) {
+		for (const auto& [workloadKey, entries] : activeDrawSetInserts) {
+			if (!entries.empty()) {
 				ZoneScopedN("ObjectManager::PublishStaticImportPacket::ActiveDrawSetInserts::InsertMany");
-				ZoneValue(indices.size());
+				ZoneValue(entries.size());
 				const auto insertBegin = std::chrono::steady_clock::now();
-				EnsureActiveDrawSetIndices(workloadKey, indices.size())->InsertMany(indices);
+				AppendActiveDrawSetEntries(workloadKey, entries);
 				const auto insertEnd = std::chrono::steady_clock::now();
 				m_stats.activeDrawSetInsertCalls += 1;
-				m_stats.activeDrawSetInsertIndices += indices.size();
+				m_stats.activeDrawSetInsertIndices += entries.size();
 				m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
 					std::chrono::duration_cast<std::chrono::microseconds>(insertEnd - insertBegin).count());
 			}
@@ -1075,6 +1323,118 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddStaticGroupsBulk(const
 	return CommitPreparedStaticGroupsBulk(plan);
 }
 
+ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemovalPayload(std::span<const Components::ObjectDrawInfo> drawInfos) const {
+	StaticObjectRemovalPayload payload;
+	payload.drawInfoCount = drawInfos.size();
+
+	const auto addRange = [&payload](const std::shared_ptr<DynamicBuffer>& buffer, const Components::ObjectDrawInfo::BufferRange& range) {
+		if (buffer && range.IsValid()) {
+			payload.bufferRanges.push_back(StaticObjectRemovalPayload::BufferRetireRange{ buffer, range });
+		}
+	};
+	const auto addRanges = [&addRange](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+		for (const auto& range : ranges) {
+			addRange(buffer, range);
+		}
+	};
+	const auto addView = [&payload](const std::shared_ptr<DynamicBuffer>& buffer, const std::shared_ptr<BufferView>& view) {
+		if (!buffer || !view) {
+			return;
+		}
+		payload.bufferRanges.push_back(StaticObjectRemovalPayload::BufferRetireRange{
+			buffer,
+			Components::ObjectDrawInfo::BufferRange{ view->GetOffset(), view->GetSize(), 1, view->GetSize() }
+		});
+	};
+
+	for (const auto& drawInfo : drawInfos) {
+		if (!drawInfo.ownedPerObjectCBPages.empty()) {
+			addRanges(m_perObjectBuffers, drawInfo.ownedPerObjectCBPages);
+		} else if (!drawInfo.perObjectCBViews.empty()) {
+			for (const auto& view : drawInfo.perObjectCBViews) {
+				addView(m_perObjectBuffers, view);
+			}
+		} else if (drawInfo.perObjectCBView) {
+			addView(m_perObjectBuffers, drawInfo.perObjectCBView);
+		} else {
+			addRange(m_perObjectBuffers, drawInfo.perObjectCBRange);
+		}
+
+		if (!drawInfo.ownedPerInstanceTransformPages.empty()) {
+			addRanges(m_perInstanceTransformBuffers, drawInfo.ownedPerInstanceTransformPages);
+		} else if (!drawInfo.perInstanceTransformViews.empty()) {
+			for (const auto& view : drawInfo.perInstanceTransformViews) {
+				addView(m_perInstanceTransformBuffers, view);
+			}
+		} else {
+			addRange(m_perInstanceTransformBuffers, drawInfo.perInstanceTransformRange);
+		}
+
+		if (!drawInfo.ownedInstanceDrawRecordPages.empty()) {
+			addRanges(m_instanceDrawRecordBuffers, drawInfo.ownedInstanceDrawRecordPages);
+		} else if (!drawInfo.drawInfo.views.empty()) {
+			for (const auto& view : drawInfo.drawInfo.views) {
+				addView(m_instanceDrawRecordBuffers, view);
+			}
+		} else {
+			addRange(m_instanceDrawRecordBuffers, drawInfo.instanceDrawRecordRange);
+		}
+
+		if (!drawInfo.ownedNormalMatrixPages.empty()) {
+			addRanges(m_normalMatrixBuffer, drawInfo.ownedNormalMatrixPages);
+		} else if (!drawInfo.normalMatrixViews.empty()) {
+			for (const auto& view : drawInfo.normalMatrixViews) {
+				addView(m_normalMatrixBuffer, view);
+			}
+		} else if (drawInfo.normalMatrixView) {
+			addView(m_normalMatrixBuffer, drawInfo.normalMatrixView);
+		} else {
+			addRange(m_normalMatrixBuffer, drawInfo.normalMatrixRange);
+		}
+
+		if (!drawInfo.activeDrawSetRemovals.empty()) {
+			payload.activeDrawSetRemovals.insert(
+				payload.activeDrawSetRemovals.end(),
+				drawInfo.activeDrawSetRemovals.begin(),
+				drawInfo.activeDrawSetRemovals.end());
+		} else {
+			for (size_t i = 0; i < drawInfo.drawInfo.indices.size(); ++i) {
+				const auto index = drawInfo.drawInfo.indices[i];
+				if (i >= drawInfo.drawInfo.drawWorkloadKeysPerDraw.size()) {
+					continue;
+				}
+				for (const auto& workloadKey : drawInfo.drawInfo.drawWorkloadKeysPerDraw[i]) {
+					auto bucketIt = std::find_if(
+						payload.activeDrawSetRemovals.begin(),
+						payload.activeDrawSetRemovals.end(),
+						[&workloadKey](const auto& bucket) { return bucket.workloadKey == workloadKey; });
+					if (bucketIt == payload.activeDrawSetRemovals.end()) {
+						auto& bucket = payload.activeDrawSetRemovals.emplace_back();
+						bucket.workloadKey = workloadKey;
+						bucket.indices.push_back(index);
+					} else {
+						bucketIt->indices.push_back(index);
+					}
+				}
+			}
+		}
+
+		if (!drawInfo.instanceDrawRecordIndices.empty()) {
+			payload.drawRecordIndices.insert(
+				payload.drawRecordIndices.end(),
+				drawInfo.instanceDrawRecordIndices.begin(),
+				drawInfo.instanceDrawRecordIndices.end());
+		} else {
+			payload.drawRecordIndices.insert(
+				payload.drawRecordIndices.end(),
+				drawInfo.drawInfo.indices.begin(),
+				drawInfo.drawInfo.indices.end());
+		}
+	}
+
+	return payload;
+}
+
 void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 #ifdef _DEBUG
 	if (drawInfo == nullptr) {
@@ -1095,10 +1455,31 @@ void ObjectManager::RemoveObjectsBulk(
 		return;
 	}
 	ZoneValue(drawInfos.size());
+	std::vector<StaticObjectRemovalPayload> payloads;
+	payloads.reserve(drawInfos.size());
+	for (const auto* drawInfo : drawInfos) {
+		if (!drawInfo) {
+			continue;
+		}
+		payloads.push_back(BuildStaticObjectRemovalPayload(std::span<const Components::ObjectDrawInfo>(drawInfo, 1)));
+	}
+	RemoveStaticObjectsBulk(payloads, options);
+}
 
+void ObjectManager::RemoveStaticObjectsBulk(
+	std::span<const StaticObjectRemovalPayload> payloads,
+	const RemoveObjectsBulkOptions& options)
+{
+	ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk");
+	if (payloads.empty()) {
+		return;
+	}
+	ZoneValue(payloads.size());
 	const auto removeBegin = std::chrono::steady_clock::now();
 	++m_stats.bulkRemoveCalls;
-	m_stats.bulkRemoveObjects += drawInfos.size();
+	for (const auto& payload : payloads) {
+		m_stats.bulkRemoveObjects += payload.drawInfoCount;
+	}
 
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetRemoves;
 	std::uint64_t pageDeallocUs = 0;
@@ -1155,75 +1536,23 @@ void ObjectManager::RemoveObjectsBulk(
 
 	{
 		ZoneScopedN("ObjectManager::RemoveObjectsBulk::CollectRetiresAndActiveRemovals");
-	for (const auto* drawInfo : drawInfos) {
-		if (!drawInfo) {
-			continue;
-		}
-
-	if (!drawInfo->ownedPerObjectCBPages.empty()) {
-		retireOrDeallocateOwnedRanges(m_perObjectBuffers, drawInfo->ownedPerObjectCBPages);
-	} else if (!drawInfo->perObjectCBViews.empty()) {
-		for (const auto& view : drawInfo->perObjectCBViews) {
-			retireOrDeallocateView(m_perObjectBuffers, view);
-		}
-	} else if (drawInfo->perObjectCBView) {
-		retireOrDeallocateView(m_perObjectBuffers, drawInfo->perObjectCBView);
-	} else if (drawInfo->perObjectCBRange.IsValid()) {
-		retireOrDeallocateRange(m_perObjectBuffers, drawInfo->perObjectCBRange.offset, drawInfo->perObjectCBRange.size);
-	}
-	if (!drawInfo->ownedPerInstanceTransformPages.empty()) {
-		retireOrDeallocateOwnedRanges(m_perInstanceTransformBuffers, drawInfo->ownedPerInstanceTransformPages);
-	} else if (!drawInfo->perInstanceTransformViews.empty()) {
-		for (const auto& view : drawInfo->perInstanceTransformViews) {
-			retireOrDeallocateView(m_perInstanceTransformBuffers, view);
-		}
-	} else if (drawInfo->perInstanceTransformRange.IsValid()) {
-		retireOrDeallocateRange(m_perInstanceTransformBuffers, drawInfo->perInstanceTransformRange.offset, drawInfo->perInstanceTransformRange.size);
-	}
-
-	auto& views = drawInfo;
-	const auto collectBegin = std::chrono::steady_clock::now();
-	if (!drawInfo->activeDrawSetRemovals.empty()) {
-		for (const auto& bucket : drawInfo->activeDrawSetRemovals) {
-			auto& indices = activeDrawSetRemoves[bucket.workloadKey];
-			indices.insert(indices.end(), bucket.indices.begin(), bucket.indices.end());
-		}
-	} else {
-		for (size_t i = 0; i < views->drawInfo.indices.size(); ++i) {
-			const unsigned int index = views->drawInfo.indices[i];
-			if (i >= views->drawInfo.drawWorkloadKeysPerDraw.size()) {
-				continue;
+		for (const auto& payload : payloads) {
+			for (const auto& retireRange : payload.bufferRanges) {
+				if (retireRange.range.IsValid()) {
+					retireOrDeallocateRange(retireRange.buffer, retireRange.range.offset, retireRange.range.size);
+				}
 			}
-			for (const auto& workloadKey : views->drawInfo.drawWorkloadKeysPerDraw[i]) {
-				activeDrawSetRemoves[workloadKey].push_back(index);
+			const auto collectBegin = std::chrono::steady_clock::now();
+			for (const auto& bucket : payload.activeDrawSetRemovals) {
+				auto& indices = activeDrawSetRemoves[bucket.workloadKey];
+				indices.insert(indices.end(), bucket.indices.begin(), bucket.indices.end());
+			}
+			collectUs += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
+			for (const auto drawRecordIndex : payload.drawRecordIndices) {
+				TombstoneDrawRecord(drawRecordIndex);
 			}
 		}
-	}
-	collectUs += static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
-	if (!drawInfo->ownedInstanceDrawRecordPages.empty()) {
-		retireOrDeallocateOwnedRanges(m_instanceDrawRecordBuffers, drawInfo->ownedInstanceDrawRecordPages);
-	} else {
-		for (auto view : views->drawInfo.views) {
-			retireOrDeallocateView(m_instanceDrawRecordBuffers, view);
-		}
-		if (drawInfo->instanceDrawRecordRange.IsValid() && drawInfo->drawInfo.views.empty()) {
-			retireOrDeallocateRange(m_instanceDrawRecordBuffers, drawInfo->instanceDrawRecordRange.offset, drawInfo->instanceDrawRecordRange.size);
-		}
-	}
-
-	if (!drawInfo->ownedNormalMatrixPages.empty()) {
-		retireOrDeallocateOwnedRanges(m_normalMatrixBuffer, drawInfo->ownedNormalMatrixPages);
-	} else if (!drawInfo->normalMatrixViews.empty()) {
-		for (const auto& view : drawInfo->normalMatrixViews) {
-			retireOrDeallocateView(m_normalMatrixBuffer, view);
-		}
-	} else if (drawInfo->normalMatrixView) {
-		retireOrDeallocateView(m_normalMatrixBuffer, drawInfo->normalMatrixView);
-	} else if (drawInfo->normalMatrixRange.IsValid()) {
-		retireOrDeallocateRange(m_normalMatrixBuffer, drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
-	}
-	}
 	}
 
 	m_stats.bulkRemovePageDeallocUs += pageDeallocUs;
@@ -1244,10 +1573,12 @@ void ObjectManager::RemoveObjectsBulk(
 				workloadKey.clodOnly);
 			continue;
 		}
-		ZoneScopedN("ObjectManager::RemoveObjectsBulk::ActiveDrawSetRemoveMany");
+		ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk::ActiveDrawSetTombstone");
 		ZoneValue(indices.size());
 		const auto activeRemoveBegin = std::chrono::steady_clock::now();
-		activeDrawSetIt->second->RemoveMany(indices);
+		const auto currentLive = activeDrawSetIt->second->LiveSize();
+		activeDrawSetIt->second->SetLiveSize(currentLive > indices.size() ? currentLive - indices.size() : 0u);
+		MaybeQueueActiveDrawSetCompaction(workloadKey, activeDrawSetIt->second);
 		const auto activeRemoveEnd = std::chrono::steady_clock::now();
 		m_stats.activeDrawSetRemoveCalls += 1;
 		m_stats.activeDrawSetRemoveIndices += indices.size();

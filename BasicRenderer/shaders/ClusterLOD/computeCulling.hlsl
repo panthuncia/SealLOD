@@ -115,9 +115,16 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
-    StructuredBuffer<uint> activeDrawSetIndicesBuffer =
+    StructuredBuffer<uint2> activeDrawSetIndicesBuffer =
         ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX];
-    const uint drawRecordIndex = activeDrawSetIndicesBuffer[drawIndex];
+    StructuredBuffer<uint> drawRecordVisibilityGenerations =
+        ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX];
+    const uint2 activeEntry = activeDrawSetIndicesBuffer[drawIndex];
+    const uint drawRecordIndex = activeEntry.x;
+    const uint activeGeneration = activeEntry.y;
+    if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+        return;
+    }
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
     const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);

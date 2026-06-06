@@ -1344,6 +1344,7 @@ struct ObjectCullRecord
     uint viewDataIndex; // One record per view, times...
     uint activeDrawSetIndicesSRVIndex; // One record per draw set
     uint activeDrawCount;
+    uint drawRecordVisibilityGenerationSRVIndex;
     uint3 dispatchGrid : SV_DispatchGrid; // Drives dispatch size
 };
 
@@ -1804,6 +1805,8 @@ void WG_ObjectCull(
     [MaxRecords(64)] NodeOutput<TraverseNodeRecord> TraverseNodes) {
     const ObjectCullRecord hdr = inRec.Get();
     const bool inRange = (vDispatchThreadID.x < hdr.activeDrawCount);
+    bool entryVisible = inRange;
+    uint drawRecordIndex = 0u;
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_THREADS, 1);
     if (inRange) {
@@ -1813,11 +1816,21 @@ void WG_ObjectCull(
     uint outCount = 0;
     TraverseNodeRecord outRecord = (TraverseNodeRecord) 0;
 
-    if (inRange) {
-        StructuredBuffer<uint> activeDrawSetIndicesBuffer =
+    if (entryVisible) {
+        StructuredBuffer<uint2> activeDrawSetIndicesBuffer =
                     ResourceDescriptorHeap[hdr.activeDrawSetIndicesSRVIndex];
+        StructuredBuffer<uint> drawRecordVisibilityGenerations =
+                    ResourceDescriptorHeap[hdr.drawRecordVisibilityGenerationSRVIndex];
 
-        const uint drawRecordIndex = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
+        const uint2 activeEntry = activeDrawSetIndicesBuffer[vDispatchThreadID.x];
+        drawRecordIndex = activeEntry.x;
+        const uint activeGeneration = activeEntry.y;
+        if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+            entryVisible = false;
+        }
+    }
+
+    if (entryVisible) {
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
