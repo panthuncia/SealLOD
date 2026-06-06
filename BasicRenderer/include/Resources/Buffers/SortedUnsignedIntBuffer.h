@@ -63,6 +63,25 @@ public:
         m_liveSize = size;
     }
 
+    UINT ActiveTombstoneEstimate() const {
+        return static_cast<UINT>(m_activeTombstoneEstimate);
+    }
+
+    UINT EstimatedActiveLiveSize() const {
+        const auto total = static_cast<uint64_t>(Size());
+        const auto stale = std::min(m_activeTombstoneEstimate, total);
+        return static_cast<UINT>(total - stale);
+    }
+
+    void AddActiveTombstoneEstimate(uint64_t count) {
+        const auto total = static_cast<uint64_t>(Size());
+        m_activeTombstoneEstimate = std::min(total, m_activeTombstoneEstimate + count);
+    }
+
+    void ResetActiveTombstoneEstimate() {
+        m_activeTombstoneEstimate = 0;
+    }
+
     bool ActiveEntryMode() const {
         return m_activeEntryMode;
     }
@@ -107,6 +126,7 @@ private:
 
     uint64_t m_capacity;
     uint64_t m_liveSize = 0;
+    uint64_t m_activeTombstoneEstimate = 0;
     uint64_t m_mutationRevision = 1;
     uint64_t m_earliestModifiedIndex; // To avoid updating the entire buffer every time
 

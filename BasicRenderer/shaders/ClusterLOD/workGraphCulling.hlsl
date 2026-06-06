@@ -115,6 +115,7 @@ static const uint WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_MISSES = 106;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_RECORDS = 107;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_DROPPED = 108;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB = 122u;
+static const uint WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION = 133u;
 
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
@@ -1826,6 +1827,7 @@ void WG_ObjectCull(
         drawRecordIndex = activeEntry.x;
         const uint activeGeneration = activeEntry.y;
         if (activeGeneration == 0u || drawRecordVisibilityGenerations[drawRecordIndex] != activeGeneration) {
+            WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION, 1);
             entryVisible = false;
         }
     }

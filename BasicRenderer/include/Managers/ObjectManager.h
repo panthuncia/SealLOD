@@ -191,13 +191,22 @@ public:
 
 	struct RemoveObjectsBulkOptions {
 		bool deferBufferRangeRetirement = false;
+		bool retireInstanceDrawRecordRanges = true;
 		std::uint64_t retireFrame = 0;
 	};
 
 	struct StaticObjectRemovalPayload {
+		enum class BufferKind : std::uint8_t {
+			PerObject,
+			InstanceTransform,
+			InstanceDrawRecord,
+			NormalMatrix
+		};
+
 		struct BufferRetireRange {
 			std::shared_ptr<DynamicBuffer> buffer;
 			Components::ObjectDrawInfo::BufferRange range;
+			BufferKind kind = BufferKind::PerObject;
 		};
 
 		std::vector<BufferRetireRange> bufferRanges;
@@ -242,8 +251,8 @@ public:
 		return m_perObjectBuffers;
 	}
 
-	std::shared_ptr<DynamicBuffer>& GetDrawRecordVisibilityGenerationBuffer() {
-		return m_drawRecordVisibilityGenerationBuffer;
+	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>& GetDrawRecordVisibilityGenerationBuffer() {
+		return m_drawRecordVisibilityGenerationSidecar;
 	}
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -306,9 +315,11 @@ private:
 		const std::shared_ptr<DynamicBuffer>& buffer,
 		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
 		std::uint64_t retireFrame);
+	void EnqueueDeferredBufferRangeRetires(std::vector<DeferredBufferRangeRetire> retires);
 	void StartActiveDrawSetCompactionWorker();
 	void StopActiveDrawSetCompactionWorker();
 	void ActiveDrawSetCompactionWorkerMain();
+	void PumpActiveDrawSetCompactionRequests(std::size_t maxRequests);
 	void MaybeQueueActiveDrawSetCompaction(
 		const DrawWorkloadKey& workloadKey,
 		const std::shared_ptr<SortedUnsignedIntBuffer>& buffer);
@@ -317,7 +328,10 @@ private:
 	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
 	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
 	std::shared_ptr<DynamicBuffer> m_instanceDrawRecordBuffers; // Compact draw records consumed by GPU culling
-	std::shared_ptr<DynamicBuffer> m_drawRecordVisibilityGenerationBuffer; // Generation tokens for append-only active draw entries
+	// Absolute-index sidecar for append-only active draw entries.
+	// This is deliberately not a DynamicBuffer allocation pool: draw-record index N
+	// must always read generation[N], and backing growth replays the CPU mirror.
+	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_drawRecordVisibilityGenerationSidecar;
 	std::shared_ptr<DynamicBuffer> m_masterIndirectCommandsBuffer; // Indirect draw command buffer
 	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
@@ -341,6 +355,7 @@ private:
 	std::atomic<std::uint64_t> m_deferredRetireWorkerUs{ 0 };
 	std::mutex m_activeDrawSetCompactionMutex;
 	std::condition_variable m_activeDrawSetCompactionCv;
+	std::deque<DrawWorkloadKey> m_activeDrawSetCompactionRequests;
 	std::deque<ActiveDrawSetCompactionJob> m_activeDrawSetCompactionJobs;
 	std::deque<ActiveDrawSetCompactionResult> m_activeDrawSetCompactionResults;
 	std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_activeDrawSetCompactionQueued;
@@ -351,7 +366,9 @@ private:
 
 	std::shared_ptr<SortedUnsignedIntBuffer> EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity = 1);
 	std::uint32_t ActivateDrawRecordCPU(std::uint32_t drawRecordIndex);
+	std::uint32_t AdvanceDrawRecordVisibilityGenerationCPU(std::uint32_t drawRecordIndex);
 	std::uint32_t ActivateDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecord(std::uint32_t drawRecordIndex);
+	void TombstoneDrawRecords(std::span<const std::uint32_t> drawRecordIndices);
 	void AppendActiveDrawSetEntries(const DrawWorkloadKey& workloadKey, const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>& entries);
 };

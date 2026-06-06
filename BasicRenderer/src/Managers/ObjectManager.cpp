@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <limits>
 #include <spdlog/spdlog.h>
 
 namespace {
@@ -90,7 +91,7 @@ ObjectManager::ObjectManager() {
 	m_perObjectBuffers = DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
 	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
 	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
-	m_drawRecordVisibilityGenerationBuffer = DynamicBuffer::CreateShared(sizeof(std::uint32_t), 10000, "drawRecordVisibilityGenerationBuffer<uint>");
+	m_drawRecordVisibilityGenerationSidecar = DynamicStructuredBuffer<std::uint32_t>::CreateShared(10000, "drawRecordVisibilityGenerationSidecar<uint>");
 	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
 	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
@@ -98,7 +99,7 @@ ObjectManager::ObjectManager() {
 	rg::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
 	rg::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
 	rg::memory::SetResourceUsageHint(*m_instanceDrawRecordBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
-	rg::memory::SetResourceUsageHint(*m_drawRecordVisibilityGenerationBuffer, "PerMesh, InstanceDrawRecord, VisibilityGeneration");
+	rg::memory::SetResourceUsageHint(*m_drawRecordVisibilityGenerationSidecar, "PerMesh, InstanceDrawRecord, VisibilityGeneration");
 	rg::memory::SetResourceUsageHint(*m_normalMatrixBuffer, "PerMesh, PerMeshInstance, PerObject");
 
 	rg::memory::SetResourceUsageHint(*m_masterIndirectCommandsBuffer, "Indirect command buffers");
@@ -221,22 +222,14 @@ void ObjectManager::EnqueueDeferredBufferRangeRetire(
 	std::uint64_t size,
 	std::uint64_t retireFrame)
 {
-	if (!buffer || size == 0) {
-		return;
-	}
-	{
-		std::lock_guard lock(m_deferredRetireMutex);
-		m_deferredRetireQueue.push_back(DeferredBufferRangeRetire{
+	std::vector<DeferredBufferRangeRetire> retires;
+	retires.push_back(DeferredBufferRangeRetire{
 			buffer,
 			offset,
 			size,
 			retireFrame
 		});
-		m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
-	}
-	m_deferredRetireRangesQueued.fetch_add(1, std::memory_order_relaxed);
-	m_deferredRetireBytesQueued.fetch_add(size, std::memory_order_relaxed);
-	m_deferredRetireCv.notify_one();
+	EnqueueDeferredBufferRangeRetires(std::move(retires));
 }
 
 void ObjectManager::EnqueueDeferredBufferRangeRetires(
@@ -247,11 +240,47 @@ void ObjectManager::EnqueueDeferredBufferRangeRetires(
 	if (!buffer) {
 		return;
 	}
+	std::vector<DeferredBufferRangeRetire> retires;
+	retires.reserve(ranges.size());
 	for (const auto& range : ranges) {
 		if (range.IsValid()) {
-			EnqueueDeferredBufferRangeRetire(buffer, range.offset, range.size, retireFrame);
+			retires.push_back(DeferredBufferRangeRetire{
+				buffer,
+				range.offset,
+				range.size,
+				retireFrame
+			});
 		}
 	}
+	EnqueueDeferredBufferRangeRetires(std::move(retires));
+}
+
+void ObjectManager::EnqueueDeferredBufferRangeRetires(std::vector<DeferredBufferRangeRetire> retires)
+{
+	if (retires.empty()) {
+		return;
+	}
+
+	std::uint64_t queuedRanges = 0;
+	std::uint64_t queuedBytes = 0;
+	{
+		std::lock_guard lock(m_deferredRetireMutex);
+		for (auto& retire : retires) {
+			if (!retire.buffer || retire.size == 0) {
+				continue;
+			}
+			queuedBytes += retire.size;
+			++queuedRanges;
+			m_deferredRetireQueue.push_back(std::move(retire));
+		}
+		m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
+	}
+	if (queuedRanges == 0) {
+		return;
+	}
+	m_deferredRetireRangesQueued.fetch_add(queuedRanges, std::memory_order_relaxed);
+	m_deferredRetireBytesQueued.fetch_add(queuedBytes, std::memory_order_relaxed);
+	m_deferredRetireCv.notify_one();
 }
 
 void ObjectManager::StartActiveDrawSetCompactionWorker() {
@@ -269,6 +298,7 @@ void ObjectManager::StopActiveDrawSetCompactionWorker() {
 	}
 
 	std::lock_guard lock(m_activeDrawSetCompactionMutex);
+	m_activeDrawSetCompactionRequests.clear();
 	m_activeDrawSetCompactionJobs.clear();
 	m_activeDrawSetCompactionResults.clear();
 	m_activeDrawSetCompactionQueued.clear();
@@ -330,23 +360,14 @@ void ObjectManager::MaybeQueueActiveDrawSetCompaction(
 	}
 
 	const auto totalEntries = static_cast<std::uint64_t>(buffer->Size());
-	const auto liveEntries = static_cast<std::uint64_t>(buffer->LiveSize());
-	if (totalEntries < 65536u || totalEntries <= liveEntries) {
+	const auto staleEntries = static_cast<std::uint64_t>(buffer->ActiveTombstoneEstimate());
+	if (totalEntries < 1024u || staleEntries == 0) {
 		return;
 	}
 
-	const auto staleEntries = totalEntries - liveEntries;
-	if (staleEntries < 16384u && staleEntries * 100u < totalEntries * 35u) {
+	if (staleEntries < 256u && staleEntries * 100u < totalEntries) {
 		return;
 	}
-
-	ActiveDrawSetCompactionJob job;
-	job.workloadKey = workloadKey;
-	job.buffer = buffer;
-	job.activeSetRevision = buffer->MutationRevision();
-	job.visibilityRevision = m_drawRecordVisibilityRevision;
-	job.entries = buffer->SnapshotActiveEntries();
-	job.visibilityGenerations = m_drawRecordVisibilityGenerations;
 
 	{
 		std::lock_guard lock(m_activeDrawSetCompactionMutex);
@@ -354,10 +375,70 @@ void ObjectManager::MaybeQueueActiveDrawSetCompaction(
 			return;
 		}
 		m_activeDrawSetCompactionQueued.insert(workloadKey);
-		m_activeDrawSetCompactionJobs.push_back(std::move(job));
+		m_activeDrawSetCompactionRequests.push_back(workloadKey);
 	}
-	++m_stats.activeDrawSetCompactionJobsQueued;
-	m_stats.activeDrawSetCompactionInputEntries += totalEntries;
+}
+
+void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests) {
+	if (maxRequests == 0) {
+		return;
+	}
+
+	std::vector<ActiveDrawSetCompactionJob> jobs;
+	jobs.reserve(maxRequests);
+	for (std::size_t i = 0; i < maxRequests; ++i) {
+		DrawWorkloadKey workloadKey;
+		{
+			std::lock_guard lock(m_activeDrawSetCompactionMutex);
+			if (m_activeDrawSetCompactionRequests.empty()) {
+				break;
+			}
+			workloadKey = m_activeDrawSetCompactionRequests.front();
+			m_activeDrawSetCompactionRequests.pop_front();
+		}
+
+		auto activeDrawSetIt = m_activeDrawSetIndices.find(workloadKey);
+		auto buffer = activeDrawSetIt != m_activeDrawSetIndices.end() ? activeDrawSetIt->second : nullptr;
+		if (!buffer || !buffer->ActiveEntryMode()) {
+			std::lock_guard lock(m_activeDrawSetCompactionMutex);
+			m_activeDrawSetCompactionQueued.erase(workloadKey);
+			continue;
+		}
+
+		const auto totalEntries = static_cast<std::uint64_t>(buffer->Size());
+		const auto staleEntries = static_cast<std::uint64_t>(buffer->ActiveTombstoneEstimate());
+		if (totalEntries < 1024u ||
+			staleEntries == 0 ||
+			(staleEntries < 256u && staleEntries * 100u < totalEntries)) {
+			std::lock_guard lock(m_activeDrawSetCompactionMutex);
+			m_activeDrawSetCompactionQueued.erase(workloadKey);
+			continue;
+		}
+
+		ZoneScopedN("ObjectManager::PumpActiveDrawSetCompactionRequests::BuildSnapshot");
+		ZoneValue(totalEntries);
+		ActiveDrawSetCompactionJob job;
+		job.workloadKey = workloadKey;
+		job.buffer = buffer;
+		job.activeSetRevision = buffer->MutationRevision();
+		job.visibilityRevision = m_drawRecordVisibilityRevision;
+		job.entries = buffer->SnapshotActiveEntries();
+		job.visibilityGenerations = m_drawRecordVisibilityGenerations;
+		m_stats.activeDrawSetCompactionInputEntries += job.entries.size();
+		jobs.push_back(std::move(job));
+	}
+
+	if (jobs.empty()) {
+		return;
+	}
+
+	{
+		std::lock_guard lock(m_activeDrawSetCompactionMutex);
+		for (auto& job : jobs) {
+			m_activeDrawSetCompactionJobs.push_back(std::move(job));
+			++m_stats.activeDrawSetCompactionJobsQueued;
+		}
+	}
 	m_activeDrawSetCompactionCv.notify_one();
 }
 
@@ -365,6 +446,8 @@ void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults
 	if (maxResults == 0) {
 		return;
 	}
+
+	PumpActiveDrawSetCompactionRequests(maxResults);
 
 	std::vector<ActiveDrawSetCompactionResult> results;
 	results.reserve(maxResults);
@@ -379,6 +462,8 @@ void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults
 	for (auto& result : results) {
 		ZoneScopedN("ObjectManager::PublishActiveDrawSetCompactionResult");
 		ZoneValue(result.entries.size());
+		TracyPlot("ObjectManager.ActiveCompaction.ResultInputEntries", static_cast<int64_t>(result.inputEntries));
+		TracyPlot("ObjectManager.ActiveCompaction.ResultOutputEntries", static_cast<int64_t>(result.entries.size()));
 		{
 			std::lock_guard lock(m_activeDrawSetCompactionMutex);
 			m_activeDrawSetCompactionQueued.erase(result.workloadKey);
@@ -390,12 +475,14 @@ void ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults
 		if (!buffer ||
 			buffer->MutationRevision() != result.activeSetRevision ||
 			m_drawRecordVisibilityRevision != result.visibilityRevision) {
+			TracyPlot("ObjectManager.ActiveCompaction.ResultStale", int64_t{ 1 });
 			++m_stats.activeDrawSetCompactionJobsStale;
 			if (buffer) {
 				MaybeQueueActiveDrawSetCompaction(result.workloadKey, buffer);
 			}
 			continue;
 		}
+		TracyPlot("ObjectManager.ActiveCompaction.ResultStale", int64_t{ 0 });
 
 		const auto publishBegin = std::chrono::steady_clock::now();
 		buffer->AssignActiveSnapshot(std::move(result.entries));
@@ -479,14 +566,38 @@ std::uint32_t ObjectManager::ActivateDrawRecordCPU(std::uint32_t drawRecordIndex
 	return generation;
 }
 
+std::uint32_t ObjectManager::AdvanceDrawRecordVisibilityGenerationCPU(std::uint32_t drawRecordIndex) {
+	if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
+		return 0u;
+	}
+	auto generation = m_drawRecordVisibilityGenerations[drawRecordIndex] + 1u;
+	if (generation == 0u) {
+		generation = 1u;
+	}
+	m_drawRecordVisibilityGenerations[drawRecordIndex] = generation;
+	return generation;
+}
+
 std::uint32_t ObjectManager::ActivateDrawRecord(std::uint32_t drawRecordIndex) {
+	const auto previousGenerationRows = m_drawRecordVisibilityGenerations.size();
+	const auto previousSidecarRows = m_drawRecordVisibilityGenerationSidecar
+		? m_drawRecordVisibilityGenerationSidecar->Data().size()
+		: 0u;
 	const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
-	const auto requiredBytes = (static_cast<std::size_t>(drawRecordIndex) + 1u) * sizeof(std::uint32_t);
-	m_drawRecordVisibilityGenerationBuffer->ReserveBytes(requiredBytes);
-	m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
-		&generation,
-		sizeof(generation),
-		static_cast<std::size_t>(drawRecordIndex) * sizeof(std::uint32_t));
+	const auto requiredRows = static_cast<std::size_t>(drawRecordIndex) + 1u;
+	if (requiredRows > previousGenerationRows || requiredRows > previousSidecarRows) {
+		ZoneScopedN("ObjectManager::ActivateDrawRecord::StageVisibilityGenerationFullAfterGrow");
+		m_drawRecordVisibilityGenerationSidecar->EnsureSize(m_drawRecordVisibilityGenerations.size(), 0u);
+		m_drawRecordVisibilityGenerationSidecar->StageRange(
+			0u,
+			std::span<const std::uint32_t>(
+				m_drawRecordVisibilityGenerations.data(),
+				m_drawRecordVisibilityGenerations.size()));
+	} else {
+		m_drawRecordVisibilityGenerationSidecar->StageRange(
+			drawRecordIndex,
+			std::span<const std::uint32_t>(&generation, 1u));
+	}
 	return generation;
 }
 
@@ -494,13 +605,69 @@ void ObjectManager::TombstoneDrawRecord(std::uint32_t drawRecordIndex) {
 	if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
 		return;
 	}
-	m_drawRecordVisibilityGenerations[drawRecordIndex] = 0u;
+	const auto generation = AdvanceDrawRecordVisibilityGenerationCPU(drawRecordIndex);
 	++m_drawRecordVisibilityRevision;
-	const std::uint32_t zero = 0u;
-	m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
-		&zero,
-		sizeof(zero),
-		static_cast<std::size_t>(drawRecordIndex) * sizeof(std::uint32_t));
+	m_drawRecordVisibilityGenerationSidecar->StageRange(
+		drawRecordIndex,
+		std::span<const std::uint32_t>(&generation, 1u));
+}
+
+void ObjectManager::TombstoneDrawRecords(std::span<const std::uint32_t> drawRecordIndices) {
+	if (drawRecordIndices.empty()) {
+		return;
+	}
+	TracyPlot("ObjectManager.TombstoneDrawRecords.Requested", static_cast<int64_t>(drawRecordIndices.size()));
+
+	std::vector<std::uint32_t> sortedIndices;
+	sortedIndices.reserve(drawRecordIndices.size());
+	for (const auto drawRecordIndex : drawRecordIndices) {
+		if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
+			continue;
+		}
+		sortedIndices.push_back(drawRecordIndex);
+	}
+	if (sortedIndices.empty()) {
+		TracyPlot("ObjectManager.TombstoneDrawRecords.Valid", int64_t{ 0 });
+		return;
+	}
+	++m_drawRecordVisibilityRevision;
+	TracyPlot("ObjectManager.TombstoneDrawRecords.Valid", static_cast<int64_t>(sortedIndices.size()));
+
+	std::sort(sortedIndices.begin(), sortedIndices.end());
+	sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+	TracyPlot("ObjectManager.TombstoneDrawRecords.Unique", static_cast<int64_t>(sortedIndices.size()));
+	for (const auto drawRecordIndex : sortedIndices) {
+		AdvanceDrawRecordVisibilityGenerationCPU(drawRecordIndex);
+	}
+
+	std::size_t runStart = sortedIndices.front();
+	std::size_t runCount = 1;
+	std::size_t stagedRuns = 0;
+	const auto stageRun = [this](std::size_t start, std::size_t count) {
+		if (count == 0) {
+			return;
+		}
+		m_drawRecordVisibilityGenerationSidecar->StageRange(
+			start,
+			std::span<const std::uint32_t>(
+				m_drawRecordVisibilityGenerations.data() + start,
+				count));
+	};
+
+	for (std::size_t i = 1; i < sortedIndices.size(); ++i) {
+		const auto index = static_cast<std::size_t>(sortedIndices[i]);
+		if (index == runStart + runCount) {
+			++runCount;
+			continue;
+		}
+		stageRun(runStart, runCount);
+		++stagedRuns;
+		runStart = index;
+		runCount = 1;
+	}
+	stageRun(runStart, runCount);
+	++stagedRuns;
+	TracyPlot("ObjectManager.TombstoneDrawRecords.StagedRuns", static_cast<int64_t>(stagedRuns));
 }
 
 void ObjectManager::AppendActiveDrawSetEntries(
@@ -1165,11 +1332,14 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 
 		std::vector<InstanceDrawRecordCB> packetDrawRecords;
 		packetDrawRecords.reserve(static_cast<size_t>(packet.drawRecords));
-		std::vector<std::uint32_t> packetVisibilityGenerations;
-		packetVisibilityGenerations.reserve(static_cast<size_t>(packet.drawRecords));
-		std::uint32_t firstVisibilityGenerationIndex = 0;
+		std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
+		std::size_t visibilityDirtyEnd = 0;
+		bool visibilitySidecarExtended = false;
 		{
-			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::ReserveVisibilityGenerationRange");
+			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::EnsureVisibilityGenerationSidecar");
+			const auto previousSidecarRows = m_drawRecordVisibilityGenerationSidecar
+				? m_drawRecordVisibilityGenerationSidecar->Data().size()
+				: 0u;
 			const auto firstRangeIt = std::find_if(
 				instanceDrawRecordRanges.begin(),
 				instanceDrawRecordRanges.end(),
@@ -1179,15 +1349,13 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					instanceDrawRecordRanges.rbegin(),
 					instanceDrawRecordRanges.rend(),
 					[](const auto& range) { return range.IsValid(); });
-				firstVisibilityGenerationIndex = static_cast<std::uint32_t>(
-					firstRangeIt->offset / sizeof(InstanceDrawRecordCB));
 				const auto maxDrawRecordIndexExclusive = static_cast<std::size_t>(
 					(lastRangeIt->offset + lastRangeIt->size) / sizeof(InstanceDrawRecordCB));
+				visibilitySidecarExtended = maxDrawRecordIndexExclusive > previousSidecarRows;
 				if (maxDrawRecordIndexExclusive > m_drawRecordVisibilityGenerations.size()) {
 					m_drawRecordVisibilityGenerations.resize(maxDrawRecordIndexExclusive, 0u);
 				}
-				m_drawRecordVisibilityGenerationBuffer->ReserveBytes(
-					maxDrawRecordIndexExclusive * sizeof(std::uint32_t));
+				m_drawRecordVisibilityGenerationSidecar->EnsureSize(maxDrawRecordIndexExclusive, 0u);
 			}
 		}
 		{
@@ -1217,7 +1385,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					}
 					m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 					const auto drawRecordGeneration = ActivateDrawRecordCPU(drawRecordIndex);
-					packetVisibilityGenerations.push_back(drawRecordGeneration);
+					visibilityDirtyStart = (std::min)(visibilityDirtyStart, static_cast<std::size_t>(drawRecordIndex));
+					visibilityDirtyEnd = (std::max)(visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
 
 					InstanceDrawRecordCB drawRecord{};
 					drawRecord.meshTemplateIndex = sourceRecord.meshTemplateIndex;
@@ -1243,12 +1412,29 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 			}
 		}
 
-		if (!packetVisibilityGenerations.empty()) {
-			ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageVisibilityGenerationRange");
-			m_drawRecordVisibilityGenerationBuffer->StageWriteRange(
-				packetVisibilityGenerations.data(),
-				packetVisibilityGenerations.size() * sizeof(std::uint32_t),
-				static_cast<std::size_t>(firstVisibilityGenerationIndex) * sizeof(std::uint32_t));
+		if (visibilityDirtyStart < visibilityDirtyEnd) {
+			if (visibilitySidecarExtended) {
+				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageVisibilityGenerationFullAfterGrow");
+				TracyPlot(
+					"ObjectManager.StaticImportPacket.VisibilityGenerationFullRows",
+					static_cast<int64_t>(m_drawRecordVisibilityGenerations.size()));
+				m_drawRecordVisibilityGenerationSidecar->StageRange(
+					0u,
+					std::span<const std::uint32_t>(
+						m_drawRecordVisibilityGenerations.data(),
+						m_drawRecordVisibilityGenerations.size()));
+			} else {
+				ZoneScopedN("ObjectManager::PublishStaticImportPacket::DrawRecordPages::StageVisibilityGenerationRange");
+				const auto dirtyCount = visibilityDirtyEnd - visibilityDirtyStart;
+				TracyPlot(
+					"ObjectManager.StaticImportPacket.VisibilityGenerationDirtyRows",
+					static_cast<int64_t>(dirtyCount));
+				m_drawRecordVisibilityGenerationSidecar->StageRange(
+					visibilityDirtyStart,
+					std::span<const std::uint32_t>(
+						m_drawRecordVisibilityGenerations.data() + visibilityDirtyStart,
+						dirtyCount));
+			}
 		}
 
 		if (!packetDrawRecords.empty()) {
@@ -1327,69 +1513,82 @@ ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemova
 	StaticObjectRemovalPayload payload;
 	payload.drawInfoCount = drawInfos.size();
 
-	const auto addRange = [&payload](const std::shared_ptr<DynamicBuffer>& buffer, const Components::ObjectDrawInfo::BufferRange& range) {
+	const auto addRange = [&payload](
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		const Components::ObjectDrawInfo::BufferRange& range,
+		StaticObjectRemovalPayload::BufferKind kind)
+	{
 		if (buffer && range.IsValid()) {
-			payload.bufferRanges.push_back(StaticObjectRemovalPayload::BufferRetireRange{ buffer, range });
+			payload.bufferRanges.push_back(StaticObjectRemovalPayload::BufferRetireRange{ buffer, range, kind });
 		}
 	};
-	const auto addRanges = [&addRange](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+	const auto addRanges = [&addRange](
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
+		StaticObjectRemovalPayload::BufferKind kind)
+	{
 		for (const auto& range : ranges) {
-			addRange(buffer, range);
+			addRange(buffer, range, kind);
 		}
 	};
-	const auto addView = [&payload](const std::shared_ptr<DynamicBuffer>& buffer, const std::shared_ptr<BufferView>& view) {
+	const auto addView = [&payload](
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::shared_ptr<BufferView>& view,
+		StaticObjectRemovalPayload::BufferKind kind)
+	{
 		if (!buffer || !view) {
 			return;
 		}
 		payload.bufferRanges.push_back(StaticObjectRemovalPayload::BufferRetireRange{
 			buffer,
-			Components::ObjectDrawInfo::BufferRange{ view->GetOffset(), view->GetSize(), 1, view->GetSize() }
+			Components::ObjectDrawInfo::BufferRange{ view->GetOffset(), view->GetSize(), 1, view->GetSize() },
+			kind
 		});
 	};
 
 	for (const auto& drawInfo : drawInfos) {
 		if (!drawInfo.ownedPerObjectCBPages.empty()) {
-			addRanges(m_perObjectBuffers, drawInfo.ownedPerObjectCBPages);
+			addRanges(m_perObjectBuffers, drawInfo.ownedPerObjectCBPages, StaticObjectRemovalPayload::BufferKind::PerObject);
 		} else if (!drawInfo.perObjectCBViews.empty()) {
 			for (const auto& view : drawInfo.perObjectCBViews) {
-				addView(m_perObjectBuffers, view);
+				addView(m_perObjectBuffers, view, StaticObjectRemovalPayload::BufferKind::PerObject);
 			}
 		} else if (drawInfo.perObjectCBView) {
-			addView(m_perObjectBuffers, drawInfo.perObjectCBView);
+			addView(m_perObjectBuffers, drawInfo.perObjectCBView, StaticObjectRemovalPayload::BufferKind::PerObject);
 		} else {
-			addRange(m_perObjectBuffers, drawInfo.perObjectCBRange);
+			addRange(m_perObjectBuffers, drawInfo.perObjectCBRange, StaticObjectRemovalPayload::BufferKind::PerObject);
 		}
 
 		if (!drawInfo.ownedPerInstanceTransformPages.empty()) {
-			addRanges(m_perInstanceTransformBuffers, drawInfo.ownedPerInstanceTransformPages);
+			addRanges(m_perInstanceTransformBuffers, drawInfo.ownedPerInstanceTransformPages, StaticObjectRemovalPayload::BufferKind::InstanceTransform);
 		} else if (!drawInfo.perInstanceTransformViews.empty()) {
 			for (const auto& view : drawInfo.perInstanceTransformViews) {
-				addView(m_perInstanceTransformBuffers, view);
+				addView(m_perInstanceTransformBuffers, view, StaticObjectRemovalPayload::BufferKind::InstanceTransform);
 			}
 		} else {
-			addRange(m_perInstanceTransformBuffers, drawInfo.perInstanceTransformRange);
+			addRange(m_perInstanceTransformBuffers, drawInfo.perInstanceTransformRange, StaticObjectRemovalPayload::BufferKind::InstanceTransform);
 		}
 
 		if (!drawInfo.ownedInstanceDrawRecordPages.empty()) {
-			addRanges(m_instanceDrawRecordBuffers, drawInfo.ownedInstanceDrawRecordPages);
+			addRanges(m_instanceDrawRecordBuffers, drawInfo.ownedInstanceDrawRecordPages, StaticObjectRemovalPayload::BufferKind::InstanceDrawRecord);
 		} else if (!drawInfo.drawInfo.views.empty()) {
 			for (const auto& view : drawInfo.drawInfo.views) {
-				addView(m_instanceDrawRecordBuffers, view);
+				addView(m_instanceDrawRecordBuffers, view, StaticObjectRemovalPayload::BufferKind::InstanceDrawRecord);
 			}
 		} else {
-			addRange(m_instanceDrawRecordBuffers, drawInfo.instanceDrawRecordRange);
+			addRange(m_instanceDrawRecordBuffers, drawInfo.instanceDrawRecordRange, StaticObjectRemovalPayload::BufferKind::InstanceDrawRecord);
 		}
 
 		if (!drawInfo.ownedNormalMatrixPages.empty()) {
-			addRanges(m_normalMatrixBuffer, drawInfo.ownedNormalMatrixPages);
+			addRanges(m_normalMatrixBuffer, drawInfo.ownedNormalMatrixPages, StaticObjectRemovalPayload::BufferKind::NormalMatrix);
 		} else if (!drawInfo.normalMatrixViews.empty()) {
 			for (const auto& view : drawInfo.normalMatrixViews) {
-				addView(m_normalMatrixBuffer, view);
+				addView(m_normalMatrixBuffer, view, StaticObjectRemovalPayload::BufferKind::NormalMatrix);
 			}
 		} else if (drawInfo.normalMatrixView) {
-			addView(m_normalMatrixBuffer, drawInfo.normalMatrixView);
+			addView(m_normalMatrixBuffer, drawInfo.normalMatrixView, StaticObjectRemovalPayload::BufferKind::NormalMatrix);
 		} else {
-			addRange(m_normalMatrixBuffer, drawInfo.normalMatrixRange);
+			addRange(m_normalMatrixBuffer, drawInfo.normalMatrixRange, StaticObjectRemovalPayload::BufferKind::NormalMatrix);
 		}
 
 		if (!drawInfo.activeDrawSetRemovals.empty()) {
@@ -1481,10 +1680,27 @@ void ObjectManager::RemoveStaticObjectsBulk(
 		m_stats.bulkRemoveObjects += payload.drawInfoCount;
 	}
 
-	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetRemoves;
+	std::unordered_map<DrawWorkloadKey, std::size_t, DrawWorkloadKey::Hasher> activeDrawSetRemoveCounts;
+	std::vector<DeferredBufferRangeRetire> deferredRetires;
+	std::vector<std::uint32_t> tombstoneDrawRecordIndices;
 	std::uint64_t pageDeallocUs = 0;
 	std::uint64_t collectUs = 0;
-	const auto retireOrDeallocateRange = [this, &options, &pageDeallocUs](
+	std::size_t totalBufferRanges = 0;
+	std::size_t skippedInstanceDrawRecordRanges = 0;
+	std::size_t totalDrawRecordIndices = 0;
+	for (const auto& payload : payloads) {
+		totalBufferRanges += payload.bufferRanges.size();
+		totalDrawRecordIndices += payload.drawRecordIndices.size();
+	}
+	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.Payloads", static_cast<int64_t>(payloads.size()));
+	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.BufferRanges", static_cast<int64_t>(totalBufferRanges));
+	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.DrawRecordIndices", static_cast<int64_t>(totalDrawRecordIndices));
+	if (options.deferBufferRangeRetirement) {
+		deferredRetires.reserve(totalBufferRanges);
+	}
+	tombstoneDrawRecordIndices.reserve(totalDrawRecordIndices);
+
+	const auto retireOrDeallocateRange = [this, &options, &pageDeallocUs, &deferredRetires](
 		const std::shared_ptr<DynamicBuffer>& buffer,
 		std::uint64_t offset,
 		std::uint64_t size)
@@ -1493,7 +1709,12 @@ void ObjectManager::RemoveStaticObjectsBulk(
 			return;
 		}
 		if (options.deferBufferRangeRetirement) {
-			EnqueueDeferredBufferRangeRetire(buffer, offset, size, options.retireFrame);
+			deferredRetires.push_back(DeferredBufferRangeRetire{
+				buffer,
+				offset,
+				size,
+				options.retireFrame
+			});
 			return;
 		}
 		const auto begin = std::chrono::steady_clock::now();
@@ -1538,53 +1759,77 @@ void ObjectManager::RemoveStaticObjectsBulk(
 		ZoneScopedN("ObjectManager::RemoveObjectsBulk::CollectRetiresAndActiveRemovals");
 		for (const auto& payload : payloads) {
 			for (const auto& retireRange : payload.bufferRanges) {
+				if (!options.retireInstanceDrawRecordRanges &&
+					retireRange.kind == StaticObjectRemovalPayload::BufferKind::InstanceDrawRecord) {
+					++skippedInstanceDrawRecordRanges;
+					continue;
+				}
 				if (retireRange.range.IsValid()) {
 					retireOrDeallocateRange(retireRange.buffer, retireRange.range.offset, retireRange.range.size);
 				}
 			}
 			const auto collectBegin = std::chrono::steady_clock::now();
 			for (const auto& bucket : payload.activeDrawSetRemovals) {
-				auto& indices = activeDrawSetRemoves[bucket.workloadKey];
-				indices.insert(indices.end(), bucket.indices.begin(), bucket.indices.end());
+				activeDrawSetRemoveCounts[bucket.workloadKey] += bucket.indices.size();
 			}
 			collectUs += static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
-			for (const auto drawRecordIndex : payload.drawRecordIndices) {
-				TombstoneDrawRecord(drawRecordIndex);
-			}
+			tombstoneDrawRecordIndices.insert(
+				tombstoneDrawRecordIndices.end(),
+				payload.drawRecordIndices.begin(),
+				payload.drawRecordIndices.end());
 		}
+	}
+	if (!deferredRetires.empty()) {
+		ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk::EnqueueDeferredRetiresBatch");
+		EnqueueDeferredBufferRangeRetires(std::move(deferredRetires));
+	}
+	TracyPlot(
+		"ObjectManager.RemoveStaticObjectsBulk.SkippedInstanceDrawRecordRetireRanges",
+		static_cast<int64_t>(skippedInstanceDrawRecordRanges));
+	if (!tombstoneDrawRecordIndices.empty()) {
+		ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk::TombstoneDrawRecordsBatch");
+		ZoneValue(tombstoneDrawRecordIndices.size());
+		TombstoneDrawRecords(tombstoneDrawRecordIndices);
 	}
 
 	m_stats.bulkRemovePageDeallocUs += pageDeallocUs;
 	m_stats.bulkRemoveCollectUs += collectUs;
-	TracyPlot("ObjectManager.RemoveObjectsBulk.ActiveBuckets", static_cast<int64_t>(activeDrawSetRemoves.size()));
+	TracyPlot("ObjectManager.RemoveObjectsBulk.ActiveBuckets", static_cast<int64_t>(activeDrawSetRemoveCounts.size()));
 
-	for (const auto& [workloadKey, indices] : activeDrawSetRemoves) {
-		if (indices.empty()) {
+	std::size_t activeRemoveIndexCount = 0;
+	for (const auto& [workloadKey, removeCount] : activeDrawSetRemoveCounts) {
+		if (removeCount == 0) {
 			continue;
 		}
+		activeRemoveIndexCount += removeCount;
 		auto activeDrawSetIt = m_activeDrawSetIndices.find(workloadKey);
 		if (activeDrawSetIt == m_activeDrawSetIndices.end() || !activeDrawSetIt->second) {
 			spdlog::warn(
 				"ObjectManager::RemoveObjectsBulk: missing active draw set while removing {} indices flags={} phase={} clodOnly={}",
-				indices.size(),
+				removeCount,
 				static_cast<std::uint64_t>(workloadKey.compileFlags),
 				workloadKey.renderPhase.hash,
 				workloadKey.clodOnly);
 			continue;
 		}
 		ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk::ActiveDrawSetTombstone");
-		ZoneValue(indices.size());
+		ZoneValue(removeCount);
 		const auto activeRemoveBegin = std::chrono::steady_clock::now();
 		const auto currentLive = activeDrawSetIt->second->LiveSize();
-		activeDrawSetIt->second->SetLiveSize(currentLive > indices.size() ? currentLive - indices.size() : 0u);
+		activeDrawSetIt->second->SetLiveSize(currentLive > removeCount ? currentLive - removeCount : 0u);
+		activeDrawSetIt->second->AddActiveTombstoneEstimate(removeCount);
+		TracyPlot("ObjectManager.RemoveStaticObjectsBulk.ActiveSetSize", static_cast<int64_t>(activeDrawSetIt->second->Size()));
+		TracyPlot("ObjectManager.RemoveStaticObjectsBulk.ActiveSetLiveSize", static_cast<int64_t>(activeDrawSetIt->second->LiveSize()));
+		TracyPlot("ObjectManager.RemoveStaticObjectsBulk.ActiveSetTombstoneEstimate", static_cast<int64_t>(activeDrawSetIt->second->ActiveTombstoneEstimate()));
 		MaybeQueueActiveDrawSetCompaction(workloadKey, activeDrawSetIt->second);
 		const auto activeRemoveEnd = std::chrono::steady_clock::now();
 		m_stats.activeDrawSetRemoveCalls += 1;
-		m_stats.activeDrawSetRemoveIndices += indices.size();
+		m_stats.activeDrawSetRemoveIndices += removeCount;
 		m_stats.activeDrawSetRemoveUs += static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(activeRemoveEnd - activeRemoveBegin).count());
 	}
+	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.ActiveRemoveIndices", static_cast<int64_t>(activeRemoveIndexCount));
 
 	m_stats.bulkRemoveUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - removeBegin).count());

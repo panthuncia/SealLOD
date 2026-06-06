@@ -159,6 +159,7 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     RasterPixelVirtualShadowPageRejected,
     RasterPixelVirtualShadowWrites,
     RasterMeshShaderSourceGroupMismatch,
+    ObjectCullRejectedStaleGeneration,
 
     Count
 };

@@ -99,6 +99,8 @@ private:
     void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
     void QueuePendingNonResidentBitsUpload();
+    void RequestStreamingStorageGpuResize(uint32_t newCapacity);
+    bool PublishPendingStreamingStorageGpuResizeLocked();
     bool IsPhysicalPageResidentForKey(uint32_t page, uint64_t key) const;
     bool IsPhysicalPagePendingForKey(uint32_t page, uint64_t key) const;
     uint32_t GetPendingMeshPageRefCount(uint32_t page, uint64_t key) const;
@@ -265,6 +267,8 @@ private:
     uint32_t m_streamingResidentGroupsCount = 0u;
     uint32_t m_streamingActiveGroupScanCount = 0u;
     uint32_t m_streamingStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
+    uint32_t m_streamingGpuStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
+    uint32_t m_pendingStreamingGpuStorageGroupCapacity = 0u;
     bool m_streamingNonResidentBitsUploadPending = false;
     bool m_streamingActiveGroupsBitsUploadPending = true;
     uint32_t m_streamingNonResidentBitsDirtyBegin = 0u;

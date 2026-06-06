@@ -121,6 +121,8 @@ void D3D12DebugCallback(
 
 namespace {
 
+constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
+
 std::string RendererExceptionStacktraceString()
 {
 #if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
@@ -260,6 +262,11 @@ bool IsCLodVisibilityTelemetryEnabledByEnvironment() {
     const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
     free(value);
     return enabled;
+}
+
+bool IsCLodVisibilityTelemetryDebugEnabled() {
+	return IsCLodVisibilityTelemetryEnabledByEnvironment() ||
+		SettingsManager::GetInstance().getSettingGetter<bool>(CLodVisibilityTelemetryDebugSettingName)();
 }
 
 bool DefaultEnableReShapeForBuild() {
@@ -1514,6 +1521,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxAgeFrames", 0u);
     settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
+    settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, true);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, false);
     settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
@@ -2255,14 +2263,26 @@ void Renderer::PostUpdate() {
 }
 
 void Renderer::MaybeRequestCLodVisibilityTelemetry() {
-    if (!currentRenderGraph || !IsCLodVisibilityTelemetryEnabledByEnvironment()) {
+    if (!currentRenderGraph) {
+        return;
+    }
+
+    if (!IsCLodVisibilityTelemetryDebugEnabled()) {
+        if (m_clodVisibilityTelemetryDebugEnabledByRenderer) {
+            SetCLodWorkGraphTelemetryEnabled(false);
+            m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
+            m_loggedCLodVisibilityTelemetryEnabled = false;
+        }
         return;
     }
 
     SetCLodWorkGraphTelemetryEnabled(true);
+    m_clodVisibilityTelemetryDebugEnabledByRenderer = true;
 
     if (!m_loggedCLodVisibilityTelemetryEnabled) {
-        spdlog::info("SARP CLOD visibility telemetry enabled.");
+        spdlog::info(
+            "SARP CLOD visibility telemetry debug enabled (setting '{}' or SARP_CLOD_VISIBILITY_TELEMETRY).",
+            CLodVisibilityTelemetryDebugSettingName);
         m_loggedCLodVisibilityTelemetryEnabled = true;
     }
 
@@ -2337,11 +2357,12 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             };
 
             spdlog::info(
-                "SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_frustum={} invalid_bounds={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} compact_tris={})",
+                "SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} compact_tris={})",
                 requestedFrame,
                 counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
                 counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
                 counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
+                counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration),
                 counter(CLodWorkGraphCounterIndex::ObjectCullRejectedFrustum),
                 counter(CLodWorkGraphCounterIndex::ObjectCullInvalidBounds),
                 counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),

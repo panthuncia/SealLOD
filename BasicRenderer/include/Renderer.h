@@ -298,6 +298,7 @@ private:
     bool m_clodTelemetryReadbackPending = false;
     bool m_clodVisibleCounterReadbackPending = false;
     bool m_loggedCLodVisibilityTelemetryEnabled = false;
+    bool m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
 
     class CoreResourceProvider : public IResourceProvider {
 	public:

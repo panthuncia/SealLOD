@@ -976,10 +976,20 @@ void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
         TracyPlot("CLodStreaming.Service.SkippedPublishLockBusy", static_cast<int64_t>(1));
         return;
     }
+
+    (void)PublishPendingStreamingStorageGpuResizeLocked();
+
     if (m_publishedActiveGroupsBitsUploadPending || m_streamingActiveGroupsBitsUploadPending) {
         std::lock_guard publishLock(m_streamingPublishMutex);
-        m_publishedActiveGroupsBits = m_streamingActiveGroupsBitsCpu;
-        m_publishedActiveGroupScanCount = m_streamingActiveGroupScanCount;
+        const uint32_t publishedWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
+        m_publishedActiveGroupsBits.assign(
+            m_streamingActiveGroupsBitsCpu.begin(),
+            m_streamingActiveGroupsBitsCpu.begin() + std::min<uint32_t>(
+                publishedWordCount,
+                static_cast<uint32_t>(m_streamingActiveGroupsBitsCpu.size())));
+        m_publishedActiveGroupScanCount = std::min(
+            m_streamingActiveGroupScanCount,
+            m_streamingGpuStorageGroupCapacity);
         m_publishedActiveGroupsBitsUploadPending = true;
         m_streamingActiveGroupsBitsUploadPending = false;
     }
@@ -1778,25 +1788,36 @@ void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
         return;
     }
 
+    const uint32_t gpuWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
+    const uint32_t originalDirtyEnd = m_streamingNonResidentBitsDirtyEnd;
     const uint32_t begin = std::min<uint32_t>(
         m_streamingNonResidentBitsDirtyBegin,
-        static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size()));
+        std::min<uint32_t>(gpuWordCount, static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size())));
     const uint32_t end = std::min<uint32_t>(
         m_streamingNonResidentBitsDirtyEnd,
-        static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size()));
+        std::min<uint32_t>(gpuWordCount, static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size())));
     if (begin >= end) {
-        m_streamingNonResidentBitsUploadPending = false;
-        m_streamingNonResidentBitsDirtyBegin = 0u;
-        m_streamingNonResidentBitsDirtyEnd = 0u;
+        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
+            m_streamingNonResidentBitsUploadPending = false;
+            m_streamingNonResidentBitsDirtyBegin = 0u;
+            m_streamingNonResidentBitsDirtyEnd = 0u;
+        }
         return;
     }
 
     std::vector<uint32_t> uploadBits(
         m_streamingNonResidentBitsCpu.begin() + begin,
         m_streamingNonResidentBitsCpu.begin() + end);
-    m_streamingNonResidentBitsUploadPending = false;
-    m_streamingNonResidentBitsDirtyBegin = 0u;
-    m_streamingNonResidentBitsDirtyEnd = 0u;
+    if (originalDirtyEnd > gpuWordCount) {
+        m_streamingNonResidentBitsUploadPending = true;
+        m_streamingNonResidentBitsDirtyBegin = gpuWordCount;
+        m_streamingNonResidentBitsDirtyEnd = originalDirtyEnd;
+    }
+    else {
+        m_streamingNonResidentBitsUploadPending = false;
+        m_streamingNonResidentBitsDirtyBegin = 0u;
+        m_streamingNonResidentBitsDirtyEnd = 0u;
+    }
 
     m_uploadInstance->UploadData(
         uploadBits.data(),
@@ -3441,8 +3462,7 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     const uint32_t newCapacity = CLodRoundUpCapacity(requiredGroupCount);
     const uint32_t newWordCount = CLodBitsetWordCount(newCapacity);
 
-    m_streamingNonResidentBits->ResizeStructured(newWordCount);
-    m_streamingActiveGroupsBits->ResizeStructured(newWordCount);
+    RequestStreamingStorageGpuResize(newCapacity);
 
     m_streamingNonResidentBitsCpu.resize(newWordCount, ~0u);
     m_streamingActiveGroupsBitsCpu.resize(newWordCount, 0u);
@@ -3458,6 +3478,45 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
 
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
+}
+
+void CLodStreamingSystem::RequestStreamingStorageGpuResize(uint32_t newCapacity) {
+    if (newCapacity <= m_streamingGpuStorageGroupCapacity ||
+        newCapacity <= m_pendingStreamingGpuStorageGroupCapacity) {
+        return;
+    }
+
+    m_pendingStreamingGpuStorageGroupCapacity = newCapacity;
+    TracyPlot("CLodStreaming.Storage.PendingGpuCapacity", static_cast<int64_t>(newCapacity));
+}
+
+bool CLodStreamingSystem::PublishPendingStreamingStorageGpuResizeLocked() {
+    const uint32_t newCapacity = m_pendingStreamingGpuStorageGroupCapacity;
+    if (newCapacity == 0u || newCapacity <= m_streamingGpuStorageGroupCapacity) {
+        m_pendingStreamingGpuStorageGroupCapacity = 0u;
+        return false;
+    }
+
+    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        TracyPlot("CLodStreaming.Storage.SkippedGpuResizeOutsideMutationScope", static_cast<int64_t>(1));
+        return false;
+    }
+
+    const uint32_t newWordCount = CLodBitsetWordCount(newCapacity);
+    spdlog::info(
+        "CLod streaming: publishing deferred bitset GPU resize oldCapacity={} newCapacity={} words={}",
+        m_streamingGpuStorageGroupCapacity,
+        newCapacity,
+        newWordCount);
+
+    m_streamingNonResidentBits->ResizeStructured(newWordCount);
+    m_streamingActiveGroupsBits->ResizeStructured(newWordCount);
+    m_streamingGpuStorageGroupCapacity = newCapacity;
+    m_pendingStreamingGpuStorageGroupCapacity = 0u;
+
+    MarkStreamingNonResidentBitsDirtyAll();
+    MarkStreamingActiveGroupsBitsDirty();
+    return true;
 }
 
 void CLodStreamingSystem::RebuildStreamingDomainFromSnapshot(MeshManager* meshManager) {

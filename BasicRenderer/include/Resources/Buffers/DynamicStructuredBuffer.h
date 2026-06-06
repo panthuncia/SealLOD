@@ -4,6 +4,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <span>
 #include <rhi.h>
 #include <memory>
 #include <utility>
@@ -80,6 +81,40 @@ public:
         }
         m_data[index] = element;
         StageOrUpload(&element, sizeof(T), index * sizeof(T));
+    }
+
+    void EnsureSize(size_t elementCount, const T& fill = T{}) {
+        if (elementCount == 0u) {
+            return;
+        }
+        EnsureCapacityForIndex(elementCount - 1u);
+        if (m_data.size() < elementCount) {
+            m_data.resize(elementCount, fill);
+        }
+    }
+
+    void StageCurrentRange(size_t firstElement, size_t elementCount) {
+        if (elementCount == 0u || firstElement >= m_data.size()) {
+            return;
+        }
+        const auto clampedCount = (std::min)(elementCount, m_data.size() - firstElement);
+        StageOrUpload(
+            m_data.data() + firstElement,
+            clampedCount * sizeof(T),
+            firstElement * sizeof(T));
+    }
+
+    void StageRange(size_t firstElement, std::span<const T> elements) {
+        if (elements.empty()) {
+            return;
+        }
+        EnsureSize(firstElement + elements.size());
+        std::copy(elements.begin(), elements.end(), m_data.begin() + firstElement);
+        StageCurrentRange(firstElement, elements.size());
+    }
+
+    const std::vector<T>& Data() const {
+        return m_data;
     }
 
     void ReplaceData(std::vector<T> data) {

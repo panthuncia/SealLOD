@@ -154,6 +154,7 @@ void SortedUnsignedIntBuffer::AssignActiveSnapshot(std::vector<ActiveDrawSetEntr
     EnsureCapacityForSize(entries.size());
     m_activeEntries = std::move(entries);
     m_liveSize = m_activeEntries.size();
+    m_activeTombstoneEstimate = 0;
     ++m_mutationRevision;
     if (!m_activeEntries.empty()) {
         StageOrUpload(m_activeEntries.data(), sizeof(ActiveDrawSetEntry) * m_activeEntries.size(), 0);
