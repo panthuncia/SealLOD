@@ -2129,6 +2129,13 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("WaitForFrame", [&]() {
         ZoneScopedN("Renderer::Update::WaitForFrame");
         WaitForFrame(m_frameIndex);
+        if (m_pObjectManager) {
+            const std::uint64_t retireDelayFrames = static_cast<std::uint64_t>(m_numFramesInFlight) + 1u;
+            const std::uint64_t safeFrameNumber = m_totalFramesRendered > retireDelayFrames
+                ? m_totalFramesRendered - retireDelayFrames
+                : 0u;
+            m_pObjectManager->PublishDeferredRetireCompletedFrame(safeFrameNumber, retireDelayFrames);
+        }
         DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_frameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
         });

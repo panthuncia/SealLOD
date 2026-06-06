@@ -1,9 +1,13 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <optional>
 #include <mutex>
 #include <cstdint>
+#include <deque>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -27,6 +31,7 @@ public:
 	static std::unique_ptr<ObjectManager> CreateUnique() {
 		return std::unique_ptr<ObjectManager>(new ObjectManager());
 	}
+	~ObjectManager();
 
 	struct ObjectBuildInfo {
 		PerObjectCB perObjectCB{};
@@ -111,6 +116,17 @@ public:
 		std::uint64_t bulkReservedInstanceTransformBytes = 0;
 		std::uint64_t bulkReservedDrawRecordBytes = 0;
 		std::uint64_t bulkReservedNormalMatrixRows = 0;
+		std::uint64_t deferredRetireRangesQueued = 0;
+		std::uint64_t deferredRetireRangesRetired = 0;
+		std::uint64_t deferredRetireBytesQueued = 0;
+		std::uint64_t deferredRetireBytesRetired = 0;
+		std::uint64_t deferredRetireQueueDepth = 0;
+		std::uint64_t deferredRetireWorkerUs = 0;
+	};
+
+	struct RemoveObjectsBulkOptions {
+		bool deferBufferRangeRetirement = false;
+		std::uint64_t retireFrame = 0;
 	};
 
 	Components::ObjectDrawInfo AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances);
@@ -121,9 +137,13 @@ public:
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
 	std::vector<Components::ObjectDrawInfo> CommitPreparedStaticGroupsBulk(const PreparedStaticGroupsBulkPlan& plan);
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
-	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo*>& drawInfos);
+	void RemoveObjectsBulk(
+		const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
+		const RemoveObjectsBulkOptions& options = {});
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
+	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
+	std::uint64_t MakeDeferredRetireFrame() const;
 
 	rg::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
@@ -153,10 +173,31 @@ public:
         return GetActiveDrawSetIndices(DrawWorkloadKey { flags, renderPhase, clodOnly });
     }
     uint64_t GetDrawSetDeclarationRevision() const { return m_drawSetDeclarationRevision; }
-	Stats GetStats() const { return m_stats; }
+	Stats GetStats() const;
 
 private:
 	ObjectManager();
+
+	struct DeferredBufferRangeRetire {
+		std::shared_ptr<DynamicBuffer> buffer;
+		std::uint64_t offset = 0;
+		std::uint64_t size = 0;
+		std::uint64_t retireFrame = 0;
+	};
+
+	void StartDeferredRetireWorker();
+	void StopDeferredRetireWorker();
+	void DeferredRetireWorkerMain();
+	void EnqueueDeferredBufferRangeRetire(
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		std::uint64_t offset,
+		std::uint64_t size,
+		std::uint64_t retireFrame);
+	void EnqueueDeferredBufferRangeRetires(
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
+		std::uint64_t retireFrame);
+
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::shared_ptr<DynamicBuffer> m_perObjectBuffers; // Per object constant buffer
 	std::shared_ptr<DynamicBuffer> m_perInstanceTransformBuffers; // Per instance transform/object data
@@ -167,6 +208,19 @@ private:
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};
+	std::mutex m_deferredRetireMutex;
+	std::condition_variable m_deferredRetireCv;
+	std::deque<DeferredBufferRangeRetire> m_deferredRetireQueue;
+	std::thread m_deferredRetireWorker;
+	std::atomic_bool m_deferredRetireStop{ false };
+	std::atomic<std::uint64_t> m_deferredRetireCompletedFrame{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireDelayFrames{ 4 };
+	std::atomic<std::uint64_t> m_deferredRetireRangesQueued{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireRangesRetired{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireBytesQueued{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireBytesRetired{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireQueueDepth{ 0 };
+	std::atomic<std::uint64_t> m_deferredRetireWorkerUs{ 0 };
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety
 

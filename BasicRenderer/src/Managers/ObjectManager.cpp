@@ -136,6 +136,179 @@ ObjectManager::ObjectManager() {
 	m_resources[Builtin::InstanceDrawRecordBuffer] = m_instanceDrawRecordBuffers;
 	m_resources[Builtin::NormalMatrixBuffer] = m_normalMatrixBuffer;
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
+
+	StartDeferredRetireWorker();
+}
+
+ObjectManager::~ObjectManager() {
+	StopDeferredRetireWorker();
+}
+
+void ObjectManager::StartDeferredRetireWorker() {
+	m_deferredRetireStop.store(false, std::memory_order_release);
+	m_deferredRetireWorker = std::thread([this]() {
+		DeferredRetireWorkerMain();
+	});
+}
+
+void ObjectManager::StopDeferredRetireWorker() {
+	m_deferredRetireStop.store(true, std::memory_order_release);
+	m_deferredRetireCv.notify_all();
+	if (m_deferredRetireWorker.joinable()) {
+		m_deferredRetireWorker.join();
+	}
+
+	std::deque<DeferredBufferRangeRetire> pending;
+	{
+		std::lock_guard lock(m_deferredRetireMutex);
+		pending.swap(m_deferredRetireQueue);
+		m_deferredRetireQueueDepth.store(0, std::memory_order_relaxed);
+	}
+
+	const auto begin = std::chrono::steady_clock::now();
+	std::uint64_t retiredRanges = 0;
+	std::uint64_t retiredBytes = 0;
+	for (const auto& retire : pending) {
+		if (retire.buffer && retire.size != 0) {
+			retire.buffer->DeallocateRange(retire.offset, retire.size);
+			++retiredRanges;
+			retiredBytes += retire.size;
+		}
+	}
+	if (retiredRanges != 0) {
+		m_deferredRetireRangesRetired.fetch_add(retiredRanges, std::memory_order_relaxed);
+		m_deferredRetireBytesRetired.fetch_add(retiredBytes, std::memory_order_relaxed);
+		m_deferredRetireWorkerUs.fetch_add(static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count()),
+			std::memory_order_relaxed);
+	}
+}
+
+void ObjectManager::DeferredRetireWorkerMain() {
+	while (true) {
+		std::vector<DeferredBufferRangeRetire> ready;
+		{
+			std::unique_lock lock(m_deferredRetireMutex);
+			m_deferredRetireCv.wait(lock, [this]() {
+				if (m_deferredRetireStop.load(std::memory_order_acquire)) {
+					return true;
+				}
+				const auto completedFrame = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
+				for (const auto& retire : m_deferredRetireQueue) {
+					if (retire.retireFrame <= completedFrame) {
+						return true;
+					}
+				}
+				return false;
+			});
+
+			if (m_deferredRetireStop.load(std::memory_order_acquire)) {
+				break;
+			}
+
+			const auto completedFrame = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
+			for (auto it = m_deferredRetireQueue.begin(); it != m_deferredRetireQueue.end();) {
+				if (it->retireFrame <= completedFrame) {
+					ready.push_back(std::move(*it));
+					it = m_deferredRetireQueue.erase(it);
+				}
+				else {
+					++it;
+				}
+			}
+			m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
+		}
+
+		if (ready.empty()) {
+			continue;
+		}
+
+		const auto begin = std::chrono::steady_clock::now();
+		std::uint64_t retiredRanges = 0;
+		std::uint64_t retiredBytes = 0;
+		for (const auto& retire : ready) {
+			if (retire.buffer && retire.size != 0) {
+				retire.buffer->DeallocateRange(retire.offset, retire.size);
+				++retiredRanges;
+				retiredBytes += retire.size;
+			}
+		}
+		m_deferredRetireRangesRetired.fetch_add(retiredRanges, std::memory_order_relaxed);
+		m_deferredRetireBytesRetired.fetch_add(retiredBytes, std::memory_order_relaxed);
+		m_deferredRetireWorkerUs.fetch_add(static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count()),
+			std::memory_order_relaxed);
+	}
+}
+
+void ObjectManager::EnqueueDeferredBufferRangeRetire(
+	const std::shared_ptr<DynamicBuffer>& buffer,
+	std::uint64_t offset,
+	std::uint64_t size,
+	std::uint64_t retireFrame)
+{
+	if (!buffer || size == 0) {
+		return;
+	}
+	{
+		std::lock_guard lock(m_deferredRetireMutex);
+		m_deferredRetireQueue.push_back(DeferredBufferRangeRetire{
+			buffer,
+			offset,
+			size,
+			retireFrame
+		});
+		m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
+	}
+	m_deferredRetireRangesQueued.fetch_add(1, std::memory_order_relaxed);
+	m_deferredRetireBytesQueued.fetch_add(size, std::memory_order_relaxed);
+	m_deferredRetireCv.notify_one();
+}
+
+void ObjectManager::EnqueueDeferredBufferRangeRetires(
+	const std::shared_ptr<DynamicBuffer>& buffer,
+	const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges,
+	std::uint64_t retireFrame)
+{
+	if (!buffer) {
+		return;
+	}
+	for (const auto& range : ranges) {
+		if (range.IsValid()) {
+			EnqueueDeferredBufferRangeRetire(buffer, range.offset, range.size, retireFrame);
+		}
+	}
+}
+
+void ObjectManager::PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames) {
+	m_deferredRetireDelayFrames.store((std::max<std::uint64_t>)(1u, retireDelayFrames), std::memory_order_release);
+	auto observed = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
+	while (completedFrame > observed &&
+		!m_deferredRetireCompletedFrame.compare_exchange_weak(
+			observed,
+			completedFrame,
+			std::memory_order_acq_rel,
+			std::memory_order_acquire)) {
+	}
+	if (completedFrame >= observed) {
+		m_deferredRetireCv.notify_all();
+	}
+}
+
+std::uint64_t ObjectManager::MakeDeferredRetireFrame() const {
+	return m_deferredRetireCompletedFrame.load(std::memory_order_acquire)
+		+ m_deferredRetireDelayFrames.load(std::memory_order_acquire);
+}
+
+ObjectManager::Stats ObjectManager::GetStats() const {
+	auto stats = m_stats;
+	stats.deferredRetireRangesQueued = m_deferredRetireRangesQueued.load(std::memory_order_relaxed);
+	stats.deferredRetireRangesRetired = m_deferredRetireRangesRetired.load(std::memory_order_relaxed);
+	stats.deferredRetireBytesQueued = m_deferredRetireBytesQueued.load(std::memory_order_relaxed);
+	stats.deferredRetireBytesRetired = m_deferredRetireBytesRetired.load(std::memory_order_relaxed);
+	stats.deferredRetireQueueDepth = m_deferredRetireQueueDepth.load(std::memory_order_relaxed);
+	stats.deferredRetireWorkerUs = m_deferredRetireWorkerUs.load(std::memory_order_relaxed);
+	return stats;
 }
 
 std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndices(const DrawWorkloadKey& workloadKey, std::size_t initialCapacity) {
@@ -778,7 +951,10 @@ void ObjectManager::RemoveObject(const Components::ObjectDrawInfo* drawInfo) {
 	RemoveObjectsBulk({ drawInfo });
 }
 
-void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo*>& drawInfos) {
+void ObjectManager::RemoveObjectsBulk(
+	const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
+	const RemoveObjectsBulkOptions& options)
+{
 	if (drawInfos.empty()) {
 		return;
 	}
@@ -790,11 +966,32 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 	std::unordered_map<DrawWorkloadKey, std::vector<unsigned int>, DrawWorkloadKey::Hasher> activeDrawSetRemoves;
 	std::uint64_t pageDeallocUs = 0;
 	std::uint64_t collectUs = 0;
-	const auto deallocateOwnedRanges = [&pageDeallocUs](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+	const auto retireOrDeallocateRange = [this, &options, &pageDeallocUs](
+		const std::shared_ptr<DynamicBuffer>& buffer,
+		std::uint64_t offset,
+		std::uint64_t size)
+	{
 		if (!buffer) {
 			return;
 		}
+		if (options.deferBufferRangeRetirement) {
+			EnqueueDeferredBufferRangeRetire(buffer, offset, size, options.retireFrame);
+			return;
+		}
 		const auto begin = std::chrono::steady_clock::now();
+		buffer->DeallocateRange(offset, size);
+		pageDeallocUs += static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+	};
+	const auto retireOrDeallocateView = [&retireOrDeallocateRange](const std::shared_ptr<DynamicBuffer>& buffer, const std::shared_ptr<BufferView>& view) {
+		if (buffer && view) {
+			retireOrDeallocateRange(buffer, view->GetOffset(), view->GetSize());
+		}
+	};
+	const auto retireOrDeallocateOwnedRanges = [this, &options, &pageDeallocUs](const std::shared_ptr<DynamicBuffer>& buffer, const std::vector<Components::ObjectDrawInfo::BufferRange>& ranges) {
+		if (!buffer) {
+			return;
+		}
 		std::vector<Components::ObjectDrawInfo::BufferRange> sortedRanges;
 		sortedRanges.reserve(ranges.size());
 		for (const auto& range : ranges) {
@@ -805,6 +1002,11 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 		std::sort(sortedRanges.begin(), sortedRanges.end(), [](const auto& lhs, const auto& rhs) {
 			return lhs.offset < rhs.offset;
 		});
+		if (options.deferBufferRangeRetirement) {
+			EnqueueDeferredBufferRangeRetires(buffer, sortedRanges, options.retireFrame);
+			return;
+		}
+		const auto begin = std::chrono::steady_clock::now();
 		for (const auto& range : sortedRanges) {
 			if (range.IsValid()) {
 				buffer->DeallocateRange(range.offset, range.size);
@@ -820,24 +1022,24 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 		}
 
 	if (!drawInfo->ownedPerObjectCBPages.empty()) {
-		deallocateOwnedRanges(m_perObjectBuffers, drawInfo->ownedPerObjectCBPages);
+		retireOrDeallocateOwnedRanges(m_perObjectBuffers, drawInfo->ownedPerObjectCBPages);
 	} else if (!drawInfo->perObjectCBViews.empty()) {
 		for (const auto& view : drawInfo->perObjectCBViews) {
-			m_perObjectBuffers->Deallocate(view.get());
+			retireOrDeallocateView(m_perObjectBuffers, view);
 		}
 	} else if (drawInfo->perObjectCBView) {
-		m_perObjectBuffers->Deallocate(drawInfo->perObjectCBView.get());
+		retireOrDeallocateView(m_perObjectBuffers, drawInfo->perObjectCBView);
 	} else if (drawInfo->perObjectCBRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
-		m_perObjectBuffers->DeallocateRange(drawInfo->perObjectCBRange.offset, drawInfo->perObjectCBRange.size);
+		retireOrDeallocateRange(m_perObjectBuffers, drawInfo->perObjectCBRange.offset, drawInfo->perObjectCBRange.size);
 	}
 	if (!drawInfo->ownedPerInstanceTransformPages.empty()) {
-		deallocateOwnedRanges(m_perInstanceTransformBuffers, drawInfo->ownedPerInstanceTransformPages);
+		retireOrDeallocateOwnedRanges(m_perInstanceTransformBuffers, drawInfo->ownedPerInstanceTransformPages);
 	} else if (!drawInfo->perInstanceTransformViews.empty()) {
 		for (const auto& view : drawInfo->perInstanceTransformViews) {
-			m_perInstanceTransformBuffers->Deallocate(view.get());
+			retireOrDeallocateView(m_perInstanceTransformBuffers, view);
 		}
 	} else if (drawInfo->perInstanceTransformRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
-		m_perInstanceTransformBuffers->DeallocateRange(drawInfo->perInstanceTransformRange.offset, drawInfo->perInstanceTransformRange.size);
+		retireOrDeallocateRange(m_perInstanceTransformBuffers, drawInfo->perInstanceTransformRange.offset, drawInfo->perInstanceTransformRange.size);
 	}
 
 	auto& views = drawInfo;
@@ -861,26 +1063,26 @@ void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::Object
 	collectUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - collectBegin).count());
 	if (!drawInfo->ownedInstanceDrawRecordPages.empty()) {
-		deallocateOwnedRanges(m_instanceDrawRecordBuffers, drawInfo->ownedInstanceDrawRecordPages);
+		retireOrDeallocateOwnedRanges(m_instanceDrawRecordBuffers, drawInfo->ownedInstanceDrawRecordPages);
 	} else {
 		for (auto view : views->drawInfo.views) {
-			m_instanceDrawRecordBuffers->Deallocate(view.get());
+			retireOrDeallocateView(m_instanceDrawRecordBuffers, view);
 		}
 		if (drawInfo->instanceDrawRecordRange.IsValid() && drawInfo->drawInfo.views.empty()) {
-			m_instanceDrawRecordBuffers->DeallocateRange(drawInfo->instanceDrawRecordRange.offset, drawInfo->instanceDrawRecordRange.size);
+			retireOrDeallocateRange(m_instanceDrawRecordBuffers, drawInfo->instanceDrawRecordRange.offset, drawInfo->instanceDrawRecordRange.size);
 		}
 	}
 
 	if (!drawInfo->ownedNormalMatrixPages.empty()) {
-		deallocateOwnedRanges(m_normalMatrixBuffer, drawInfo->ownedNormalMatrixPages);
+		retireOrDeallocateOwnedRanges(m_normalMatrixBuffer, drawInfo->ownedNormalMatrixPages);
 	} else if (!drawInfo->normalMatrixViews.empty()) {
 		for (const auto& view : drawInfo->normalMatrixViews) {
-			m_normalMatrixBuffer->Deallocate(view.get());
+			retireOrDeallocateView(m_normalMatrixBuffer, view);
 		}
 	} else if (drawInfo->normalMatrixView) {
-		m_normalMatrixBuffer->Deallocate(drawInfo->normalMatrixView.get());
+		retireOrDeallocateView(m_normalMatrixBuffer, drawInfo->normalMatrixView);
 	} else if (drawInfo->normalMatrixRange.IsValid() && !drawInfo->instanceDrawRecordViews.empty()) {
-		m_normalMatrixBuffer->DeallocateRange(drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
+		retireOrDeallocateRange(m_normalMatrixBuffer, drawInfo->normalMatrixRange.offset, drawInfo->normalMatrixRange.size);
 	}
 	}
 
