@@ -240,6 +240,7 @@ public:
 		std::shared_ptr<DynamicBuffer> instanceTransformBuffer;
 		std::shared_ptr<DynamicBuffer> normalMatrixBuffer;
 		std::shared_ptr<DynamicBuffer> instanceDrawRecordBuffer;
+		std::uint64_t groupCount = 0;
 		std::uint64_t preparedBytes = 0;
 		std::uint64_t drawRecords = 0;
 	};

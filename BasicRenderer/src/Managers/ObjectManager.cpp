@@ -1367,6 +1367,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 		reservation.instanceTransformBuffer = m_perInstanceTransformBuffers;
 		reservation.normalMatrixBuffer = m_normalMatrixBuffer;
 		reservation.instanceDrawRecordBuffer = m_instanceDrawRecordBuffers;
+		reservation.groupCount = build.prepared.groups.size();
 		reservation.preparedBytes = build.preparedBytes;
 		reservation.drawRecords = build.drawRecords;
 		reservation.drawRecordGenerations.reserve(static_cast<std::size_t>(build.drawRecords));
@@ -1508,6 +1509,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 
 	transaction.materializeUs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - materializeBegin).count());
+	transaction.reservation.build = {};
 	return transaction;
 }
 
@@ -1518,7 +1520,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	result.transactionID = transaction.reservation.id;
 	result.drawRecords = transaction.reservation.drawRecords;
 	result.preparedBytes = transaction.reservation.preparedBytes;
-	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputGroups", static_cast<int64_t>(transaction.reservation.build.prepared.groups.size()));
+	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputGroups", static_cast<int64_t>(transaction.reservation.groupCount));
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputDrawRecords", static_cast<int64_t>(transaction.reservation.drawRecords));
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputBytes", static_cast<int64_t>(transaction.reservation.preparedBytes));
 
@@ -1609,7 +1611,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	}
 
 	++m_stats.staticDirectBulkAddCalls;
-	m_stats.staticDirectGroupsSubmitted += transaction.reservation.build.prepared.groups.size();
+	m_stats.staticDirectGroupsSubmitted += transaction.reservation.groupCount;
 	m_stats.staticDirectGroupsImported += result.groupsImported;
 	m_stats.staticDirectTransformRows += transaction.perObjectRows.size();
 	m_stats.staticDirectDrawRecords += transaction.drawRecordRows.size();
@@ -1647,7 +1649,7 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	for (const auto* transactionPtr : transactions) {
 		assert(transactionPtr);
 		const auto& transaction = *transactionPtr;
-		inputGroups += transaction.reservation.build.prepared.groups.size();
+		inputGroups += transaction.reservation.groupCount;
 		result.drawRecords += transaction.reservation.drawRecords;
 		result.preparedBytes += transaction.reservation.preparedBytes;
 		transformRows += transaction.perObjectRows.size();
@@ -1827,7 +1829,7 @@ void ObjectManager::CancelStaticImportTransaction(StaticImportReservation reserv
 	addRanges(reservation.normalMatrixBuffer, reservation.normalMatrixRanges);
 	addRanges(reservation.instanceDrawRecordBuffer, reservation.instanceDrawRecordRanges);
 	EnqueueDeferredBufferRangeRetires(std::move(retires));
-	TracyPlot("ObjectManager.StaticImportTransaction.CanceledGroups", static_cast<int64_t>(reservation.build.prepared.groups.size()));
+	TracyPlot("ObjectManager.StaticImportTransaction.CanceledGroups", static_cast<int64_t>(reservation.groupCount));
 }
 
 ObjectManager::StaticImportPacket ObjectManager::BuildStaticImportPacket(StaticImportPacketPlan plan) {
