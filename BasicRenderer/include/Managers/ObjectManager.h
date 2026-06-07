@@ -362,10 +362,12 @@ public:
 	void RemoveObject(const Components::ObjectDrawInfo* drawInfo);
 	void RemoveObjectsBulk(
 		const std::vector<const Components::ObjectDrawInfo*>& drawInfos,
-		const RemoveObjectsBulkOptions& options = {});
+		const RemoveObjectsBulkOptions& options);
+	void RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo *> &drawInfos);
 	void RemoveStaticObjectsBulk(
 		std::span<const StaticObjectRemovalPayload> payloads,
-		const RemoveObjectsBulkOptions& options = {});
+		const RemoveObjectsBulkOptions& options);
+	void RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);
@@ -386,6 +388,12 @@ public:
 
 	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>& GetDrawRecordVisibilityGenerationBuffer() {
 		return m_drawRecordVisibilityGenerationSidecar;
+	}
+
+	std::uint64_t GetResidentInstanceDrawRecordCount() const {
+		return m_instanceDrawRecordBuffers
+			? m_instanceDrawRecordBuffers->GetBufferSize() / sizeof(InstanceDrawRecordCB)
+			: 0u;
 	}
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;

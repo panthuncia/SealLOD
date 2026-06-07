@@ -1,5 +1,8 @@
 #include "Managers/IndirectCommandBufferManager.h"
 
+#include <algorithm>
+#include <limits>
+
 #include "Managers/Singletons/ResourceManager.h"
 #include "Resources/ResourceGroup.h"
 #include "Resources/GloballyIndexedResource.h"
@@ -7,6 +10,8 @@
 #include "Render/IndirectCommand.h"
 #include "Resources/Components.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/Buffers/SortedUnsignedIntBuffer.h"
+#include "Managers/ObjectManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 
@@ -80,9 +85,9 @@ void IndirectCommandBufferManager::CreateBuffersForView(uint64_t viewID) {
         m_indirectCommandsResourceGroup->AddResource(dyn);
         perView.buffersByWorkload[workloadKey] = { dyn, 0 };
 
-        // Set the workload count to the last known value for this workload
-        auto itCount = m_workloadToLastCount.find(workloadKey);
-        if (itCount != m_workloadToLastCount.end()) {
+        // Set the workload count to the last published value for this workload.
+        auto itCount = m_workloadToPublishedCount.find(workloadKey);
+        if (itCount != m_workloadToPublishedCount.end()) {
             perView.buffersByWorkload[workloadKey].count = itCount->second;
         }
     }
@@ -104,11 +109,19 @@ void IndirectCommandBufferManager::UnregisterBuffers(uint64_t viewID) {
 }
 
 void IndirectCommandBufferManager::UpdateBuffersForWorkload(const DrawWorkloadKey& workloadKey, unsigned int numDraws) {
-    const WorkloadCountUpdate update{ workloadKey, numDraws };
-    UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate>(&update, 1));
+    RequestWorkloadCount(workloadKey, numDraws);
 }
 
 void IndirectCommandBufferManager::UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates) {
+    RequestWorkloadCounts(updates);
+}
+
+void IndirectCommandBufferManager::RequestWorkloadCount(const DrawWorkloadKey& workloadKey, unsigned int numDraws) {
+    const WorkloadCountUpdate update{ workloadKey, numDraws };
+    RequestWorkloadCounts(std::span<const WorkloadCountUpdate>(&update, 1));
+}
+
+void IndirectCommandBufferManager::RequestWorkloadCounts(std::span<const WorkloadCountUpdate> updates) {
     if (updates.empty()) {
         return;
     }
@@ -119,34 +132,43 @@ void IndirectCommandBufferManager::UpdateBuffersForWorkloads(std::span<const Wor
         deduped[update.workloadKey] = update.count;
     }
 
-    std::vector<WorkloadCountUpdate> changed;
-    changed.reserve(deduped.size());
     for (const auto& [workloadKey, count] : deduped) {
         EnsureWorkloadRegistered(workloadKey);
-        const auto previousCount = m_workloadToLastCount[workloadKey];
-        const auto previousCapacity = m_workloadToCapacity[workloadKey];
-        const auto nextCapacity = RoundUp(count);
-        if (previousCount == count && nextCapacity <= previousCapacity) {
-            continue;
-        }
-
-        m_workloadToLastCount[workloadKey] = count;
-        if (nextCapacity > previousCapacity) {
-            m_workloadToCapacity[workloadKey] = nextCapacity;
-        }
-        changed.push_back(WorkloadCountUpdate{ workloadKey, count });
+        m_workloadToRequestedCount[workloadKey] = count;
     }
-    if (changed.empty()) {
-        return;
-    }
+}
 
+void IndirectCommandBufferManager::CommitGpuVisibleSnapshot(ObjectManager& objectManager) {
     for (auto& [viewID, perView] : m_viewIDToBuffers) {
-        for (const auto& update : changed) {
-            const auto capacity = m_workloadToCapacity[update.workloadKey];
-            auto it = perView.buffersByWorkload.find(update.workloadKey);
-            if (capacity == 0) {
+        for (auto& [workloadKey, requestedCount] : m_workloadToRequestedCount) {
+            EnsureWorkloadRegistered(workloadKey);
+            auto activeDrawSet = objectManager.TryGetActiveDrawSetIndices(workloadKey);
+            const auto logicalActiveCount = activeDrawSet
+                ? static_cast<uint64_t>(activeDrawSet->Size())
+                : 0u;
+            const auto residentActiveCount = activeDrawSet
+                ? activeDrawSet->ResidentSize()
+                : 0u;
+            const auto residentDrawRecords = objectManager.GetResidentInstanceDrawRecordCount();
+            const auto safeCount64 = (std::min<uint64_t>)(
+                (std::min<uint64_t>)(requestedCount, logicalActiveCount),
+                (std::min<uint64_t>)(residentActiveCount, residentDrawRecords));
+            const auto safeCount = static_cast<unsigned int>((std::min<uint64_t>)(
+                safeCount64,
+                std::numeric_limits<unsigned int>::max()));
+            const auto capacity = safeCount > 0u ? RoundUp(safeCount) : 0u;
+            auto it = perView.buffersByWorkload.find(workloadKey);
+
+            m_workloadToPublishedCount[workloadKey] = safeCount;
+            if (capacity > m_workloadToCapacity[workloadKey]) {
+                m_workloadToCapacity[workloadKey] = capacity;
+            }
+
+            if (capacity == 0u) {
                 if (it != perView.buffersByWorkload.end()) {
-                    it->second.count = update.count;
+                    it->second.count = 0u;
+                    it->second.activeDrawCount = 0u;
+                    it->second.activeDrawSetIndices = activeDrawSet;
                 }
                 continue;
             }
@@ -155,14 +177,18 @@ void IndirectCommandBufferManager::UpdateBuffersForWorkloads(std::span<const Wor
                 if (!it->second.buffer ||
                     !it->second.buffer->GetResource() ||
                     capacity > RoundUp(it->second.count)) {
-                    it->second.buffer->SetResource(CreateIndirectCommandBufferResource(update.workloadKey, viewID, capacity));
+                    it->second.buffer->SetResource(CreateIndirectCommandBufferResource(workloadKey, viewID, capacity));
                 }
-                it->second.count = update.count;
+                it->second.count = safeCount;
+                it->second.activeDrawCount = safeCount;
+                it->second.activeDrawSetIndices = activeDrawSet;
                 continue;
             }
 
-            auto dyn = CreateIndirectWorkloadResource(update.workloadKey, viewID, capacity);
-            perView.buffersByWorkload.emplace(update.workloadKey, IndirectWorkload{ dyn, update.count });
+            auto dyn = CreateIndirectWorkloadResource(workloadKey, viewID, capacity);
+            perView.buffersByWorkload.emplace(
+                workloadKey,
+                IndirectWorkload{ dyn, safeCount, safeCount, activeDrawSet });
             m_indirectCommandsResourceGroup->AddResource(dyn);
         }
     }
@@ -181,7 +207,7 @@ IndirectCommandBufferManager::GetBuffersForRenderPhase(uint64_t viewID, const Re
     auto const& perView = vIt->second;
 
     for (auto const& [key, wl] : perView.buffersByWorkload) {
-        if (key.renderPhase == phase && key.clodOnly == clodOnly) {
+        if (key.renderPhase == phase && key.clodOnly == clodOnly && wl.buffer && wl.count > 0u) {
             out.emplace_back(key.compileFlags, wl);
         }
     }
@@ -197,7 +223,7 @@ IndirectCommandBufferManager::GetViewIndirectBuffersForRenderPhase(uint64_t view
 
     auto const& perView = vit->second;
     for (auto const& [key, wl] : perView.buffersByWorkload) {
-        if (key.renderPhase == phase && key.clodOnly == clodOnly) {
+        if (key.renderPhase == phase && key.clodOnly == clodOnly && wl.buffer && wl.count > 0u) {
             out.push_back(IndirectBufferEntry{ viewID, key, wl });
         }
     }
@@ -210,7 +236,10 @@ void IndirectCommandBufferManager::EnsureWorkloadRegistered(const DrawWorkloadKe
     if (!m_workloadToCapacity.count(workloadKey)) {
         m_workloadToCapacity[workloadKey] = 0;
     }
-    if (!m_workloadToLastCount.count(workloadKey)) {
-        m_workloadToLastCount[workloadKey] = 0;
+    if (!m_workloadToRequestedCount.count(workloadKey)) {
+        m_workloadToRequestedCount[workloadKey] = 0;
+    }
+    if (!m_workloadToPublishedCount.count(workloadKey)) {
+        m_workloadToPublishedCount[workloadKey] = 0;
     }
 }

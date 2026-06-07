@@ -36,8 +36,10 @@ public:
         cl.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(cl, m_pso.GetResourceDescriptorSlots());
 
-        context.materialManager->GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
         auto numMaterials = context.materialManager->GetCompileFlagsSlotsUsed();
+        if (numMaterials == 0u) {
+            return {};
+        }
         // Push: UintRootConstant0 = MaterialCount SRV descriptor index, UintRootConstant1 = MaterialPixelCountBuffer UAV index
         unsigned int rc[NumMiscUintRootConstants] = {};
         rc[0] = numMaterials;

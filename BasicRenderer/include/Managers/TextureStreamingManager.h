@@ -71,7 +71,7 @@ private:
 	};
 
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
-	void UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture);
+	bool UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture);
 	void NotifyBindingChanged(TextureAsset& texture);
 	void TrackTexture(const std::shared_ptr<TextureAsset>& texture);
 	void RecordTextureDirtyReason(const char* reason);
@@ -102,5 +102,4 @@ private:
 	uint64_t m_textureDirtyReasonOther = 0;
 	uint64_t m_textureBindingRefreshCount = 0;
 	uint64_t m_textureBindingChangedWithoutOwnerCount = 0;
-	uint32_t m_textureStreamingMetadataCapacity = 1u;
 };

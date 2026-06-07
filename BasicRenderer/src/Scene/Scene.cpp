@@ -437,14 +437,21 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 
 			// Register mesh if not already present
 			const auto globalMeshBegin = std::chrono::steady_clock::now();
-			if (!globalMeshLibrary.meshes.contains(meshInstance->GetMesh()->GetGlobalID())) {
+			if (!globalMeshLibrary.meshes.contains(meshInstance->GetMesh()->GetGlobalID()) ||
+				!meshInstance->GetMesh()->GetPerMeshBufferView()) {
+				if (!m_managerInterface.GetMeshManager()->AddMesh(meshInstance->GetMesh(), useMeshletReorderedVertices)) {
+					m_renderableActivationGlobalMeshUs += ElapsedUs(globalMeshBegin);
+					continue;
+				}
 				globalMeshLibrary.meshes[meshInstance->GetMesh()->GetGlobalID()] = meshInstance->GetMesh();
 				++globalMeshLibrary.generation;
-				m_managerInterface.GetMeshManager()->AddMesh(meshInstance->GetMesh(), useMeshletReorderedVertices);
 			}
 			m_renderableActivationGlobalMeshUs += ElapsedUs(globalMeshBegin);
 			const auto meshInstanceBegin = std::chrono::steady_clock::now();
-			m_managerInterface.GetMeshManager()->AddMeshInstance(meshInstance.get(), useMeshletReorderedVertices);
+			if (!m_managerInterface.GetMeshManager()->AddMeshInstance(meshInstance.get(), useMeshletReorderedVertices)) {
+				m_renderableActivationMeshInstanceUs += ElapsedUs(meshInstanceBegin);
+				continue;
+			}
 			m_renderableActivationMeshInstanceUs += ElapsedUs(meshInstanceBegin);
 
 			// Update draw stats and indirect workload counts

@@ -17,7 +17,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-class SortedUnsignedIntBuffer : public BufferBase, public IHasMemoryMetadata {
+class SortedUnsignedIntBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
 public:
     struct ActiveDrawSetEntry {
         uint32_t drawRecordIndex = 0;
@@ -32,11 +32,16 @@ public:
         return std::shared_ptr<SortedUnsignedIntBuffer>(new SortedUnsignedIntBuffer(capacity, name, false, true));
     }
 
+    ~SortedUnsignedIntBuffer() override;
+
     // Insert an element while maintaining sorted order (deduped)
     void Insert(unsigned int element);
     void InsertMany(const std::vector<unsigned int>& elements);
     void RequestAsyncReserveCapacity(uint64_t requiredSize);
     bool PublishReadyAsyncResize(bool wait = false);
+    bool PublishPendingBackingResize(bool wait) override { return PublishReadyAsyncResize(wait); }
+    bool HasPendingBackingResize() const override { return m_pendingResizeValid; }
+    std::string GetDeferredBackingResizeDebugName() const override { return GetName(); }
     void AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries);
     void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
     std::vector<ActiveDrawSetEntry> SnapshotActiveEntries() const;
@@ -59,6 +64,19 @@ public:
 
     UINT Size() const {
         return m_activeEntryMode ? static_cast<UINT>(m_activeEntries.size()) : static_cast<UINT>(m_data.size());
+    }
+
+    uint64_t ResidentCapacity() const {
+        const auto stride = ElementStride();
+        return stride == 0u ? 0u : GetBufferSize() / stride;
+    }
+
+    uint64_t ResidentSize() const {
+        return std::min<uint64_t>(Size(), ResidentCapacity());
+    }
+
+    uint64_t ElementStride() const {
+        return m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
     }
 
     UINT LiveSize() const {
@@ -98,6 +116,7 @@ private:
         SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
         CreateBuffer(capacity);
         SetName(name);
+        RegisterDeferredBackingResizeClient(this);
     }
 
     void OnUploadPolicyBeginFrame() override {

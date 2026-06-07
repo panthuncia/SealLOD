@@ -9,6 +9,8 @@
 
 class DynamicGloballyIndexedResource;
 class ResourceGroup;
+class ObjectManager;
+class SortedUnsignedIntBuffer;
 
 struct RenderPhase; // forward
 
@@ -22,6 +24,8 @@ struct MaterialCompileFlagsHash {
 struct IndirectWorkload {
     std::shared_ptr<DynamicGloballyIndexedResource> buffer;
     unsigned int count = 0;
+    unsigned int activeDrawCount = 0;
+    std::shared_ptr<SortedUnsignedIntBuffer> activeDrawSetIndices;
 };
 
 struct IndirectBufferEntry {
@@ -61,6 +65,9 @@ public:
     // and resizes meshlet buffers (sum of all flags sizes).
     void UpdateBuffersForWorkload(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
     void UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates);
+    void RequestWorkloadCount(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
+    void RequestWorkloadCounts(std::span<const WorkloadCountUpdate> updates);
+    void CommitGpuVisibleSnapshot(ObjectManager& objectManager);
 
     // Set growth granularity
     void SetIncrementSize(unsigned int incrementSize);
@@ -94,11 +101,12 @@ private:
             DrawWorkloadKey::Hasher> buffersByWorkload;
     };
 
-    // Per-workload current capacity (rounded to increment)
+    // Per-workload published capacity (rounded to increment)
     std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToCapacity;
 
-    // Per-workload last known draw count (unrounded)
-    std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToLastCount;
+    // Per-workload requested and published draw count (unrounded)
+    std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToRequestedCount;
+    std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> m_workloadToPublishedCount;
 
     // Single group that owns all indirect command buffers (regardless of flags)
     std::shared_ptr<ResourceGroup> m_indirectCommandsResourceGroup;

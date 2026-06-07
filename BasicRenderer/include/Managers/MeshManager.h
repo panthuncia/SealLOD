@@ -90,8 +90,8 @@ public:
 		return std::unique_ptr<MeshManager>(new MeshManager());
 	}
 	~MeshManager();
-	void AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices);
-	void AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices);
+	bool AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices);
+	bool AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices);
 	void RemoveMesh(Mesh* mesh);
 	void RemoveMeshInstance(MeshInstance* mesh);
 

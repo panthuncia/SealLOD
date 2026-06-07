@@ -97,6 +97,8 @@ public:
     ManagerInterface& GetManagerInterface() { return m_managerInterface; }
     const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
+    RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
+    const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
 
 private:
 	bool m_isInitialized = false;

@@ -1,7 +1,10 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <future>
+#include <limits>
 #include <vector>
 #include <functional>
 #include <string>
@@ -14,6 +17,7 @@
 
 #include "Resources/Resource.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
+#include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
@@ -21,16 +25,20 @@
 using Microsoft::WRL::ComPtr;
 
 template<class T>
-class DynamicStructuredBuffer : public BufferBase, public IHasMemoryMetadata {
+class DynamicStructuredBuffer : public BufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
 public:
 
     static std::shared_ptr<DynamicStructuredBuffer<T>> CreateShared(UINT capacity = 64, std::string name = "", bool UAV = false) {
         return std::shared_ptr<DynamicStructuredBuffer<T>>(new DynamicStructuredBuffer<T>(capacity, name, UAV));
     }
 
+    ~DynamicStructuredBuffer() override {
+        UnregisterDeferredBackingResizeClient(this);
+    }
+
     unsigned int Add(const T& element) {
-        if (m_data.size() >= m_capacity) {
-            Resize(m_capacity * 2);
+        if (m_data.size() >= m_capacity && !TryResize(m_capacity > 0u ? m_capacity * 2u : 1u)) {
+            return InvalidIndex();
         }
         m_data.push_back(element);
 
@@ -68,27 +76,50 @@ public:
     }
 
     void Resize(uint32_t newCapacity) {
-        if (newCapacity > m_capacity) {
-            CreateBuffer(newCapacity, m_capacity);
-            m_capacity = newCapacity;
-        }
+        (void)TryResize(newCapacity);
 
     }
 
+    bool TryResize(uint32_t newCapacity) {
+        if (newCapacity <= m_capacity) {
+            return true;
+        }
+
+        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            CreateBuffer(newCapacity, m_capacity);
+            m_capacity = newCapacity;
+            return true;
+        }
+
+        RequestAsyncResize(newCapacity);
+        return false;
+    }
+
     void UpdateAt(UINT index, const T& element) {
-        EnsureCapacityForIndex(index);
+        if (!TryUpdateAt(index, element)) {
+            return;
+        }
+    }
+
+    bool TryUpdateAt(UINT index, const T& element) {
+        if (!TryEnsureCapacityForIndex(index)) {
+            return false;
+        }
         if (static_cast<size_t>(index) >= m_data.size()) {
             m_data.resize(static_cast<size_t>(index) + 1u);
         }
         m_data[index] = element;
         StageOrUpload(&element, sizeof(T), index * sizeof(T));
+        return true;
     }
 
     void EnsureSize(size_t elementCount, const T& fill = T{}) {
         if (elementCount == 0u) {
             return;
         }
-        EnsureCapacityForIndex(elementCount - 1u);
+        if (!TryEnsureCapacityForIndex(elementCount - 1u)) {
+            return;
+        }
         if (m_data.size() < elementCount) {
             m_data.resize(elementCount, fill);
         }
@@ -109,6 +140,9 @@ public:
         if (elements.empty()) {
             return;
         }
+        if (!TryEnsureCapacityForIndex(firstElement + elements.size() - 1u)) {
+            return;
+        }
         EnsureSize(firstElement + elements.size());
         std::copy(elements.begin(), elements.end(), m_data.begin() + firstElement);
         StageCurrentRange(firstElement, elements.size());
@@ -121,7 +155,10 @@ public:
     void ReplaceData(std::vector<T> data) {
         const auto elementCount = data.size();
         if (elementCount > 0u) {
-            EnsureCapacityForIndex(elementCount - 1u);
+            if (!TryEnsureCapacityForIndex(elementCount - 1u)) {
+                m_data = std::move(data);
+                return;
+            }
         }
 
         m_data = std::move(data);
@@ -134,12 +171,54 @@ public:
         return static_cast<uint32_t>(m_data.size());
     }
 
+    UINT Capacity() const {
+        return m_capacity;
+    }
+
+    UINT ResidentCapacity() const {
+        return static_cast<UINT>(GetBufferSize() / sizeof(T));
+    }
+
+    bool TryEnsureCapacityForIndex(size_t index) {
+        if (index < m_capacity) {
+            return true;
+        }
+
+        uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+        while (index >= static_cast<size_t>(newCapacity)) {
+            newCapacity *= 2u;
+        }
+
+        return TryResize(newCapacity);
+    }
+
+    bool PublishReadyAsyncResize(bool wait = false) {
+        return PublishReadyAsyncResizeInternal(wait);
+    }
+
+    bool PublishPendingBackingResize(bool wait) override {
+        return PublishReadyAsyncResize(wait);
+    }
+
+    bool HasPendingBackingResize() const override {
+        return m_pendingResizeValid;
+    }
+
+    std::string GetDeferredBackingResizeDebugName() const override {
+        return name;
+    }
+
+    static constexpr unsigned int InvalidIndex() {
+        return (std::numeric_limits<unsigned int>::max)();
+    }
+
 private:
     DynamicStructuredBuffer(UINT capacity = 64, std::string bufName = "", bool UAV = false)
         : m_capacity(capacity), m_UAV(UAV), m_needsUpdate(false) {
 		SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
 		name = bufName;
         CreateBuffer(capacity);
+        RegisterDeferredBackingResizeClient(this);
     }
 
     void OnUploadPolicyBeginFrame() override {
@@ -187,16 +266,69 @@ private:
     std::vector<EntityComponentBundle> m_metadataBundles;
 
     void EnsureCapacityForIndex(size_t index) {
-        if (index < m_capacity) {
+        (void)TryEnsureCapacityForIndex(index);
+    }
+
+    void RequestAsyncResize(uint32_t newCapacity) {
+        if (m_pendingResizeValid && m_pendingResizeCapacity >= newCapacity) {
             return;
         }
 
-        uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
-        while (index >= static_cast<size_t>(newCapacity)) {
-            newCapacity *= 2u;
+        if (m_pendingResizeValid) {
+            if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+                (void)PublishReadyAsyncResizeInternal(false);
+            }
+            if (m_pendingResizeValid) {
+                return;
+            }
         }
 
-        Resize(newCapacity);
+        const auto resourceID = GetGlobalResourceID();
+        const bool unorderedAccess = m_UAV;
+        const auto bufferName = name;
+        m_pendingResizeCapacity = newCapacity;
+        m_pendingResizeValid = true;
+        m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, newCapacity, bufferName]() {
+            spdlog::debug(
+                "DynamicStructuredBuffer '{}' id={} async resize backing create begin capacity={}",
+                bufferName,
+                resourceID,
+                newCapacity);
+            auto backing = GpuBufferBacking::CreateUnique(
+                rhi::HeapType::DeviceLocal,
+                sizeof(T) * static_cast<size_t>(newCapacity),
+                resourceID,
+                unorderedAccess);
+            spdlog::debug(
+                "DynamicStructuredBuffer '{}' id={} async resize backing create complete capacity={}",
+                bufferName,
+                resourceID,
+                newCapacity);
+            return backing;
+        });
+    }
+
+    bool PublishReadyAsyncResizeInternal(bool wait) {
+        if (!m_pendingResizeValid || !BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            return false;
+        }
+
+        if (!wait &&
+            m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return false;
+        }
+
+        auto backing = m_pendingResizeFuture.get();
+        const uint32_t newCapacity = m_pendingResizeCapacity;
+        m_pendingResizeCapacity = 0u;
+        m_pendingResizeValid = false;
+        if (!backing || newCapacity <= m_capacity) {
+            return false;
+        }
+
+        ApplyResizeBacking(std::move(backing), newCapacity, m_capacity);
+        m_capacity = newCapacity;
+        return true;
     }
 
     void SyncUploadPolicyState() {
@@ -278,6 +410,15 @@ private:
 
 
     void CreateBuffer(size_t capacity, size_t previousCapacity = 0) {
+        auto backing = GpuBufferBacking::CreateUnique(
+            rhi::HeapType::DeviceLocal,
+            sizeof(T) * capacity,
+            GetGlobalResourceID(),
+            m_UAV);
+        ApplyResizeBacking(std::move(backing), capacity, previousCapacity);
+    }
+
+    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
         const size_t replayElements = (std::min)(m_data.size(), capacity);
         if (previousCapacity != 0u) {
             spdlog::info(
@@ -288,7 +429,7 @@ private:
                 capacity);
         }
 
-		CreateAndSetBacking(rhi::HeapType::DeviceLocal, sizeof(T) * capacity, m_UAV);
+		SetBacking(std::move(backing), sizeof(T) * capacity);
         if (previousCapacity != 0u) {
             spdlog::info(
                 "DynamicStructuredBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
@@ -347,4 +488,7 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    uint32_t m_pendingResizeCapacity = 0u;
+    bool m_pendingResizeValid = false;
 };

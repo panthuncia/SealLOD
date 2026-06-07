@@ -5,9 +5,11 @@
 #include <memory>
 #include <deque>
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <mutex>
 #include <utility>
 #include <spdlog/spdlog.h>
@@ -15,6 +17,7 @@
 
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Resources/Buffers/BufferView.h"
+#include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
@@ -28,12 +31,16 @@ public:
 };
 
 template <typename T>
-class LazyDynamicStructuredBuffer : public LazyDynamicStructuredBufferBase {
+class LazyDynamicStructuredBuffer : public LazyDynamicStructuredBufferBase, public IDeferredBackingResizeClient {
 public:
 
 	static std::shared_ptr<LazyDynamicStructuredBuffer<T>> CreateShared(UINT capacity = 64, std::string name = "", uint64_t alignment = 1, bool UAV = false) {
 		return std::shared_ptr<LazyDynamicStructuredBuffer<T>>(new LazyDynamicStructuredBuffer<T>(capacity, name, alignment, UAV));
 	}
+
+    ~LazyDynamicStructuredBuffer() override {
+        UnregisterDeferredBackingResizeClient(this);
+    }
 
     std::shared_ptr<BufferView> Add() {
         auto viewedWeak = std::weak_ptr<ViewedDynamicBufferBase>(
@@ -41,19 +48,29 @@ public:
         );
 		if (!m_freeIndices.empty()) { // Reuse a free index
 			uint64_t index = m_freeIndices.front();
-			m_freeIndices.pop_front();
+            m_freeIndices.pop_front();
             return BufferView::CreateShared(viewedWeak, index * m_elementSize, m_elementSize, sizeof(T));
         }
-        m_usedCapacity++;
-		if (m_usedCapacity > m_capacity) { // Resize the buffer if necessary
-            Resize(m_capacity * 2);
+        const uint64_t requiredCapacity = m_usedCapacity + 1u;
+		if (requiredCapacity > m_capacity) { // Resize the buffer if necessary
+            uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+            while (requiredCapacity > newCapacity) {
+                newCapacity *= 2u;
+            }
+            if (!TryResize(newCapacity)) {
+                return nullptr;
+            }
         }
+        m_usedCapacity = requiredCapacity;
 		size_t index = m_usedCapacity - 1;
         return BufferView::CreateShared(viewedWeak, index * m_elementSize, m_elementSize, sizeof(T));
     }
 
 	std::shared_ptr<BufferView> Add(const T& data) {
 		auto view = Add();
+        if (!view) {
+            return nullptr;
+        }
 		UpdateView(view.get(), &data);
 		return view;
 	}
@@ -69,6 +86,21 @@ public:
         );
         views.reserve(count);
 
+        const size_t reusableCount = std::min(count, m_freeIndices.size());
+        const size_t newCount = count - reusableCount;
+        if (newCount != 0) {
+            const uint64_t requiredCapacity = m_usedCapacity + newCount;
+            if (requiredCapacity > m_capacity) {
+                uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+                while (requiredCapacity > newCapacity) {
+                    newCapacity *= 2u;
+                }
+                if (!TryResize(newCapacity)) {
+                    return views;
+                }
+            }
+        }
+
         size_t copiedFromFreeList = 0;
         while (!m_freeIndices.empty() && copiedFromFreeList < count) {
             const uint64_t index = m_freeIndices.front();
@@ -80,26 +112,19 @@ public:
             ++copiedFromFreeList;
         }
 
-        const size_t newCount = count - copiedFromFreeList;
-        if (newCount != 0) {
+        const size_t remainingNewCount = count - copiedFromFreeList;
+        if (remainingNewCount != 0) {
             const uint64_t firstIndex = m_usedCapacity;
-            const uint64_t requiredCapacity = m_usedCapacity + newCount;
-            if (requiredCapacity > m_capacity) {
-                uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
-                while (requiredCapacity > newCapacity) {
-                    newCapacity *= 2u;
-                }
-                Resize(newCapacity);
-            }
+            const uint64_t requiredCapacity = m_usedCapacity + remainingNewCount;
 
-            for (size_t i = 0; i < newCount; ++i) {
+            for (size_t i = 0; i < remainingNewCount; ++i) {
                 const uint64_t index = firstIndex + i;
                 views.push_back(BufferView::CreateShared(viewedWeak, index * m_elementSize, m_elementSize, sizeof(T)));
             }
             m_usedCapacity = requiredCapacity;
 
             if (data != nullptr) {
-                StageOrUpload(data + copiedFromFreeList, sizeof(T) * newCount, firstIndex * m_elementSize);
+                StageOrUpload(data + copiedFromFreeList, sizeof(T) * remainingNewCount, firstIndex * m_elementSize);
             }
         }
 
@@ -118,7 +143,9 @@ public:
             while (requiredCapacity > newCapacity) {
                 newCapacity *= 2u;
             }
-            Resize(newCapacity);
+            if (!TryResize(newCapacity)) {
+                return { 0, 0 };
+            }
         }
 
         m_usedCapacity = requiredCapacity;
@@ -149,7 +176,7 @@ public:
         while (requiredCapacity > newCapacity) {
             newCapacity *= 2u;
         }
-        Resize(newCapacity);
+        (void)TryResize(newCapacity);
     }
 
     void Remove(BufferView* view) {
@@ -183,10 +210,22 @@ public:
     }
 
     void Resize(uint32_t newCapacity) {
-        if (newCapacity > m_capacity) {
+        (void)TryResize(newCapacity);
+    }
+
+    bool TryResize(uint32_t newCapacity) {
+        if (newCapacity <= m_capacity) {
+            return true;
+        }
+
+        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
             CreateBuffer(newCapacity, m_capacity);
             m_capacity = newCapacity;
+            return true;
         }
+
+        RequestAsyncResize(newCapacity);
+        return false;
     }
 
     void UpdateView(BufferView* view, const void* data) {
@@ -194,13 +233,24 @@ public:
             return;
         }
         const uint64_t index = view->GetOffset() / m_elementSize;
-        EnsureCapacityForIndex(index);
+        if (!TryEnsureCapacityForIndex(index)) {
+            return;
+        }
         StageOrUpload(data, sizeof(T), view->GetOffset());
     }
 
 	void UpdateAt(uint64_t index, const T& data) {
-        EnsureCapacityForIndex(index);
+        if (!TryUpdateAt(index, data)) {
+            return;
+        }
+    }
+
+	bool TryUpdateAt(uint64_t index, const T& data) {
+        if (!TryEnsureCapacityForIndex(index)) {
+            return false;
+        }
         StageOrUpload(&data, sizeof(T), index * m_elementSize);
+        return true;
     }
 
     rg::runtime::BulkWriteHandle BeginBulkWrite() {
@@ -233,9 +283,47 @@ public:
         return m_usedCapacity;
     }
 
+    uint32_t Capacity() const {
+        return m_capacity;
+    }
+
 	size_t GetElementSize() const {
 		return m_elementSize;
 	}
+
+    bool TryEnsureCapacityForIndex(uint64_t index) {
+        if (index >= m_capacity) {
+            uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
+            while (index >= static_cast<uint64_t>(newCapacity)) {
+                newCapacity *= 2u;
+            }
+            if (!TryResize(newCapacity)) {
+                return false;
+            }
+        }
+
+        const uint64_t requiredUsedCapacity = index + 1u;
+        if (requiredUsedCapacity > m_usedCapacity) {
+            m_usedCapacity = requiredUsedCapacity;
+        }
+        return true;
+    }
+
+    bool PublishReadyAsyncResize(bool wait = false) {
+        return PublishReadyAsyncResizeInternal(wait);
+    }
+
+    bool PublishPendingBackingResize(bool wait) override {
+        return PublishReadyAsyncResize(wait);
+    }
+
+    bool HasPendingBackingResize() const override {
+        return m_pendingResizeValid;
+    }
+
+    std::string GetDeferredBackingResizeDebugName() const override {
+        return name;
+    }
 
     void OnUploadPolicyBeginFrame() override {
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
@@ -281,6 +369,7 @@ private:
 		m_elementSize = static_cast<uint32_t>(((sizeof(T) + alignment - 1) / alignment) * alignment);
         CreateBuffer(capacity);
 		SetName(name);
+        RegisterDeferredBackingResizeClient(this);
     }
     void OnSetName() override {
         SetBackingName(m_name, name);
@@ -302,18 +391,69 @@ private:
     std::vector<std::byte> m_cpuShadowData;
 
     void EnsureCapacityForIndex(uint64_t index) {
-        if (index >= m_capacity) {
-            uint32_t newCapacity = m_capacity > 0u ? m_capacity : 1u;
-            while (index >= static_cast<uint64_t>(newCapacity)) {
-                newCapacity *= 2u;
-            }
-            Resize(newCapacity);
+        (void)TryEnsureCapacityForIndex(index);
+    }
+
+    void RequestAsyncResize(uint32_t newCapacity) {
+        if (m_pendingResizeValid && m_pendingResizeCapacity >= newCapacity) {
+            return;
         }
 
-        const uint64_t requiredUsedCapacity = index + 1u;
-        if (requiredUsedCapacity > m_usedCapacity) {
-            m_usedCapacity = requiredUsedCapacity;
+        if (m_pendingResizeValid) {
+            if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
+                (void)PublishReadyAsyncResizeInternal(false);
+            }
+            if (m_pendingResizeValid) {
+                return;
+            }
         }
+
+        const auto resourceID = GetGlobalResourceID();
+        const bool unorderedAccess = m_UAV;
+        const auto bufferName = name;
+        const uint32_t elementSize = m_elementSize;
+        m_pendingResizeCapacity = newCapacity;
+        m_pendingResizeValid = true;
+        m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, newCapacity, bufferName, elementSize]() {
+            spdlog::debug(
+                "LazyDynamicStructuredBuffer '{}' id={} async resize backing create begin capacity={}",
+                bufferName,
+                resourceID,
+                newCapacity);
+            auto backing = GpuBufferBacking::CreateUnique(
+                rhi::HeapType::DeviceLocal,
+                static_cast<size_t>(elementSize) * newCapacity,
+                resourceID,
+                unorderedAccess);
+            spdlog::debug(
+                "LazyDynamicStructuredBuffer '{}' id={} async resize backing create complete capacity={}",
+                bufferName,
+                resourceID,
+                newCapacity);
+            return backing;
+        });
+    }
+
+    bool PublishReadyAsyncResizeInternal(bool wait) {
+        if (!m_pendingResizeValid || !BufferBase::IsBackingMutationAllowedOnThisThread()) {
+            return false;
+        }
+        if (!wait &&
+            m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return false;
+        }
+
+        auto backing = m_pendingResizeFuture.get();
+        const uint32_t newCapacity = m_pendingResizeCapacity;
+        m_pendingResizeCapacity = 0u;
+        m_pendingResizeValid = false;
+        if (!backing || newCapacity <= m_capacity) {
+            return false;
+        }
+
+        ApplyResizeBacking(std::move(backing), newCapacity, m_capacity);
+        m_capacity = newCapacity;
+        return true;
     }
 
     void AssignDescriptorSlots(uint32_t newCapacity)
@@ -355,7 +495,16 @@ private:
     }
 
     void CreateBuffer(uint64_t capacity, size_t previousCapacity = 0) {
-		CreateAndSetBacking(rhi::HeapType::DeviceLocal, m_elementSize * capacity, m_UAV);
+        auto backing = GpuBufferBacking::CreateUnique(
+            rhi::HeapType::DeviceLocal,
+            m_elementSize * capacity,
+            GetGlobalResourceID(),
+            m_UAV);
+		ApplyResizeBacking(std::move(backing), capacity, previousCapacity);
+    }
+
+    void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> backing, uint64_t capacity, size_t previousCapacity = 0) {
+		SetBacking(std::move(backing), m_elementSize * capacity);
         {
             std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
             SyncUploadPolicyState();
@@ -459,4 +608,7 @@ private:
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
     mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
+    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    uint32_t m_pendingResizeCapacity = 0u;
+    bool m_pendingResizeValid = false;
 };

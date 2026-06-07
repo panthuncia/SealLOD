@@ -633,8 +633,10 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
             }
 
             const auto instanceKey = reinterpret_cast<uint64_t>(meshInstance.get());
-            const bool newExternalInstance = m_externalRegisteredMeshInstances.insert(instanceKey).second;
-            if (newExternalInstance && meshInstance->HasSkin() && m_pSkeletonManager) {
+            const bool externalInstanceKnown = m_externalRegisteredMeshInstances.contains(instanceKey);
+            const bool needsExternalInstanceRegistration =
+                !externalInstanceKnown || meshInstance->GetPerMeshInstanceBufferView() == nullptr;
+            if (needsExternalInstanceRegistration && meshInstance->HasSkin() && m_pSkeletonManager) {
                 meshInstance->SetCurrentSkeletonManager(m_pSkeletonManager.get());
                 auto skinInst = meshInstance->GetSkin();
                 m_pSkeletonManager->AcquireSkinningInstance(skinInst);
@@ -642,8 +644,13 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
                 meshInstance->SyncSkinningStateFromSkeleton();
             }
 
-            if (m_externalRegisteredMeshes.insert(mesh->GetGlobalID()).second) {
-                m_pMaterialManager->IncrementMaterialUsageCount(*material);
+            const bool externalMeshKnown = m_externalRegisteredMeshes.contains(mesh->GetGlobalID());
+            const bool needsExternalMeshRegistration =
+                !externalMeshKnown || mesh->GetPerMeshBufferView() == nullptr;
+            if (needsExternalMeshRegistration) {
+                if (!externalMeshKnown) {
+                    m_pMaterialManager->IncrementMaterialUsageCount(*material);
+                }
                 const auto materialDataIndex = m_pMaterialManager->GetMaterialSlot(material->GetMaterialID());
                 mesh->SetMaterialDataIndex(materialDataIndex);
 
@@ -654,15 +661,23 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
                 const auto rasterBucketIndex = m_pMaterialManager->AcquireRasterBucket(rasterFlags);
                 mesh->SetRasterBucketIndex(rasterBucketIndex);
 
-                m_pMeshManager->AddMesh(mesh, useMeshletReorderedVertices);
+                if (!m_pMeshManager->AddMesh(mesh, useMeshletReorderedVertices)) {
+                    m_externalRegisteredMeshes.erase(mesh->GetGlobalID());
+                    continue;
+                }
+                m_externalRegisteredMeshes.insert(mesh->GetGlobalID());
 
                 ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workload) {
                     m_pIndirectCommandBufferManager->RegisterWorkload(workload);
                 });
             }
 
-            if (newExternalInstance) {
-                m_pMeshManager->AddMeshInstance(meshInstance.get(), useMeshletReorderedVertices);
+            if (needsExternalInstanceRegistration) {
+                if (m_pMeshManager->AddMeshInstance(meshInstance.get(), useMeshletReorderedVertices)) {
+                    m_externalRegisteredMeshInstances.insert(instanceKey);
+                } else {
+                    m_externalRegisteredMeshInstances.erase(instanceKey);
+                }
             }
         }
     }
@@ -2044,6 +2059,11 @@ void Renderer::Update(float elapsedSeconds) {
         RecordFrameTaskStage(stageName, br::telemetry::CpuTaskDomain::MainThread, stageStart, stageEnd);
     };
 
+    runCapturedStage("PublishDeferredBackingResizesEarly", []() {
+        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesEarly");
+        (void)PublishReadyDeferredBackingResizes(true);
+    });
+
     if (!IsSceneReadyForFrame()) {
         return;
     }
@@ -2196,9 +2216,24 @@ void Renderer::Update(float elapsedSeconds) {
     RendererUpdateHostData updateHostData;
     updateHostData.data = &updateData;
 
+    runCapturedStage("PublishDeferredBackingResizesLate", []() {
+        ZoneScopedN("Renderer::Update::PublishDeferredBackingResizesLate");
+        (void)PublishReadyDeferredBackingResizes(false);
+    });
+
     runCapturedStage("FlushUploadPolicies", [&]() {
         ZoneScopedN("Renderer::Update::FlushUploadPolicies");
         rg::runtime::FlushUploadPolicies();
+    });
+
+    runCapturedStage("CommitGpuVisibleSnapshots", [&]() {
+        ZoneScopedN("Renderer::Update::CommitGpuVisibleSnapshots");
+        if (m_pMaterialManager) {
+            m_pMaterialManager->CommitGpuVisibleSnapshot();
+        }
+        if (m_pIndirectCommandBufferManager && m_pObjectManager) {
+            m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+        }
     });
 
     UpdateExecutionContext context{};

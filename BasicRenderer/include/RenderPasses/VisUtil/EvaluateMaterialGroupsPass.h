@@ -15,6 +15,7 @@
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Resources/Buffers/PagePool.h"
+#include "Resources/Buffers/DynamicBufferBase.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
 class EvaluateMaterialGroupsPass : public ComputePass {
@@ -234,8 +235,12 @@ public:
         auto argBuf = m_materialEvalCmds->GetAPIResource();
         RefreshDescriptorIndices();
 
-		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes, avoid in-frame compile
-			unsigned int slot = ctx.materialManager->GetCompileFlagsSlot(flags);
+		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
+			unsigned int slot = 0u;
+            if (!ctx.materialManager->TryGetCompileFlagsSlot(flags, slot) ||
+                slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
+                continue;
+            }
             const MaterialCompileFlags shaderKey = GetMaterialEvalShaderKey(flags);
 			// Bind pipeline for this material compile flag set
             auto psoIter = m_psoCache.find(shaderKey);
@@ -279,6 +284,18 @@ public:
             cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, miscRootConstants);
 
             const uint64_t argOffset = static_cast<uint64_t>(slot) * stride;
+            if (auto* bufferBase = dynamic_cast<BufferBase*>(m_materialEvalCmds)) {
+                if (argOffset + stride > bufferBase->GetBufferSize()) {
+                    spdlog::error(
+                        "EvaluateMaterialGroupsPass: skipping undersized material eval args flags=0x{:X} slot={} offset={} stride={} backingBytes={}",
+                        static_cast<uint64_t>(flags),
+                        slot,
+                        argOffset,
+                        stride,
+                        bufferBase->GetBufferSize());
+                    continue;
+                }
+            }
             cl.ExecuteIndirect(
                 sig.GetHandle(),
                 argBuf.GetHandle(), argOffset,

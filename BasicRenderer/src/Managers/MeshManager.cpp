@@ -319,7 +319,13 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 	}
 }
 
-void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
+bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
+	if (!mesh) {
+		return false;
+	}
+	if (mesh->GetPerMeshBufferView() != nullptr) {
+		return true;
+	}
 
 	mesh->SetCurrentMeshManager(this);
 
@@ -342,7 +348,7 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	const bool hasData = hasDiskBackedGroupChunks && mesh->HasCLodDiskStreamingSource();
 	if (!hasData) {
 		spdlog::warn("Loading mesh with no associated geometry, skipping");
-		return; //Empty mesh? Nothing to upload.
+		return true; //Empty mesh? Nothing to upload.
 	}
 	if (mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) {
 		unsigned int skinningVertexByteSize = mesh->GetSkinningVertexSize();
@@ -353,8 +359,22 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		//meshletBoundsView = m_meshletBoundsBuffer->AddData(mesh->GetMeshletBounds().data(), mesh->GetMeshletCount() * sizeof(BoundingSphere), sizeof(BoundingSphere));
 	}
 
+	uint32_t totalPageMapEntries = 0;
+	for (const auto& group : mesh->GetCLodGroups()) {
+		const uint64_t pageEnd = static_cast<uint64_t>(group.pageMapBase) + static_cast<uint64_t>(group.pageCount);
+		if (pageEnd > static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())) {
+			spdlog::warn("CLOD mesh page-map allocation exceeds uint32_t range; skipping mesh");
+			return false;
+		}
+		totalPageMapEntries = std::max(totalPageMapEntries, static_cast<uint32_t>(pageEnd));
+	}
+
 	// Per mesh buffer
 	auto perMeshBufferView = m_perMeshBuffers->AddData(&mesh->GetPerMeshCBData(), sizeof(PerMeshCB), sizeof(PerMeshCB));
+	if (!perMeshBufferView) {
+		spdlog::error("MeshManager::AddMesh: failed to allocate logical PerMesh buffer view for mesh globalID={}", mesh->GetGlobalID());
+		return false;
+	}
 	mesh->SetPerMeshBufferView(std::move(perMeshBufferView));
 
 	// Cluster LOD hierarchy data is shared per mesh; per-instance state stores only indirection/instance IDs.
@@ -362,6 +382,10 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	auto clusterLODSegmentsView = m_clusterLODSegments->AddData(mesh->GetCLodSegments().data(), mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment), sizeof(ClusterLODGroupSegment));
 	
 	auto clusterLODNodesView = m_clusterLODNodes->AddData(mesh->GetCLodNodes().data(), mesh->GetCLodNodes().size() * sizeof(ClusterLODNode), sizeof(ClusterLODNode));
+	if (!clusterLODGroupsView || !clusterLODSegmentsView || !clusterLODNodesView) {
+		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD hierarchy views for mesh globalID={}", mesh->GetGlobalID());
+		return false;
+	}
 
 	// Create shared streaming state (once per mesh, before hierarchy CPU data is released)
 	{
@@ -400,6 +424,10 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				materializedGroupChunks.data(),
 				materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
 				sizeof(ClusterLODGroupChunk));
+			if (!sharedGroupChunksView) {
+				spdlog::error("MeshManager::AddMesh: failed to allocate logical shared group chunks view for mesh globalID={}", mesh->GetGlobalID());
+				return false;
+			}
 		}
 
 		auto sharedState = std::make_shared<CLodSharedStreamingState>();
@@ -431,17 +459,6 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			sharedState->coarsestRanges = summary.coarsestRanges;
 		}
 
-		// Compute total mesh-local page-map entries needed for this mesh.
-		uint32_t totalPageMapEntries = 0;
-		for (const auto& grp : sharedState->groups) {
-			const uint64_t pageEnd = static_cast<uint64_t>(grp.pageMapBase) + static_cast<uint64_t>(grp.pageCount);
-			if (pageEnd > static_cast<uint64_t>((std::numeric_limits<uint32_t>::max)())) {
-				spdlog::warn("CLOD mesh page-map allocation exceeds uint32_t range; skipping mesh");
-				return;
-			}
-			totalPageMapEntries = std::max(totalPageMapEntries, static_cast<uint32_t>(pageEnd));
-		}
-
 		std::unique_ptr<BufferView> hierarchyLevelInfoView = nullptr;
 		uint32_t hierarchyLevelInfoBase = 0;
 		const auto& lodNodeRanges = mesh->GetCLodLodNodeRanges();
@@ -460,6 +477,10 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				levelInfos.data(),
 				levelInfos.size() * sizeof(CLodHierarchyLevelInfo),
 				sizeof(CLodHierarchyLevelInfo));
+			if (!hierarchyLevelInfoView) {
+				spdlog::error("MeshManager::AddMesh: failed to allocate logical hierarchy level info view for mesh globalID={}", mesh->GetGlobalID());
+				return false;
+			}
 			if (hierarchyLevelInfoView != nullptr) {
 				hierarchyLevelInfoBase = static_cast<uint32_t>(hierarchyLevelInfoView->GetOffset() / sizeof(CLodHierarchyLevelInfo));
 			}
@@ -474,6 +495,10 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				initialPageMapEntries.data(),
 				totalPageMapEntries * sizeof(GroupPageMapEntry),
 				sizeof(GroupPageMapEntry));
+			if (!pageMapView) {
+				spdlog::error("MeshManager::AddMesh: failed to allocate logical page-map view for mesh globalID={}", mesh->GetGlobalID());
+				return false;
+			}
 			if (pageMapView) {
 				pageMapGlobalBase = static_cast<uint32_t>(pageMapView->GetOffset() / sizeof(GroupPageMapEntry));
 			}
@@ -493,6 +518,10 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		clodMeshMetadata.lodLevelCount = static_cast<uint32_t>(lodLevelRoots.size());
 		clodMeshMetadata.maxDepth = mesh->GetCLodMaxDepth();
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
+		if (!sharedState->ownedMeshMetadataView) {
+			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
+			return false;
+		}
 		if (sharedState->ownedMeshMetadataView != nullptr) {
 			sharedState->clodMeshMetadataIndex = static_cast<uint32_t>(sharedState->ownedMeshMetadataView->GetOffset() / sizeof(CLodMeshMetadata));
 		}
@@ -522,6 +551,7 @@ void MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	mesh->ReleaseCLodHierarchyCpuData();
 	mesh->ReleaseCLodGroupChunkMetadataCpuData();
 
+	return true;
 }
 
 void MeshManager::RemoveMesh(Mesh* mesh) {
@@ -814,11 +844,29 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 	return registrations;
 }
 
-void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices) {
+bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVertices) {
+	if (mesh == nullptr || !mesh->GetMesh()) {
+		return false;
+	}
+	if (mesh->GetPerMeshInstanceBufferView() != nullptr) {
+		return true;
+	}
+	if (!mesh->GetMesh()->GetPerMeshBufferView()) {
+		auto baseMesh = mesh->GetMesh();
+		if (!AddMesh(baseMesh, useMeshletReorderedVertices) || !baseMesh->GetPerMeshBufferView()) {
+			spdlog::warn("MeshManager::AddMeshInstance: base mesh registration unavailable for mesh instance");
+			return false;
+		}
+	}
+
 	mesh->SetCurrentMeshManager(this);
 	(void)useMeshletReorderedVertices;
 
 	auto perMeshInstanceBufferView = m_perMeshInstanceBuffers->AddData(&mesh->GetPerMeshInstanceBufferData(), sizeof(PerMeshInstanceCB), sizeof(PerMeshInstanceCB));
+	if (!perMeshInstanceBufferView) {
+		spdlog::error("MeshManager::AddMeshInstance: failed to allocate logical per-mesh-instance buffer view");
+		return false;
+	}
 	mesh->SetBufferViewUsingBaseMesh(std::move(perMeshInstanceBufferView));
 
 	uint32_t bitsToAllocate = mesh->GetMesh()->GetCLodMeshletCount();
@@ -858,6 +906,10 @@ void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 	clodOffsets.clodMeshMetadataIndex = (sharedState != nullptr) ? sharedState->clodMeshMetadataIndex : 0u;
 	//clodOffsets.rootGroup = mesh->GetMesh()->GetCLodRootGroup();
 	auto clodOffsetsView = m_perMeshInstanceClodOffsets->AddData(&clodOffsets, sizeof(MeshInstanceClodOffsets), sizeof(MeshInstanceClodOffsets)); // Indexable by mesh instance
+	if (!clodOffsetsView) {
+		spdlog::error("MeshManager::AddMeshInstance: failed to allocate logical CLOD offsets view");
+		return false;
+	}
 
 	mesh->SetCLodBufferViews(std::move(clodOffsetsView));
 
@@ -875,6 +927,7 @@ void MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 			PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
 		}
 	}
+	return true;
 }
 
 void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
@@ -2386,6 +2439,9 @@ void MeshManager::GetCLodRayTracingResidencySnapshot(CLodRayTracingResidencySnap
 }
 
 void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<BufferView>& view, PerMeshCB& data) {
+	if (!view || !view->GetBuffer()) {
+		return;
+	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 
@@ -2401,6 +2457,9 @@ void MeshManager::ReleasePerMeshOverrideBuffer(std::unique_ptr<BufferView>& view
 }
 
 void MeshManager::UpdatePerMeshInstanceBuffer(std::unique_ptr<BufferView>& view, PerMeshInstanceCB& data) {
+	if (!view || !view->GetBuffer()) {
+		return;
+	}
 	view->GetBuffer()->UpdateView(view.get(), &data);
 }
 

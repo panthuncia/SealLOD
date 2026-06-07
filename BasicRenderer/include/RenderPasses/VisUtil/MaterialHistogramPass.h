@@ -114,7 +114,12 @@ public:
         miscRootConstants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClusterBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = m_reyesDiceQueueBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_PATCH_INDEX_BASE] = m_patchVisibilityIndexBase;
-        miscRootConstants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = ctx.materialManager->GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+        unsigned int voxelMaterialBin = 0u;
+        if (!ctx.materialManager->TryGetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel, voxelMaterialBin) ||
+            voxelMaterialBin >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
+            return {};
+        }
+        miscRootConstants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = voxelMaterialBin;
         cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, miscRootConstants);
 
         const uint32_t groupSizeX = 8, groupSizeY = 8;

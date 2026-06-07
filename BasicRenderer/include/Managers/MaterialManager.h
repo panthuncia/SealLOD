@@ -25,6 +25,7 @@ public:
 		return std::unique_ptr<MaterialManager>(new MaterialManager());
 	}
 	unsigned int GetCompileFlagsSlot(MaterialCompileFlags flags);
+	bool TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const;
 	unsigned int GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data = std::nullopt);
 	unsigned int AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count = 1u);
 	void ReleaseRasterBucket(MaterialRasterFlags rasterFlags);
@@ -49,9 +50,10 @@ public:
 	std::vector<ResourceIdentifier> GetSupportedResolverKeys() override;
 	std::shared_ptr<IResourceResolver> ProvideResolver(ResourceIdentifier const& key) override;
 
-	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_activeCompileFlagsSlots; }
-	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_activeCompileFlags; }
-	unsigned int GetCompileFlagsSlotsUsed() const { return m_compileFlagsSlotsUsed; }
+	void CommitGpuVisibleSnapshot();
+	const std::vector<unsigned int>& GetActiveCompileFlagsSlots() const { return m_publishedActiveCompileFlagsSlots; }
+	const std::vector<MaterialCompileFlags>& GetActiveCompileFlags() const { return m_publishedActiveCompileFlags; }
+	unsigned int GetCompileFlagsSlotsUsed() const { return m_publishedCompileFlagsSlotsUsed; }
 
 	unsigned int GetRasterBucketCount() const { return m_rasterBucketsUsed; }
 	unsigned int GetRasterBucketForFlags(MaterialRasterFlags rasterFlags) const {
@@ -77,6 +79,7 @@ private:
 	void TrackMaterialTextureAssets(const Material& material, int delta, TextureFactory* textureFactory = nullptr);
 	void FlushDirtyMaterial(Material& material, TextureFactory* textureFactory = nullptr);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
+	void EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots);
 	std::vector<std::shared_ptr<Resource>> CollectActiveMaterialTextureResources() const;
 
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
@@ -87,13 +90,16 @@ private:
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map <MaterialCompileFlags, unsigned int> m_compileFlagsSlotMapping;
-	std::atomic<unsigned int> m_nextCompileFlagsSlot;
+	std::atomic<unsigned int> m_nextCompileFlagsSlot{ 1 };
 	std::vector<unsigned int> m_freeCompileFlagsSlots;
 	std::vector<unsigned int> m_compileFlagsUsageCounts = { 0 };
 	std::vector<unsigned int> m_activeCompileFlagsSlots;
 	std::vector<MaterialCompileFlags> m_activeCompileFlags;
+	std::vector<unsigned int> m_publishedActiveCompileFlagsSlots;
+	std::vector<MaterialCompileFlags> m_publishedActiveCompileFlags;
 	//std::mutex m_compileFlagsSlotMappingMutex;
 	unsigned int m_compileFlagsSlotsUsed = 1;
+	unsigned int m_publishedCompileFlagsSlotsUsed = 1;
 
 	unsigned int m_materialSlotsUsed = 0;
 	std::vector<unsigned int> m_freeMaterialSlots;

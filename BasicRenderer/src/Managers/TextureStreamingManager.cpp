@@ -54,11 +54,11 @@ namespace {
 TextureStreamingManager::TextureStreamingManager()
 {
 	m_textureStreamingMetadataBuffer = DynamicStructuredBuffer<TextureStreamingGPUInfo>::CreateShared(
-		m_textureStreamingMetadataCapacity,
+		1u,
 		"Builtin::Material::TextureStreamingMetadataBuffer",
 		true);
 	m_textureStreamingFeedbackBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(
-		m_textureStreamingMetadataCapacity,
+		1u,
 		"Builtin::Material::TextureStreamingFeedbackBuffer",
 		true);
 	rg::memory::SetResourceUsageHint(*m_textureStreamingMetadataBuffer, "Material texture streaming buffers");
@@ -303,9 +303,7 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 	}
 
 	for (const uint32_t streamingTextureID : m_activeTextureStreamingFeedbackIDs) {
-		if (streamingTextureID < m_textureStreamingMetadataCapacity) {
-			m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
-		}
+		(void)m_textureStreamingFeedbackBuffer->TryUpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
 	}
 }
 
@@ -456,43 +454,44 @@ void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<Te
 		return;
 	}
 
-	UpdateTextureStreamingMetadata(texture);
+	if (!UpdateTextureStreamingMetadata(texture)) {
+		if (m_dirtyTextureStreamingIDSet.insert(streamingTextureID).second) {
+			m_dirtyTextureStreamingIDs.push_back(streamingTextureID);
+		}
+		return;
+	}
 	m_textureStreamingMetadataRevisions[streamingTextureID] = revision;
 }
 
-void TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture)
+bool TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture)
 {
 	ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata");
 	if (!texture) {
-		return;
+		return false;
 	}
 
 	const uint32_t streamingTextureID = texture->GetStreamingTextureID();
 	if (streamingTextureID == 0u) {
-		return;
+		return false;
 	}
 	ZoneValue(streamingTextureID);
 
-	if (streamingTextureID >= m_textureStreamingMetadataCapacity) {
-		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ResizeBuffers");
-		uint32_t newCapacity = m_textureStreamingMetadataCapacity;
-		while (streamingTextureID >= newCapacity) {
-			newCapacity *= 2u;
-		}
-		TracyPlot("TextureStreamingManager.MetadataCapacityBeforeResize", static_cast<int64_t>(m_textureStreamingMetadataCapacity));
-		TracyPlot("TextureStreamingManager.MetadataCapacityAfterResize", static_cast<int64_t>(newCapacity));
-		m_textureStreamingMetadataBuffer->Resize(newCapacity);
-		m_textureStreamingFeedbackBuffer->Resize(newCapacity);
-		m_textureStreamingMetadataCapacity = newCapacity;
+	if (!m_textureStreamingMetadataBuffer->TryEnsureCapacityForIndex(streamingTextureID) ||
+		!m_textureStreamingFeedbackBuffer->TryEnsureCapacityForIndex(streamingTextureID)) {
+		return false;
 	}
 
 	{
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::UploadMetadata");
-		m_textureStreamingMetadataBuffer->UpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture));
+		if (!m_textureStreamingMetadataBuffer->TryUpdateAt(streamingTextureID, BuildTextureStreamingGPUInfo(*texture))) {
+			return false;
+		}
 	}
 	{
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ResetFeedback");
-		m_textureStreamingFeedbackBuffer->UpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused);
+		if (!m_textureStreamingFeedbackBuffer->TryUpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused)) {
+			return false;
+		}
 	}
 	if (auto image = texture->ImagePtr()) {
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::TrackImageResource");
@@ -506,11 +505,13 @@ void TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ActivateFeedbackID");
 		m_activeTextureStreamingFeedbackIDs.push_back(streamingTextureID);
 	}
+	return true;
 }
 
 void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, TextureFactory& textureFactory)
 {
 	const auto updateStart = std::chrono::steady_clock::now();
+
 	const auto feedbackStart = std::chrono::steady_clock::now();
 	BeginTextureStreamingFeedbackFrame(frameIndex);
 	const auto feedbackEnd = std::chrono::steady_clock::now();
@@ -667,7 +668,9 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 			? previousUploadedRevision->second
 			: std::numeric_limits<uint64_t>::max();
 		FlushDirtyTextureMetadata(texture);
-		if (m_textureStreamingMetadataRevisions[streamingTextureID] != previousRevision) {
+		const auto currentUploadedRevision = m_textureStreamingMetadataRevisions.find(streamingTextureID);
+		if (currentUploadedRevision != m_textureStreamingMetadataRevisions.end() &&
+			currentUploadedRevision->second != previousRevision) {
 			++dirtyTextureMetadataUpdated;
 		}
 	}

@@ -912,6 +912,13 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 					continue;
 				}
 				auto& mesh = meshInstance->GetMesh();
+				if (meshInstance->GetPerMeshInstanceBufferView() == nullptr) {
+					spdlog::warn(
+						"ObjectManager::AddObjectsBulk: skipping mesh instance with no per-mesh-instance buffer view objectIndex={} meshInstanceIndex={}",
+						objectIndex,
+						meshInstanceIndex);
+					continue;
+				}
 				const uint32_t perMeshInstanceBufferIndex = static_cast<uint32_t>(meshInstance->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
 				if (transformIndex == 0) {
 					meshInstance->SetPerObjectBufferIndex(meshPerObjectIndex);
@@ -1142,12 +1149,29 @@ void ObjectManager::RequestStaticImportTransactionResources(const StaticImportBu
 }
 
 ObjectManager::StaticImportResourceProbe ObjectManager::CreateStaticImportResourceProbe() const {
-	return StaticImportResourceProbe{
-		.normalMatrix = m_normalMatrixBuffer->SnapshotAllocationProbe(),
-		.perObject = m_perObjectBuffers->SnapshotAllocationProbe(),
-		.instanceTransform = m_perInstanceTransformBuffers->SnapshotAllocationProbe(),
-		.instanceDrawRecord = m_instanceDrawRecordBuffers->SnapshotAllocationProbe()
-	};
+	ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe");
+	StaticImportResourceProbe probe;
+	{
+		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotNormalMatrix");
+		probe.normalMatrix = m_normalMatrixBuffer->SnapshotAllocationProbe();
+		TracyPlot("ObjectManager.StaticImportResourceProbe.NormalMatrixFreeBlocks", static_cast<int64_t>(probe.normalMatrix.freeBlocks.size()));
+	}
+	{
+		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotPerObject");
+		probe.perObject = m_perObjectBuffers->SnapshotAllocationProbe();
+		TracyPlot("ObjectManager.StaticImportResourceProbe.PerObjectFreeBlocks", static_cast<int64_t>(probe.perObject.freeBlocks.size()));
+	}
+	{
+		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceTransform");
+		probe.instanceTransform = m_perInstanceTransformBuffers->SnapshotAllocationProbe();
+		TracyPlot("ObjectManager.StaticImportResourceProbe.InstanceTransformFreeBlocks", static_cast<int64_t>(probe.instanceTransform.freeBlocks.size()));
+	}
+	{
+		ZoneScopedN("ObjectManager::CreateStaticImportResourceProbe::SnapshotInstanceDrawRecord");
+		probe.instanceDrawRecord = m_instanceDrawRecordBuffers->SnapshotAllocationProbe();
+		TracyPlot("ObjectManager.StaticImportResourceProbe.InstanceDrawRecordFreeBlocks", static_cast<int64_t>(probe.instanceDrawRecord.freeBlocks.size()));
+	}
+	return probe;
 }
 
 ObjectManager::StaticImportResourceProbeStatus ObjectManager::ProbeStaticImportTransactionResources(
@@ -2483,6 +2507,11 @@ void ObjectManager::RemoveObjectsBulk(
 	RemoveStaticObjectsBulk(payloads, options);
 }
 
+
+void ObjectManager::RemoveObjectsBulk(const std::vector<const Components::ObjectDrawInfo *> &drawInfos) {
+	RemoveObjectsBulk(drawInfos, {});
+}
+
 void ObjectManager::RemoveStaticObjectsBulk(
 	std::span<const StaticObjectRemovalPayload> payloads,
 	const RemoveObjectsBulkOptions& options)
@@ -2651,6 +2680,10 @@ void ObjectManager::RemoveStaticObjectsBulk(
 
 	m_stats.bulkRemoveUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - removeBegin).count());
+}
+
+void ObjectManager::RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads) {
+	RemoveStaticObjectsBulk(payloads, {});
 }
 
 void ObjectManager::UpdatePerObjectBuffer(BufferView* view, PerObjectCB& data) {

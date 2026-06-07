@@ -564,7 +564,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
 				m_renderPhase,
 				m_clodOnlyWorkloads);
 			for (auto& wl : workloads) {
-				const auto activeDrawSetIndices = context.objectManager->TryGetActiveDrawSetIndices(wl.key);
+				const auto activeDrawSetIndices = wl.workload.activeDrawSetIndices;
 				if (!activeDrawSetIndices) {
 					spdlog::warn(
 						"HierarchicalCullingPass: skipping stale workload without active draw set indices flags={} phase={} clodOnly={} count={}",
@@ -574,7 +574,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
 						wl.workload.count);
 					continue;
 				}
-				const auto count = activeDrawSetIndices->Size();
+				const auto count = wl.workload.activeDrawCount;
 				if (count == 0) {
 					continue;
 				}

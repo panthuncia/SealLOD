@@ -21,7 +21,7 @@
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
-class DynamicBuffer : public ViewedDynamicBufferBase, public IHasMemoryMetadata {
+class DynamicBuffer : public ViewedDynamicBufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
 public:
     enum class ReadyResizePublishMode : std::uint8_t {
         PublishIfReady,
@@ -41,17 +41,23 @@ public:
     };
 
     struct AllocationProbe {
-        std::set<std::pair<size_t, size_t>> freeBlocks;
+        std::vector<std::pair<size_t, size_t>> freeBlocks;
     };
 
     static std::shared_ptr<DynamicBuffer> CreateShared(size_t elementSize, size_t capacity = 64, std::string name = "", bool byteAddress = false, bool UAV = false) {
         return std::shared_ptr<DynamicBuffer>(new DynamicBuffer(byteAddress, elementSize, capacity, name, UAV));
     }
 
+    ~DynamicBuffer() override;
+
     std::unique_ptr<BufferView> Allocate(size_t size, size_t elementSize);
     void ReserveBytes(size_t size);
     void RequestAsyncReserveBytes(size_t size);
     bool PublishReadyAsyncResize(bool wait = false);
+    bool CanAllocateBytes(size_t size) const;
+    bool PublishPendingBackingResize(bool wait) override { return PublishReadyAsyncResize(wait); }
+    bool HasPendingBackingResize() const override;
+    std::string GetDeferredBackingResizeDebugName() const override { return m_name; }
     void Deallocate(const BufferView* view);
     void DeallocateRange(size_t offset, size_t size);
     void DeallocatePages(const std::vector<PagedAllocation>& pages);
@@ -177,6 +183,7 @@ private:
 		m_capacity = bufferSize;
         CreateBuffer(bufferSize);
         SetName(name);
+        RegisterDeferredBackingResizeClient(this);
     }
 
     void OnSetName() override {
@@ -215,6 +222,8 @@ private:
     void CreateBuffer(size_t capacity);
     void GrowBuffer(size_t newSize);
     size_t ComputeReserveCapacityLocked(size_t size) const;
+    bool ExtendTrackedCapacityLocked(size_t newCapacity);
+    void RequestAsyncReserveBytesLocked(size_t size);
     bool PublishReadyAsyncResizeLocked(bool wait);
     void ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity);
 
@@ -247,5 +256,6 @@ private:
     mutable std::recursive_mutex m_allocationMutex;
     std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
     size_t m_pendingResizeCapacity = 0;
+    size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
 };

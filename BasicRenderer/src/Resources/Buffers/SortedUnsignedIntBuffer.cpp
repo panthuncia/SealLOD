@@ -10,6 +10,10 @@
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 #include "Managers/Singletons/DeviceManager.h"
 
+SortedUnsignedIntBuffer::~SortedUnsignedIntBuffer() {
+    UnregisterDeferredBackingResizeClient(this);
+}
+
 void SortedUnsignedIntBuffer::OnSetName() {
     if (!m_dataBuffer) {
         return;
@@ -158,6 +162,9 @@ void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize)
 }
 
 bool SortedUnsignedIntBuffer::PublishReadyAsyncResize(bool wait) {
+    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        return false;
+    }
     if (!m_pendingResizeValid) {
         return false;
     }
@@ -175,6 +182,9 @@ bool SortedUnsignedIntBuffer::PublishReadyAsyncResize(bool wait) {
     }
 
     ApplyResizeBacking(std::move(newBacking), newCapacity);
+    if (Size() > m_capacity) {
+        EnsureCapacityForSize(Size());
+    }
     return true;
 }
 
@@ -350,6 +360,9 @@ void SortedUnsignedIntBuffer::RemoveMany(const std::vector<unsigned int>& elemen
 
 void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
     RetainCpuShadowWrite(data, size, offset);
+    if (offset + size > GetBufferSize()) {
+        return;
+    }
 
     if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
         SyncUploadPolicyState();
@@ -381,7 +394,7 @@ void SortedUnsignedIntBuffer::StageOrUpload(const void* data, size_t size, size_
 void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
     auto device = DeviceManager::GetInstance().GetDevice();
     m_capacity = capacity;
-    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    const auto stride = ElementStride();
     auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV);
     SetBacking(std::move(newDataBuffer), capacity * stride);
     EnsureCpuShadowSize(GetBufferSize());
@@ -396,7 +409,7 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 
 void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity) {
     const uint64_t previousCapacity = m_capacity;
-    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    const auto stride = ElementStride();
     spdlog::info(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={} activeEntryMode={}",
         GetName(),
@@ -413,7 +426,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBackin
         GetBackingGeneration());
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
     EnsureCpuShadowSize(GetBufferSize());
-    const size_t replayBytes = (std::min)(previousCapacity * stride, m_cpuShadowData.size());
+    const size_t replayBytes = (std::min)(newCapacity * stride, static_cast<uint64_t>(m_cpuShadowData.size()));
     if (replayBytes > 0u) {
         SyncUploadPolicyState();
         if (rg::runtime::GetActiveUploadService() != nullptr) {
@@ -443,7 +456,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBackin
 }
 
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
-    const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
+    const auto stride = ElementStride();
     auto newDataBuffer = GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
     ApplyResizeBacking(std::move(newDataBuffer), newSize);
 }
@@ -452,10 +465,20 @@ void SortedUnsignedIntBuffer::EnsureCapacityForSize(uint64_t requiredSize) {
     if (requiredSize <= m_capacity) {
         return;
     }
+    if (m_pendingResizeValid) {
+        (void)PublishReadyAsyncResize(false);
+        if (requiredSize <= m_capacity) {
+            return;
+        }
+    }
 
     uint64_t newCapacity = (std::max<uint64_t>)(m_capacity, 1u);
     while (newCapacity < requiredSize) {
         newCapacity *= 2;
+    }
+    if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        RequestAsyncReserveCapacity(newCapacity);
+        return;
     }
     GrowBuffer(newCapacity);
 }
@@ -464,7 +487,7 @@ void SortedUnsignedIntBuffer::AssignDescriptorSlots()
 {
     BufferBase::DescriptorRequirements requirements{};
 
-    const uint32_t numElements = static_cast<uint32_t>(m_capacity);
+    const uint32_t numElements = static_cast<uint32_t>(ResidentCapacity());
 
     requirements.createCBV = false;
     requirements.createSRV = true;
@@ -479,7 +502,7 @@ void SortedUnsignedIntBuffer::AssignDescriptorSlots()
             .kind = rhi::BufferViewKind::Structured,
             .firstElement = 0,
             .numElements = numElements,
-            .structureByteStride = static_cast<uint32_t>(m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int)),
+            .structureByteStride = static_cast<uint32_t>(ElementStride()),
         },
     };
 

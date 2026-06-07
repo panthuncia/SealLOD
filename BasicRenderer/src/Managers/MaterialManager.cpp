@@ -7,6 +7,7 @@
 #include "Render/RasterBucketFlags.h"
 #include "Render/Runtime/IReadbackService.h"
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <unordered_set>
@@ -335,6 +336,7 @@ MaterialManager::MaterialManager() {
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
 	GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+	CommitGpuVisibleSnapshot();
 }
 
 void MaterialManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex) {
@@ -942,6 +944,85 @@ void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
 	m_materialBufferCapacity = newCapacity;
 }
 
+void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots) {
+	ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity");
+	ZoneValue(requiredSlots);
+	const auto currentCapacity = m_materialPixelCountBuffer ? m_materialPixelCountBuffer->Capacity() : 0u;
+	if (requiredSlots <= currentCapacity) {
+		TracyPlot("MaterialManager.CompileFlagsBufferGrow", int64_t{ 0 });
+		return;
+	}
+	TracyPlot("MaterialManager.CompileFlagsBufferGrow", int64_t{ 1 });
+
+	unsigned int newCapacity = std::max(1u, currentCapacity);
+	while (newCapacity < requiredSlots) {
+		newCapacity *= 2u;
+	}
+	TracyPlot("MaterialManager.CompileFlagsBufferOldCapacity", static_cast<int64_t>(currentCapacity));
+	TracyPlot("MaterialManager.CompileFlagsBufferNewCapacity", static_cast<int64_t>(newCapacity));
+
+	spdlog::info("MaterialManager: growing compile-flags buffers oldCapacity={} newCapacity={} requiredSlots={}",
+		currentCapacity,
+		newCapacity,
+		requiredSlots);
+
+	{
+		ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity::ResizeSlotBuffers");
+		m_materialPixelCountBuffer->Resize(newCapacity);
+		m_materialOffsetBuffer->Resize(newCapacity);
+		m_materialWriteCursorBuffer->Resize(newCapacity);
+		m_materialEvaluationCommandBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureCompileFlagsBufferCapacity::ResizeBlockBuffers");
+		const uint32_t numBlocks = (newCapacity + kScanBlockSize - 1u) / kScanBlockSize;
+		m_blockSumsBuffer->Resize(std::max(1u, numBlocks));
+		m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));
+	}
+}
+
+bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const {
+	auto it = m_compileFlagsSlotMapping.find(flags);
+	if (it == m_compileFlagsSlotMapping.end()) {
+		return false;
+	}
+	slot = it->second;
+	return true;
+}
+
+void MaterialManager::CommitGpuVisibleSnapshot() {
+	if (m_materialPixelCountBuffer && m_compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
+		EnsureCompileFlagsBufferCapacity(m_compileFlagsSlotsUsed);
+	}
+
+	const auto slotResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
+		(std::min<uint64_t>)(m_materialPixelCountBuffer ? m_materialPixelCountBuffer->ResidentCapacity() : 0u,
+			m_materialOffsetBuffer ? m_materialOffsetBuffer->ResidentCapacity() : 0u),
+		(std::min<uint64_t>)(m_materialWriteCursorBuffer ? m_materialWriteCursorBuffer->ResidentCapacity() : 0u,
+			m_materialEvaluationCommandBuffer ? m_materialEvaluationCommandBuffer->ResidentCapacity() : 0u)));
+	const auto blockResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
+		m_blockSumsBuffer ? m_blockSumsBuffer->ResidentCapacity() : 0u,
+		m_scannedBlockSumsBuffer ? m_scannedBlockSumsBuffer->ResidentCapacity() : 0u));
+	const auto scanCoveredSlots = blockResidentCapacity * kScanBlockSize;
+	const auto publishedSlots = (std::min<unsigned int>)(
+		m_compileFlagsSlotsUsed,
+		(std::min<unsigned int>)(slotResidentCapacity, scanCoveredSlots));
+
+	m_publishedCompileFlagsSlotsUsed = publishedSlots;
+	m_publishedActiveCompileFlags.clear();
+	m_publishedActiveCompileFlagsSlots.clear();
+	m_publishedActiveCompileFlags.reserve(m_activeCompileFlags.size());
+	m_publishedActiveCompileFlagsSlots.reserve(m_activeCompileFlagsSlots.size());
+	for (MaterialCompileFlags flags : m_activeCompileFlags) {
+		unsigned int slot = 0u;
+		if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
+			continue;
+		}
+		m_publishedActiveCompileFlags.push_back(flags);
+		m_publishedActiveCompileFlagsSlots.push_back(slot);
+	}
+}
+
 unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
 	ZoneScopedN("MaterialManager::GetCompileFlagsSlot");
 	unsigned int slot;
@@ -968,19 +1049,7 @@ unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
 			m_compileFlagsSlotsUsed++;
 			m_compileFlagsUsageCounts.push_back(0);
 		}
-		{
-			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::ResizeSlotBuffers");
-			m_materialPixelCountBuffer->Resize(m_compileFlagsSlotsUsed);
-			m_materialOffsetBuffer->Resize(m_compileFlagsSlotsUsed);
-			m_materialWriteCursorBuffer->Resize(m_compileFlagsSlotsUsed);
-			m_materialEvaluationCommandBuffer->Resize(m_compileFlagsSlotsUsed);
-		}
-		{
-			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::ResizeBlockBuffers");
-			const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
-			m_blockSumsBuffer->Resize(std::max(1u, numBlocks));
-			m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));
-		}
+		EnsureCompileFlagsBufferCapacity(m_compileFlagsSlotsUsed);
 	}
 	{
 		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::StoreMapping");
