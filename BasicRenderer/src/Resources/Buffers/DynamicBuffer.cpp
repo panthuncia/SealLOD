@@ -386,7 +386,8 @@ std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AllocateRangesBatch(
 bool DynamicBuffer::TryAllocateRangesBatch(
     const std::vector<size_t>& counts,
     size_t elementSize,
-    std::vector<PagedAllocation>& ranges)
+    std::vector<PagedAllocation>& ranges,
+    ReadyResizePublishMode resizePublishMode)
 {
     std::lock_guard lock(m_allocationMutex);
     ranges.assign(counts.size(), PagedAllocation{});
@@ -402,7 +403,8 @@ bool DynamicBuffer::TryAllocateRangesBatch(
         return true;
     }
 
-    if (PublishReadyAsyncResizeLocked(false)) {
+    if (resizePublishMode == ReadyResizePublishMode::PublishIfReady &&
+        PublishReadyAsyncResizeLocked(false)) {
         // Publishing an already-built resize is intentionally allowed here:
         // it is bounded state publication, not GPU backing creation.
     }

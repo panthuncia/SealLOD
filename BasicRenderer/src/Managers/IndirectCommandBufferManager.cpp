@@ -104,43 +104,66 @@ void IndirectCommandBufferManager::UnregisterBuffers(uint64_t viewID) {
 }
 
 void IndirectCommandBufferManager::UpdateBuffersForWorkload(const DrawWorkloadKey& workloadKey, unsigned int numDraws) {
-    EnsureWorkloadRegistered(workloadKey);
+    const WorkloadCountUpdate update{ workloadKey, numDraws };
+    UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate>(&update, 1));
+}
 
-    // Remember the last exact draw count for this workload
-    m_workloadToLastCount[workloadKey] = numDraws;
-
-    unsigned int newSize = RoundUp(numDraws);
-    unsigned int& curr = m_workloadToCapacity[workloadKey];
-    if (newSize <= curr) { // no grow, just update count
-        for (auto& [viewID, perView] : m_viewIDToBuffers) {
-            auto it = perView.buffersByWorkload.find(workloadKey);
-            if (it != perView.buffersByWorkload.end()) {
-                it->second.count = numDraws;
-            }
-            else {
-                throw std::runtime_error("IndirectCommandBufferManager: missing buffer for workload on existing view");
-            }
-        }
+void IndirectCommandBufferManager::UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates) {
+    if (updates.empty()) {
         return;
     }
 
-    curr = newSize;
+    std::unordered_map<DrawWorkloadKey, unsigned int, DrawWorkloadKey::Hasher> deduped;
+    deduped.reserve(updates.size());
+    for (const auto& update : updates) {
+        deduped[update.workloadKey] = update.count;
+    }
 
-    // Grow this flags buffer for every view
-    for (auto& [viewID, perView] : m_viewIDToBuffers) {
-        auto it = perView.buffersByWorkload.find(workloadKey);
-        if (it != perView.buffersByWorkload.end()) {
-            // Replace existing
-            it->second.buffer->SetResource(CreateIndirectCommandBufferResource(workloadKey, viewID, curr));
-            it->second.count = numDraws;
+    std::vector<WorkloadCountUpdate> changed;
+    changed.reserve(deduped.size());
+    for (const auto& [workloadKey, count] : deduped) {
+        EnsureWorkloadRegistered(workloadKey);
+        const auto previousCount = m_workloadToLastCount[workloadKey];
+        const auto previousCapacity = m_workloadToCapacity[workloadKey];
+        const auto nextCapacity = RoundUp(count);
+        if (previousCount == count && nextCapacity <= previousCapacity) {
+            continue;
         }
-        else {
-            // Create new buffer for this view (this flags appeared after the view was created)
-            auto dyn = CreateIndirectWorkloadResource(workloadKey, viewID, curr);
-            perView.buffersByWorkload.emplace(workloadKey, IndirectWorkload { dyn, 0 });
-            m_indirectCommandsResourceGroup->AddResource(dyn);
 
-            perView.buffersByWorkload[workloadKey].count = numDraws;
+        m_workloadToLastCount[workloadKey] = count;
+        if (nextCapacity > previousCapacity) {
+            m_workloadToCapacity[workloadKey] = nextCapacity;
+        }
+        changed.push_back(WorkloadCountUpdate{ workloadKey, count });
+    }
+    if (changed.empty()) {
+        return;
+    }
+
+    for (auto& [viewID, perView] : m_viewIDToBuffers) {
+        for (const auto& update : changed) {
+            const auto capacity = m_workloadToCapacity[update.workloadKey];
+            auto it = perView.buffersByWorkload.find(update.workloadKey);
+            if (capacity == 0) {
+                if (it != perView.buffersByWorkload.end()) {
+                    it->second.count = update.count;
+                }
+                continue;
+            }
+
+            if (it != perView.buffersByWorkload.end()) {
+                if (!it->second.buffer ||
+                    !it->second.buffer->GetResource() ||
+                    capacity > RoundUp(it->second.count)) {
+                    it->second.buffer->SetResource(CreateIndirectCommandBufferResource(update.workloadKey, viewID, capacity));
+                }
+                it->second.count = update.count;
+                continue;
+            }
+
+            auto dyn = CreateIndirectWorkloadResource(update.workloadKey, viewID, capacity);
+            perView.buffersByWorkload.emplace(update.workloadKey, IndirectWorkload{ dyn, update.count });
+            m_indirectCommandsResourceGroup->AddResource(dyn);
         }
     }
 }

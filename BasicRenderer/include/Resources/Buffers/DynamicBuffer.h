@@ -23,6 +23,11 @@
 
 class DynamicBuffer : public ViewedDynamicBufferBase, public IHasMemoryMetadata {
 public:
+    enum class ReadyResizePublishMode : std::uint8_t {
+        PublishIfReady,
+        DoNotPublish
+    };
+
     struct PagedAllocation {
         size_t offset = 0;
         size_t size = 0;
@@ -52,7 +57,8 @@ public:
     bool TryAllocateRangesBatch(
         const std::vector<size_t>& counts,
         size_t elementSize,
-        std::vector<PagedAllocation>& ranges);
+        std::vector<PagedAllocation>& ranges,
+        ReadyResizePublishMode resizePublishMode = ReadyResizePublishMode::PublishIfReady);
     std::vector<PagedAllocation> AllocatePages(size_t count, size_t elementSize, size_t pageElementCount);
     void StageWriteRange(const void* data, size_t size, size_t offset);
     void StageWritePages(const void* data, size_t count, size_t elementSize, const std::vector<PagedAllocation>& pages, size_t pageElementCount);

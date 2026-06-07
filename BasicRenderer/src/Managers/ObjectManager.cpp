@@ -1076,7 +1076,41 @@ void ObjectManager::RequestStaticImportPacketResources(const StaticImportPacketP
 ObjectManager::StaticImportBuildBatch ObjectManager::PrepareStaticImportBuildBatch(const std::vector<StaticGroupBuildInfo>& groups) {
 	StaticImportBuildBatch build;
 	build.prepared = PrepareStaticGroupsBulkPlan(groups);
+	FinalizeStaticImportBuildBatch(build);
 	return build;
+}
+
+void ObjectManager::FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build) {
+	if (build.finalized) {
+		return;
+	}
+
+	build.transformCounts.clear();
+	build.drawRecordCounts.clear();
+	build.activeReserveCounts.clear();
+	build.transformCounts.reserve(build.prepared.groups.size());
+	build.drawRecordCounts.reserve(build.prepared.groups.size());
+	build.drawRecords = 0;
+	build.activeInsertIndices = 0;
+	build.preparedBytes = build.prepared.preparedBytes;
+
+	for (const auto& group : build.prepared.groups) {
+		const auto transforms = group.perObjectCBs.size();
+		const auto records = transforms * group.meshTemplates.size();
+		build.transformCounts.push_back(transforms);
+		build.drawRecordCounts.push_back(records);
+		build.drawRecords += records;
+		for (std::size_t meshIndex = 0; meshIndex < group.meshTemplates.size(); ++meshIndex) {
+			if (meshIndex >= group.workloadKeysByMeshTemplate.size()) {
+				continue;
+			}
+			for (const auto& workloadKey : group.workloadKeysByMeshTemplate[meshIndex]) {
+				build.activeReserveCounts[workloadKey] += transforms;
+				build.activeInsertIndices += transforms;
+			}
+		}
+	}
+	build.finalized = true;
 }
 
 void ObjectManager::RequestStaticImportTransactionResources(const StaticImportBuildBatch& build) {
@@ -1088,93 +1122,163 @@ ObjectManager::StaticImportReservationStatus ObjectManager::TryReserveStaticImpo
 	StaticImportReservation& reservation)
 {
 	ZoneScopedN("ObjectManager::TryReserveStaticImportTransaction");
-	reservation = {};
-	if (build.prepared.groups.empty()) {
-		return StaticImportReservationStatus::Empty;
+	std::vector<StaticImportBuildBatch> builds;
+	builds.push_back(std::move(build));
+	std::vector<StaticImportReservation> reservations;
+	const auto statuses = TryReserveStaticImportTransactionsBatch(builds, reservations);
+	if (!reservations.empty()) {
+		reservation = std::move(reservations.front());
+	} else {
+		reservation = {};
+	}
+	return statuses.empty() ? StaticImportReservationStatus::Empty : statuses.front();
+}
+
+std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryReserveStaticImportTransactionsBatch(
+	std::vector<StaticImportBuildBatch>& builds,
+	std::vector<StaticImportReservation>& reservations)
+{
+	ZoneScopedN("ObjectManager::TryReserveStaticImportTransactionsBatch");
+	std::vector<StaticImportBuildBatch*> buildPtrs;
+	buildPtrs.reserve(builds.size());
+	for (auto& build : builds) {
+		buildPtrs.push_back(std::addressof(build));
+	}
+	return TryReserveStaticImportTransactionsInPlace(buildPtrs, reservations);
+}
+
+std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryReserveStaticImportTransactionsInPlace(
+	std::span<StaticImportBuildBatch*> builds,
+	std::vector<StaticImportReservation>& reservations)
+{
+	ZoneScopedN("ObjectManager::TryReserveStaticImportTransactionsInPlace");
+	std::vector<StaticImportReservationStatus> statuses(builds.size(), StaticImportReservationStatus::Empty);
+	reservations.clear();
+	reservations.resize(builds.size());
+	if (builds.empty()) {
+		return statuses;
 	}
 
-	PublishPreparedStaticGroupCommitResourceResizes(false);
-
-	std::vector<std::size_t> transformCounts;
-	std::vector<std::size_t> drawRecordCounts;
-	transformCounts.reserve(build.prepared.groups.size());
-	drawRecordCounts.reserve(build.prepared.groups.size());
-	std::uint64_t drawRecords = 0;
-	for (const auto& group : build.prepared.groups) {
-		const auto transforms = group.perObjectCBs.size();
-		const auto records = transforms * group.meshTemplates.size();
-		transformCounts.push_back(transforms);
-		drawRecordCounts.push_back(records);
-		drawRecords += records;
-		for (std::size_t meshIndex = 0; meshIndex < group.meshTemplates.size(); ++meshIndex) {
-			if (meshIndex >= group.workloadKeysByMeshTemplate.size()) {
-				continue;
-			}
-			for (const auto& workloadKey : group.workloadKeysByMeshTemplate[meshIndex]) {
-				auto buffer = EnsureActiveDrawSetIndices(workloadKey, transforms);
-				buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + transforms);
-			}
-		}
-	}
-
-	std::vector<DynamicBuffer::PagedAllocation> normalRanges;
-	std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
-	std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
-	std::vector<DynamicBuffer::PagedAllocation> drawRecordRanges;
-	if (!m_normalMatrixBuffer->TryAllocateRangesBatch(transformCounts, sizeof(DirectX::XMFLOAT4X4), normalRanges)) {
-		return StaticImportReservationStatus::PendingResources;
-	}
-	if (!m_perObjectBuffers->TryAllocateRangesBatch(transformCounts, sizeof(PerObjectCB), perObjectRanges)) {
-		m_normalMatrixBuffer->DeallocatePages(normalRanges);
-		return StaticImportReservationStatus::PendingResources;
-	}
-	if (!m_perInstanceTransformBuffers->TryAllocateRangesBatch(transformCounts, sizeof(PerInstanceTransformCB), instanceTransformRanges)) {
-		m_normalMatrixBuffer->DeallocatePages(normalRanges);
-		m_perObjectBuffers->DeallocatePages(perObjectRanges);
-		return StaticImportReservationStatus::PendingResources;
-	}
-	if (!m_instanceDrawRecordBuffers->TryAllocateRangesBatch(drawRecordCounts, sizeof(InstanceDrawRecordCB), drawRecordRanges)) {
-		m_normalMatrixBuffer->DeallocatePages(normalRanges);
-		m_perObjectBuffers->DeallocatePages(perObjectRanges);
-		m_perInstanceTransformBuffers->DeallocatePages(instanceTransformRanges);
-		return StaticImportReservationStatus::PendingResources;
-	}
-
-	reservation.id = m_nextStaticImportTransactionID++;
-	reservation.build = std::move(build);
-	reservation.transformCounts = std::move(transformCounts);
-	reservation.drawRecordCounts = std::move(drawRecordCounts);
-	reservation.normalMatrixRanges = std::move(normalRanges);
-	reservation.perObjectRanges = std::move(perObjectRanges);
-	reservation.instanceTransformRanges = std::move(instanceTransformRanges);
-	reservation.instanceDrawRecordRanges = std::move(drawRecordRanges);
-	reservation.perObjectBuffer = m_perObjectBuffers;
-	reservation.instanceTransformBuffer = m_perInstanceTransformBuffers;
-	reservation.normalMatrixBuffer = m_normalMatrixBuffer;
-	reservation.instanceDrawRecordBuffer = m_instanceDrawRecordBuffers;
-	reservation.preparedBytes = reservation.build.prepared.preparedBytes;
-	reservation.drawRecords = drawRecords;
-	reservation.drawRecordGenerations.reserve(static_cast<std::size_t>(drawRecords));
-
-	for (const auto& range : reservation.instanceDrawRecordRanges) {
-		if (!range.IsValid()) {
+	std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> activeReserveCounts;
+	for (auto* buildPtr : builds) {
+		if (!buildPtr) {
 			continue;
 		}
-		const auto firstIndex = static_cast<std::uint32_t>(range.offset / sizeof(InstanceDrawRecordCB));
-		const auto count = static_cast<std::uint32_t>(range.count);
-		for (std::uint32_t i = 0; i < count; ++i) {
-			const auto drawRecordIndex = firstIndex + i;
-			const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
-			reservation.drawRecordGenerations.push_back(generation);
-			reservation.visibilityDirtyStart = (std::min)(reservation.visibilityDirtyStart, static_cast<std::size_t>(drawRecordIndex));
-			reservation.visibilityDirtyEnd = (std::max)(reservation.visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
+		auto& build = *buildPtr;
+		FinalizeStaticImportBuildBatch(build);
+		if (build.prepared.groups.empty()) {
+			continue;
+		}
+		for (const auto& [workloadKey, count] : build.activeReserveCounts) {
+			activeReserveCounts[workloadKey] += count;
 		}
 	}
+	for (const auto& [workloadKey, count] : activeReserveCounts) {
+		auto buffer = EnsureActiveDrawSetIndices(workloadKey, static_cast<std::size_t>(count));
+		buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + count);
+	}
 
-	TracyPlot("ObjectManager.StaticImportTransaction.ReservedGroups", static_cast<int64_t>(reservation.build.prepared.groups.size()));
-	TracyPlot("ObjectManager.StaticImportTransaction.ReservedDrawRecords", static_cast<int64_t>(reservation.drawRecords));
-	TracyPlot("ObjectManager.StaticImportTransaction.ReservedBytes", static_cast<int64_t>(reservation.preparedBytes));
-	return StaticImportReservationStatus::Ready;
+	std::size_t readyCount = 0;
+	std::uint64_t readyDrawRecords = 0;
+	std::uint64_t readyBytes = 0;
+	for (std::size_t buildIndex = 0; buildIndex < builds.size(); ++buildIndex) {
+		auto* buildPtr = builds[buildIndex];
+		auto& reservation = reservations[buildIndex];
+		reservation = {};
+		if (!buildPtr) {
+			statuses[buildIndex] = StaticImportReservationStatus::Empty;
+			continue;
+		}
+		auto& build = *buildPtr;
+		if (build.prepared.groups.empty()) {
+			statuses[buildIndex] = StaticImportReservationStatus::Empty;
+			continue;
+		}
+
+		std::vector<DynamicBuffer::PagedAllocation> normalRanges;
+		std::vector<DynamicBuffer::PagedAllocation> perObjectRanges;
+		std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
+		std::vector<DynamicBuffer::PagedAllocation> drawRecordRanges;
+		if (!m_normalMatrixBuffer->TryAllocateRangesBatch(
+				build.transformCounts,
+				sizeof(DirectX::XMFLOAT4X4),
+				normalRanges,
+				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			continue;
+		}
+		if (!m_perObjectBuffers->TryAllocateRangesBatch(
+				build.transformCounts,
+				sizeof(PerObjectCB),
+				perObjectRanges,
+				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+			m_normalMatrixBuffer->DeallocatePages(normalRanges);
+			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			continue;
+		}
+		if (!m_perInstanceTransformBuffers->TryAllocateRangesBatch(
+				build.transformCounts,
+				sizeof(PerInstanceTransformCB),
+				instanceTransformRanges,
+				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+			m_normalMatrixBuffer->DeallocatePages(normalRanges);
+			m_perObjectBuffers->DeallocatePages(perObjectRanges);
+			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			continue;
+		}
+		if (!m_instanceDrawRecordBuffers->TryAllocateRangesBatch(
+				build.drawRecordCounts,
+				sizeof(InstanceDrawRecordCB),
+				drawRecordRanges,
+				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
+			m_normalMatrixBuffer->DeallocatePages(normalRanges);
+			m_perObjectBuffers->DeallocatePages(perObjectRanges);
+			m_perInstanceTransformBuffers->DeallocatePages(instanceTransformRanges);
+			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			continue;
+		}
+
+		reservation.id = m_nextStaticImportTransactionID++;
+		reservation.transformCounts = build.transformCounts;
+		reservation.drawRecordCounts = build.drawRecordCounts;
+		reservation.normalMatrixRanges = std::move(normalRanges);
+		reservation.perObjectRanges = std::move(perObjectRanges);
+		reservation.instanceTransformRanges = std::move(instanceTransformRanges);
+		reservation.instanceDrawRecordRanges = std::move(drawRecordRanges);
+		reservation.perObjectBuffer = m_perObjectBuffers;
+		reservation.instanceTransformBuffer = m_perInstanceTransformBuffers;
+		reservation.normalMatrixBuffer = m_normalMatrixBuffer;
+		reservation.instanceDrawRecordBuffer = m_instanceDrawRecordBuffers;
+		reservation.preparedBytes = build.preparedBytes;
+		reservation.drawRecords = build.drawRecords;
+		reservation.drawRecordGenerations.reserve(static_cast<std::size_t>(build.drawRecords));
+
+		for (const auto& range : reservation.instanceDrawRecordRanges) {
+			if (!range.IsValid()) {
+				continue;
+			}
+			const auto firstIndex = static_cast<std::uint32_t>(range.offset / sizeof(InstanceDrawRecordCB));
+			const auto count = static_cast<std::uint32_t>(range.count);
+			for (std::uint32_t i = 0; i < count; ++i) {
+				const auto drawRecordIndex = firstIndex + i;
+				const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
+				reservation.drawRecordGenerations.push_back(generation);
+				reservation.visibilityDirtyStart = (std::min)(reservation.visibilityDirtyStart, static_cast<std::size_t>(drawRecordIndex));
+				reservation.visibilityDirtyEnd = (std::max)(reservation.visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
+			}
+		}
+
+		reservation.build = std::move(build);
+		statuses[buildIndex] = StaticImportReservationStatus::Ready;
+		++readyCount;
+		readyDrawRecords += reservation.drawRecords;
+		readyBytes += reservation.preparedBytes;
+	}
+
+	TracyPlot("ObjectManager.StaticImportTransaction.BatchReserved", static_cast<int64_t>(readyCount));
+	TracyPlot("ObjectManager.StaticImportTransaction.BatchReservedDrawRecords", static_cast<int64_t>(readyDrawRecords));
+	TracyPlot("ObjectManager.StaticImportTransaction.BatchReservedBytes", static_cast<int64_t>(readyBytes));
+	return statuses;
 }
 
 ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeStaticImportTransaction(StaticImportReservation reservation) const {
@@ -1402,6 +1506,171 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishedGroups", static_cast<int64_t>(result.groupsImported));
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
+	return result;
+}
+
+ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTransactionsBulk(std::vector<MaterializedStaticImportTransaction> transactions) {
+	ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk");
+	StaticImportBulkPublishResult result;
+	if (transactions.empty()) {
+		return result;
+	}
+	ZoneValue(static_cast<int64_t>(transactions.size()));
+
+	std::uint64_t inputGroups = 0;
+	std::uint64_t transformRows = 0;
+	std::uint64_t drawRecordRows = 0;
+	std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
+	std::size_t visibilityDirtyEnd = 0;
+	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
+
+	for (const auto& transaction : transactions) {
+		inputGroups += transaction.reservation.build.prepared.groups.size();
+		result.drawRecords += transaction.reservation.drawRecords;
+		result.preparedBytes += transaction.reservation.preparedBytes;
+		transformRows += transaction.perObjectRows.size();
+		drawRecordRows += transaction.drawRecordRows.size();
+		visibilityDirtyStart = (std::min)(visibilityDirtyStart, transaction.reservation.visibilityDirtyStart);
+		visibilityDirtyEnd = (std::max)(visibilityDirtyEnd, transaction.reservation.visibilityDirtyEnd);
+	}
+	result.transactionID = transactions.front().reservation.id;
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputTransactions", static_cast<int64_t>(transactions.size()));
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputGroups", static_cast<int64_t>(inputGroups));
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputDrawRecords", static_cast<int64_t>(result.drawRecords));
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputBytes", static_cast<int64_t>(result.preparedBytes));
+
+	const auto publishBegin = std::chrono::steady_clock::now();
+	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges) -> const DynamicBuffer::PagedAllocation* {
+		for (const auto& range : ranges) {
+			if (range.IsValid()) {
+				return &range;
+			}
+		}
+		return nullptr;
+	};
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::StageUploadRows");
+		for (const auto& transaction : transactions) {
+			if (!transaction.normalRows.empty()) {
+				if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges)) {
+					m_normalMatrixBuffer->StageWriteRange(
+						transaction.normalRows.data(),
+						transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4),
+						range->offset);
+				}
+			}
+			if (!transaction.perObjectRows.empty()) {
+				if (const auto* range = firstValidRange(transaction.reservation.perObjectRanges)) {
+					m_perObjectBuffers->StageWriteRange(
+						transaction.perObjectRows.data(),
+						transaction.perObjectRows.size() * sizeof(PerObjectCB),
+						range->offset);
+				}
+				if (const auto* range = firstValidRange(transaction.reservation.instanceTransformRanges)) {
+					m_perInstanceTransformBuffers->StageWriteRange(
+						transaction.perObjectRows.data(),
+						transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB),
+						range->offset);
+				}
+			}
+			if (!transaction.drawRecordRows.empty()) {
+				if (const auto* range = firstValidRange(transaction.reservation.instanceDrawRecordRanges)) {
+					m_instanceDrawRecordBuffers->StageWriteRange(
+						transaction.drawRecordRows.data(),
+						transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB),
+						range->offset);
+				}
+			}
+		}
+	}
+
+	if (visibilityDirtyStart < visibilityDirtyEnd) {
+		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::StageVisibilityGenerations");
+		const auto previousSidecarRows = m_drawRecordVisibilityGenerationSidecar
+			? m_drawRecordVisibilityGenerationSidecar->Data().size()
+			: 0u;
+		if (visibilityDirtyEnd > previousSidecarRows) {
+			m_drawRecordVisibilityGenerationSidecar->EnsureSize(visibilityDirtyEnd, 0u);
+		}
+		const auto dirtyCount = visibilityDirtyEnd - visibilityDirtyStart;
+		TracyPlot("ObjectManager.StaticImportTransaction.BulkVisibilityDirtyRows", static_cast<int64_t>(dirtyCount));
+		m_drawRecordVisibilityGenerationSidecar->StageRange(
+			visibilityDirtyStart,
+			std::span<const std::uint32_t>(
+				m_drawRecordVisibilityGenerations.data() + visibilityDirtyStart,
+				dirtyCount));
+	}
+
+	for (auto& transaction : transactions) {
+		for (auto& [workloadKey, entries] : transaction.activeDrawSetInserts) {
+			if (entries.empty()) {
+				continue;
+			}
+			auto& dst = activeDrawSetInserts[workloadKey];
+			dst.reserve(dst.size() + entries.size());
+			dst.insert(
+				dst.end(),
+				std::make_move_iterator(entries.begin()),
+				std::make_move_iterator(entries.end()));
+		}
+	}
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::ActiveDrawSetInserts");
+		TracyPlot("ObjectManager.StaticImportTransaction.BulkActiveWorkloads", static_cast<int64_t>(activeDrawSetInserts.size()));
+		for (const auto& [workloadKey, entries] : activeDrawSetInserts) {
+			if (entries.empty()) {
+				continue;
+			}
+			const auto insertBegin = std::chrono::steady_clock::now();
+			auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
+			buffer->AppendActiveEntries(entries);
+			buffer->SetLiveSize(buffer->LiveSize() + entries.size());
+			result.activeDrawSetSpans[workloadKey] = buffer->Size();
+			m_stats.activeDrawSetInsertCalls += 1;
+			m_stats.activeDrawSetInsertIndices += entries.size();
+			m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
+				std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - insertBegin).count());
+		}
+	}
+
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::FinalizeResult");
+		result.transactions.reserve(transactions.size());
+		for (auto& transaction : transactions) {
+			StaticImportTransactionPublishRecord record;
+			record.transactionID = transaction.reservation.id;
+			record.drawRecords = transaction.reservation.drawRecords;
+			record.preparedBytes = transaction.reservation.preparedBytes;
+			for (const auto& drawInfo : transaction.drawInfos) {
+				if (!drawInfo.instanceDrawRecordIndices.empty()) {
+					++record.groupsImported;
+				}
+			}
+			record.removalPayloads = std::move(transaction.removalPayloads);
+			result.groupsImported += record.groupsImported;
+			result.transactions.push_back(std::move(record));
+		}
+		TracyPlot("ObjectManager.StaticImportTransaction.BulkTransactionRecords", static_cast<int64_t>(result.transactions.size()));
+	}
+
+	const auto publishUs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - publishBegin).count());
+	++m_stats.staticDirectBulkAddCalls;
+	m_stats.staticDirectGroupsSubmitted += inputGroups;
+	m_stats.staticDirectGroupsImported += result.groupsImported;
+	m_stats.staticDirectTransformRows += transformRows;
+	m_stats.staticDirectDrawRecords += drawRecordRows;
+	m_stats.staticDirectPacketPublishUs += publishUs;
+	m_stats.staticDirectImportUs += publishUs;
+	m_stats.bulkReservedPerObjectBytes += transformRows * sizeof(PerObjectCB);
+	m_stats.bulkReservedInstanceTransformBytes += transformRows * sizeof(PerInstanceTransformCB);
+	m_stats.bulkReservedNormalMatrixRows += transformRows;
+	m_stats.bulkReservedDrawRecordBytes += drawRecordRows * sizeof(InstanceDrawRecordCB);
+	m_stats.instanceDrawRecordsAllocated += drawRecordRows;
+	m_stats.bulkReserveCalls += transactions.size();
+
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedGroups", static_cast<int64_t>(result.groupsImported));
+	TracyPlot("ObjectManager.StaticImportTransaction.BulkPublishedDrawRecords", static_cast<int64_t>(result.drawRecords));
 	return result;
 }
 

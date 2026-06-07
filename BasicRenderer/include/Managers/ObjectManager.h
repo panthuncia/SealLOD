@@ -192,7 +192,14 @@ public:
 
 	struct StaticImportBuildBatch {
 		PreparedStaticGroupsBulkPlan prepared;
+		std::vector<std::size_t> transformCounts;
+		std::vector<std::size_t> drawRecordCounts;
+		std::unordered_map<DrawWorkloadKey, std::uint64_t, DrawWorkloadKey::Hasher> activeReserveCounts;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t activeInsertIndices = 0;
+		std::uint64_t preparedBytes = 0;
 		std::uint64_t buildUs = 0;
+		bool finalized = false;
 	};
 
 	enum class StaticImportReservationStatus {
@@ -269,6 +276,23 @@ public:
 		std::uint64_t preparedBytes = 0;
 	};
 
+	struct StaticImportTransactionPublishRecord {
+		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::uint64_t transactionID = 0;
+		std::uint64_t groupsImported = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t preparedBytes = 0;
+	};
+
+	struct StaticImportBulkPublishResult {
+		std::vector<StaticImportTransactionPublishRecord> transactions;
+		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
+		std::uint64_t transactionID = 0;
+		std::uint64_t groupsImported = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t preparedBytes = 0;
+	};
+
 	struct ActiveDrawSetCompactionPublishResult {
 		DrawWorkloadKey workloadKey{};
 		std::uint32_t activeSpan = 0;
@@ -293,14 +317,22 @@ public:
 	static StaticImportPacketPlan PrepareStaticImportPacketPlan(const std::vector<StaticGroupBuildInfo>& groups);
 	static StaticImportPacket BuildStaticImportPacket(StaticImportPacketPlan plan);
 	static StaticImportBuildBatch PrepareStaticImportBuildBatch(const std::vector<StaticGroupBuildInfo>& groups);
+	static void FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build);
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
 	StaticImportReservationStatus TryReserveStaticImportTransaction(
 		StaticImportBuildBatch build,
 		StaticImportReservation& reservation);
+	std::vector<StaticImportReservationStatus> TryReserveStaticImportTransactionsBatch(
+		std::vector<StaticImportBuildBatch>& builds,
+		std::vector<StaticImportReservation>& reservations);
+	std::vector<StaticImportReservationStatus> TryReserveStaticImportTransactionsInPlace(
+		std::span<StaticImportBuildBatch*> builds,
+		std::vector<StaticImportReservation>& reservations);
 	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(StaticImportReservation reservation) const;
 	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
+	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::vector<MaterializedStaticImportTransaction> transactions);
 	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
 	std::vector<Components::ObjectDrawInfo> PublishStaticImportPacket(StaticImportPacket packet);

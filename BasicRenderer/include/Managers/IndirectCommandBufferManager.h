@@ -2,6 +2,7 @@
 #include <vector>
 #include <unordered_map>
 #include <memory>
+#include <span>
 
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
@@ -29,6 +30,11 @@ struct IndirectBufferEntry {
     IndirectWorkload workload;
 };
 
+struct WorkloadCountUpdate {
+    DrawWorkloadKey workloadKey;
+    unsigned int count = 0;
+};
+
 class IndirectCommandBufferManager {
 public:
     ~IndirectCommandBufferManager();
@@ -54,6 +60,7 @@ public:
     // Rounds up to increment size. Triggers per-view reallocation for that workload,
     // and resizes meshlet buffers (sum of all flags sizes).
     void UpdateBuffersForWorkload(const DrawWorkloadKey& workloadKey, unsigned int numDraws);
+    void UpdateBuffersForWorkloads(std::span<const WorkloadCountUpdate> updates);
 
     // Set growth granularity
     void SetIncrementSize(unsigned int incrementSize);
