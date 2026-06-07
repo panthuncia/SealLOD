@@ -352,7 +352,7 @@ public:
 		std::vector<StaticImportReservation>& reservations);
 	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(StaticImportReservation reservation) const;
 	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
-	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::vector<MaterializedStaticImportTransaction> transactions);
+	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions);
 	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);
 	void PublishPreparedStaticGroupCommitResourceResizes(bool wait = false);
 	std::vector<Components::ObjectDrawInfo> PublishStaticImportPacket(StaticImportPacket packet);

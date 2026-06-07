@@ -1629,7 +1629,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	return result;
 }
 
-ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTransactionsBulk(std::vector<MaterializedStaticImportTransaction> transactions) {
+ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk");
 	StaticImportBulkPublishResult result;
 	if (transactions.empty()) {
@@ -1644,7 +1644,9 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	std::size_t visibilityDirtyEnd = 0;
 	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 
-	for (const auto& transaction : transactions) {
+	for (const auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		const auto& transaction = *transactionPtr;
 		inputGroups += transaction.reservation.build.prepared.groups.size();
 		result.drawRecords += transaction.reservation.drawRecords;
 		result.preparedBytes += transaction.reservation.preparedBytes;
@@ -1653,7 +1655,7 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 		visibilityDirtyStart = (std::min)(visibilityDirtyStart, transaction.reservation.visibilityDirtyStart);
 		visibilityDirtyEnd = (std::max)(visibilityDirtyEnd, transaction.reservation.visibilityDirtyEnd);
 	}
-	result.transactionID = transactions.front().reservation.id;
+	result.transactionID = transactions.front()->reservation.id;
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputTransactions", static_cast<int64_t>(transactions.size()));
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputGroups", static_cast<int64_t>(inputGroups));
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputDrawRecords", static_cast<int64_t>(result.drawRecords));
@@ -1670,7 +1672,9 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	};
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::StageUploadRows");
-		for (const auto& transaction : transactions) {
+		for (const auto* transactionPtr : transactions) {
+			assert(transactionPtr);
+			const auto& transaction = *transactionPtr;
 			if (!transaction.normalRows.empty()) {
 				if (const auto* range = firstValidRange(transaction.reservation.normalMatrixRanges)) {
 					m_normalMatrixBuffer->StageWriteRange(
@@ -1721,7 +1725,9 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 				dirtyCount));
 	}
 
-	for (auto& transaction : transactions) {
+	for (auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		auto& transaction = *transactionPtr;
 		for (auto& [workloadKey, entries] : transaction.activeDrawSetInserts) {
 			if (entries.empty()) {
 				continue;
@@ -1756,7 +1762,9 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportTransactionsBulk::FinalizeResult");
 		result.transactions.reserve(transactions.size());
-		for (auto& transaction : transactions) {
+		for (auto* transactionPtr : transactions) {
+			assert(transactionPtr);
+			auto& transaction = *transactionPtr;
 			StaticImportTransactionPublishRecord record;
 			record.transactionID = transaction.reservation.id;
 			record.drawRecords = transaction.reservation.drawRecords;
