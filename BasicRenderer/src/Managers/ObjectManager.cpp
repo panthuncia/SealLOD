@@ -1057,10 +1057,25 @@ void ObjectManager::PrepareStaticGroupCommitResourcesAsync(const PreparedStaticG
 }
 
 void ObjectManager::PublishPreparedStaticGroupCommitResourceResizes(bool wait) {
-	(void)m_perObjectBuffers->PublishReadyAsyncResize(wait);
-	(void)m_perInstanceTransformBuffers->PublishReadyAsyncResize(wait);
-	(void)m_normalMatrixBuffer->PublishReadyAsyncResize(wait);
-	(void)m_instanceDrawRecordBuffers->PublishReadyAsyncResize(wait);
+	ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes");
+	std::size_t published = 0;
+	{
+		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::PerObject");
+		published += m_perObjectBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
+	}
+	{
+		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::InstanceTransforms");
+		published += m_perInstanceTransformBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
+	}
+	{
+		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::NormalMatrices");
+		published += m_normalMatrixBuffer->PublishReadyAsyncResize(wait) ? 1u : 0u;
+	}
+	{
+		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::DrawRecords");
+		published += m_instanceDrawRecordBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
+	}
+	TracyPlot("ObjectManager.StaticImportTransaction.ResourceResizesPublished", static_cast<int64_t>(published));
 }
 
 ObjectManager::StaticImportPacketPlan ObjectManager::PrepareStaticImportPacketPlan(const std::vector<StaticGroupBuildInfo>& groups) {
@@ -1115,6 +1130,61 @@ void ObjectManager::FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build
 
 void ObjectManager::RequestStaticImportTransactionResources(const StaticImportBuildBatch& build) {
 	PrepareStaticGroupCommitResourcesAsync(build.prepared);
+}
+
+ObjectManager::StaticImportResourceProbe ObjectManager::CreateStaticImportResourceProbe() const {
+	return StaticImportResourceProbe{
+		.normalMatrix = m_normalMatrixBuffer->SnapshotAllocationProbe(),
+		.perObject = m_perObjectBuffers->SnapshotAllocationProbe(),
+		.instanceTransform = m_perInstanceTransformBuffers->SnapshotAllocationProbe(),
+		.instanceDrawRecord = m_instanceDrawRecordBuffers->SnapshotAllocationProbe()
+	};
+}
+
+ObjectManager::StaticImportResourceProbeStatus ObjectManager::ProbeStaticImportTransactionResources(
+	StaticImportBuildBatch& build,
+	StaticImportResourceProbe& probe)
+{
+	ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources");
+	FinalizeStaticImportBuildBatch(build);
+	if (build.prepared.groups.empty()) {
+		return StaticImportResourceProbeStatus::Empty;
+	}
+
+	RequestStaticImportTransactionResources(build);
+	for (const auto& [workloadKey, count] : build.activeReserveCounts) {
+		auto buffer = EnsureActiveDrawSetIndices(workloadKey, static_cast<std::size_t>(count));
+		buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + count);
+	}
+
+	auto nextProbe = probe;
+	if (!DynamicBuffer::TryConsumeAllocationProbe(
+			nextProbe.normalMatrix,
+			build.transformCounts,
+			sizeof(DirectX::XMFLOAT4X4))) {
+		return StaticImportResourceProbeStatus::PendingNormalMatrix;
+	}
+	if (!DynamicBuffer::TryConsumeAllocationProbe(
+			nextProbe.perObject,
+			build.transformCounts,
+			sizeof(PerObjectCB))) {
+		return StaticImportResourceProbeStatus::PendingPerObject;
+	}
+	if (!DynamicBuffer::TryConsumeAllocationProbe(
+			nextProbe.instanceTransform,
+			build.transformCounts,
+			sizeof(PerInstanceTransformCB))) {
+		return StaticImportResourceProbeStatus::PendingInstanceTransform;
+	}
+	if (!DynamicBuffer::TryConsumeAllocationProbe(
+			nextProbe.instanceDrawRecord,
+			build.drawRecordCounts,
+			sizeof(InstanceDrawRecordCB))) {
+		return StaticImportResourceProbeStatus::PendingDrawRecord;
+	}
+
+	probe = std::move(nextProbe);
+	return StaticImportResourceProbeStatus::Ready;
 }
 
 ObjectManager::StaticImportReservationStatus ObjectManager::TryReserveStaticImportTransaction(
@@ -1181,6 +1251,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 	std::size_t readyCount = 0;
 	std::uint64_t readyDrawRecords = 0;
 	std::uint64_t readyBytes = 0;
+	std::size_t pendingCount = 0;
 	for (std::size_t buildIndex = 0; buildIndex < builds.size(); ++buildIndex) {
 		auto* buildPtr = builds[buildIndex];
 		auto& reservation = reservations[buildIndex];
@@ -1205,6 +1276,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 				normalRanges,
 				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			++pendingCount;
 			continue;
 		}
 		if (!m_perObjectBuffers->TryAllocateRangesBatch(
@@ -1214,6 +1286,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 				DynamicBuffer::ReadyResizePublishMode::DoNotPublish)) {
 			m_normalMatrixBuffer->DeallocatePages(normalRanges);
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			++pendingCount;
 			continue;
 		}
 		if (!m_perInstanceTransformBuffers->TryAllocateRangesBatch(
@@ -1224,6 +1297,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 			m_normalMatrixBuffer->DeallocatePages(normalRanges);
 			m_perObjectBuffers->DeallocatePages(perObjectRanges);
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			++pendingCount;
 			continue;
 		}
 		if (!m_instanceDrawRecordBuffers->TryAllocateRangesBatch(
@@ -1235,6 +1309,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 			m_perObjectBuffers->DeallocatePages(perObjectRanges);
 			m_perInstanceTransformBuffers->DeallocatePages(instanceTransformRanges);
 			statuses[buildIndex] = StaticImportReservationStatus::PendingResources;
+			++pendingCount;
 			continue;
 		}
 
@@ -1278,6 +1353,8 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 	TracyPlot("ObjectManager.StaticImportTransaction.BatchReserved", static_cast<int64_t>(readyCount));
 	TracyPlot("ObjectManager.StaticImportTransaction.BatchReservedDrawRecords", static_cast<int64_t>(readyDrawRecords));
 	TracyPlot("ObjectManager.StaticImportTransaction.BatchReservedBytes", static_cast<int64_t>(readyBytes));
+	TracyPlot("ObjectManager.StaticImportTransaction.BatchPendingResources", static_cast<int64_t>(pendingCount));
+	TracyPlot("ObjectManager.StaticImportTransaction.BatchBlockedAfterPending", int64_t{ 0 });
 	return statuses;
 }
 

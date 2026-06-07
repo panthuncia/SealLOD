@@ -418,37 +418,65 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, Texture
 }
 
 unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory, unsigned int count) {
+	ZoneScopedN("MaterialManager::IncrementMaterialUsageCount");
+	ZoneValue(material.GetMaterialID());
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
 	if (count == 0u) {
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CountZeroSlotLookup");
 		return GetMaterialSlot(material.GetMaterialID());
 	}
 
 	auto& flags = material.Technique().compileFlags;
-	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
-	m_compileFlagsUsageCounts[flagsSlot] += count;
+	unsigned int flagsSlot = 0;
+	{
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CompileFlagsSlot");
+		flagsSlot = GetCompileFlagsSlot(flags);
+		m_compileFlagsUsageCounts[flagsSlot] += count;
+	}
 
 	uint32_t materialID = material.GetMaterialID();
-	auto existingSlotIt = m_materialIDSlotMapping.find(materialID);
-	const bool alreadyResident =
-		existingSlotIt != m_materialIDSlotMapping.end()
-		&& existingSlotIt->second < m_materialUsageCounts.size()
-		&& m_materialUsageCounts[existingSlotIt->second] > 0u;
+	decltype(m_materialIDSlotMapping)::iterator existingSlotIt;
+	bool alreadyResident = false;
+	{
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResidentLookup");
+		existingSlotIt = m_materialIDSlotMapping.find(materialID);
+		alreadyResident =
+			existingSlotIt != m_materialIDSlotMapping.end()
+			&& existingSlotIt->second < m_materialUsageCounts.size()
+			&& m_materialUsageCounts[existingSlotIt->second] > 0u;
+		TracyPlot("MaterialManager.IncrementUsage.AlreadyResident", alreadyResident ? int64_t{ 1 } : int64_t{ 0 });
+	}
 
 	material.SetCompileFlagsID(flagsSlot);
-	unsigned int materialSlot = alreadyResident
-		? existingSlotIt->second
-		: GetMaterialSlot(materialID, textureFactory ? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
-	material.SetOpenPBRMaterialDataIndex(materialSlot);
-	m_activeMaterialsByID[materialID] = &material;
+	unsigned int materialSlot = 0;
+	{
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResolveMaterialSlot");
+		materialSlot = alreadyResident
+			? existingSlotIt->second
+			: GetMaterialSlot(materialID, textureFactory ? std::optional<PerMaterialCB>{ material.GetData() } : std::nullopt);
+		material.SetOpenPBRMaterialDataIndex(materialSlot);
+		m_activeMaterialsByID[materialID] = &material;
+	}
 
 	m_materialUsageCounts[materialSlot] += count;
 	if (m_materialUsageCounts[materialSlot] == 1u) {
+		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse");
 		if (textureFactory) {
+			ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::FlushDirtyMaterial");
 			FlushDirtyMaterial(material, textureFactory);
 		} else {
-			UpdateMaterialTextureUsage(material, 1);
-			TrackMaterialTextureAssets(material, 1, textureFactory);
-			MarkMaterialDirty(material);
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::UpdateTextureUsage");
+				UpdateMaterialTextureUsage(material, 1);
+			}
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::TrackTextureAssets");
+				TrackMaterialTextureAssets(material, 1, textureFactory);
+			}
+			{
+				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::MarkDirty");
+				MarkMaterialDirty(material);
+			}
 		}
 	}
 	return materialSlot;
@@ -797,107 +825,175 @@ std::shared_ptr<IResourceResolver> MaterialManager::ProvideResolver(ResourceIden
 
 // TODO: C++26 will allow optional references
 unsigned int MaterialManager::GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data) {
+	ZoneScopedN("MaterialManager::GetMaterialSlot");
+	ZoneValue(materialID);
 	unsigned int slot;
-	auto it = m_materialIDSlotMapping.find(materialID);
-	if (it != m_materialIDSlotMapping.end()) {
-		slot = it->second;
-		return slot;
+	{
+		ZoneScopedN("MaterialManager::GetMaterialSlot::Lookup");
+		auto it = m_materialIDSlotMapping.find(materialID);
+		if (it != m_materialIDSlotMapping.end()) {
+			TracyPlot("MaterialManager.GetMaterialSlot.Existing", int64_t{ 1 });
+			slot = it->second;
+			return slot;
+		}
 	}
+	TracyPlot("MaterialManager.GetMaterialSlot.Existing", int64_t{ 0 });
 	if (!m_freeMaterialSlots.empty()) {
-		slot = m_freeMaterialSlots.back();
-		m_freeMaterialSlots.pop_back();
-		if (slot >= m_materialUploadSignatures.size()) {
-			m_materialUploadSignatures.resize(static_cast<size_t>(slot) + 1u);
+		ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot");
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::Pop");
+			slot = m_freeMaterialSlots.back();
+			m_freeMaterialSlots.pop_back();
 		}
-		m_materialUploadSignatures[slot].valid = false;
-		if (data.has_value()) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ResizeSignatures");
+			if (slot >= m_materialUploadSignatures.size()) {
+				m_materialUploadSignatures.resize(static_cast<size_t>(slot) + 1u);
+			}
+			m_materialUploadSignatures[slot].valid = false;
 		}
-		else {
-			m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::ReuseFreeSlot::ClearBuffers");
+			if (data.has_value()) {
+				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+			}
+			else {
+				m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+			}
+			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 		}
-		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
 	}
 	else {
-		slot = m_materialSlotsUsed++;
-		m_materialUsageCounts.push_back(0);
-		if constexpr (kForceMaterialBufferResizeEveryMaterial) {
-			m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
-			m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
-			m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
-			m_materialBufferCapacity = m_materialSlotsUsed;
-		} else {
-			EnsureMaterialBufferCapacity(m_materialSlotsUsed);
+		ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot");
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::BumpCounters");
+			slot = m_materialSlotsUsed++;
+			m_materialUsageCounts.push_back(0);
 		}
-		m_materialUploadSignatures.resize(m_materialSlotsUsed);
-		m_materialUploadSignatures[slot].valid = false;
-		if (data.has_value()) {
-			m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::EnsureCapacity");
+			if constexpr (kForceMaterialBufferResizeEveryMaterial) {
+				m_perMaterialDataBuffer->Resize(m_materialSlotsUsed);
+				m_perMaterialEvalDataBuffer->Resize(m_materialSlotsUsed);
+				m_perMaterialOpenPBRDataBuffer->Resize(m_materialSlotsUsed);
+				m_materialBufferCapacity = m_materialSlotsUsed;
+			} else {
+				EnsureMaterialBufferCapacity(m_materialSlotsUsed);
+			}
 		}
-		else {
-			m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ResizeSignatures");
+			m_materialUploadSignatures.resize(m_materialSlotsUsed);
+			m_materialUploadSignatures[slot].valid = false;
 		}
-		m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
-		m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
+		{
+			ZoneScopedN("MaterialManager::GetMaterialSlot::AllocateNewSlot::ClearBuffers");
+			if (data.has_value()) {
+				m_perMaterialDataBuffer->UpdateAt(slot, data.value());
+			}
+			else {
+				m_perMaterialDataBuffer->UpdateAt(slot, PerMaterialCB{});
+			}
+			m_perMaterialEvalDataBuffer->UpdateAt(slot, PerMaterialEvalCB{});
+			m_perMaterialOpenPBRDataBuffer->UpdateAt(slot, PerMaterialOpenPBRCB{});
+		}
 	}
-	m_materialIDSlotMapping[materialID] = slot;
+	{
+		ZoneScopedN("MaterialManager::GetMaterialSlot::StoreMapping");
+		m_materialIDSlotMapping[materialID] = slot;
+	}
 	return slot;
 }
 
 void MaterialManager::EnsureMaterialBufferCapacity(unsigned int requiredSlots) {
+	ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity");
+	ZoneValue(requiredSlots);
 	if (requiredSlots <= m_materialBufferCapacity) {
+		TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 0 });
 		return;
 	}
+	TracyPlot("MaterialManager.MaterialBufferGrow", int64_t{ 1 });
 
 	unsigned int newCapacity = std::max(kInitialMaterialBufferCapacity, m_materialBufferCapacity);
 	while (newCapacity < requiredSlots) {
 		newCapacity *= 2u;
 	}
+	TracyPlot("MaterialManager.MaterialBufferOldCapacity", static_cast<int64_t>(m_materialBufferCapacity));
+	TracyPlot("MaterialManager.MaterialBufferNewCapacity", static_cast<int64_t>(newCapacity));
 
 	spdlog::info("MaterialManager: growing material buffers oldCapacity={} newCapacity={} requiredSlots={}",
 		m_materialBufferCapacity,
 		newCapacity,
 		requiredSlots);
 
-	m_perMaterialDataBuffer->Resize(newCapacity);
-	m_perMaterialEvalDataBuffer->Resize(newCapacity);
-	m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeMaterialData");
+		m_perMaterialDataBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeMaterialEval");
+		m_perMaterialEvalDataBuffer->Resize(newCapacity);
+	}
+	{
+		ZoneScopedN("MaterialManager::EnsureMaterialBufferCapacity::ResizeOpenPBR");
+		m_perMaterialOpenPBRDataBuffer->Resize(newCapacity);
+	}
 	m_materialBufferCapacity = newCapacity;
 }
 
 unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
+	ZoneScopedN("MaterialManager::GetCompileFlagsSlot");
 	unsigned int slot;
-	auto it = m_compileFlagsSlotMapping.find(flags);
-	if (it != m_compileFlagsSlotMapping.end()) {
-		slot = it->second;
-		return slot;
+	{
+		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::Lookup");
+		auto it = m_compileFlagsSlotMapping.find(flags);
+		if (it != m_compileFlagsSlotMapping.end()) {
+			TracyPlot("MaterialManager.GetCompileFlagsSlot.Existing", int64_t{ 1 });
+			slot = it->second;
+			return slot;
+		}
 	}
+	TracyPlot("MaterialManager.GetCompileFlagsSlot.Existing", int64_t{ 0 });
 	if (!m_freeCompileFlagsSlots.empty()) {
+		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::ReuseFreeSlot");
 		slot = m_freeCompileFlagsSlots.back();
 		m_freeCompileFlagsSlots.pop_back();
 	}
 	else {
+		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot");
 		slot = m_nextCompileFlagsSlot++;
-		m_compileFlagsSlotsUsed++;
-		m_compileFlagsUsageCounts.push_back(0);
-		// Resize resources to accommodate new material slot
-		m_materialPixelCountBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialOffsetBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialWriteCursorBuffer->Resize(m_compileFlagsSlotsUsed);
-		m_materialEvaluationCommandBuffer->Resize(m_compileFlagsSlotsUsed);
-
-		// Resize per-block buffers to match new block count
-		const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
-		m_blockSumsBuffer->Resize(std::max(1u, numBlocks));
-		m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));		
+		{
+			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::BumpCounters");
+			m_compileFlagsSlotsUsed++;
+			m_compileFlagsUsageCounts.push_back(0);
+		}
+		{
+			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::ResizeSlotBuffers");
+			m_materialPixelCountBuffer->Resize(m_compileFlagsSlotsUsed);
+			m_materialOffsetBuffer->Resize(m_compileFlagsSlotsUsed);
+			m_materialWriteCursorBuffer->Resize(m_compileFlagsSlotsUsed);
+			m_materialEvaluationCommandBuffer->Resize(m_compileFlagsSlotsUsed);
+		}
+		{
+			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::ResizeBlockBuffers");
+			const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
+			m_blockSumsBuffer->Resize(std::max(1u, numBlocks));
+			m_scannedBlockSumsBuffer->Resize(std::max(1u, numBlocks));
+		}
 	}
-	m_compileFlagsSlotMapping[flags] = slot;
-	if (std::find(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), slot) == m_activeCompileFlagsSlots.end()) {
-		m_activeCompileFlagsSlots.push_back(slot);
+	{
+		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::StoreMapping");
+		m_compileFlagsSlotMapping[flags] = slot;
 	}
-	if (std::find(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags) == m_activeCompileFlags.end()) {
-		m_activeCompileFlags.push_back(flags);
+	{
+		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::UpdateActiveLists");
+		if (std::find(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), slot) == m_activeCompileFlagsSlots.end()) {
+			m_activeCompileFlagsSlots.push_back(slot);
+		}
+		if (std::find(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags) == m_activeCompileFlags.end()) {
+			m_activeCompileFlags.push_back(flags);
+		}
 	}
 	return slot;
 }

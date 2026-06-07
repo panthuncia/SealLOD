@@ -208,6 +208,22 @@ public:
 		Empty
 	};
 
+	enum class StaticImportResourceProbeStatus {
+		Ready,
+		PendingNormalMatrix,
+		PendingPerObject,
+		PendingInstanceTransform,
+		PendingDrawRecord,
+		Empty
+	};
+
+	struct StaticImportResourceProbe {
+		DynamicBuffer::AllocationProbe normalMatrix;
+		DynamicBuffer::AllocationProbe perObject;
+		DynamicBuffer::AllocationProbe instanceTransform;
+		DynamicBuffer::AllocationProbe instanceDrawRecord;
+	};
+
 	struct StaticImportReservation {
 		std::uint64_t id = 0;
 		StaticImportBuildBatch build;
@@ -321,6 +337,10 @@ public:
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
+	StaticImportResourceProbe CreateStaticImportResourceProbe() const;
+	StaticImportResourceProbeStatus ProbeStaticImportTransactionResources(
+		StaticImportBuildBatch& build,
+		StaticImportResourceProbe& probe);
 	StaticImportReservationStatus TryReserveStaticImportTransaction(
 		StaticImportBuildBatch build,
 		StaticImportReservation& reservation);

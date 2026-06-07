@@ -40,6 +40,10 @@ public:
         }
     };
 
+    struct AllocationProbe {
+        std::set<std::pair<size_t, size_t>> freeBlocks;
+    };
+
     static std::shared_ptr<DynamicBuffer> CreateShared(size_t elementSize, size_t capacity = 64, std::string name = "", bool byteAddress = false, bool UAV = false) {
         return std::shared_ptr<DynamicBuffer>(new DynamicBuffer(byteAddress, elementSize, capacity, name, UAV));
     }
@@ -59,6 +63,11 @@ public:
         size_t elementSize,
         std::vector<PagedAllocation>& ranges,
         ReadyResizePublishMode resizePublishMode = ReadyResizePublishMode::PublishIfReady);
+    AllocationProbe SnapshotAllocationProbe() const;
+    static bool TryConsumeAllocationProbe(
+        AllocationProbe& probe,
+        const std::vector<size_t>& counts,
+        size_t elementSize);
     std::vector<PagedAllocation> AllocatePages(size_t count, size_t elementSize, size_t pageElementCount);
     void StageWriteRange(const void* data, size_t size, size_t offset);
     void StageWritePages(const void* data, size_t count, size_t elementSize, const std::vector<PagedAllocation>& pages, size_t pageElementCount);
