@@ -64,6 +64,16 @@ public:
         std::vector<PagedAllocation>& ranges,
         ReadyResizePublishMode resizePublishMode = ReadyResizePublishMode::PublishIfReady);
     AllocationProbe SnapshotAllocationProbe() const;
+    static bool CanConsumeAllocationProbeBytes(
+        const AllocationProbe& probe,
+        size_t totalSize);
+    static bool CanConsumeAllocationProbe(
+        const AllocationProbe& probe,
+        const std::vector<size_t>& counts,
+        size_t elementSize);
+    static bool TryConsumeAllocationProbeBytes(
+        AllocationProbe& probe,
+        size_t totalSize);
     static bool TryConsumeAllocationProbe(
         AllocationProbe& probe,
         const std::vector<size_t>& counts,

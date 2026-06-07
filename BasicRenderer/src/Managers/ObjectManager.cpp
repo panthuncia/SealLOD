@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <spdlog/spdlog.h>
 
@@ -49,6 +50,14 @@ Components::ObjectDrawInfo::BufferRange ToBufferRange(const DynamicBuffer::Paged
 		page.stride,
 		page.allocationSize != 0 && page.stride != 0 ? page.allocationSize / page.stride : 0
 	};
+}
+
+std::size_t SumCounts(const std::vector<std::size_t>& counts) {
+	std::size_t total = 0;
+	for (const auto count : counts) {
+		total += count;
+	}
+	return total;
 }
 
 void AppendActiveDrawSetRemoval(
@@ -1146,44 +1155,78 @@ ObjectManager::StaticImportResourceProbeStatus ObjectManager::ProbeStaticImportT
 	StaticImportResourceProbe& probe)
 {
 	ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources");
-	FinalizeStaticImportBuildBatch(build);
-	if (build.prepared.groups.empty()) {
-		return StaticImportResourceProbeStatus::Empty;
+	{
+		ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources::FinalizeBuildBatch");
+		FinalizeStaticImportBuildBatch(build);
+		if (build.prepared.groups.empty()) {
+			return StaticImportResourceProbeStatus::Empty;
+		}
 	}
 
-	RequestStaticImportTransactionResources(build);
-	for (const auto& [workloadKey, count] : build.activeReserveCounts) {
-		auto buffer = EnsureActiveDrawSetIndices(workloadKey, static_cast<std::size_t>(count));
-		buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + count);
+	{
+		ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources::RequestResources");
+		RequestStaticImportTransactionResources(build);
+	}
+	{
+		ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources::RequestActiveDrawSetReserves");
+		for (const auto& [workloadKey, count] : build.activeReserveCounts) {
+			auto buffer = EnsureActiveDrawSetIndices(workloadKey, static_cast<std::size_t>(count));
+			buffer->RequestAsyncReserveCapacity(static_cast<std::uint64_t>(buffer->Size()) + count);
+		}
 	}
 
-	auto nextProbe = probe;
-	if (!DynamicBuffer::TryConsumeAllocationProbe(
-			nextProbe.normalMatrix,
-			build.transformCounts,
-			sizeof(DirectX::XMFLOAT4X4))) {
-		return StaticImportResourceProbeStatus::PendingNormalMatrix;
-	}
-	if (!DynamicBuffer::TryConsumeAllocationProbe(
-			nextProbe.perObject,
-			build.transformCounts,
-			sizeof(PerObjectCB))) {
-		return StaticImportResourceProbeStatus::PendingPerObject;
-	}
-	if (!DynamicBuffer::TryConsumeAllocationProbe(
-			nextProbe.instanceTransform,
-			build.transformCounts,
-			sizeof(PerInstanceTransformCB))) {
-		return StaticImportResourceProbeStatus::PendingInstanceTransform;
-	}
-	if (!DynamicBuffer::TryConsumeAllocationProbe(
-			nextProbe.instanceDrawRecord,
-			build.drawRecordCounts,
-			sizeof(InstanceDrawRecordCB))) {
-		return StaticImportResourceProbeStatus::PendingDrawRecord;
+	{
+		ZoneScopedN("ObjectManager::ProbeStaticImportTransactionResources::ProbeResources");
+		const std::size_t transformRows = SumCounts(build.transformCounts);
+		const std::size_t drawRecordRows = SumCounts(build.drawRecordCounts);
+		const std::size_t normalMatrixBytes = transformRows * sizeof(DirectX::XMFLOAT4X4);
+		const std::size_t perObjectBytes = transformRows * sizeof(PerObjectCB);
+		const std::size_t instanceTransformBytes = transformRows * sizeof(PerInstanceTransformCB);
+		const std::size_t instanceDrawRecordBytes = drawRecordRows * sizeof(InstanceDrawRecordCB);
+
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
+				probe.normalMatrix,
+				normalMatrixBytes)) {
+			return StaticImportResourceProbeStatus::PendingNormalMatrix;
+		}
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
+				probe.perObject,
+				perObjectBytes)) {
+			return StaticImportResourceProbeStatus::PendingPerObject;
+		}
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
+				probe.instanceTransform,
+				instanceTransformBytes)) {
+			return StaticImportResourceProbeStatus::PendingInstanceTransform;
+		}
+		if (!DynamicBuffer::CanConsumeAllocationProbeBytes(
+				probe.instanceDrawRecord,
+				instanceDrawRecordBytes)) {
+			return StaticImportResourceProbeStatus::PendingDrawRecord;
+		}
+
+		const bool consumedNormalMatrix = DynamicBuffer::TryConsumeAllocationProbeBytes(
+			probe.normalMatrix,
+			normalMatrixBytes);
+		const bool consumedPerObject = DynamicBuffer::TryConsumeAllocationProbeBytes(
+			probe.perObject,
+			perObjectBytes);
+		const bool consumedInstanceTransform = DynamicBuffer::TryConsumeAllocationProbeBytes(
+			probe.instanceTransform,
+			instanceTransformBytes);
+		const bool consumedInstanceDrawRecord = DynamicBuffer::TryConsumeAllocationProbeBytes(
+			probe.instanceDrawRecord,
+			instanceDrawRecordBytes);
+		assert(consumedNormalMatrix);
+		assert(consumedPerObject);
+		assert(consumedInstanceTransform);
+		assert(consumedInstanceDrawRecord);
+		(void)consumedNormalMatrix;
+		(void)consumedPerObject;
+		(void)consumedInstanceTransform;
+		(void)consumedInstanceDrawRecord;
 	}
 
-	probe = std::move(nextProbe);
 	return StaticImportResourceProbeStatus::Ready;
 }
 

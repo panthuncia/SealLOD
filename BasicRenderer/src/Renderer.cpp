@@ -1492,7 +1492,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
-    settingsManager.registerSetting<bool>("renderGraphDisableCaching", false);
+    settingsManager.registerSetting<bool>("renderGraphDisableCaching", true);
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
 	settingsManager.registerSetting<AutoAliasMode>("autoAliasMode", AutoAliasMode::Balanced);
     settingsManager.registerSetting<AutoAliasPackingStrategy>("autoAliasPackingStrategy", AutoAliasPackingStrategy::GreedySweepLine);

@@ -14,6 +14,23 @@
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
+namespace {
+
+size_t TotalAllocationProbeSize(const std::vector<size_t>& counts, size_t elementSize)
+{
+    if (counts.empty() || elementSize == 0) {
+        return 0;
+    }
+
+    size_t totalCount = 0;
+    for (const auto count : counts) {
+        totalCount += count;
+    }
+    return totalCount * elementSize;
+}
+
+}
+
 std::unique_ptr<BufferView> DynamicBuffer::Allocate(size_t size, size_t elementSize) {
     std::lock_guard lock(m_allocationMutex);
 	size_t requiredSize = size;
@@ -483,24 +500,33 @@ DynamicBuffer::AllocationProbe DynamicBuffer::SnapshotAllocationProbe() const
     };
 }
 
-bool DynamicBuffer::TryConsumeAllocationProbe(
-    AllocationProbe& probe,
+bool DynamicBuffer::CanConsumeAllocationProbe(
+    const AllocationProbe& probe,
     const std::vector<size_t>& counts,
     size_t elementSize)
 {
-    if (counts.empty() || elementSize == 0) {
+    return CanConsumeAllocationProbeBytes(probe, TotalAllocationProbeSize(counts, elementSize));
+}
+
+bool DynamicBuffer::CanConsumeAllocationProbeBytes(
+    const AllocationProbe& probe,
+    size_t totalSize)
+{
+    if (totalSize == 0) {
         return true;
     }
 
-    size_t totalCount = 0;
-    for (const auto count : counts) {
-        totalCount += count;
-    }
-    if (totalCount == 0) {
+    return probe.freeBlocks.lower_bound({ totalSize, 0 }) != probe.freeBlocks.end();
+}
+
+bool DynamicBuffer::TryConsumeAllocationProbeBytes(
+    AllocationProbe& probe,
+    size_t totalSize)
+{
+    if (totalSize == 0) {
         return true;
     }
 
-    const size_t totalSize = totalCount * elementSize;
     auto freeIt = probe.freeBlocks.lower_bound({ totalSize, 0 });
     if (freeIt == probe.freeBlocks.end()) {
         return false;
@@ -513,6 +539,14 @@ bool DynamicBuffer::TryConsumeAllocationProbe(
         probe.freeBlocks.insert({ blockSize - totalSize, blockOffset + totalSize });
     }
     return true;
+}
+
+bool DynamicBuffer::TryConsumeAllocationProbe(
+    AllocationProbe& probe,
+    const std::vector<size_t>& counts,
+    size_t elementSize)
+{
+    return TryConsumeAllocationProbeBytes(probe, TotalAllocationProbeSize(counts, elementSize));
 }
 
 std::vector<DynamicBuffer::PagedAllocation> DynamicBuffer::AddDataPaged(
