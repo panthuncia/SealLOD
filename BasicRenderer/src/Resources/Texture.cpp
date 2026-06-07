@@ -1,6 +1,7 @@
 #include "Resources/Texture.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -952,6 +953,48 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 	return factory.CreateAlwaysResidentPixelBuffer(
 		desc,
 		TextureFactory::TextureInitialData::FromBytes({ bytes }));
+}
+
+std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
+	const TextureFactory& factory,
+	const TextureProcessingSettings& settings)
+{
+	ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture");
+	constexpr size_t kTextureSemanticCount = static_cast<size_t>(TextureSemantic::OpenPBRScalar) + 1u;
+	constexpr size_t kPlaceholderVariantCount = kTextureSemanticCount * 2u;
+	const size_t semanticIndex = static_cast<size_t>(settings.semantic);
+	const size_t cacheIndex = semanticIndex * 2u + (settings.preferSRGB ? 1u : 0u);
+
+	if (cacheIndex >= kPlaceholderVariantCount) {
+		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::UncachedSemantic");
+		TracyPlot("SARP.Texture.ProcessingPlaceholder.UncachedSemantic", static_cast<int64_t>(semanticIndex));
+		return CreatePlaceholderTexture(factory, settings);
+	}
+
+	static std::mutex cacheMutex;
+	static std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount> placeholders{};
+
+	std::lock_guard<std::mutex> lock(cacheMutex);
+	auto& placeholder = placeholders[cacheIndex];
+	if (placeholder && placeholder->HasValidBackingResource()) {
+		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::CacheHit");
+		TracyPlot("SARP.Texture.ProcessingPlaceholder.CacheHit", static_cast<int64_t>(1));
+		return placeholder;
+	}
+
+	{
+		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::CreatePlaceholderTexture");
+		TracyPlot("SARP.Texture.ProcessingPlaceholder.CacheMiss", static_cast<int64_t>(1));
+		placeholder = CreatePlaceholderTexture(factory, settings);
+		if (placeholder) {
+			std::ostringstream name;
+			name << "Shared Processing Placeholder "
+				<< ToString(settings.semantic)
+				<< (settings.preferSRGB ? " sRGB" : " Linear");
+			placeholder->SetName(name.str());
+		}
+	}
+	return placeholder;
 }
 
 std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::string& path, bool preferSRGB, const std::string& reason = {}) {
@@ -2124,8 +2167,8 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		}
 
 		{
-			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::CreatePlaceholderTexture");
-			m_image = CreatePlaceholderTexture(factory, m_meta.processing);
+			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::GetSharedPlaceholderTexture");
+			m_image = GetSharedProcessingPlaceholderTexture(factory, m_meta.processing);
 		}
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::RecordUploadPath");

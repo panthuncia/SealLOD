@@ -537,6 +537,8 @@ void MeshManager::RemoveMesh(Mesh* mesh) {
 }
 
 void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices) {
+	ZoneScopedN("MeshManager::AddMeshesBulk");
+	ZoneValue(static_cast<int64_t>(meshes.size()));
 	if (meshes.empty()) {
 		return;
 	}
@@ -550,48 +552,60 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	size_t clodMeshMetadataBytes = 0;
 	size_t clodPageMapBytes = 0;
 
-	for (const auto& mesh : meshes) {
-		if (!mesh || mesh->GetPerMeshBufferView()) {
-			continue;
-		}
-		++meshRowsToAdd;
-		clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
-		clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
-		clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
-		clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
-		clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
-		clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
+	{
+		ZoneScopedN("MeshManager::AddMeshesBulk::MeasureResources");
+		for (const auto& mesh : meshes) {
+			if (!mesh || mesh->GetPerMeshBufferView()) {
+				continue;
+			}
+			++meshRowsToAdd;
+			clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
+			clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
+			clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+			clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
+			clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
+			clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
 
-		uint32_t totalPageMapEntries = 0;
-		for (const auto& group : mesh->GetCLodGroups()) {
-			totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+			uint32_t totalPageMapEntries = 0;
+			for (const auto& group : mesh->GetCLodGroups()) {
+				totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+			}
+			clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
 		}
-		clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
 	}
+	TracyPlot("MeshManager.AddMeshesBulk.MeshRows", static_cast<int64_t>(meshRowsToAdd));
 
 	if (meshRowsToAdd == 0) {
 		return;
 	}
 
-	PublishPreparedStaticMeshTemplateResourceResizes(false);
-	m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
-	m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
-	m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
-	m_clusterLODNodes->ReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
-	m_clodSharedGroupChunks->ReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
-	m_clodHierarchyLevelInfos->ReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
-	m_clodMeshMetadata->ReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
-	m_clodGroupPageMap->ReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+	{
+		ZoneScopedN("MeshManager::AddMeshesBulk::ReserveBuffers");
+		PublishPreparedStaticMeshTemplateResourceResizes(false);
+		m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
+		m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
+		m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
+		m_clusterLODNodes->ReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+		m_clodSharedGroupChunks->ReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
+		m_clodHierarchyLevelInfos->ReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
+		m_clodMeshMetadata->ReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
+		m_clodGroupPageMap->ReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+	}
 
-	for (auto mesh : meshes) {
-		if (!mesh || mesh->GetPerMeshBufferView()) {
-			continue;
+	{
+		ZoneScopedN("MeshManager::AddMeshesBulk::AddMeshes");
+		for (auto mesh : meshes) {
+			if (!mesh || mesh->GetPerMeshBufferView()) {
+				continue;
+			}
+			AddMesh(mesh, useMeshletReorderedVertices);
 		}
-		AddMesh(mesh, useMeshletReorderedVertices);
 	}
 }
 
 void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests) {
+	ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
+	ZoneValue(static_cast<int64_t>(requests.size()));
 	if (requests.empty()) {
 		return;
 	}
@@ -608,32 +622,38 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	std::unordered_set<Mesh*> uniqueMeshes;
 	uniqueMeshes.reserve(requests.size());
 
-	for (const auto& request : requests) {
-		const auto& mesh = request.mesh;
-		if (!mesh) {
-			continue;
-		}
-		if (uniqueMeshes.insert(mesh.get()).second && !mesh->GetPerMeshBufferView()) {
-			++meshRowsToAdd;
-			clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
-			clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
-			clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
-			clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
-			clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
-			clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
-
-			uint32_t totalPageMapEntries = 0;
-			for (const auto& group : mesh->GetCLodGroups()) {
-				totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+	{
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::MeasureResources");
+		for (const auto& request : requests) {
+			const auto& mesh = request.mesh;
+			if (!mesh) {
+				continue;
 			}
-			clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
-		}
-		if (request.material) {
-			++templateRowsToAdd;
+			if (uniqueMeshes.insert(mesh.get()).second && !mesh->GetPerMeshBufferView()) {
+				++meshRowsToAdd;
+				clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
+				clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
+				clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+				clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
+				clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
+				clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
+
+				uint32_t totalPageMapEntries = 0;
+				for (const auto& group : mesh->GetCLodGroups()) {
+					totalPageMapEntries = std::max(totalPageMapEntries, group.pageMapBase + group.pageCount);
+				}
+				clodPageMapBytes += static_cast<size_t>(totalPageMapEntries) * sizeof(GroupPageMapEntry);
+			}
+			if (request.material) {
+				++templateRowsToAdd;
+			}
 		}
 	}
+	TracyPlot("MeshManager.StaticTemplate.AsyncMeshRows", static_cast<int64_t>(meshRowsToAdd));
+	TracyPlot("MeshManager.StaticTemplate.AsyncTemplateRows", static_cast<int64_t>(templateRowsToAdd));
 
 	if (meshRowsToAdd != 0) {
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestMeshResizes");
 		m_perMeshBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
 		m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 		m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
@@ -644,12 +664,14 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 		m_clodGroupPageMap->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
 	}
 	if (templateRowsToAdd != 0) {
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestTemplateResizes");
 		m_perMeshInstanceBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(PerMeshInstanceCB), 256ull * 1024ull));
 		m_perMeshInstanceClodOffsets->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(MeshInstanceClodOffsets), 256ull * 1024ull));
 	}
 }
 
 void MeshManager::PublishPreparedStaticMeshTemplateResourceResizes(bool wait) {
+	ZoneScopedN("MeshManager::PublishPreparedStaticMeshTemplateResourceResizes");
 	(void)m_perMeshBuffers->PublishReadyAsyncResize(wait);
 	(void)m_clusterLODGroups->PublishReadyAsyncResize(wait);
 	(void)m_clusterLODSegments->PublishReadyAsyncResize(wait);
@@ -663,6 +685,8 @@ void MeshManager::PublishPreparedStaticMeshTemplateResourceResizes(bool wait) {
 }
 
 std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
+	ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk");
+	ZoneValue(static_cast<int64_t>(requests.size()));
 	std::vector<StaticMeshTemplateRegistration> registrations(requests.size());
 	if (requests.empty()) {
 		return registrations;
@@ -677,31 +701,35 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 	validRequestIndices.reserve(requests.size());
 	sharedStates.reserve(requests.size());
 
-	for (size_t requestIndex = 0; requestIndex < requests.size(); ++requestIndex) {
-		const auto& request = requests[requestIndex];
-		if (!request.mesh || !request.mesh->GetPerMeshBufferView()) {
-			continue;
+	{
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::BuildRows");
+		for (size_t requestIndex = 0; requestIndex < requests.size(); ++requestIndex) {
+			const auto& request = requests[requestIndex];
+			if (!request.mesh || !request.mesh->GetPerMeshBufferView()) {
+				continue;
+			}
+
+			PerMeshInstanceCB row{};
+			row.boundingSphere = request.mesh->GetPerMeshCBData().boundingSphere;
+			row.skinningInstanceSlot = 0xFFFFFFFFu;
+			row.skinnedBoundsScale = 1.0f;
+			row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
+
+			std::shared_ptr<CLodSharedStreamingState> sharedState;
+			if (auto sharedIt = m_clodSharedStreamingStateByMesh.find(request.mesh.get()); sharedIt != m_clodSharedStreamingStateByMesh.end()) {
+				sharedState = sharedIt->second;
+			}
+
+			MeshInstanceClodOffsets clodOffsets{};
+			clodOffsets.clodMeshMetadataIndex = sharedState ? sharedState->clodMeshMetadataIndex : 0u;
+
+			validRequestIndices.push_back(requestIndex);
+			perMeshInstanceRows.push_back(row);
+			clodOffsetRows.push_back(clodOffsets);
+			sharedStates.push_back(std::move(sharedState));
 		}
-
-		PerMeshInstanceCB row{};
-		row.boundingSphere = request.mesh->GetPerMeshCBData().boundingSphere;
-		row.skinningInstanceSlot = 0xFFFFFFFFu;
-		row.skinnedBoundsScale = 1.0f;
-		row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
-
-		std::shared_ptr<CLodSharedStreamingState> sharedState;
-		if (auto sharedIt = m_clodSharedStreamingStateByMesh.find(request.mesh.get()); sharedIt != m_clodSharedStreamingStateByMesh.end()) {
-			sharedState = sharedIt->second;
-		}
-
-		MeshInstanceClodOffsets clodOffsets{};
-		clodOffsets.clodMeshMetadataIndex = sharedState ? sharedState->clodMeshMetadataIndex : 0u;
-
-		validRequestIndices.push_back(requestIndex);
-		perMeshInstanceRows.push_back(row);
-		clodOffsetRows.push_back(clodOffsets);
-		sharedStates.push_back(std::move(sharedState));
 	}
+	TracyPlot("MeshManager.StaticTemplate.ValidRows", static_cast<int64_t>(validRequestIndices.size()));
 
 	if (perMeshInstanceRows.empty()) {
 		return registrations;
@@ -709,61 +737,75 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 
 	const auto perMeshInstanceBytes = perMeshInstanceRows.size() * sizeof(PerMeshInstanceCB);
 	const auto clodOffsetBytes = clodOffsetRows.size() * sizeof(MeshInstanceClodOffsets);
-	PublishPreparedStaticMeshTemplateResourceResizes(false);
-	m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
-	m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
+	{
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::ReserveTemplateBuffers");
+		PublishPreparedStaticMeshTemplateResourceResizes(false);
+		m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
+		m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
+	}
 
-	const auto perMeshInstanceRange = m_perMeshInstanceBuffers->AddDataRange(
-		perMeshInstanceRows.data(),
-		perMeshInstanceRows.size(),
-		sizeof(PerMeshInstanceCB));
-	const auto clodOffsetRange = m_perMeshInstanceClodOffsets->AddDataRange(
-		clodOffsetRows.data(),
-		clodOffsetRows.size(),
-		sizeof(MeshInstanceClodOffsets));
+	std::pair<size_t, size_t> perMeshInstanceRange;
+	std::pair<size_t, size_t> clodOffsetRange;
+	{
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::UploadInstanceRows");
+		perMeshInstanceRange = m_perMeshInstanceBuffers->AddDataRange(
+			perMeshInstanceRows.data(),
+			perMeshInstanceRows.size(),
+			sizeof(PerMeshInstanceCB));
+	}
+	{
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::UploadClodOffsetRows");
+		clodOffsetRange = m_perMeshInstanceClodOffsets->AddDataRange(
+			clodOffsetRows.data(),
+			clodOffsetRows.size(),
+			sizeof(MeshInstanceClodOffsets));
+	}
 
-	for (size_t rowIndex = 0; rowIndex < validRequestIndices.size(); ++rowIndex) {
-		const auto requestIndex = validRequestIndices[rowIndex];
-		const auto& request = requests[requestIndex];
-		const auto meshTemplateIndex = static_cast<uint32_t>(
-			(perMeshInstanceRange.first + rowIndex * sizeof(PerMeshInstanceCB)) / sizeof(PerMeshInstanceCB));
-		const auto clodOffsetIndex = static_cast<uint32_t>(
-			(clodOffsetRange.first + rowIndex * sizeof(MeshInstanceClodOffsets)) / sizeof(MeshInstanceClodOffsets));
+	{
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::BuildRegistrations");
+		for (size_t rowIndex = 0; rowIndex < validRequestIndices.size(); ++rowIndex) {
+			const auto requestIndex = validRequestIndices[rowIndex];
+			const auto& request = requests[requestIndex];
+			const auto meshTemplateIndex = static_cast<uint32_t>(
+				(perMeshInstanceRange.first + rowIndex * sizeof(PerMeshInstanceCB)) / sizeof(PerMeshInstanceCB));
+			const auto clodOffsetIndex = static_cast<uint32_t>(
+				(clodOffsetRange.first + rowIndex * sizeof(MeshInstanceClodOffsets)) / sizeof(MeshInstanceClodOffsets));
 
-		registrations[requestIndex].meshTemplateIndex = meshTemplateIndex;
-		registrations[requestIndex].clodOffsetIndex = clodOffsetIndex;
-		registrations[requestIndex].valid = true;
+			registrations[requestIndex].meshTemplateIndex = meshTemplateIndex;
+			registrations[requestIndex].clodOffsetIndex = clodOffsetIndex;
+			registrations[requestIndex].valid = true;
 
-		if (request.mesh) {
-			m_activeMeshletCount += request.mesh->GetCLodMeshletCount();
-		}
-
-		auto& sharedState = sharedStates[rowIndex];
-		if (sharedState) {
-			const bool wasInactive = sharedState->activeInstanceCount == 0u;
-			sharedState->activeInstanceCount++;
-			if (wasInactive && sharedState->mesh != nullptr) {
-				const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
-				uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
-				while (meshTraversalDepth > cachedDepth
-					&& !m_clodActiveMaxTraversalDepth.compare_exchange_weak(
-						cachedDepth,
-						meshTraversalDepth,
-						std::memory_order_release,
-						std::memory_order_acquire)) {
-				}
+			if (request.mesh) {
+				m_activeMeshletCount += request.mesh->GetCLodMeshletCount();
 			}
 
-			if (sharedState->groupCount > 0u) {
-				CLodStreamingInstanceState state{};
-				state.instance = nullptr;
-				state.meshInstanceIndex = meshTemplateIndex;
-				state.groupsBase = sharedState->groupsBase;
-				state.groupCount = sharedState->groupCount;
-				state.sharedMeshState = sharedState;
-				m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
-				if (wasInactive) {
-					PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
+			auto& sharedState = sharedStates[rowIndex];
+			if (sharedState) {
+				const bool wasInactive = sharedState->activeInstanceCount == 0u;
+				sharedState->activeInstanceCount++;
+				if (wasInactive && sharedState->mesh != nullptr) {
+					const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
+					uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
+					while (meshTraversalDepth > cachedDepth
+						&& !m_clodActiveMaxTraversalDepth.compare_exchange_weak(
+							cachedDepth,
+							meshTraversalDepth,
+							std::memory_order_release,
+							std::memory_order_acquire)) {
+					}
+				}
+
+				if (sharedState->groupCount > 0u) {
+					CLodStreamingInstanceState state{};
+					state.instance = nullptr;
+					state.meshInstanceIndex = meshTemplateIndex;
+					state.groupsBase = sharedState->groupsBase;
+					state.groupCount = sharedState->groupCount;
+					state.sharedMeshState = sharedState;
+					m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
+					if (wasInactive) {
+						PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
+					}
 				}
 			}
 		}

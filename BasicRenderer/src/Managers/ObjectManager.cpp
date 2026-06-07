@@ -1289,38 +1289,56 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
+	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
 	StaticImportPublishResult result;
 	result.transactionID = transaction.reservation.id;
 	result.drawRecords = transaction.reservation.drawRecords;
 	result.preparedBytes = transaction.reservation.preparedBytes;
+	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputGroups", static_cast<int64_t>(transaction.reservation.build.prepared.groups.size()));
+	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputDrawRecords", static_cast<int64_t>(transaction.reservation.drawRecords));
+	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputBytes", static_cast<int64_t>(transaction.reservation.preparedBytes));
 
 	const auto publishBegin = std::chrono::steady_clock::now();
-	if (!transaction.normalRows.empty() && !transaction.reservation.normalMatrixRanges.empty()) {
-		if (const auto& range = transaction.reservation.normalMatrixRanges.front(); range.IsValid()) {
-			m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(), transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range.offset);
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows");
+		if (!transaction.normalRows.empty() && !transaction.reservation.normalMatrixRanges.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::NormalMatrices");
+			if (const auto& range = transaction.reservation.normalMatrixRanges.front(); range.IsValid()) {
+				ZoneValue(static_cast<int64_t>(transaction.normalRows.size()));
+				m_normalMatrixBuffer->StageWriteRange(transaction.normalRows.data(), transaction.normalRows.size() * sizeof(DirectX::XMFLOAT4X4), range.offset);
+			}
 		}
-	}
-	if (!transaction.perObjectRows.empty() && !transaction.reservation.perObjectRanges.empty()) {
-		if (const auto& range = transaction.reservation.perObjectRanges.front(); range.IsValid()) {
-			m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerObjectCB), range.offset);
+		if (!transaction.perObjectRows.empty() && !transaction.reservation.perObjectRanges.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::PerObject");
+			if (const auto& range = transaction.reservation.perObjectRanges.front(); range.IsValid()) {
+				ZoneValue(static_cast<int64_t>(transaction.perObjectRows.size()));
+				m_perObjectBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerObjectCB), range.offset);
+			}
 		}
-	}
-	if (!transaction.perObjectRows.empty() && !transaction.reservation.instanceTransformRanges.empty()) {
-		if (const auto& range = transaction.reservation.instanceTransformRanges.front(); range.IsValid()) {
-			m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range.offset);
+		if (!transaction.perObjectRows.empty() && !transaction.reservation.instanceTransformRanges.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::InstanceTransforms");
+			if (const auto& range = transaction.reservation.instanceTransformRanges.front(); range.IsValid()) {
+				ZoneValue(static_cast<int64_t>(transaction.perObjectRows.size()));
+				m_perInstanceTransformBuffers->StageWriteRange(transaction.perObjectRows.data(), transaction.perObjectRows.size() * sizeof(PerInstanceTransformCB), range.offset);
+			}
 		}
-	}
-	if (!transaction.drawRecordRows.empty() && !transaction.reservation.instanceDrawRecordRanges.empty()) {
-		if (const auto& range = transaction.reservation.instanceDrawRecordRanges.front(); range.IsValid()) {
-			m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(), transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range.offset);
+		if (!transaction.drawRecordRows.empty() && !transaction.reservation.instanceDrawRecordRanges.empty()) {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows::DrawRecords");
+			if (const auto& range = transaction.reservation.instanceDrawRecordRanges.front(); range.IsValid()) {
+				ZoneValue(static_cast<int64_t>(transaction.drawRecordRows.size()));
+				m_instanceDrawRecordBuffers->StageWriteRange(transaction.drawRecordRows.data(), transaction.drawRecordRows.size() * sizeof(InstanceDrawRecordCB), range.offset);
+			}
 		}
 	}
 
 	if (transaction.reservation.visibilityDirtyStart < transaction.reservation.visibilityDirtyEnd) {
+		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations");
 		const auto previousSidecarRows = m_drawRecordVisibilityGenerationSidecar
 			? m_drawRecordVisibilityGenerationSidecar->Data().size()
 			: 0u;
+		ZoneValue(static_cast<int64_t>(transaction.reservation.visibilityDirtyEnd - transaction.reservation.visibilityDirtyStart));
 		if (transaction.reservation.visibilityDirtyEnd > previousSidecarRows) {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations::FullAfterGrow");
 			m_drawRecordVisibilityGenerationSidecar->EnsureSize(transaction.reservation.visibilityDirtyEnd, 0u);
 			m_drawRecordVisibilityGenerationSidecar->StageRange(
 				0u,
@@ -1328,6 +1346,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 					m_drawRecordVisibilityGenerations.data(),
 					m_drawRecordVisibilityGenerations.size()));
 		} else {
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations::DirtyRange");
 			const auto dirtyCount = transaction.reservation.visibilityDirtyEnd - transaction.reservation.visibilityDirtyStart;
 			m_drawRecordVisibilityGenerationSidecar->StageRange(
 				transaction.reservation.visibilityDirtyStart,
@@ -1337,24 +1356,33 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 		}
 	}
 
-	for (const auto& [workloadKey, entries] : transaction.activeDrawSetInserts) {
-		if (entries.empty()) {
-			continue;
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::ActiveDrawSetInserts");
+		TracyPlot("ObjectManager.StaticImportTransaction.ActiveWorkloads", static_cast<int64_t>(transaction.activeDrawSetInserts.size()));
+		for (const auto& [workloadKey, entries] : transaction.activeDrawSetInserts) {
+			if (entries.empty()) {
+				continue;
+			}
+			ZoneScopedN("ObjectManager::PublishStaticImportTransaction::ActiveDrawSetInserts::AppendWorkload");
+			ZoneValue(static_cast<int64_t>(entries.size()));
+			auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
+			buffer->AppendActiveEntries(entries);
+			buffer->SetLiveSize(buffer->LiveSize() + entries.size());
+			result.activeDrawSetSpans[workloadKey] = buffer->Size();
 		}
-		auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
-		(void)buffer->PublishReadyAsyncResize(false);
-		AppendActiveDrawSetEntries(workloadKey, entries);
-		result.activeDrawSetSpans[workloadKey] = buffer->Size();
 	}
 
-	result.groupsImported = 0;
-	for (const auto& drawInfo : transaction.drawInfos) {
-		if (!drawInfo.instanceDrawRecordIndices.empty()) {
-			++result.groupsImported;
+	{
+		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::FinalizeResult");
+		result.groupsImported = 0;
+		for (const auto& drawInfo : transaction.drawInfos) {
+			if (!drawInfo.instanceDrawRecordIndices.empty()) {
+				++result.groupsImported;
+			}
 		}
+		result.drawInfos = std::move(transaction.drawInfos);
+		result.removalPayloads = std::move(transaction.removalPayloads);
 	}
-	result.drawInfos = std::move(transaction.drawInfos);
-	result.removalPayloads = std::move(transaction.removalPayloads);
 
 	++m_stats.staticDirectBulkAddCalls;
 	m_stats.staticDirectGroupsSubmitted += transaction.reservation.build.prepared.groups.size();

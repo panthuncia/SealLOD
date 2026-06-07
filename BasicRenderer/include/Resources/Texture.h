@@ -329,7 +329,7 @@ public:
     void SetName(const std::string& name)
     {
         m_name = name;
-        if (HasUsableImage()) {
+        if (HasUsableImage() && !m_hasUploadedPlaceholder) {
             m_image->SetName(name);
         }
     }
