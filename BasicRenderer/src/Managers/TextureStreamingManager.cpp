@@ -309,12 +309,21 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 
 void TextureStreamingManager::RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService)
 {
+	ZoneScopedN("TextureStreamingManager::RequestTextureStreamingFeedbackReadback");
 	if (!IsMaterialTextureStreamingEnabledSetting() ||
 		!readbackService ||
 		!m_textureStreamingFeedbackBuffer ||
 		m_activeTextureStreamingFeedbackIDs.empty()) {
+		TracyPlot("TextureStreaming.FeedbackReadbackRequested", int64_t{0});
 		return;
 	}
+
+	uint64_t feedbackBufferBytes = 0;
+	(void)m_textureStreamingFeedbackBuffer->TryGetBufferByteSize(feedbackBufferBytes);
+	ZoneValue(feedbackBufferBytes);
+	TracyPlot("TextureStreaming.FeedbackReadbackRequested", int64_t{1});
+	TracyPlot("TextureStreaming.ActiveFeedbackIDs", static_cast<int64_t>(m_activeTextureStreamingFeedbackIDs.size()));
+	TracyPlot("TextureStreaming.FeedbackReadbackBytes", static_cast<int64_t>(feedbackBufferBytes));
 
 	std::vector<uint32_t> activeStreamingTextureIDs = m_activeTextureStreamingFeedbackIDs;
 	readbackService->RequestReadbackCapture(

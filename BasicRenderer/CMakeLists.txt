@@ -80,6 +80,19 @@ if(NOT TARGET OpenRenderGraph::OpenRenderGraph)
     message(FATAL_ERROR "BasicRenderer requires OpenRenderGraph::OpenRenderGraph. Install OpenRenderGraph package or provide OpenRenderGraph as submodule.")
 endif()
 
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    get_filename_component(_basicrenderer_clang_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_basicrenderer_clang_root_dir "${_basicrenderer_clang_bin_dir}" DIRECTORY)
+    set(_basicrenderer_clang_libomp "${_basicrenderer_clang_root_dir}/lib/libomp.lib")
+    if(EXISTS "${_basicrenderer_clang_libomp}")
+        set(OpenMP_C_FLAGS "/openmp" CACHE STRING "OpenMP C flags for clang-cl" FORCE)
+        set(OpenMP_CXX_FLAGS "/openmp" CACHE STRING "OpenMP CXX flags for clang-cl" FORCE)
+        set(OpenMP_C_LIB_NAMES "libomp" CACHE STRING "OpenMP C libraries for clang-cl" FORCE)
+        set(OpenMP_CXX_LIB_NAMES "libomp" CACHE STRING "OpenMP CXX libraries for clang-cl" FORCE)
+        set(OpenMP_libomp_LIBRARY "${_basicrenderer_clang_libomp}" CACHE FILEPATH "LLVM OpenMP runtime for clang-cl" FORCE)
+    endif()
+endif()
+
 find_package(spdlog CONFIG REQUIRED)
 find_package(directxtex CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
@@ -790,10 +803,12 @@ add_symlink_or_copy_per_config(
 if (MSVC)
   target_compile_options(${PROJECT_NAME} PRIVATE /Zc:preprocessor)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /Zc:preprocessor)
-  target_compile_options(${PROJECT_NAME} PRIVATE /WX)
-  target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /WX)
   target_compile_options(ShaderPreprocessTests PRIVATE /Zc:preprocessor)
-  target_compile_options(ShaderPreprocessTests PRIVATE /WX)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE /WX)
+    target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /WX)
+    target_compile_options(ShaderPreprocessTests PRIVATE /WX)
+  endif()
   target_compile_options(${PROJECT_NAME} PRIVATE 
       /wd4828 
       /wd4514 
@@ -845,7 +860,6 @@ if (MSVC)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE /external:anglebrackets /external:W0)
   # Clang (via clang-cl) warns about MSVC-specific flags it ignores; suppress those warnings-as-errors
   target_compile_options(${PROJECT_NAME} PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
@@ -865,7 +879,6 @@ if (MSVC)
       -Wno-error=unused-lambda-capture
   >)
   target_compile_options(${BASICRENDERER_DEMO_TARGET} PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
@@ -909,7 +922,6 @@ if (MSVC)
   )
   target_compile_options(ShaderPreprocessTests PRIVATE /external:anglebrackets /external:W0)
   target_compile_options(ShaderPreprocessTests PRIVATE $<$<CXX_COMPILER_ID:Clang>:
-      -Werror
       -Wno-unused-command-line-argument
       -Wno-unused-function
       -Wno-error=switch
