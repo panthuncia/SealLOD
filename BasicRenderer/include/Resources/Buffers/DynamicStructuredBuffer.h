@@ -1,9 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
-#include <future>
 #include <limits>
 #include <vector>
 #include <functional>
@@ -201,7 +199,7 @@ public:
     }
 
     bool HasPendingBackingResize() const override {
-        return m_pendingResizeValid;
+        return m_pendingResizeValid || m_asyncResizeState.HasPending();
     }
 
     std::string GetDeferredBackingResizeDebugName() const override {
@@ -275,51 +273,64 @@ private:
         }
 
         if (m_pendingResizeValid) {
-            if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
-                (void)PublishReadyAsyncResizeInternal(false);
-            }
-            if (m_pendingResizeValid) {
-                return;
-            }
+            m_pendingResizeCapacity = (std::max)(m_pendingResizeCapacity, newCapacity);
+            m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+                .resourceID = GetGlobalResourceID(),
+                .heapType = rhi::HeapType::DeviceLocal,
+                .byteSize = sizeof(T) * static_cast<size_t>(m_pendingResizeCapacity),
+                .unorderedAccess = m_UAV,
+                .debugName = name,
+            });
+            return;
         }
 
         const auto resourceID = GetGlobalResourceID();
-        const bool unorderedAccess = m_UAV;
-        const auto bufferName = name;
         m_pendingResizeCapacity = newCapacity;
         m_pendingResizeValid = true;
-        m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, newCapacity, bufferName]() {
-            spdlog::debug(
-                "DynamicStructuredBuffer '{}' id={} async resize backing create begin capacity={}",
-                bufferName,
-                resourceID,
-                newCapacity);
-            auto backing = GpuBufferBacking::CreateUnique(
-                rhi::HeapType::DeviceLocal,
-                sizeof(T) * static_cast<size_t>(newCapacity),
-                resourceID,
-                unorderedAccess);
-            spdlog::debug(
-                "DynamicStructuredBuffer '{}' id={} async resize backing create complete capacity={}",
-                bufferName,
-                resourceID,
-                newCapacity);
-            return backing;
+        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            .resourceID = resourceID,
+            .heapType = rhi::HeapType::DeviceLocal,
+            .byteSize = sizeof(T) * static_cast<size_t>(newCapacity),
+            .unorderedAccess = m_UAV,
+            .debugName = name,
         });
     }
 
     bool PublishReadyAsyncResizeInternal(bool wait) {
-        if (!m_pendingResizeValid || !BufferBase::IsBackingMutationAllowedOnThisThread()) {
+        if ((!m_pendingResizeValid && !m_asyncResizeState.HasPending()) ||
+            !BufferBase::IsBackingMutationAllowedOnThisThread()) {
             return false;
         }
 
-        if (!wait &&
-            m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        auto resizeResult = m_asyncResizeState.ConsumeReady(wait);
+        if (!resizeResult.has_value()) {
             return false;
         }
 
-        auto backing = m_pendingResizeFuture.get();
-        const uint32_t newCapacity = m_pendingResizeCapacity;
+        if (resizeResult->exception) {
+            try {
+                std::rethrow_exception(resizeResult->exception);
+            }
+            catch (const std::exception& e) {
+                spdlog::error(
+                    "DynamicStructuredBuffer '{}' id={} async resize failed: {}",
+                    name,
+                    GetGlobalResourceID(),
+                    e.what());
+            }
+            catch (...) {
+                spdlog::error(
+                    "DynamicStructuredBuffer '{}' id={} async resize failed with unknown exception",
+                    name,
+                    GetGlobalResourceID());
+            }
+            m_pendingResizeCapacity = 0u;
+            m_pendingResizeValid = false;
+            return false;
+        }
+
+        auto backing = std::move(resizeResult->backing);
+        const uint32_t newCapacity = static_cast<uint32_t>(resizeResult->byteSize / sizeof(T));
         m_pendingResizeCapacity = 0u;
         m_pendingResizeValid = false;
         if (!backing || newCapacity <= m_capacity) {
@@ -488,7 +499,7 @@ private:
     }
 
     rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
-    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    AsyncBufferBackingResizeState m_asyncResizeState;
     uint32_t m_pendingResizeCapacity = 0u;
     bool m_pendingResizeValid = false;
 };

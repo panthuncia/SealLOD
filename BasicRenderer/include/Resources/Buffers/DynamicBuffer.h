@@ -7,7 +7,6 @@
 #include <mutex>
 #include <set>
 #include <functional>
-#include <future>
 #include <memory>
 #include <typeinfo>
 #include <string>
@@ -254,7 +253,7 @@ private:
     std::vector<std::byte> m_cpuShadowData;
     mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
     mutable std::recursive_mutex m_allocationMutex;
-    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    AsyncBufferBackingResizeState m_asyncResizeState;
     size_t m_pendingResizeCapacity = 0;
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;

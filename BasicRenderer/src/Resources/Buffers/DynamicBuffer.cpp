@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <chrono>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
@@ -223,13 +222,13 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
 
     if (m_pendingResizeValid) {
         m_requestedResizeCapacity = (std::max)(m_requestedResizeCapacity, desiredBackingCapacity);
-        if (BufferBase::IsBackingMutationAllowedOnThisThread()) {
-            (void)PublishReadyAsyncResizeLocked(false);
-        }
-        if (!m_pendingResizeValid) {
-            RequestAsyncReserveBytesLocked(size);
-            return;
-        }
+        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            .resourceID = GetGlobalResourceID(),
+            .heapType = rhi::HeapType::DeviceLocal,
+            .byteSize = m_requestedResizeCapacity,
+            .unorderedAccess = m_UAV,
+            .debugName = m_name,
+        });
         spdlog::debug(
             "DynamicBuffer '{}' id={} async resize request coalesced pendingResizeCapacity={} requestedCapacity={} desiredBackingCapacity={} mutationAllowed={}",
             m_name,
@@ -242,28 +241,15 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     }
 
     const auto resourceID = GetGlobalResourceID();
-    const bool unorderedAccess = m_UAV;
-    const auto bufferName = m_name;
     m_pendingResizeCapacity = desiredBackingCapacity;
     m_requestedResizeCapacity = (std::max)(m_requestedResizeCapacity, desiredBackingCapacity);
     m_pendingResizeValid = true;
-    m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, desiredBackingCapacity, bufferName]() {
-        spdlog::debug(
-            "DynamicBuffer '{}' id={} async resize backing create begin capacity={}",
-            bufferName,
-            resourceID,
-            desiredBackingCapacity);
-        auto backing = GpuBufferBacking::CreateUnique(
-            rhi::HeapType::DeviceLocal,
-            desiredBackingCapacity,
-            resourceID,
-            unorderedAccess);
-        spdlog::debug(
-            "DynamicBuffer '{}' id={} async resize backing create complete capacity={}",
-            bufferName,
-            resourceID,
-            desiredBackingCapacity);
-        return backing;
+    m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        .resourceID = resourceID,
+        .heapType = rhi::HeapType::DeviceLocal,
+        .byteSize = desiredBackingCapacity,
+        .unorderedAccess = m_UAV,
+        .debugName = m_name,
     });
 }
 
@@ -275,7 +261,7 @@ bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
 
 bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
     ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked");
-    if (!m_pendingResizeValid) {
+    if (!m_pendingResizeValid && !m_asyncResizeState.HasPending()) {
         TracyPlot("DynamicBuffer.Resize.Pending", int64_t{ 0 });
         return false;
     }
@@ -283,36 +269,50 @@ bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
         return false;
     }
     TracyPlot("DynamicBuffer.Resize.Pending", int64_t{ 1 });
-    {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked::PollFuture");
-        if (!wait &&
-            m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-            TracyPlot("DynamicBuffer.Resize.FutureReady", int64_t{ 0 });
-            return false;
+    auto resizeResult = m_asyncResizeState.ConsumeReady(wait);
+    if (!resizeResult.has_value()) {
+        TracyPlot("DynamicBuffer.Resize.FutureReady", int64_t{ 0 });
+        return false;
+    }
+    TracyPlot("DynamicBuffer.Resize.FutureReady", int64_t{ 1 });
+    if (resizeResult->exception) {
+        try {
+            std::rethrow_exception(resizeResult->exception);
         }
-        TracyPlot("DynamicBuffer.Resize.FutureReady", int64_t{ 1 });
+        catch (const std::exception& e) {
+            spdlog::error(
+                "DynamicBuffer '{}' id={} async resize failed: {}",
+                m_name,
+                GetGlobalResourceID(),
+                e.what());
+        }
+        catch (...) {
+            spdlog::error(
+                "DynamicBuffer '{}' id={} async resize failed with unknown exception",
+                m_name,
+                GetGlobalResourceID());
+        }
+        m_pendingResizeCapacity = 0;
+        m_requestedResizeCapacity = 0;
+        m_pendingResizeValid = false;
+        return false;
     }
 
-    std::unique_ptr<GpuBufferBacking> newBacking;
-    {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked::GetFuture");
-        newBacking = m_pendingResizeFuture.get();
-    }
+    std::unique_ptr<GpuBufferBacking> newBacking = std::move(resizeResult->backing);
     const size_t previousBackingCapacity = static_cast<size_t>(GetBufferSize());
-    size_t newCapacity = (std::max)({ m_pendingResizeCapacity, m_requestedResizeCapacity, m_capacity });
-    if (newCapacity > m_pendingResizeCapacity) {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked::SupersedeBacking");
-        spdlog::debug(
-            "DynamicBuffer '{}' id={} superseding ready async backing capacity={} with coalesced logical capacity={}",
-            m_name,
-            GetGlobalResourceID(),
-            m_pendingResizeCapacity,
-            newCapacity);
-        newBacking = GpuBufferBacking::CreateUnique(
-            rhi::HeapType::DeviceLocal,
-            newCapacity,
-            GetGlobalResourceID(),
-            m_UAV);
+    size_t newCapacity = (std::max)({ static_cast<size_t>(resizeResult->byteSize), m_requestedResizeCapacity, m_capacity });
+    if (newCapacity > static_cast<size_t>(resizeResult->byteSize)) {
+        m_pendingResizeCapacity = newCapacity;
+        m_requestedResizeCapacity = newCapacity;
+        m_pendingResizeValid = true;
+        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            .resourceID = GetGlobalResourceID(),
+            .heapType = rhi::HeapType::DeviceLocal,
+            .byteSize = newCapacity,
+            .unorderedAccess = m_UAV,
+            .debugName = m_name,
+        });
+        return false;
     }
     const bool logicalCapacityAlreadyExtended = m_capacity >= newCapacity;
     m_pendingResizeCapacity = 0;
@@ -359,7 +359,7 @@ bool DynamicBuffer::CanAllocateBytes(size_t size) const {
 
 bool DynamicBuffer::HasPendingBackingResize() const {
     std::lock_guard lock(m_allocationMutex);
-    return m_pendingResizeValid;
+    return m_pendingResizeValid || m_asyncResizeState.HasPending();
 }
 
 std::vector<std::shared_ptr<BufferView>> DynamicBuffer::AddDataBatch(const void* data, size_t count, size_t elementSize) {

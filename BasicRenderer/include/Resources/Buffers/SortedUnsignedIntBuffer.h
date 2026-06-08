@@ -5,7 +5,6 @@
 #include <algorithm> // For std::lower_bound, std::upper_bound
 #include <cstddef>
 #include <cstring>
-#include <future>
 #include <rhi.h>
 
 #include "Resources/Buffers/Buffer.h"
@@ -40,7 +39,7 @@ public:
     void RequestAsyncReserveCapacity(uint64_t requiredSize);
     bool PublishReadyAsyncResize(bool wait = false);
     bool PublishPendingBackingResize(bool wait) override { return PublishReadyAsyncResize(wait); }
-    bool HasPendingBackingResize() const override { return m_pendingResizeValid; }
+    bool HasPendingBackingResize() const override { return m_pendingResizeValid || m_asyncResizeState.HasPending(); }
     std::string GetDeferredBackingResizeDebugName() const override { return GetName(); }
     void AppendActiveEntries(const std::vector<ActiveDrawSetEntry>& entries);
     void AssignActiveSnapshot(std::vector<ActiveDrawSetEntry> entries);
@@ -169,7 +168,7 @@ private:
 
     bool m_UAV = false;
     bool m_activeEntryMode = false;
-    std::future<std::unique_ptr<GpuBufferBacking>> m_pendingResizeFuture;
+    AsyncBufferBackingResizeState m_asyncResizeState;
     uint64_t m_pendingResizeCapacity = 0;
     bool m_pendingResizeValid = false;
 

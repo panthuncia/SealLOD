@@ -1072,28 +1072,6 @@ void ObjectManager::PrepareStaticGroupCommitResourcesAsync(const PreparedStaticG
 	}
 }
 
-void ObjectManager::PublishPreparedStaticGroupCommitResourceResizes(bool wait) {
-	ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes");
-	std::size_t published = 0;
-	{
-		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::PerObject");
-		published += m_perObjectBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
-	}
-	{
-		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::InstanceTransforms");
-		published += m_perInstanceTransformBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
-	}
-	{
-		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::NormalMatrices");
-		published += m_normalMatrixBuffer->PublishReadyAsyncResize(wait) ? 1u : 0u;
-	}
-	{
-		ZoneScopedN("ObjectManager::PublishPreparedStaticGroupCommitResourceResizes::DrawRecords");
-		published += m_instanceDrawRecordBuffers->PublishReadyAsyncResize(wait) ? 1u : 0u;
-	}
-	TracyPlot("ObjectManager.StaticImportTransaction.ResourceResizesPublished", static_cast<int64_t>(published));
-}
-
 ObjectManager::StaticImportPacketPlan ObjectManager::PrepareStaticImportPacketPlan(const std::vector<StaticGroupBuildInfo>& groups) {
 	StaticImportPacketPlan plan;
 	plan.prepared = PrepareStaticGroupsBulkPlan(groups);
@@ -1965,7 +1943,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	const auto resizeBegin = std::chrono::steady_clock::now();
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportPacket::PublishResizes");
-		PublishPreparedStaticGroupCommitResourceResizes(false);
+		(void)PublishReadyDeferredBackingResizes(false);
 	}
 	m_stats.staticDirectResizePublishUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - resizeBegin).count());

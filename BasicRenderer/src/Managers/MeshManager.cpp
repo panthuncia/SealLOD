@@ -611,7 +611,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 
 	{
 		ZoneScopedN("MeshManager::AddMeshesBulk::ReserveBuffers");
-		PublishPreparedStaticMeshTemplateResourceResizes(false);
+		(void)PublishReadyDeferredBackingResizes(false);
 		m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
 		m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 		m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
@@ -700,20 +700,6 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	}
 }
 
-void MeshManager::PublishPreparedStaticMeshTemplateResourceResizes(bool wait) {
-	ZoneScopedN("MeshManager::PublishPreparedStaticMeshTemplateResourceResizes");
-	(void)m_perMeshBuffers->PublishReadyAsyncResize(wait);
-	(void)m_clusterLODGroups->PublishReadyAsyncResize(wait);
-	(void)m_clusterLODSegments->PublishReadyAsyncResize(wait);
-	(void)m_clusterLODNodes->PublishReadyAsyncResize(wait);
-	(void)m_clodSharedGroupChunks->PublishReadyAsyncResize(wait);
-	(void)m_clodHierarchyLevelInfos->PublishReadyAsyncResize(wait);
-	(void)m_clodMeshMetadata->PublishReadyAsyncResize(wait);
-	(void)m_clodGroupPageMap->PublishReadyAsyncResize(wait);
-	(void)m_perMeshInstanceBuffers->PublishReadyAsyncResize(wait);
-	(void)m_perMeshInstanceClodOffsets->PublishReadyAsyncResize(wait);
-}
-
 std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests) {
 	ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk");
 	ZoneValue(static_cast<int64_t>(requests.size()));
@@ -769,7 +755,7 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 	const auto clodOffsetBytes = clodOffsetRows.size() * sizeof(MeshInstanceClodOffsets);
 	{
 		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::ReserveTemplateBuffers");
-		PublishPreparedStaticMeshTemplateResourceResizes(false);
+		(void)PublishReadyDeferredBackingResizes(false);
 		m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
 		m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
 	}

@@ -488,6 +488,9 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
     }
     ResourceManager::GetInstance().Initialize();
     TaskSchedulerManager::GetInstance().Initialize(16);
+    SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
+        TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
+    });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
     PSOManager::GetInstance().initialize();
     DeletionManager::GetInstance().Initialize();
@@ -2788,6 +2791,7 @@ void Renderer::Cleanup() {
         m_pReadbackManager->Cleanup();
     }
     ResourceManager::GetInstance().Cleanup();
+    SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
     currentRenderGraph.reset();

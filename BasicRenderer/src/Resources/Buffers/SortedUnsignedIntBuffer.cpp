@@ -1,7 +1,6 @@
 #include "Resources/Buffers/SortedUnsignedIntBuffer.h"
 
 #include <algorithm>
-#include <chrono>
 
 #include <spdlog/spdlog.h>
 
@@ -126,38 +125,21 @@ void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize)
     }
 
     if (m_pendingResizeValid) {
-        (void)PublishReadyAsyncResize(false);
         if (m_pendingResizeValid && m_pendingResizeCapacity >= newCapacity) {
-            return;
-        }
-        if (m_pendingResizeValid) {
             return;
         }
     }
 
     const auto stride = m_activeEntryMode ? sizeof(ActiveDrawSetEntry) : sizeof(unsigned int);
     const auto resourceID = GetGlobalResourceID();
-    const auto unorderedAccess = m_UAV;
-    const auto bufferName = GetName();
-    m_pendingResizeCapacity = newCapacity;
+    m_pendingResizeCapacity = (std::max)(m_pendingResizeCapacity, newCapacity);
     m_pendingResizeValid = true;
-    m_pendingResizeFuture = std::async(std::launch::async, [resourceID, unorderedAccess, newCapacity, stride, bufferName]() {
-        spdlog::debug(
-            "SortedUnsignedIntBuffer '{}' id={} async resize backing create begin capacity={}",
-            bufferName,
-            resourceID,
-            newCapacity);
-        auto backing = GpuBufferBacking::CreateUnique(
-            rhi::HeapType::DeviceLocal,
-            newCapacity * stride,
-            resourceID,
-            unorderedAccess);
-        spdlog::debug(
-            "SortedUnsignedIntBuffer '{}' id={} async resize backing create complete capacity={}",
-            bufferName,
-            resourceID,
-            newCapacity);
-        return backing;
+    m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+        .resourceID = resourceID,
+        .heapType = rhi::HeapType::DeviceLocal,
+        .byteSize = newCapacity * stride,
+        .unorderedAccess = m_UAV,
+        .debugName = GetName(),
     });
 }
 
@@ -165,16 +147,39 @@ bool SortedUnsignedIntBuffer::PublishReadyAsyncResize(bool wait) {
     if (!BufferBase::IsBackingMutationAllowedOnThisThread()) {
         return false;
     }
-    if (!m_pendingResizeValid) {
+    if (!m_pendingResizeValid && !m_asyncResizeState.HasPending()) {
         return false;
     }
-    if (!wait &&
-        m_pendingResizeFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+    auto resizeResult = m_asyncResizeState.ConsumeReady(wait);
+    if (!resizeResult.has_value()) {
         return false;
     }
 
-    auto newBacking = m_pendingResizeFuture.get();
-    const auto newCapacity = m_pendingResizeCapacity;
+    if (resizeResult->exception) {
+        try {
+            std::rethrow_exception(resizeResult->exception);
+        }
+        catch (const std::exception& e) {
+            spdlog::error(
+                "SortedUnsignedIntBuffer '{}' id={} async resize failed: {}",
+                GetName(),
+                GetGlobalResourceID(),
+                e.what());
+        }
+        catch (...) {
+            spdlog::error(
+                "SortedUnsignedIntBuffer '{}' id={} async resize failed with unknown exception",
+                GetName(),
+                GetGlobalResourceID());
+        }
+        m_pendingResizeCapacity = 0;
+        m_pendingResizeValid = false;
+        return false;
+    }
+
+    auto newBacking = std::move(resizeResult->backing);
+    const auto stride = ElementStride();
+    const auto newCapacity = stride == 0u ? 0u : resizeResult->byteSize / stride;
     m_pendingResizeCapacity = 0;
     m_pendingResizeValid = false;
     if (!newBacking || newCapacity <= m_capacity) {
