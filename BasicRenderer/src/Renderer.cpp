@@ -2538,64 +2538,68 @@ void Renderer::Render() {
 
     auto& deviceManager = DeviceManager::GetInstance();
 
-    runCapturedStage("PrepareRenderContext", [&]() {
-        m_context.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
-        m_context.hasPrimaryCamera = false;
-        m_context.primaryViewID = 0;
-        m_context.textureDescriptorHeap = rg::runtime::GetActiveSRVDescriptorHeap();
-        m_context.samplerDescriptorHeap = rg::runtime::GetActiveSamplerDescriptorHeap();
-        m_context.rtvHeap = rtvHeap.Get();
-        m_context.rtvDescriptorSize = rtvDescriptorSize;
-        m_context.dsvDescriptorSize = dsvDescriptorSize;
-	    m_context.frameIndex = renderedFrameIndex;
-		m_context.frameNumber = m_totalFramesRendered;
-        m_context.frameFenceValue = m_currentFrameFenceValue;
-        m_context.renderResolution = { renderRes.x, renderRes.y };
-	    m_context.outputResolution = { outputRes.x, outputRes.y };
-        m_context.clodRayTracingSupported = deviceManager.GetCLodRayTracingSupported();
-        m_context.rayTracedReflectionsEnabled = m_rayTracedReflections && m_context.clodRayTracingSupported;
-	    m_context.viewManager = m_pViewManager.get();
-	    m_context.objectManager = m_pObjectManager.get();
-	    m_context.meshManager = m_pMeshManager.get();
-	    m_context.indirectCommandBufferManager = m_pIndirectCommandBufferManager.get();
-	    m_context.lightManager = m_pLightManager.get();
-	    m_context.environmentManager = m_pEnvironmentManager.get();
-	    m_context.materialManager = m_pMaterialManager.get();
-	    m_context.clodRayTracingSystem = m_clodRayTracingSystem.get();
+    {
+        ZoneScopedN("Renderer::Render::PrepareRenderContext");
+        runCapturedStage("PrepareRenderContext", [&]() {
+            m_context.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
+            m_context.hasPrimaryCamera = false;
+            m_context.primaryViewID = 0;
+            m_context.textureDescriptorHeap = rg::runtime::GetActiveSRVDescriptorHeap();
+            m_context.samplerDescriptorHeap = rg::runtime::GetActiveSamplerDescriptorHeap();
+            m_context.rtvHeap = rtvHeap.Get();
+            m_context.rtvDescriptorSize = rtvDescriptorSize;
+            m_context.dsvDescriptorSize = dsvDescriptorSize;
+            m_context.frameIndex = renderedFrameIndex;
+            m_context.frameNumber = m_totalFramesRendered;
+            m_context.frameFenceValue = m_currentFrameFenceValue;
+            m_context.renderResolution = { renderRes.x, renderRes.y };
+            m_context.outputResolution = { outputRes.x, outputRes.y };
+            m_context.clodRayTracingSupported = deviceManager.GetCLodRayTracingSupported();
+            m_context.rayTracedReflectionsEnabled = m_rayTracedReflections && m_context.clodRayTracingSupported;
+            m_context.viewManager = m_pViewManager.get();
+            m_context.objectManager = m_pObjectManager.get();
+            m_context.meshManager = m_pMeshManager.get();
+            m_context.indirectCommandBufferManager = m_pIndirectCommandBufferManager.get();
+            m_context.lightManager = m_pLightManager.get();
+            m_context.environmentManager = m_pEnvironmentManager.get();
+            m_context.materialManager = m_pMaterialManager.get();
+            m_context.clodRayTracingSystem = m_clodRayTracingSystem.get();
 
-        if (m_context.rayTracedReflectionsEnabled && m_clodRayTracingSystem && m_pMeshManager) {
-            m_clodRayTracingSystem->Refresh(*m_pMeshManager);
-            m_clodRayTracingSystem->UpdateGpuResources(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures());
-        }
-        else if (m_clodRayTracingSystem) {
-            m_clodRayTracingSystem->Reset();
-        }
-	    m_context.drawStats = drawStats;
-	    m_context.deltaTime = deltaTime;
-        m_context.sceneOverlapStatus = GetSceneOverlapStatus();
-
-        auto primaryCamera = GetValidatedPrimaryRenderCamera(false);
-        if (primaryCamera) {
-            m_context.hasPrimaryCamera = true;
-            m_context.primaryViewID = primaryCamera.get<Components::RenderViewRef>().viewID;
-            m_context.primaryCamera = primaryCamera.get<Components::Camera>();
-            if (auto depthMap = primaryCamera.try_get<Components::DepthMap>()) {
-                m_context.primaryDepthMap = *depthMap;
+            if (m_context.rayTracedReflectionsEnabled && m_clodRayTracingSystem && m_pMeshManager) {
+                m_clodRayTracingSystem->Refresh(*m_pMeshManager);
+                m_clodRayTracingSystem->UpdateGpuResources(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures());
             }
-        }
+            else if (m_clodRayTracingSystem) {
+                m_clodRayTracingSystem->Reset();
+            }
+            m_context.drawStats = drawStats;
+            m_context.deltaTime = deltaTime;
+            m_context.sceneOverlapStatus = GetSceneOverlapStatus();
 
-        unsigned int globalPSOFlags = 0;
-        if (m_imageBasedLighting) {
-            globalPSOFlags |= PSOFlags::PSO_IMAGE_BASED_LIGHTING;
-        }
-	    if (m_clusteredLighting) {
-		    globalPSOFlags |= PSOFlags::PSO_CLUSTERED_LIGHTING;
-	    }
-        if (m_screenSpaceReflections || m_context.rayTracedReflectionsEnabled) {
-            globalPSOFlags |= PSOFlags::PSO_SCREENSPACE_REFLECTIONS;
-        }
-	    m_context.globalPSOFlags = globalPSOFlags;
-    });
+            auto primaryCamera = GetValidatedPrimaryRenderCamera(false);
+            if (primaryCamera) {
+                m_context.hasPrimaryCamera = true;
+                m_context.primaryViewID = primaryCamera.get<Components::RenderViewRef>().viewID;
+                m_context.primaryCamera = primaryCamera.get<Components::Camera>();
+                if (auto depthMap = primaryCamera.try_get<Components::DepthMap>()) {
+                    m_context.primaryDepthMap = *depthMap;
+                }
+            }
+
+            unsigned int globalPSOFlags = 0;
+            if (m_imageBasedLighting) {
+                globalPSOFlags |= PSOFlags::PSO_IMAGE_BASED_LIGHTING;
+            }
+            if (m_clusteredLighting) {
+                globalPSOFlags |= PSOFlags::PSO_CLUSTERED_LIGHTING;
+            }
+            if (m_screenSpaceReflections || m_context.rayTracedReflectionsEnabled) {
+                globalPSOFlags |= PSOFlags::PSO_SCREENSPACE_REFLECTIONS;
+            }
+            m_context.globalPSOFlags = globalPSOFlags;
+        });
+
+    }
 
     struct RendererHostFrameData : IHostExecutionData {
         rhi::DescriptorHeap textureDescriptorHeap;
@@ -2668,8 +2672,10 @@ void Renderer::Render() {
         }
     }
 
-    MaybeRequestCLodVisibilityTelemetry();
-
+    {
+        ZoneScopedN("Renderer::Render::CLodVisibilityTelemetry");
+        MaybeRequestCLodVisibilityTelemetry();
+    }
     runCapturedStage("RenderGraphExecute", [&]() {
         ZoneScopedN("Renderer::Render::RenderGraphExecute");
         if (renderGraphBatchTraceEnabled) {
