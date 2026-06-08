@@ -2297,6 +2297,7 @@ void Renderer::Update(float elapsedSeconds) {
 }
 
 void Renderer::PostUpdate() {
+    ZoneScopedN("Renderer::PostUpdate");
 	if (!currentScene) {
         return;
     }
