@@ -204,6 +204,7 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.autoAliasLogExclusionReasons = sm.getSettingGetter<bool>("autoAliasLogExclusionReasons")();
     orgSettings.autoAliasBuildDebugData = sm.getSettingGetter<bool>("autoAliasBuildDebugData")();
     orgSettings.queueSchedulingEnableLogging = sm.getSettingGetter<bool>("queueSchedulingEnableLogging")();
+    orgSettings.queueSchedulingSelectionPolicy = static_cast<rg::runtime::QueueSchedulingSelectionPolicy>(sm.getSettingGetter<uint8_t>("queueSchedulingSelectionPolicy")());
     orgSettings.queueSchedulingWidthScale = sm.getSettingGetter<float>("queueSchedulingWidthScale")();
     orgSettings.queueSchedulingPenaltyBias = sm.getSettingGetter<float>("queueSchedulingPenaltyBias")();
     orgSettings.queueSchedulingMinPenalty = sm.getSettingGetter<float>("queueSchedulingMinPenalty")();
@@ -1518,6 +1519,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
     settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
     settingsManager.registerSetting<bool>("queueSchedulingEnableLogging", false);
+    settingsManager.registerSetting<uint8_t>("queueSchedulingSelectionPolicy", static_cast<uint8_t>(rg::runtime::QueueSchedulingSelectionPolicy::FirstFit));
     settingsManager.registerSetting<float>("queueSchedulingWidthScale", 0.0f); // Disable multi-queue scheduling
     settingsManager.registerSetting<float>("queueSchedulingPenaltyBias", 0.0f);
     settingsManager.registerSetting<float>("queueSchedulingMinPenalty", 1.0f);
