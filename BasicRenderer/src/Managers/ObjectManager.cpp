@@ -1406,6 +1406,7 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 
 ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeStaticImportTransaction(StaticImportReservation reservation) const {
 	ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction");
+
 	const auto materializeBegin = std::chrono::steady_clock::now();
 	MaterializedStaticImportTransaction transaction;
 	transaction.reservation = std::move(reservation);
@@ -1416,9 +1417,10 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 	transaction.perObjectRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.normalRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.drawRecordRows.reserve(static_cast<std::size_t>(transaction.reservation.drawRecords));
-
+	
 	std::size_t generationCursor = 0;
 	for (std::size_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
+		ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::ProcessGroup");
 		const auto& group = build.prepared.groups[groupIndex];
 		auto& drawInfo = transaction.drawInfos[groupIndex];
 		const auto transformCount = group.perObjectCBs.size();
@@ -1446,14 +1448,17 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		drawInfo.drawInfo.indices.reserve(transformCount * group.meshTemplates.size());
 		drawInfo.drawInfo.drawWorkloadKeysPerDraw.reserve(transformCount * group.meshTemplates.size());
 
-		const auto groupTransformFirst = transaction.perObjectRows.size();
-		for (std::size_t i = 0; i < transformCount; ++i) {
-			auto perObject = group.perObjectCBs[i];
-			perObject.normalMatrixBufferIndex = static_cast<std::uint32_t>(
-				(normalRange.offset + i * sizeof(DirectX::XMFLOAT4X4)) / sizeof(DirectX::XMFLOAT4X4));
-			transaction.perObjectRows.push_back(perObject);
-			if (i < group.normalMatrices.size()) {
-				transaction.normalRows.push_back(group.normalMatrices[i]);
+		{
+			ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::SetupPerObjectAndNormalRows");
+			const auto groupTransformFirst = transaction.perObjectRows.size();
+			for (std::size_t i = 0; i < transformCount; ++i) {
+				auto perObject = group.perObjectCBs[i];
+				perObject.normalMatrixBufferIndex = static_cast<std::uint32_t>(
+					(normalRange.offset + i * sizeof(DirectX::XMFLOAT4X4)) / sizeof(DirectX::XMFLOAT4X4));
+				transaction.perObjectRows.push_back(perObject);
+				if (i < group.normalMatrices.size()) {
+					transaction.normalRows.push_back(group.normalMatrices[i]);
+				}
 			}
 		}
 
@@ -1461,52 +1466,57 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			drawInfo.perMeshInstanceBufferIndices.push_back(meshTemplate.meshTemplateIndex);
 		}
 
-		std::size_t localDrawRecordOrdinal = 0;
-		for (std::size_t transformIndex = 0; transformIndex < transformCount; ++transformIndex) {
-			const auto instanceTransformOffset = instanceTransformRange.offset + transformIndex * sizeof(PerInstanceTransformCB);
-			for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < group.meshTemplates.size(); ++meshTemplateIndex) {
-				const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
-				if (!meshTemplate.mesh || !meshTemplate.material) {
-					continue;
-				}
-				const auto drawRecordOffset = drawRecordRange.offset + localDrawRecordOrdinal * sizeof(InstanceDrawRecordCB);
-				const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
-				const auto generation = generationCursor < transaction.reservation.drawRecordGenerations.size()
-					? transaction.reservation.drawRecordGenerations[generationCursor]
-					: 1u;
-				++generationCursor;
-
-				InstanceDrawRecordCB record{};
-				record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
-				record.instanceTransformIndex = static_cast<std::uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
-				record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
-				record.flags = 0u;
-				transaction.drawRecordRows.push_back(record);
-
-				drawInfo.drawInfo.indices.push_back(drawRecordIndex);
-				drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
-				if (meshTemplateIndex < group.workloadKeysByMeshTemplate.size()) {
-					const auto& workloadKeys = group.workloadKeysByMeshTemplate[meshTemplateIndex];
-					drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(workloadKeys);
-					for (const auto& workloadKey : workloadKeys) {
-						transaction.activeDrawSetInserts[workloadKey].push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
-							.drawRecordIndex = drawRecordIndex,
-							.generation = generation
-						});
-						AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
+		{
+			ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::SetupDrawRecordRows");
+			std::size_t localDrawRecordOrdinal = 0;
+			for (std::size_t transformIndex = 0; transformIndex < transformCount; ++transformIndex) {
+				const auto instanceTransformOffset = instanceTransformRange.offset + transformIndex * sizeof(PerInstanceTransformCB);
+				for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < group.meshTemplates.size(); ++meshTemplateIndex) {
+					const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
+					if (!meshTemplate.mesh || !meshTemplate.material) {
+						continue;
 					}
-				} else {
-					drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back({});
+					const auto drawRecordOffset = drawRecordRange.offset + localDrawRecordOrdinal * sizeof(InstanceDrawRecordCB);
+					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
+					const auto generation = generationCursor < transaction.reservation.drawRecordGenerations.size()
+						? transaction.reservation.drawRecordGenerations[generationCursor]
+						: 1u;
+					++generationCursor;
+
+					InstanceDrawRecordCB record{};
+					record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
+					record.instanceTransformIndex = static_cast<std::uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
+					record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+					record.flags = 0u;
+					transaction.drawRecordRows.push_back(record);
+
+					drawInfo.drawInfo.indices.push_back(drawRecordIndex);
+					drawInfo.instanceDrawRecordIndices.push_back(drawRecordIndex);
+					if (meshTemplateIndex < group.workloadKeysByMeshTemplate.size()) {
+						const auto& workloadKeys = group.workloadKeysByMeshTemplate[meshTemplateIndex];
+						drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back(workloadKeys);
+						for (const auto& workloadKey : workloadKeys) {
+							transaction.activeDrawSetInserts[workloadKey].push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
+								.drawRecordIndex = drawRecordIndex,
+								.generation = generation
+							});
+							AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
+						}
+					} else {
+						drawInfo.drawInfo.drawWorkloadKeysPerDraw.push_back({});
+					}
+					++localDrawRecordOrdinal;
 				}
-				++localDrawRecordOrdinal;
 			}
 		}
-		(void)groupTransformFirst;
 	}
 
-	transaction.removalPayloads.reserve(transaction.drawInfos.size());
-	for (const auto& drawInfo : transaction.drawInfos) {
-		transaction.removalPayloads.push_back(BuildStaticObjectRemovalPayload(std::span<const Components::ObjectDrawInfo>(&drawInfo, 1)));
+	{
+		ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::BuildRemovalPayloads");
+		transaction.removalPayloads.reserve(transaction.drawInfos.size());
+		for (const auto& drawInfo : transaction.drawInfos) {
+			transaction.removalPayloads.push_back(BuildStaticObjectRemovalPayload(std::span<const Components::ObjectDrawInfo>(&drawInfo, 1)));
+		}
 	}
 
 	transaction.materializeUs = static_cast<std::uint64_t>(
