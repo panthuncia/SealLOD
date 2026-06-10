@@ -104,6 +104,7 @@ public:
 		uint32_t meshTemplateIndex = 0;
 		uint32_t clodOffsetIndex = 0;
 		bool valid = false;
+		bool pendingResources = false;
 	};
 
 	void AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices);

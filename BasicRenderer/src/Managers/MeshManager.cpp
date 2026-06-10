@@ -610,16 +610,28 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	}
 
 	{
-		ZoneScopedN("MeshManager::AddMeshesBulk::ReserveBuffers");
-		(void)PublishReadyDeferredBackingResizes(false);
-		m_perMeshBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
-		m_clusterLODGroups->ReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
-		m_clusterLODSegments->ReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
-		m_clusterLODNodes->ReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
-		m_clodSharedGroupChunks->ReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
-		m_clodHierarchyLevelInfos->ReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
-		m_clodMeshMetadata->ReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
-		m_clodGroupPageMap->ReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+		ZoneScopedN("MeshManager::AddMeshesBulk::CheckAsyncCapacity");
+		const bool capacityReady =
+			m_perMeshBuffers->CanAllocateBytes(meshRowsToAdd * sizeof(PerMeshCB)) &&
+			m_clusterLODGroups->CanAllocateBytes(clodGroupsBytes) &&
+			m_clusterLODSegments->CanAllocateBytes(clodSegmentsBytes) &&
+			m_clusterLODNodes->CanAllocateBytes(clodNodesBytes) &&
+			m_clodSharedGroupChunks->CanAllocateBytes(clodSharedGroupChunkBytes) &&
+			m_clodHierarchyLevelInfos->CanAllocateBytes(clodHierarchyLevelInfoBytes) &&
+			m_clodMeshMetadata->CanAllocateBytes(clodMeshMetadataBytes) &&
+			m_clodGroupPageMap->CanAllocateBytes(clodPageMapBytes);
+		TracyPlot("MeshManager.AddMeshesBulk.AsyncCapacityReady", capacityReady ? int64_t{ 1 } : int64_t{ 0 });
+		if (!capacityReady) {
+			m_perMeshBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
+			m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
+			m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
+			m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+			m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
+			m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
+			m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
+			m_clodGroupPageMap->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodPageMapBytes, 512ull * 1024ull));
+			return;
+		}
 	}
 
 	{
@@ -754,10 +766,19 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 	const auto perMeshInstanceBytes = perMeshInstanceRows.size() * sizeof(PerMeshInstanceCB);
 	const auto clodOffsetBytes = clodOffsetRows.size() * sizeof(MeshInstanceClodOffsets);
 	{
-		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::ReserveTemplateBuffers");
-		(void)PublishReadyDeferredBackingResizes(false);
-		m_perMeshInstanceBuffers->ReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
-		m_perMeshInstanceClodOffsets->ReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
+		ZoneScopedN("MeshManager::AddStaticMeshTemplatesBulk::CheckAsyncCapacity");
+		const bool capacityReady =
+			m_perMeshInstanceBuffers->CanAllocateBytes(perMeshInstanceBytes) &&
+			m_perMeshInstanceClodOffsets->CanAllocateBytes(clodOffsetBytes);
+		TracyPlot("MeshManager.StaticTemplate.AsyncCapacityReady", capacityReady ? int64_t{ 1 } : int64_t{ 0 });
+		if (!capacityReady) {
+			m_perMeshInstanceBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(perMeshInstanceBytes, 256ull * 1024ull));
+			m_perMeshInstanceClodOffsets->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodOffsetBytes, 256ull * 1024ull));
+			for (const auto requestIndex : validRequestIndices) {
+				registrations[requestIndex].pendingResources = true;
+			}
+			return registrations;
+		}
 	}
 
 	std::pair<size_t, size_t> perMeshInstanceRange;
