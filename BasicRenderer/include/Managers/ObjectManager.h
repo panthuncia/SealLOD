@@ -357,6 +357,9 @@ public:
 		std::span<StaticImportBuildBatch*> builds,
 		std::vector<StaticImportReservation>& reservations);
 	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(StaticImportReservation reservation) const;
+	MaterializedStaticImportTransaction MaterializeStaticImportTransaction(
+		StaticImportReservation&& reservation,
+		StaticImportBuildBatch& buildScratch) const;
 	StaticImportPublishResult PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction);
 	StaticImportBulkPublishResult PublishStaticImportTransactionsBulk(std::span<MaterializedStaticImportTransaction*> transactions);
 	void CancelStaticImportTransaction(StaticImportReservation reservation, std::uint64_t retireFrame = 0);

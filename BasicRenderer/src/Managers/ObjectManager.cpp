@@ -84,38 +84,13 @@ void ResetStaticImportBuildBatchForReuse(ObjectManager::StaticImportBuildBatch& 
 	build.finalized = false;
 }
 
-std::vector<ObjectManager::StaticImportBuildBatch>& StaticImportBuildScratchPool()
-{
-	thread_local std::vector<ObjectManager::StaticImportBuildBatch> buildScratchPool;
-	return buildScratchPool;
-}
-
 ObjectManager::StaticImportBuildBatch AcquireStaticImportBuildScratch()
 {
-	auto& buildScratchPool = StaticImportBuildScratchPool();
-	if (buildScratchPool.empty()) {
-		return {};
-	}
-
-	auto build = std::move(buildScratchPool.back());
-	buildScratchPool.pop_back();
-	ResetStaticImportBuildBatchForReuse(build);
-	return build;
+	return {};
 }
 
-void RetireStaticImportBuildScratch(ObjectManager::StaticImportBuildBatch&& build) {
+void RetireStaticImportBuildScratch(ObjectManager::StaticImportBuildBatch& build) {
 	ResetStaticImportBuildBatchForReuse(build);
-
-	constexpr std::size_t InitialRetiredBatchCapacity = 64;
-	auto& buildScratchPool = StaticImportBuildScratchPool();
-	thread_local bool reservedBuildScratchPool = false;
-
-	if (!reservedBuildScratchPool) {
-		buildScratchPool.reserve(InitialRetiredBatchCapacity);
-		reservedBuildScratchPool = true;
-	}
-
-	buildScratchPool.push_back(std::move(build));
 }
 
 void AppendActiveDrawSetRemoval(
@@ -1342,7 +1317,13 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 	for (auto& build : builds) {
 		buildPtrs.push_back(std::addressof(build));
 	}
-	return TryReserveStaticImportTransactionsInPlace(buildPtrs, reservations);
+	auto statuses = TryReserveStaticImportTransactionsInPlace(buildPtrs, reservations);
+	for (std::size_t i = 0; i < builds.size() && i < reservations.size() && i < statuses.size(); ++i) {
+		if (statuses[i] == StaticImportReservationStatus::Ready) {
+			reservations[i].build = std::move(builds[i]);
+		}
+	}
+	return statuses;
 }
 
 std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryReserveStaticImportTransactionsInPlace(
@@ -1472,7 +1453,6 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 			}
 		}
 
-		reservation.build = std::move(build);
 		statuses[buildIndex] = StaticImportReservationStatus::Ready;
 		++readyCount;
 		readyDrawRecords += reservation.drawRecords;
@@ -1488,18 +1468,25 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 }
 
 ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeStaticImportTransaction(StaticImportReservation reservation) const {
+	return MaterializeStaticImportTransaction(std::move(reservation), reservation.build);
+}
+
+ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeStaticImportTransaction(
+	StaticImportReservation&& reservation,
+	StaticImportBuildBatch& buildScratch) const
+{
 	ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction");
 
 	const auto materializeBegin = std::chrono::steady_clock::now();
 	MaterializedStaticImportTransaction transaction;
-	transaction.reservation = std::move(reservation);
-	const auto& build = transaction.reservation.build;
+	const auto& build = buildScratch;
+	const bool reservationOwnsBuildScratch = std::addressof(buildScratch) == std::addressof(reservation.build);
 	const auto groupCount = build.prepared.groups.size();
 
 	transaction.drawInfos.resize(groupCount);
 	transaction.perObjectRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.normalRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
-	transaction.drawRecordRows.reserve(static_cast<std::size_t>(transaction.reservation.drawRecords));
+	transaction.drawRecordRows.reserve(static_cast<std::size_t>(reservation.drawRecords));
 	
 	std::size_t generationCursor = 0;
 	for (std::size_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
@@ -1507,17 +1494,17 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		const auto& group = build.prepared.groups[groupIndex];
 		auto& drawInfo = transaction.drawInfos[groupIndex];
 		const auto transformCount = group.perObjectCBs.size();
-		const auto perObjectRange = groupIndex < transaction.reservation.perObjectRanges.size()
-			? transaction.reservation.perObjectRanges[groupIndex]
+		const auto perObjectRange = groupIndex < reservation.perObjectRanges.size()
+			? reservation.perObjectRanges[groupIndex]
 			: DynamicBuffer::PagedAllocation{};
-		const auto instanceTransformRange = groupIndex < transaction.reservation.instanceTransformRanges.size()
-			? transaction.reservation.instanceTransformRanges[groupIndex]
+		const auto instanceTransformRange = groupIndex < reservation.instanceTransformRanges.size()
+			? reservation.instanceTransformRanges[groupIndex]
 			: DynamicBuffer::PagedAllocation{};
-		const auto normalRange = groupIndex < transaction.reservation.normalMatrixRanges.size()
-			? transaction.reservation.normalMatrixRanges[groupIndex]
+		const auto normalRange = groupIndex < reservation.normalMatrixRanges.size()
+			? reservation.normalMatrixRanges[groupIndex]
 			: DynamicBuffer::PagedAllocation{};
-		const auto drawRecordRange = groupIndex < transaction.reservation.instanceDrawRecordRanges.size()
-			? transaction.reservation.instanceDrawRecordRanges[groupIndex]
+		const auto drawRecordRange = groupIndex < reservation.instanceDrawRecordRanges.size()
+			? reservation.instanceDrawRecordRanges[groupIndex]
 			: DynamicBuffer::PagedAllocation{};
 
 		drawInfo.perObjectCBRange = ToBufferRange(perObjectRange);
@@ -1558,8 +1545,8 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 					const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
 					const auto drawRecordOffset = drawRecordRange.offset + localDrawRecordOrdinal * sizeof(InstanceDrawRecordCB);
 					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
-					const auto generation = generationCursor < transaction.reservation.drawRecordGenerations.size()
-						? transaction.reservation.drawRecordGenerations[generationCursor]
+					const auto generation = generationCursor < reservation.drawRecordGenerations.size()
+						? reservation.drawRecordGenerations[generationCursor]
 						: 1u;
 					++generationCursor;
 
@@ -1603,8 +1590,12 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - materializeBegin).count());
 	{
 		ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::RetireBuildData");
-		RetireStaticImportBuildScratch(std::move(transaction.reservation.build));
+		RetireStaticImportBuildScratch(buildScratch);
 	}
+	if (reservationOwnsBuildScratch) {
+		reservation.build = {};
+	}
+	transaction.reservation = std::move(reservation);
 	return transaction;
 }
 
