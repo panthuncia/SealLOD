@@ -60,6 +60,64 @@ std::size_t SumCounts(const std::vector<std::size_t>& counts) {
 	return total;
 }
 
+void ResetPreparedStaticGroupsPlanForReuse(ObjectManager::PreparedStaticGroupsBulkPlan& plan)
+{
+	plan.transformRows = 0;
+	plan.drawRecords = 0;
+	plan.preparedBytes = 0;
+	plan.prepareUs = 0;
+	plan.transformBuildUs = 0;
+	plan.workloadBuildUs = 0;
+	plan.drawRecordBuildUs = 0;
+}
+
+void ResetStaticImportBuildBatchForReuse(ObjectManager::StaticImportBuildBatch& build)
+{
+	ResetPreparedStaticGroupsPlanForReuse(build.prepared);
+	build.transformCounts.clear();
+	build.drawRecordCounts.clear();
+	build.activeReserveCounts.clear();
+	build.drawRecords = 0;
+	build.activeInsertIndices = 0;
+	build.preparedBytes = 0;
+	build.buildUs = 0;
+	build.finalized = false;
+}
+
+std::vector<ObjectManager::StaticImportBuildBatch>& StaticImportBuildScratchPool()
+{
+	thread_local std::vector<ObjectManager::StaticImportBuildBatch> buildScratchPool;
+	return buildScratchPool;
+}
+
+ObjectManager::StaticImportBuildBatch AcquireStaticImportBuildScratch()
+{
+	auto& buildScratchPool = StaticImportBuildScratchPool();
+	if (buildScratchPool.empty()) {
+		return {};
+	}
+
+	auto build = std::move(buildScratchPool.back());
+	buildScratchPool.pop_back();
+	ResetStaticImportBuildBatchForReuse(build);
+	return build;
+}
+
+void RetireStaticImportBuildScratch(ObjectManager::StaticImportBuildBatch&& build) {
+	ResetStaticImportBuildBatchForReuse(build);
+
+	constexpr std::size_t InitialRetiredBatchCapacity = 64;
+	auto& buildScratchPool = StaticImportBuildScratchPool();
+	thread_local bool reservedBuildScratchPool = false;
+
+	if (!reservedBuildScratchPool) {
+		buildScratchPool.reserve(InitialRetiredBatchCapacity);
+		reservedBuildScratchPool = true;
+	}
+
+	buildScratchPool.push_back(std::move(build));
+}
+
 void AppendActiveDrawSetRemoval(
 	Components::ObjectDrawInfo& drawInfo,
 	const DrawWorkloadKey& workloadKey,
@@ -91,6 +149,77 @@ std::vector<DrawWorkloadKey> ResolveStaticTemplateWorkloadKeys(const ObjectManag
 		workloadKeys.push_back(workloadKey);
 	});
 	return workloadKeys;
+}
+
+std::vector<DrawWorkloadKey> ResolveStaticTemplateWorkloadKeys(const ObjectManager::PreparedStaticMeshTemplateRef& meshTemplate)
+{
+	return meshTemplate.workloadKeys;
+}
+
+void PrepareStaticGroupsBulkPlanInPlace(
+	ObjectManager::PreparedStaticGroupsBulkPlan& plan,
+	const std::vector<ObjectManager::StaticGroupBuildInfo>& groups)
+{
+	ResetPreparedStaticGroupsPlanForReuse(plan);
+	if (groups.empty()) {
+		plan.groups.clear();
+		return;
+	}
+
+	const auto prepareBegin = std::chrono::steady_clock::now();
+	plan.groups.resize(groups.size());
+
+	const auto transformBuildBegin = std::chrono::steady_clock::now();
+	for (std::size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
+		const auto& group = groups[groupIndex];
+		auto& prepared = plan.groups[groupIndex];
+		prepared.stableGroupID = group.stableGroupID;
+		prepared.allocationScopeID = group.allocationScopeID;
+		prepared.meshTemplates.clear();
+		prepared.perObjectCBs.clear();
+		prepared.normalMatrices.clear();
+		prepared.workloadKeysByMeshTemplate.clear();
+		prepared.meshTemplates.reserve(group.meshTemplates.size());
+		for (const auto& meshTemplate : group.meshTemplates) {
+			auto& preparedTemplate = prepared.meshTemplates.emplace_back();
+			preparedTemplate.meshTemplateIndex = meshTemplate.meshTemplateIndex;
+			preparedTemplate.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+			preparedTemplate.workloadKeys = ResolveStaticTemplateWorkloadKeys(meshTemplate);
+		}
+		prepared.perObjectCBs.reserve(group.instanceTransforms.size());
+		prepared.normalMatrices.reserve(group.instanceTransforms.size());
+		prepared.workloadKeysByMeshTemplate.reserve(prepared.meshTemplates.size());
+
+		for (const auto& matrix : group.instanceTransforms) {
+			PerObjectCB perObject{};
+			perObject.modelMatrix = matrix;
+			perObject.prevModelMatrix = matrix;
+			perObject.modelInverseMatrix = DirectX::XMMatrixInverse(nullptr, matrix);
+			const auto determinant = DirectX::XMMatrixDeterminant(matrix);
+			perObject.objectFlags = (DirectX::XMVectorGetX(determinant) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
+			prepared.perObjectCBs.push_back(perObject);
+			prepared.normalMatrices.push_back(ComputeNormalMatrixStorage(matrix));
+		}
+
+		plan.transformRows += prepared.perObjectCBs.size();
+		plan.drawRecords += prepared.perObjectCBs.size() * prepared.meshTemplates.size();
+		plan.preparedBytes += prepared.perObjectCBs.size() * sizeof(PerObjectCB);
+		plan.preparedBytes += prepared.perObjectCBs.size() * sizeof(DirectX::XMFLOAT4X4);
+		plan.preparedBytes += prepared.perObjectCBs.size() * prepared.meshTemplates.size() * sizeof(InstanceDrawRecordCB);
+	}
+	plan.transformBuildUs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - transformBuildBegin).count());
+
+	const auto workloadBuildBegin = std::chrono::steady_clock::now();
+	for (auto& prepared : plan.groups) {
+		for (const auto& meshTemplate : prepared.meshTemplates) {
+			prepared.workloadKeysByMeshTemplate.push_back(ResolveStaticTemplateWorkloadKeys(meshTemplate));
+		}
+	}
+	plan.workloadBuildUs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - workloadBuildBegin).count());
+	plan.prepareUs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - prepareBegin).count());
 }
 
 }
@@ -1001,53 +1130,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 
 ObjectManager::PreparedStaticGroupsBulkPlan ObjectManager::PrepareStaticGroupsBulkPlan(const std::vector<StaticGroupBuildInfo>& groups) {
 	PreparedStaticGroupsBulkPlan plan;
-	if (groups.empty()) {
-		return plan;
-	}
-
-	const auto prepareBegin = std::chrono::steady_clock::now();
-	plan.groups.reserve(groups.size());
-
-	const auto transformBuildBegin = std::chrono::steady_clock::now();
-	for (const auto& group : groups) {
-		auto& prepared = plan.groups.emplace_back();
-		prepared.stableGroupID = group.stableGroupID;
-		prepared.allocationScopeID = group.allocationScopeID;
-		prepared.meshTemplates = group.meshTemplates;
-		prepared.perObjectCBs.reserve(group.instanceTransforms.size());
-		prepared.normalMatrices.reserve(group.instanceTransforms.size());
-		prepared.workloadKeysByMeshTemplate.reserve(group.meshTemplates.size());
-
-		for (const auto& matrix : group.instanceTransforms) {
-			PerObjectCB perObject{};
-			perObject.modelMatrix = matrix;
-			perObject.prevModelMatrix = matrix;
-			perObject.modelInverseMatrix = DirectX::XMMatrixInverse(nullptr, matrix);
-			const auto determinant = DirectX::XMMatrixDeterminant(matrix);
-			perObject.objectFlags = (DirectX::XMVectorGetX(determinant) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
-			prepared.perObjectCBs.push_back(perObject);
-			prepared.normalMatrices.push_back(ComputeNormalMatrixStorage(matrix));
-		}
-
-		plan.transformRows += prepared.perObjectCBs.size();
-		plan.drawRecords += prepared.perObjectCBs.size() * prepared.meshTemplates.size();
-		plan.preparedBytes += prepared.perObjectCBs.size() * sizeof(PerObjectCB);
-		plan.preparedBytes += prepared.perObjectCBs.size() * sizeof(DirectX::XMFLOAT4X4);
-		plan.preparedBytes += prepared.perObjectCBs.size() * prepared.meshTemplates.size() * sizeof(InstanceDrawRecordCB);
-	}
-	plan.transformBuildUs = static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - transformBuildBegin).count());
-
-	const auto workloadBuildBegin = std::chrono::steady_clock::now();
-	for (auto& prepared : plan.groups) {
-		for (const auto& meshTemplate : prepared.meshTemplates) {
-			prepared.workloadKeysByMeshTemplate.push_back(ResolveStaticTemplateWorkloadKeys(meshTemplate));
-		}
-	}
-	plan.workloadBuildUs = static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - workloadBuildBegin).count());
-	plan.prepareUs = static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - prepareBegin).count());
+	PrepareStaticGroupsBulkPlanInPlace(plan, groups);
 	return plan;
 }
 
@@ -1083,8 +1166,8 @@ void ObjectManager::RequestStaticImportPacketResources(const StaticImportPacketP
 }
 
 ObjectManager::StaticImportBuildBatch ObjectManager::PrepareStaticImportBuildBatch(const std::vector<StaticGroupBuildInfo>& groups) {
-	StaticImportBuildBatch build;
-	build.prepared = PrepareStaticGroupsBulkPlan(groups);
+	StaticImportBuildBatch build = AcquireStaticImportBuildScratch();
+	PrepareStaticGroupsBulkPlanInPlace(build.prepared, groups);
 	FinalizeStaticImportBuildBatch(build);
 	return build;
 }
@@ -1473,9 +1556,6 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 				const auto instanceTransformOffset = instanceTransformRange.offset + transformIndex * sizeof(PerInstanceTransformCB);
 				for (std::size_t meshTemplateIndex = 0; meshTemplateIndex < group.meshTemplates.size(); ++meshTemplateIndex) {
 					const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
-					if (!meshTemplate.mesh || !meshTemplate.material) {
-						continue;
-					}
 					const auto drawRecordOffset = drawRecordRange.offset + localDrawRecordOrdinal * sizeof(InstanceDrawRecordCB);
 					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
 					const auto generation = generationCursor < transaction.reservation.drawRecordGenerations.size()
@@ -1521,7 +1601,10 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 
 	transaction.materializeUs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - materializeBegin).count());
-	transaction.reservation.build = {};
+	{
+		ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::RetireBuildData");
+		RetireStaticImportBuildScratch(std::move(transaction.reservation.build));
+	}
 	return transaction;
 }
 
@@ -1915,9 +1998,6 @@ ObjectManager::StaticImportPacket ObjectManager::BuildStaticImportPacket(StaticI
 			const auto transformOrdinal = range.first + transformIndex;
 			for (size_t meshTemplateIndex = 0; meshTemplateIndex < group.meshTemplates.size(); ++meshTemplateIndex) {
 				const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
-				if (!meshTemplate.mesh || !meshTemplate.material) {
-					continue;
-				}
 				StaticImportPacket::PatchableDrawRecord record;
 				record.groupIndex = groupIndex;
 				record.scopeTransformOrdinal = transformOrdinal;

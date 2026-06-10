@@ -57,13 +57,18 @@ public:
 		std::vector<DirectX::XMMATRIX> instanceTransforms;
 		std::vector<StaticMeshTemplateRef> meshTemplates;
 	};
+	struct PreparedStaticMeshTemplateRef {
+		std::uint32_t meshTemplateIndex = 0;
+		std::uint32_t clodOffsetIndex = 0;
+		std::vector<DrawWorkloadKey> workloadKeys;
+	};
 
 	struct PreparedStaticGroupInfo {
 		std::uint64_t stableGroupID = 0;
 		std::uint64_t allocationScopeID = 0;
 		std::vector<PerObjectCB> perObjectCBs;
 		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
-		std::vector<StaticMeshTemplateRef> meshTemplates;
+		std::vector<PreparedStaticMeshTemplateRef> meshTemplates;
 		std::vector<std::vector<DrawWorkloadKey>> workloadKeysByMeshTemplate;
 	};
 
