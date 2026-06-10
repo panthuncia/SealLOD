@@ -7,6 +7,9 @@ endif()
 find_package(nlohmann_json REQUIRED CONFIG)
 find_package(spdlog REQUIRED CONFIG)
 find_package(pxr REQUIRED CONFIG)
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+endif()
 
 add_executable(BRNifly
     "src/main.cpp"

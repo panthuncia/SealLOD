@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 #include <span>
+#include <mutex>
 #include <rhi.h>
 #include <memory>
 #include <utility>
@@ -35,6 +36,7 @@ public:
     }
 
     unsigned int Add(const T& element) {
+        std::scoped_lock lock(m_mutex);
         if (m_data.size() >= m_capacity && !TryResize(m_capacity > 0u ? m_capacity * 2u : 1u)) {
             return InvalidIndex();
         }
@@ -48,6 +50,7 @@ public:
     }
 
     void RemoveAt(UINT index) {
+        std::scoped_lock lock(m_mutex);
         if (index < m_data.size()) {
             m_data.erase(m_data.begin() + index);
 
@@ -66,19 +69,23 @@ public:
     }
 
     T& operator[](UINT index) {
+        std::scoped_lock lock(m_mutex);
         return m_data[index];
     }
 
     const T& operator[](UINT index) const {
+        std::scoped_lock lock(m_mutex);
         return m_data[index];
     }
 
     void Resize(uint32_t newCapacity) {
+        std::scoped_lock lock(m_mutex);
         (void)TryResize(newCapacity);
 
     }
 
     bool TryResize(uint32_t newCapacity) {
+        std::scoped_lock lock(m_mutex);
         if (newCapacity <= m_capacity) {
             return true;
         }
@@ -100,6 +107,7 @@ public:
     }
 
     bool TryUpdateAt(UINT index, const T& element) {
+        std::scoped_lock lock(m_mutex);
         if (!TryEnsureCapacityForIndex(index)) {
             return false;
         }
@@ -112,6 +120,7 @@ public:
     }
 
     void EnsureSize(size_t elementCount, const T& fill = T{}) {
+        std::scoped_lock lock(m_mutex);
         if (elementCount == 0u) {
             return;
         }
@@ -124,6 +133,7 @@ public:
     }
 
     void StageCurrentRange(size_t firstElement, size_t elementCount) {
+        std::scoped_lock lock(m_mutex);
         if (elementCount == 0u || firstElement >= m_data.size()) {
             return;
         }
@@ -135,6 +145,7 @@ public:
     }
 
     void StageRange(size_t firstElement, std::span<const T> elements) {
+        std::scoped_lock lock(m_mutex);
         if (elements.empty()) {
             return;
         }
@@ -147,10 +158,12 @@ public:
     }
 
     const std::vector<T>& Data() const {
+        std::scoped_lock lock(m_mutex);
         return m_data;
     }
 
     void ReplaceData(std::vector<T> data) {
+        std::scoped_lock lock(m_mutex);
         const auto elementCount = data.size();
         if (elementCount > 0u) {
             if (!TryEnsureCapacityForIndex(elementCount - 1u)) {
@@ -166,18 +179,22 @@ public:
     }
 
     UINT Size() {
+        std::scoped_lock lock(m_mutex);
         return static_cast<uint32_t>(m_data.size());
     }
 
     UINT Capacity() const {
+        std::scoped_lock lock(m_mutex);
         return m_capacity;
     }
 
     UINT ResidentCapacity() const {
+        std::scoped_lock lock(m_mutex);
         return static_cast<UINT>(GetBufferSize() / sizeof(T));
     }
 
     bool TryEnsureCapacityForIndex(size_t index) {
+        std::scoped_lock lock(m_mutex);
         if (index < m_capacity) {
             return true;
         }
@@ -191,6 +208,7 @@ public:
     }
 
     bool PublishReadyAsyncResize(bool wait = false) {
+        std::scoped_lock lock(m_mutex);
         return PublishReadyAsyncResizeInternal(wait);
     }
 
@@ -199,6 +217,7 @@ public:
     }
 
     bool HasPendingBackingResize() const override {
+        std::scoped_lock lock(m_mutex);
         return m_pendingResizeValid || m_asyncResizeState.HasPending();
     }
 
@@ -220,11 +239,13 @@ private:
     }
 
     void OnUploadPolicyBeginFrame() override {
+        std::scoped_lock lock(m_mutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.BeginFrame();
     }
 
     void OnUploadPolicyFlush() override {
+        std::scoped_lock lock(m_mutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
             rg::runtime::UploadTarget::FromShared(shared_from_this()),
@@ -238,21 +259,26 @@ private:
     }
 
     bool HasPendingUploadPolicyWork() const override {
+        std::scoped_lock lock(m_mutex);
         return m_uploadPolicyState.HasPendingWork();
     }
 
     uint64_t GetUploadPolicyLastFlushWrites() const override {
+        std::scoped_lock lock(m_mutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedWrites;
     }
 
     uint64_t GetUploadPolicyLastFlushBytes() const override {
+        std::scoped_lock lock(m_mutex);
         return m_uploadPolicyState.GetLastFlushStats().flushedBytes;
     }
 
     void OnSetName() override {
+        std::scoped_lock lock(m_mutex);
         SetBackingName(m_name, name);
     }
 
+    mutable std::recursive_mutex m_mutex;
     std::vector<T> m_data;
     uint32_t m_capacity;
     bool m_needsUpdate;

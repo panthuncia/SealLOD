@@ -107,6 +107,10 @@ find_package(pxr REQUIRED CONFIG)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+    basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
+endif()
 
 # meshoptimizer is added via ThirdParty/meshoptimizer
 

@@ -114,6 +114,17 @@ endif()
 find_package(implot CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS container_hash)
 find_package(Tracy REQUIRED CONFIG)
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+    basicrenderer_use_release_library_for_debug(polyclipping::polyclipping)
+    basicrenderer_use_release_library_for_debug(poly2tri::poly2tri)
+    basicrenderer_use_release_library_for_debug(unofficial::minizip::minizip)
+    basicrenderer_use_release_library_for_debug(ZLIB::ZLIB)
+    basicrenderer_use_release_library_for_debug(pugixml)
+    basicrenderer_use_release_library_for_debug(pugixml::static)
+    basicrenderer_use_release_library_for_debug(zip::zip)
+    basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
+endif()
 find_package(slang CONFIG REQUIRED)
 
 option(BASICRENDERER_ENABLE_DIRECTSTORAGE "Enable DirectStorage integration when the SDK is available" ON)
@@ -1009,6 +1020,31 @@ target_compile_definitions(ShaderPreprocessTests PRIVATE
   $<$<CONFIG:Release>:BUILD_TYPE=BUILD_TYPE_RELEASE>
   $<$<CONFIG:RelWithDebInfo>:BUILD_TYPE=BUILD_TYPE_RELEASE_DEBUG>
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  if(TARGET Microsoft::DirectXTex)
+    get_target_property(_basicrenderer_directxtex_debug_lib Microsoft::DirectXTex IMPORTED_LOCATION_DEBUG)
+    get_target_property(_basicrenderer_directxtex_release_lib Microsoft::DirectXTex IMPORTED_LOCATION_RELEASE)
+    if(_basicrenderer_directxtex_release_lib
+        AND _basicrenderer_directxtex_debug_lib
+        AND NOT "${_basicrenderer_directxtex_debug_lib}" STREQUAL "${_basicrenderer_directxtex_release_lib}")
+      set_property(TARGET Microsoft::DirectXTex PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+      set_property(TARGET Microsoft::DirectXTex PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+      set_property(TARGET Microsoft::DirectXTex PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_directxtex_release_lib}")
+    endif()
+  endif()
+  if(TARGET assimp::assimp)
+    get_target_property(_basicrenderer_assimp_debug_lib assimp::assimp IMPORTED_LOCATION_DEBUG)
+    get_target_property(_basicrenderer_assimp_release_lib assimp::assimp IMPORTED_LOCATION_RELEASE)
+    if(_basicrenderer_assimp_release_lib
+        AND _basicrenderer_assimp_debug_lib
+        AND NOT "${_basicrenderer_assimp_debug_lib}" STREQUAL "${_basicrenderer_assimp_release_lib}")
+      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+      set_property(TARGET assimp::assimp PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+      set_property(TARGET assimp::assimp PROPERTY IMPORTED_LOCATION_DEBUG "${_basicrenderer_assimp_release_lib}")
+    endif()
+  endif()
+endif()
 
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 

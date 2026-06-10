@@ -55,6 +55,28 @@ endif()
 
 project ("BasicRenderer")
 
+if(CMAKE_MAP_IMPORTED_CONFIG_DEBUG STREQUAL "RelWithDebInfo;Release")
+  unset(CMAKE_MAP_IMPORTED_CONFIG_DEBUG CACHE)
+endif()
+
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+endif()
+
+function(basicrenderer_use_release_library_for_debug target_name)
+  if(NOT TARGET ${target_name})
+    return()
+  endif()
+
+  set_target_properties(${target_name} PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
+  foreach(_basicrenderer_imported_prop IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
+    get_target_property(_basicrenderer_imported_release_value ${target_name} ${_basicrenderer_imported_prop}_RELEASE)
+    if(_basicrenderer_imported_release_value)
+      set_target_properties(${target_name} PROPERTIES ${_basicrenderer_imported_prop}_DEBUG "${_basicrenderer_imported_release_value}")
+    endif()
+  endforeach()
+endfunction()
+
 if(MSVC)
   # Keep compiler debug info in .obj files (/Z7). This avoids large shared
   # compiler PDBs, which can hit MSVC/PDB API limits before the final link.
@@ -129,7 +151,11 @@ if (WIN32)
 endif()
 
 if (MSVC)
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+  else()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  endif()
   add_compile_definitions(_SILENCE_STDEXT_ARR_ITERS_DEPRECATION_WARNING)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
@@ -137,6 +163,8 @@ endif()
 
 set(_basicrenderer_clang_warning_options
   -Werror
+  -Wno-error=deprecated-declarations
+  -Wno-error=deprecated-volatile
   -Wno-unused-command-line-argument
   -Wno-unused-function
   -Wno-error=switch
@@ -238,6 +266,7 @@ add_subdirectory("BasicRHI")
 add_subdirectory("OpenRenderGraph")
 add_subdirectory("BasicScene")
 add_subdirectory ("BasicRenderer")
+
 add_subdirectory("CLodCacheTool")
 if(BASICRENDERER_BUILD_BRNIFLY)
   add_subdirectory("BRNifly")

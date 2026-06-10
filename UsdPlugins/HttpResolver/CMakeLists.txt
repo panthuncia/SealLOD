@@ -9,6 +9,9 @@ set(USDPLUGINS_OUTPUT_ROOT "${CMAKE_BINARY_DIR}/BasicRenderer")
 # Find OpenUSD (must provide USD_INCLUDE_DIRS and USD_LIBRARIES)
 find_package(pxr REQUIRED)
 find_package(spdlog REQUIRED)
+if(COMMAND basicrenderer_use_release_library_for_debug)
+    basicrenderer_use_release_library_for_debug(fmt::fmt)
+endif()
 
 # Find CURL for HTTP fetching
 find_package(curl REQUIRED)
