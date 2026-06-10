@@ -242,36 +242,13 @@ public:
                 continue;
             }
             const MaterialCompileFlags shaderKey = GetMaterialEvalShaderKey(flags);
-			// Bind pipeline for this material compile flag set
-            auto psoIter = m_psoCache.find(shaderKey);
-            if (psoIter == m_psoCache.end()) {
-                auto shaderDefines = psoMgr.GetShaderDefines(0, flags);
-                shaderDefines.push_back({L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1"});
-                shaderDefines.push_back({L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1"});
-                if (flags & MaterialCompileFlags::MaterialCompileDoubleSided) {
-                    shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
-                }
-                spdlog::info(
-                    "EvaluateMaterialGroupsPass: creating material eval PSO flags=0x{:X} shaderKey=0x{:X} slot={} defines={}",
-                    static_cast<uint64_t>(flags),
-                    static_cast<uint64_t>(shaderKey),
-                    slot,
-                    shaderDefines.size());
-                auto [newIter, _] = m_psoCache.emplace(
-                    shaderKey,
-                    psoMgr.MakeComputePipeline(
-                        psoMgr.GetComputeRootSignature().GetHandle(),
-                        L"shaders/VisUtilEvaluate.hlsl",
-                        L"EvaluateMaterialGroupCS",
-                        shaderDefines,
-                        "VisUtil_EvaluateMaterialGroupPSO"));
-                psoIter = newIter;
+            const PipelineState* pso = psoMgr.TryGetMaterialEvalPSO(shaderKey);
+            if (!pso) {
+                continue;
             }
 
-            PipelineState& pso = psoIter->second;
-
-            cl.BindPipeline(pso.GetAPIPipelineState().GetHandle());
-            BindResourceDescriptorIndices(cl, pso.GetResourceDescriptorSlots());
+            cl.BindPipeline(pso->GetAPIPipelineState().GetHandle());
+            BindResourceDescriptorIndices(cl, pso->GetResourceDescriptorSlots());
 
             // Set per-pass root constants
             unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
@@ -343,7 +320,6 @@ private:
         return static_cast<MaterialCompileFlags>(static_cast<uint64_t>(flags) & shaderAffectingFlags);
     }
 
-    std::unordered_map<MaterialCompileFlags, PipelineState> m_psoCache;
     Resource* m_materialEvalCmds;
     flecs::query<> m_visibleClustersQuery;
     flecs::query<> m_reyesDiceQueueQuery;

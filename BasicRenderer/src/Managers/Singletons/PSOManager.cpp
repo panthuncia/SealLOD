@@ -385,6 +385,7 @@ void PSOManager::initialize() {
 
 void PSOManager::Cleanup() {
     std::scoped_lock lock(m_cacheMutex);
+    m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_psoCache.clear();
     m_PPLLPSOCache.clear();
     m_meshPSOCache.clear();
@@ -405,6 +406,16 @@ void PSOManager::Cleanup() {
     m_clusterLODAVBOITRasterPSOCache.clear();
     m_clusterLODAVBOITShadePSOCache.clear();
     m_clusterLODDeepVisibilityResolvePSOCache.clear();
+    m_materialEvalPSOCache.clear();
+    m_pendingClusterLODRasterPSOs.clear();
+    m_pendingClusterLODVirtualShadowRasterPSOs.clear();
+    m_pendingClusterLODVirtualShadowReyesRasterPSOs.clear();
+    m_pendingClusterLODDeepVisibilityRasterPSOs.clear();
+    m_pendingClusterLODAVBOITOccupancyPSOs.clear();
+    m_pendingClusterLODAVBOITRasterPSOs.clear();
+    m_pendingClusterLODAVBOITShadePSOs.clear();
+    m_pendingClusterLODSoftwareRasterPSOs.clear();
+    m_pendingMaterialEvalPSOs.clear();
 
     debugPSO.Reset();
     environmentConversionPSO.Reset();
@@ -573,6 +584,114 @@ const PipelineState& PSOManager::GetClusterLODDeepVisibilityResolvePSO(UINT psoF
     return GetOrCreatePipelineState(m_clusterLODDeepVisibilityResolvePSOCache, psoFlags, [&]() {
         return CreateClusterLODDeepVisibilityResolvePSO(psoFlags);
     });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODRasterPSOCache,
+        &PSOManager::m_pendingClusterLODRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODRasterPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODRasterPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODVirtualShadowRasterPSOCache,
+        &PSOManager::m_pendingClusterLODVirtualShadowRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODVirtualShadowRasterPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODVirtualShadowRasterPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODVirtualShadowReyesRasterPSOCache,
+        &PSOManager::m_pendingClusterLODVirtualShadowReyesRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODVirtualShadowReyesRasterPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODVirtualShadowReyesRasterPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODDeepVisibilityRasterPSOCache,
+        &PSOManager::m_pendingClusterLODDeepVisibilityRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODDeepVisibilityRasterPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODDeepVisibilityRasterPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODAVBOITOccupancyPSOCache,
+        &PSOManager::m_pendingClusterLODAVBOITOccupancyPSOs,
+        key,
+        "PSOManager::CompileClusterLODAVBOITOccupancyPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODAVBOITOccupancyPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODAVBOITRasterPSOCache,
+        &PSOManager::m_pendingClusterLODAVBOITRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODAVBOITRasterPSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODAVBOITRasterPSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    RasterPSOKey key(materialRasterFlags, wireframe);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODAVBOITShadePSOCache,
+        &PSOManager::m_pendingClusterLODAVBOITShadePSOs,
+        key,
+        "PSOManager::CompileClusterLODAVBOITShadePSO",
+        [this, materialRasterFlags, wireframe]() {
+            return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe);
+        });
+}
+
+const PipelineState* PSOManager::TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
+    const uint64_t key = static_cast<uint64_t>(materialRasterFlags) |
+        (static_cast<uint64_t>(outputKind) << 32u);
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_clusterLODSoftwareRasterPSOCache,
+        &PSOManager::m_pendingClusterLODSoftwareRasterPSOs,
+        key,
+        "PSOManager::CompileClusterLODSoftwareRasterPSO",
+        [this, materialRasterFlags, outputKind]() {
+            return CreateClusterLODSoftwareRasterPSO(materialRasterFlags, outputKind);
+        });
+}
+
+const PipelineState* PSOManager::TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags) {
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_materialEvalPSOCache,
+        &PSOManager::m_pendingMaterialEvalPSOs,
+        materialCompileFlags,
+        "PSOManager::CompileMaterialEvalPSO",
+        [this, materialCompileFlags]() {
+            return CreateMaterialEvalPSO(materialCompileFlags);
+        });
 }
 
 PipelineState PSOManager::CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe)
@@ -1700,6 +1819,28 @@ PipelineState PSOManager::CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags
     return pso;
 }
 
+PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags)
+{
+    auto shaderDefines = GetShaderDefines(0, materialCompileFlags);
+    shaderDefines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
+    shaderDefines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
+    if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
+        shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
+    }
+
+    spdlog::info(
+        "PSOManager: creating material eval PSO shaderKey=0x{:X} defines={}",
+        static_cast<uint64_t>(materialCompileFlags),
+        shaderDefines.size());
+
+    return MakeComputePipeline(
+        GetComputeRootSignature().GetHandle(),
+        L"shaders/VisUtilEvaluate.hlsl",
+        L"EvaluateMaterialGroupCS",
+        std::move(shaderDefines),
+        "VisUtil_EvaluateMaterialGroupPSO");
+}
+
 PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
     const wchar_t* shaderPath,
     const wchar_t* entryPoint,
@@ -2031,6 +2172,8 @@ void PSOManager::CompileShaderForSlot(
 }
 
 ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines) {
+    std::scoped_lock compileLock(m_compileMutex);
+
     Microsoft::WRL::ComPtr<ID3DBlob> outBlob;
     DxcBuffer dxcPreprocessBuff;
 
@@ -2106,6 +2249,8 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 }
 
 ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
+    std::scoped_lock compileLock(m_compileMutex);
+
     if (info.vertexShader && info.meshShader) 
 		throw std::runtime_error("Cannot compile both vertex and mesh shaders in the same bundle");
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
@@ -2657,6 +2802,7 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature() {
 
 void PSOManager::ReloadShaders() {
     std::scoped_lock lock(m_cacheMutex);
+    m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_psoCache.clear();
 	m_meshPSOCache.clear();
 	m_deferredPSOCache.clear();
@@ -2668,12 +2814,23 @@ void PSOManager::ReloadShaders() {
     m_prePassPSOCache.clear();
     m_clusterLODRasterPSOCache.clear();
     m_clusterLODVirtualShadowRasterPSOCache.clear();
+    m_clusterLODVirtualShadowReyesRasterPSOCache.clear();
     m_clusterLODDeepVisibilityRasterPSOCache.clear();
     m_clusterLODSoftwareRasterPSOCache.clear();
     m_clusterLODAVBOITOccupancyPSOCache.clear();
     m_clusterLODAVBOITRasterPSOCache.clear();
     m_clusterLODAVBOITShadePSOCache.clear();
     m_clusterLODDeepVisibilityResolvePSOCache.clear();
+    m_materialEvalPSOCache.clear();
+    m_pendingClusterLODRasterPSOs.clear();
+    m_pendingClusterLODVirtualShadowRasterPSOs.clear();
+    m_pendingClusterLODVirtualShadowReyesRasterPSOs.clear();
+    m_pendingClusterLODDeepVisibilityRasterPSOs.clear();
+    m_pendingClusterLODAVBOITOccupancyPSOs.clear();
+    m_pendingClusterLODAVBOITRasterPSOs.clear();
+    m_pendingClusterLODAVBOITShadePSOs.clear();
+    m_pendingClusterLODSoftwareRasterPSOs.clear();
+    m_pendingMaterialEvalPSOs.clear();
 }
 
 rhi::BlendState PSOManager::GetBlendDesc(MaterialCompileFlags materialCompileFlags) {

@@ -201,9 +201,12 @@ PassReturn ReyesVirtualShadowHardwareRasterPass::Execute(PassExecutionContext& e
     const auto stride = sizeof(RasterizeClustersCommand);
     for (uint32_t i = 0; i < numBuckets; ++i) {
         const auto flags = context.materialManager->GetRasterFlagsForBucket(i);
-        const auto& pso = psoManager.GetClusterLODVirtualShadowReyesRasterPSO(flags);
-        BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
-        commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
+        const PipelineState* pso = psoManager.TryGetClusterLODVirtualShadowReyesRasterPSO(flags);
+        if (!pso) {
+            continue;
+        }
+        BindResourceDescriptorIndices(commandList, pso->GetResourceDescriptorSlots());
+        commandList.BindPipeline(pso->GetAPIPipelineState().GetHandle());
 
         const uint64_t argOffset = static_cast<uint64_t>(i) * stride;
         commandList.ExecuteIndirect(

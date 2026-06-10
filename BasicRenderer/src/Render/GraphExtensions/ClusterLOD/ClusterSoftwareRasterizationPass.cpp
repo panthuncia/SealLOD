@@ -190,10 +190,13 @@ PassReturn ClusterSoftwareRasterizationPass::Execute(PassExecutionContext& execu
     auto stride = sizeof(RasterizeClustersCommand);
     for (uint32_t i = 0; i < numBuckets; ++i) {
         auto flags = context.materialManager->GetRasterFlagsForBucket(i);
-        auto& pso = PSOManager::GetInstance().GetClusterLODSoftwareRasterPSO(flags, m_outputKind);
+        const PipelineState* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(flags, m_outputKind);
+        if (!pso) {
+            continue;
+        }
 
-        BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
-        commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, pso->GetResourceDescriptorSlots());
+        commandList.BindPipeline(pso->GetAPIPipelineState().GetHandle());
 
         const uint64_t argOffset = static_cast<uint64_t>(i) * stride;
         commandList.ExecuteIndirect(

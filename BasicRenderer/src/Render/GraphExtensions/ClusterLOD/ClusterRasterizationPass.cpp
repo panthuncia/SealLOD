@@ -518,20 +518,23 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     auto stride = sizeof(RasterizeClustersCommand);
     for (uint32_t i = 0; i < numBuckets; ++i) {
         auto flags = context.materialManager->GetRasterFlagsForBucket(i);
-        const auto& pso = (m_outputKind == CLodRasterOutputKind::VisibilityBuffer)
-            ? psoManager.GetClusterLODRasterPSO(flags, m_wireframe)
+        const PipelineState* pso = (m_outputKind == CLodRasterOutputKind::VisibilityBuffer)
+            ? psoManager.TryGetClusterLODRasterPSO(flags, m_wireframe)
             : (m_outputKind == CLodRasterOutputKind::VirtualShadow)
-                ? psoManager.GetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
+                ? psoManager.TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITOccupancy)
-                    ? psoManager.GetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
+                    ? psoManager.TryGetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOIT)
-                    ? psoManager.GetClusterLODAVBOITRasterPSO(flags, m_wireframe)
+                    ? psoManager.TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITShading)
-                    ? psoManager.GetClusterLODAVBOITShadePSO(flags, m_wireframe)
-                : psoManager.GetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+                    ? psoManager.TryGetClusterLODAVBOITShadePSO(flags, m_wireframe)
+                : psoManager.TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+        if (!pso) {
+            continue;
+        }
 
-        BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
-        commandList.BindPipeline(pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, pso->GetResourceDescriptorSlots());
+        commandList.BindPipeline(pso->GetAPIPipelineState().GetHandle());
 
         const uint64_t argOffset = static_cast<uint64_t>(i) * stride;
         commandList.ExecuteIndirect(

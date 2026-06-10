@@ -3,10 +3,12 @@
 #include <directx/d3d12.h>
 #include <wrl.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <filesystem>
 #include <optional>
 #include <mutex>
+#include <atomic>
 #include <boost/container_hash/hash.hpp>
 
 #include <rhi.h>
@@ -18,6 +20,7 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/PSOFlags.h"
 #include "Materials/TechniqueDescriptor.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -151,6 +154,16 @@ public:
     const PipelineState& GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     const PipelineState& GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
 
+    const PipelineState* TryGetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
+    const PipelineState* TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
+
 
     const PipelineState& GetDeferredPSO(UINT psoFlags);
 
@@ -220,6 +233,17 @@ private:
     std::unordered_map<RasterPSOKey, PipelineState> m_clusterLODAVBOITShadePSOCache;
     std::unordered_map<uint64_t, PipelineState> m_clusterLODSoftwareRasterPSOCache;
     std::unordered_map<unsigned int, PipelineState> m_clusterLODDeepVisibilityResolvePSOCache;
+    std::unordered_map<MaterialCompileFlags, PipelineState> m_materialEvalPSOCache;
+
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODRasterPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowRasterPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowReyesRasterPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODDeepVisibilityRasterPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITOccupancyPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITRasterPSOs;
+    std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITShadePSOs;
+    std::unordered_set<uint64_t> m_pendingClusterLODSoftwareRasterPSOs;
+    std::unordered_set<MaterialCompileFlags> m_pendingMaterialEvalPSOs;
 
 	std::unordered_map<unsigned int, PipelineState> m_deferredPSOCache;
 
@@ -228,6 +252,8 @@ private:
 	ComPtr<ID3D12PipelineState> debugPSO;
     ComPtr<ID3D12PipelineState> environmentConversionPSO;
     mutable std::mutex m_cacheMutex;
+    mutable std::mutex m_compileMutex;
+    std::atomic<uint64_t> m_asyncPSOGeneration = 0;
 
     PipelineState CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
     PipelineState CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
@@ -252,8 +278,61 @@ private:
     PipelineState CreateClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     PipelineState CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     PipelineState CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
+    PipelineState CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
 
     PipelineState CreateDeferredPSO(UINT psoFlags);
+
+    template <typename TCache, typename TPending, typename TKey, typename TFactory>
+    const PipelineState* TryGetOrRequestPipelineState(
+        TCache PSOManager::* cacheMember,
+        TPending PSOManager::* pendingMember,
+        const TKey& key,
+        std::string taskName,
+        TFactory&& factory)
+    {
+        {
+            std::scoped_lock lock(m_cacheMutex);
+            auto& cache = this->*cacheMember;
+            auto it = cache.find(key);
+            if (it != cache.end()) {
+                return &it->second;
+            }
+
+            auto& pending = this->*pendingMember;
+            if (!pending.insert(key).second) {
+                return nullptr;
+            }
+        }
+
+        const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
+        TaskSchedulerManager::GetInstance().RunBackgroundTask(
+            taskName,
+            [this, cacheMember, pendingMember, key, generation, factory = std::forward<TFactory>(factory)]() mutable {
+                try {
+                    PipelineState pipelineState = factory();
+                    std::scoped_lock lock(m_cacheMutex);
+                    if (generation != m_asyncPSOGeneration.load(std::memory_order_acquire)) {
+                        return;
+                    }
+
+                    auto& pending = this->*pendingMember;
+                    pending.erase(key);
+                    auto& cache = this->*cacheMember;
+                    cache.emplace(key, std::move(pipelineState));
+                }
+                catch (...) {
+                    std::scoped_lock lock(m_cacheMutex);
+                    if (generation != m_asyncPSOGeneration.load(std::memory_order_acquire)) {
+                        return;
+                    }
+
+                    auto& pending = this->*pendingMember;
+                    pending.erase(key);
+                }
+            });
+
+        return nullptr;
+    }
 
     void CompileShaderForSlot(
         const std::optional<ShaderInfo>& slot,
