@@ -14,6 +14,7 @@
 #include "Render/IndirectCommand.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/ShaderVariantRequestService.h"
 #include "Resources/Buffers/PagePool.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -241,7 +242,7 @@ public:
                 slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
                 continue;
             }
-            const MaterialCompileFlags shaderKey = GetMaterialEvalShaderKey(flags);
+            const MaterialCompileFlags shaderKey = GetMaterialEvaluationShaderKey(flags);
             const PipelineState* pso = psoMgr.TryGetMaterialEvalPSO(shaderKey);
             if (!pso) {
                 continue;
@@ -295,31 +296,6 @@ public:
     }
 
 private:
-    static MaterialCompileFlags GetMaterialEvalShaderKey(MaterialCompileFlags flags) {
-        constexpr uint64_t shaderAffectingFlags =
-            MaterialCompileFlags::MaterialCompileBlend |
-            MaterialCompileFlags::MaterialCompileAlphaTest |
-            MaterialCompileFlags::MaterialCompileDoubleSided |
-            MaterialCompileFlags::MaterialCompileBaseColorTexture |
-            MaterialCompileFlags::MaterialCompileNormalMap |
-            MaterialCompileFlags::MaterialCompileMetallicTexture |
-            MaterialCompileFlags::MaterialCompileRoughnessTexture |
-            MaterialCompileFlags::MaterialCompileAOTexture |
-            MaterialCompileFlags::MaterialCompileEmissiveTexture |
-            MaterialCompileFlags::MaterialCompileParallax |
-            MaterialCompileFlags::MaterialCompileGeometricDisplacement |
-            MaterialCompileFlags::MaterialCompileOpacityTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRCoatColorTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRCoatWeightTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRCoatRoughnessTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRFuzzColorTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRFuzzWeightTexture |
-            MaterialCompileFlags::MaterialCompileOpenPBRFuzzRoughnessTexture |
-            MaterialCompileFlags::MaterialCompileTextureStreaming |
-            MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
-        return static_cast<MaterialCompileFlags>(static_cast<uint64_t>(flags) & shaderAffectingFlags);
-    }
-
     Resource* m_materialEvalCmds;
     flecs::query<> m_visibleClustersQuery;
     flecs::query<> m_reyesDiceQueueQuery;

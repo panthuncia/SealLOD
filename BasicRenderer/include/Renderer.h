@@ -42,6 +42,7 @@
 #include "Render/OpenPBRLookupResources.h"
 #include "Render/SceneRenderBridge.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
+#include "Render/ShaderVariantRequestService.h"
 
 class DynamicResource;
 class ExternalTextureResource;
@@ -165,6 +166,7 @@ private:
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager = nullptr;
     std::unique_ptr<TextureFactory> m_pTextureFactory = nullptr;
     std::unique_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    ShaderVariantRequestService m_shaderVariantRequestService;
 
 	ManagerInterface m_managerInterface;
     DirectX::XMUINT3 m_lightClusterSize = { 12, 12, 24 };

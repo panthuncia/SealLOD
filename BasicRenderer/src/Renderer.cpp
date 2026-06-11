@@ -557,7 +557,8 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
         m_pMaterialManager.get(),
         m_pSkeletonManager.get(),
         m_pTextureFactory.get(),
-        m_pTerrainManager.get());
+        m_pTerrainManager.get(),
+        std::addressof(m_shaderVariantRequestService));
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;

@@ -10,6 +10,7 @@ class MaterialManager;
 class SkeletonManager;
 class TextureFactory;
 class TerrainManager;
+class ShaderVariantRequestService;
 
 class ManagerInterface {
 public:
@@ -24,7 +25,8 @@ public:
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
 		TextureFactory* textureFactory,
-		TerrainManager* terrainManager = nullptr
+		TerrainManager* terrainManager = nullptr,
+		ShaderVariantRequestService* shaderVariantRequestService = nullptr
 	) : m_pMeshManager(meshManager),
 		m_pObjectManager(objectManager),
 		m_pIndirectCommandBufferManager(indirectCommandBufferManager),
@@ -34,7 +36,8 @@ public:
 		m_pMaterialManager(materialManager),
 		m_pSkeletonManager(skeletonManager),
 		m_pTextureFactory(textureFactory),
-		m_pTerrainManager(terrainManager) {
+		m_pTerrainManager(terrainManager),
+		m_pShaderVariantRequestService(shaderVariantRequestService) {
 	}
 
 	void SetManagers(MeshManager* meshManager,
@@ -46,7 +49,8 @@ public:
 		MaterialManager* materialManager,
 		SkeletonManager* skeletonManager,
 		TextureFactory* textureFactory,
-		TerrainManager* terrainManager = nullptr) {
+		TerrainManager* terrainManager = nullptr,
+		ShaderVariantRequestService* shaderVariantRequestService = nullptr) {
 		m_pMeshManager = meshManager;
 		m_pObjectManager = objectManager;
 		m_pIndirectCommandBufferManager = indirectCommandBufferManager;
@@ -57,6 +61,7 @@ public:
 		m_pSkeletonManager = skeletonManager;
 		m_pTextureFactory = textureFactory;
 		m_pTerrainManager = terrainManager;
+		m_pShaderVariantRequestService = shaderVariantRequestService;
 	}
 
 	MeshManager* GetMeshManager() const { return m_pMeshManager; }
@@ -69,6 +74,7 @@ public:
 	SkeletonManager* GetSkeletonManager() const { return m_pSkeletonManager; }
 	TextureFactory* GetTextureFactory() const { return m_pTextureFactory; }
 	TerrainManager* GetTerrainManager() const { return m_pTerrainManager; }
+	ShaderVariantRequestService* GetShaderVariantRequestService() const { return m_pShaderVariantRequestService; }
 private:
 	MeshManager* m_pMeshManager = nullptr;
 	ObjectManager* m_pObjectManager = nullptr;
@@ -80,4 +86,5 @@ private:
 	SkeletonManager* m_pSkeletonManager = nullptr;
 	TextureFactory* m_pTextureFactory = nullptr;
 	TerrainManager* m_pTerrainManager = nullptr;
+	ShaderVariantRequestService* m_pShaderVariantRequestService = nullptr;
 };
