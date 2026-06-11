@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "RenderPasses/Base/CopyPass.h"
-#include "interfaces/IResourceResolver.h"
+#include "Interfaces/IResourceResolver.h"
 
 struct CLodDirectStorageLaunchInputs {
 	std::unique_ptr<IResourceResolver> targetSlabResolver;

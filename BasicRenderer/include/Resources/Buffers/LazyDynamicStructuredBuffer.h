@@ -226,7 +226,7 @@ public:
         return false;
     }
 
-    void UpdateView(BufferView* view, const void* data) {
+    void UpdateView(BufferView* view, const void* data) override {
         if (view == nullptr) {
             return;
         }

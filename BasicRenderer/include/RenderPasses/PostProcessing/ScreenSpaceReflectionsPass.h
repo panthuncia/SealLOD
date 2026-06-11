@@ -10,7 +10,7 @@ public:
     ScreenSpaceReflectionsPass() {
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithLegacyInterop(Builtin::Color::HDRColorTarget,
             Builtin::GBuffer::MotionVectors,
             Builtin::PrimaryCamera::DepthTexture,

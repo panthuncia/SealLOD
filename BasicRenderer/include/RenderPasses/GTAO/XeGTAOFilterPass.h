@@ -45,7 +45,7 @@ public:
             0);
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder){
+    void DeclareResourceUsages(ComputePassBuilder* builder)override {
         builder->WithShaderResource(Builtin::GBuffer::Normals)
             .WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
             .WithUnorderedAccess(Builtin::GTAO::WorkingDepths)

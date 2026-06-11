@@ -3,6 +3,13 @@
 #
 cmake_minimum_required (VERSION 3.10)
 
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
+if(POLICY CMP0177)
+  cmake_policy(SET CMP0177 NEW)
+endif()
+
 foreach(_basicrenderer_cached_tool
     CMAKE_C_COMPILER
     CMAKE_CXX_COMPILER
@@ -167,21 +174,22 @@ set(_basicrenderer_clang_warning_options
   -Wno-error=deprecated-volatile
   -Wno-unused-command-line-argument
   -Wno-unused-function
-  -Wno-error=switch
-  -Wno-error=reorder-ctor
-  -Wno-error=unused-variable
-  -Wno-error=unused-but-set-variable
-  -Wno-error=unused-private-field
-  -Wno-error=misleading-indentation
-  -Wno-error=nonportable-include-path
-  -Wno-error=inconsistent-missing-override
-  -Wno-error=format
-  -Wno-error=implicit-float-conversion
-  -Wno-error=missing-braces
-  -Wno-error=braced-scalar-init
-  -Wno-error=pessimizing-move
-  -Wno-error=self-assign-field
-  -Wno-error=unused-lambda-capture
+  -Wno-switch
+  -Wno-reorder-ctor
+  -Wno-unused-variable
+  -Wno-unused-but-set-variable
+  -Wno-unused-private-field
+  -Wno-misleading-indentation
+  -Wno-nonportable-include-path
+  -Wno-inconsistent-missing-override
+  -Wno-format
+  -Wno-implicit-float-conversion
+  -Wno-missing-braces
+  -Wno-braced-scalar-init
+  -Wno-pessimizing-move
+  -Wno-self-assign-field
+  -Wno-unused-lambda-capture
+  "-Wno-#pragma-messages"
 )
 foreach(_basicrenderer_clang_warning_option IN LISTS _basicrenderer_clang_warning_options)
   add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:Clang>>:${_basicrenderer_clang_warning_option}>)

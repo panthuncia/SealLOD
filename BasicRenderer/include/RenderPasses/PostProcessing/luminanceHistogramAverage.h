@@ -12,7 +12,7 @@ public:
         CreateComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithUnorderedAccess(Builtin::PostProcessing::LuminanceHistogram, Builtin::PostProcessing::AdaptedLuminance, "FFX::LPMConstants");
     }
 

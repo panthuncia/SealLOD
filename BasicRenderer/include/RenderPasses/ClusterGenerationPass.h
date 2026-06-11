@@ -16,7 +16,7 @@ public:
 	~ClusterGenerationPass() {
 	}
 
-	void DeclareResourceUsages(ComputePassBuilder* builder) {
+	void DeclareResourceUsages(ComputePassBuilder* builder) override {
 		builder->WithShaderResource(Builtin::CameraBuffer)
 			.WithUnorderedAccess(Builtin::Light::ClusterBuffer);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);

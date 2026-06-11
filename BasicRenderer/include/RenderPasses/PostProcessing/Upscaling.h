@@ -14,7 +14,7 @@ public:
 		m_outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     }
 
-    void DeclareResourceUsages(RenderPassBuilder* builder) {
+    void DeclareResourceUsages(RenderPassBuilder* builder) override {
         ResourceIdentifierAndRange upscaledHDR(Builtin::PostProcessing::UpscaledHDR, {});
         const UpscalingMode upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
         const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();

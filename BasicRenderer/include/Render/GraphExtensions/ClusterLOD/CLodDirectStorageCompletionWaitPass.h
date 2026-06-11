@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "RenderPasses/Base/CopyPass.h"
-#include "interfaces/IResourceResolver.h"
+#include "Interfaces/IResourceResolver.h"
 
 struct CLodDirectStorageCompletionWaitInputs {
 	std::vector<ExternalTimelinePoint> waits;

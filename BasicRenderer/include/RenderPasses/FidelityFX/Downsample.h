@@ -40,7 +40,7 @@ public:
     ~DownsamplePass() {
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
             .WithUnorderedAccess(Subresources(Builtin::PrimaryCamera::LinearDepthMap, FromMip{ 1 }));
     }

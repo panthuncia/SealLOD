@@ -13,7 +13,7 @@ public:
         CreateXeGTAOComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Builtin::GTAO::WorkingEdges, Builtin::GTAO::WorkingAOTerm1)
             .WithUnorderedAccess(Builtin::GTAO::OutputAOTerm)
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");

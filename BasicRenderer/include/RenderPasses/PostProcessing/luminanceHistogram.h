@@ -12,7 +12,7 @@ public:
         CreateComputePSO();
     }
 
-    void DeclareResourceUsages(ComputePassBuilder* builder) {
+    void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Builtin::Color::HDRColorTarget)
             .WithUnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
     }
