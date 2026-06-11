@@ -130,6 +130,8 @@ struct PerObjectCB {
 
 struct PerMeshCB {
     unsigned int materialDataIndex;
+    unsigned int materialEvalCompileFlagsID;
+    unsigned int materialReyesEvalCompileFlagsID;
     unsigned int rasterBucketIndex;
     unsigned int vertexFlags;
 	unsigned int vertexByteSize;

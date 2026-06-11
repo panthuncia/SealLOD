@@ -2027,6 +2027,36 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
         macro.Name = L"PSO_TEXTURE_STREAMING";
         defines.insert(defines.begin(), macro);
     }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileVoxel) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_CLOD_VOXEL";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileTerrain) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_TERRAIN";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileClodReyesPatch) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_CLOD_REYES_PATCH";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileClodVertexColor) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_CLOD_VERTEX_COLOR";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileClodSkinning) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_CLOD_SKINNING";
+        defines.insert(defines.begin(), macro);
+    }
 
     if (psoFlags & PSOFlags::PSO_SHADOW) {
         DxcDefine macro;

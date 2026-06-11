@@ -1464,7 +1464,11 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     uint meshletTriangleIndex;
     UnpackVisKey(vis, depth, clusterIndex, meshletTriangleIndex);
 
-    bool isReyesPatch = false;
+#if defined(PSO_CLOD_REYES_PATCH)
+    const bool isReyesPatch = true;
+#else
+    const bool isReyesPatch = false;
+#endif
     float3 patchDomain0 = float3(1.0f, 0.0f, 0.0f);
     float3 patchDomain1 = float3(0.0f, 1.0f, 0.0f);
     float3 patchDomain2 = float3(0.0f, 0.0f, 1.0f);
@@ -1472,6 +1476,11 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3 microTrianglePatchDomain1 = patchDomain1;
     float3 microTrianglePatchDomain2 = patchDomain2;
     uint reyesMicroTriangleIndex = meshletTriangleIndex;
+#if defined(PSO_CLOD_REYES_PATCH)
+    if (clusterIndex < VISBUF_REYES_PATCH_INDEX_BASE || VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
     if (clusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE && VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
         StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue = ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
@@ -1507,22 +1516,35 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             microTrianglePatchDomain0,
             microTrianglePatchDomain1,
             microTrianglePatchDomain2);
-        isReyesPatch = true;
     }
+#else
+    if (clusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
+    {
+        return false;
+    }
+#endif
 
     ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedVisibleCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
+#if defined(PSO_CLOD_VOXEL)
+    if (!CLodVisibleClusterIsVoxel(packedVisibleCluster))
+    {
+        return false;
+    }
+    return ResolveClodVoxelCommonSampleFromPackedCluster(
+        packedVisibleCluster,
+        clusterIndex,
+        meshletTriangleIndex,
+        depth,
+        pixel,
+        cam,
+        sample);
+#else
     if (CLodVisibleClusterIsVoxel(packedVisibleCluster))
     {
-        return ResolveClodVoxelCommonSampleFromPackedCluster(
-            packedVisibleCluster,
-            clusterIndex,
-            meshletTriangleIndex,
-            depth,
-            pixel,
-            cam,
-            sample);
+        return false;
     }
+#endif
 
     MeshletResolveData md = LoadMeshletResolveData_Wave(clusterIndex);
     if (meshletTriangleIndex >= md.triangleCount)
@@ -1556,19 +1578,28 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float4 t0 = DecodeCompressedTangentFrame(triIdx.x, n0, md);
     float4 t1 = DecodeCompressedTangentFrame(triIdx.y, n1, md);
     float4 t2 = DecodeCompressedTangentFrame(triIdx.z, n2, md);
-    const bool hasVertexColor = (md.pageAttributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u;
     float3 c0 = 1.0f.xxx;
     float3 c1 = 1.0f.xxx;
     float3 c2 = 1.0f.xxx;
+#if defined(PSO_CLOD_VERTEX_COLOR)
+    const bool hasVertexColor = true;
+    c0 = DecodeCompressedColor(triIdx.x, md);
+    c1 = DecodeCompressedColor(triIdx.y, md);
+    c2 = DecodeCompressedColor(triIdx.z, md);
+#else
+    const bool hasVertexColor = (md.pageAttributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u;
     if (hasVertexColor)
     {
         c0 = DecodeCompressedColor(triIdx.x, md);
         c1 = DecodeCompressedColor(triIdx.y, md);
         c2 = DecodeCompressedColor(triIdx.z, md);
     }
+#endif
+#if defined(PSO_CLOD_SKINNING)
     ApplyClodSkinningToFrame(triIdx.x, md, p0, n0, t0);
     ApplyClodSkinningToFrame(triIdx.y, md, p1, n1, t1);
     ApplyClodSkinningToFrame(triIdx.z, md, p2, n2, t2);
+#endif
 
     PerObjectBuffer obj = LoadInstanceTransformForDraw(md.objAndMesh.x);
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
@@ -1653,7 +1684,11 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3x3 model3x3 = (float3x3)obj.model;
     float3 dpdx = 0.0f.xxx;
     float3 dpdy = 0.0f.xxx;
-    if ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX | MATERIAL_TERRAIN)) != 0u)
+    uint derivativeMaterialFlags = MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX;
+#if defined(PSO_TERRAIN)
+    derivativeMaterialFlags |= MATERIAL_TERRAIN;
+#endif
+    if ((materialFlags & derivativeMaterialFlags) != 0u)
     {
         dpdx = mul(dpdxOS, model3x3);
         dpdy = mul(dpdyOS, model3x3);
@@ -1716,7 +1751,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         dpdy,
         materialInputs);
     #endif
+#if defined(PSO_TERRAIN)
     ApplyTerrainMaterial(materialInfo, worldPosition, dpdx, dpdy, worldNormal, vertexColor, materialInputs);
+#endif
 
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;
 

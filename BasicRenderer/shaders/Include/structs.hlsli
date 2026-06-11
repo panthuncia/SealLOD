@@ -599,6 +599,8 @@ struct PerObjectBuffer {
 
 struct PerMeshBuffer {
     uint materialDataIndex;
+    uint materialEvalCompileFlagsID;
+    uint materialReyesEvalCompileFlagsID;
     uint rasterBucketIndex;
     uint vertexFlags;
     uint vertexByteSize;

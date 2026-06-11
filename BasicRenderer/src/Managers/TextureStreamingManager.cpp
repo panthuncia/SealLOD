@@ -73,7 +73,8 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	const std::shared_ptr<TextureAsset>& texture,
 	TextureFactory& textureFactory,
 	BindingChangedCallback onBindingChanged,
-	std::string debugLabel)
+	std::string debugLabel,
+	bool seedCurrentBinding)
 {
 	ZoneScopedN("TextureStreamingManager::RegisterTextureBinding");
 	if (!debugLabel.empty()) {
@@ -119,7 +120,7 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::FlushDirtyTextureMetadata");
 		FlushDirtyTextureMetadata(texture);
 	}
-	if (texture->ImagePtr()) {
+	if (seedCurrentBinding && texture->ImagePtr()) {
 		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::SeedCurrentBinding");
 		auto bindingIt = m_bindingsByID.find(bindingID);
 		if (bindingIt != m_bindingsByID.end() && bindingIt->second.onBindingChanged) {

@@ -28,6 +28,10 @@ enum MaterialCompileFlags : uint64_t {
 	MaterialCompileVoxel = 1ull << 18,
 	MaterialCompileTextureStreaming = 1ull << 19,
 	MaterialCompileHeightFromBaseAlpha = 1ull << 20,
+	MaterialCompileTerrain = 1ull << 21,
+	MaterialCompileClodReyesPatch = 1ull << 22,
+	MaterialCompileClodVertexColor = 1ull << 23,
+	MaterialCompileClodSkinning = 1ull << 24,
 };
 
 // |= operator for MaterialCompileFlags

@@ -49,8 +49,13 @@ inline MaterialCompileFlags GetMaterialEvaluationShaderKey(MaterialCompileFlags 
 		MaterialCompileFlags::MaterialCompileOpenPBRFuzzColorTexture |
 		MaterialCompileFlags::MaterialCompileOpenPBRFuzzWeightTexture |
 		MaterialCompileFlags::MaterialCompileOpenPBRFuzzRoughnessTexture |
+		MaterialCompileFlags::MaterialCompileVoxel |
 		MaterialCompileFlags::MaterialCompileTextureStreaming |
-		MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
+		MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha |
+		MaterialCompileFlags::MaterialCompileTerrain |
+		MaterialCompileFlags::MaterialCompileClodReyesPatch |
+		MaterialCompileFlags::MaterialCompileClodVertexColor |
+		MaterialCompileFlags::MaterialCompileClodSkinning;
 	return static_cast<MaterialCompileFlags>(static_cast<std::uint64_t>(flags) & shaderAffectingFlags);
 }
 

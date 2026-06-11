@@ -25,6 +25,23 @@ inline bool ShouldAddSupplementalCLodShadowWorkload(const Mesh& mesh, const Rend
     return mesh.IsCLodMesh() && pass == Engine::Primary::ShadowMapsPass;
 }
 
+inline MaterialCompileFlags ComposeRuntimeMaterialEvalCompileFlags(const Mesh& mesh, const Material& material) {
+    auto compileFlags = material.Technique().compileFlags;
+    const auto vertexFlags = mesh.GetPerMeshCBData().vertexFlags;
+    if ((vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u) {
+        compileFlags |= MaterialCompileFlags::MaterialCompileClodSkinning;
+    }
+    return compileFlags;
+}
+
+inline MaterialCompileFlags ComposeRuntimeReyesMaterialEvalCompileFlags(const Mesh& mesh, const Material& material) {
+    auto compileFlags = ComposeRuntimeMaterialEvalCompileFlags(mesh, material);
+    if ((compileFlags & MaterialCompileFlags::MaterialCompileGeometricDisplacement) != 0u) {
+        compileFlags |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
+    }
+    return compileFlags;
+}
+
 template<class F>
 void ForEachMeshDrawWorkload(const Mesh& mesh, const Material& material, F&& callback) {
     const auto& technique = material.Technique();

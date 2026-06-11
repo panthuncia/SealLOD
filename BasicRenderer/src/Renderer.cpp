@@ -658,6 +658,12 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
                 }
                 const auto materialDataIndex = m_pMaterialManager->GetMaterialSlot(material->GetMaterialID());
                 mesh->SetMaterialDataIndex(materialDataIndex);
+                const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*mesh, *material);
+                const auto materialEvalCompileFlagsID = m_pMaterialManager->GetCompileFlagsSlot(materialEvalCompileFlags);
+                mesh->SetMaterialEvalCompileFlagsID(materialEvalCompileFlagsID);
+                const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*mesh, *material);
+                const auto materialReyesEvalCompileFlagsID = m_pMaterialManager->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
+                mesh->SetMaterialReyesEvalCompileFlagsID(materialReyesEvalCompileFlagsID);
 
                 auto rasterFlags = material->Technique().rasterFlags;
                 if ((mesh->GetPerMeshCBData().vertexFlags & VERTEX_SKINNED) != 0u) {

@@ -43,7 +43,8 @@ public:
 		const std::shared_ptr<TextureAsset>& texture,
 		TextureFactory& textureFactory,
 		BindingChangedCallback onBindingChanged,
-		std::string debugLabel = {});
+		std::string debugLabel = {},
+		bool seedCurrentBinding = true);
 	void UnregisterTextureBinding(uint64_t bindingID);
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
 

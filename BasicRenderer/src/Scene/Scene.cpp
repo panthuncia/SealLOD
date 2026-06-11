@@ -407,6 +407,10 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 					*effectiveMaterial,
 					m_managerInterface.GetTextureFactory());
 			}
+			const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
+			const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
+			const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
+			const auto materialReyesEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
 			const MaterialRasterFlags runtimeRasterFlags = ComposeRuntimeRasterFlags(*meshInstance->GetMesh(), *effectiveMaterial);
 			unsigned int rasterBucketIndex = 0;
 			if (m_renderableActivationBatchActive) {
@@ -427,10 +431,14 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 			if (meshInstance->HasMaterialOverride()) {
 				auto meshData = meshInstance->GetMesh()->GetPerMeshCBData();
 				meshData.materialDataIndex = materialDataIndex;
+				meshData.materialEvalCompileFlagsID = materialEvalCompileFlagsID;
+				meshData.materialReyesEvalCompileFlagsID = materialReyesEvalCompileFlagsID;
 				meshData.rasterBucketIndex = rasterBucketIndex;
 				meshInstance->SetPerMeshOverrideBufferView(m_managerInterface.GetMeshManager()->AllocatePerMeshOverrideBuffer(meshData));
 			} else {
 				meshInstance->GetMesh()->SetMaterialDataIndex(materialDataIndex);
+				meshInstance->GetMesh()->SetMaterialEvalCompileFlagsID(materialEvalCompileFlagsID);
+				meshInstance->GetMesh()->SetMaterialReyesEvalCompileFlagsID(materialReyesEvalCompileFlagsID);
 				meshInstance->GetMesh()->SetRasterBucketIndex(rasterBucketIndex);
 			}
 			m_renderableActivationMaterialUs += ElapsedUs(materialBegin);
@@ -815,8 +823,14 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 		const auto materialDataIndex = m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
 			*material,
 			m_managerInterface.GetTextureFactory());
+		const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*mesh, *material);
+		const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
+		const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*mesh, *material);
+		const auto materialReyesEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
 		auto meshData = mesh->GetPerMeshCBData();
 		meshData.materialDataIndex = materialDataIndex;
+		meshData.materialEvalCompileFlagsID = materialEvalCompileFlagsID;
+		meshData.materialReyesEvalCompileFlagsID = materialReyesEvalCompileFlagsID;
 		meshData.rasterBucketIndex = m_managerInterface.GetMaterialManager()->AcquireRasterBucket(ComposeRuntimeRasterFlags(*mesh, *material));
 
 		if (material != mesh->material) {

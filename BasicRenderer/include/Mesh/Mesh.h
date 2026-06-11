@@ -48,6 +48,7 @@ public:
     }
 
 	PerMeshCB& GetPerMeshCBData() { return m_perMeshBufferData; };
+	const PerMeshCB& GetPerMeshCBData() const { return m_perMeshBufferData; };
 	uint64_t GetGlobalID() const;
 
     std::shared_ptr<Material> material;
@@ -96,6 +97,8 @@ public:
 	BoundingSphere GetAnimatedBoundingSphere(size_t animationIndex) const;
 
 	void SetMaterialDataIndex(unsigned int index);
+	void SetMaterialEvalCompileFlagsID(unsigned int index);
+	void SetMaterialReyesEvalCompileFlagsID(unsigned int index);
 	void SetRasterBucketIndex(unsigned int index);
 
 	void SetCLodBufferViews(

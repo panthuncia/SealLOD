@@ -306,6 +306,7 @@ void Material::SetOpenPBRMaterialDataIndex(uint32_t index) {
 
 void Material::SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable) {
     m_materialData.materialFlags |= MaterialFlags::MATERIAL_TERRAIN;
+    m_technique.compileFlags |= MaterialCompileFlags::MaterialCompileTerrain;
     m_materialData.terrainSetIndex = index;
     if (m_materialData.geometricDisplacementEnabled != 0u) {
         m_materialData.materialFlags &= ~MaterialFlags::MATERIAL_PARALLAX;

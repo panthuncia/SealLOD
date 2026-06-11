@@ -666,7 +666,8 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 						MarkMaterialDirty(*materialIt->second);
 					}
 				},
-				"material:" + std::to_string(materialID));
+				"material:" + std::to_string(materialID),
+				false);
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
 			}

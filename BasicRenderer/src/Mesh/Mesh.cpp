@@ -740,6 +740,20 @@ void Mesh::SetMaterialDataIndex(unsigned int index) {
 	}
 }
 
+void Mesh::SetMaterialEvalCompileFlagsID(unsigned int index) {
+	m_perMeshBufferData.materialEvalCompileFlagsID = index;
+	if (m_pCurrentMeshManager != nullptr) {
+		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);
+	}
+}
+
+void Mesh::SetMaterialReyesEvalCompileFlagsID(unsigned int index) {
+	m_perMeshBufferData.materialReyesEvalCompileFlagsID = index;
+	if (m_pCurrentMeshManager != nullptr) {
+		m_pCurrentMeshManager->UpdatePerMeshBuffer(m_perMeshBufferView, m_perMeshBufferData);
+	}
+}
+
 void Mesh::SetRasterBucketIndex(unsigned int index) {
 	m_perMeshBufferData.rasterBucketIndex = index;
 	if (m_pCurrentMeshManager != nullptr) {

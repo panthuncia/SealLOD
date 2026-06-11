@@ -13,9 +13,11 @@ uint GetMaterialIdFromCluster(uint clusterIndex,
                               StructuredBuffer<PerMeshInstanceBuffer> perMeshInstance,
                               StructuredBuffer<PerMeshBuffer> perMeshBuffer)
 {
+    bool isReyesPatch = false;
     if (clusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE && VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
         clusterIndex = diceQueue[clusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
+        isReyesPatch = true;
     }
 
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
@@ -28,10 +30,7 @@ uint GetMaterialIdFromCluster(uint clusterIndex,
     PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
     PerMeshBuffer meshBuffer = perMeshBuffer[instanceData.perMeshBufferIndex];
 
-    StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    MaterialInfo materialInfo = materialDataBuffer[meshBuffer.materialDataIndex];
-
-    return materialInfo.compileFlagsID;
+    return isReyesPatch ? meshBuffer.materialReyesEvalCompileFlagsID : meshBuffer.materialEvalCompileFlagsID;
 }
 
 // UintRootConstant0 = NumMaterials
