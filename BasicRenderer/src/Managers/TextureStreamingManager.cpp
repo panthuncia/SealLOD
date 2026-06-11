@@ -119,6 +119,14 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::FlushDirtyTextureMetadata");
 		FlushDirtyTextureMetadata(texture);
 	}
+	if (texture->ImagePtr()) {
+		ZoneScopedN("TextureStreamingManager::RegisterTextureBinding::SeedCurrentBinding");
+		auto bindingIt = m_bindingsByID.find(bindingID);
+		if (bindingIt != m_bindingsByID.end() && bindingIt->second.onBindingChanged) {
+			bindingIt->second.onBindingChanged(*texture);
+			++m_textureBindingRefreshCount;
+		}
+	}
 	return bindingID;
 }
 

@@ -307,9 +307,13 @@ public:
             m_processingHandle != nullptr ||
             m_reloadHandle != nullptr ||
             m_directStorageReloadHandle != nullptr;
+        const bool hasOnlyPlaceholder =
+            m_hasUploadedPlaceholder &&
+            !m_hasUploadedFinalImage;
         return !HasUsableImage() ||
             needsStreamingReload ||
-            hasAsyncHandle;
+            hasAsyncHandle ||
+            hasOnlyPlaceholder;
     }
     TexturePendingDebugInfo GetPendingDebugInfo() const;
     const std::string& DebugName() const { return m_name; }
