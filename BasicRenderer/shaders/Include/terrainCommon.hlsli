@@ -565,6 +565,11 @@ float2 TerrainSkyrimXYFromRendererPosition(float3 positionWS)
     return float2(positionWS.x, -positionWS.z);
 }
 
+float2 TerrainSkyrimXYDerivativeFromRendererDerivative(float3 positionDerivativeWS)
+{
+    return float2(positionDerivativeWS.x, -positionDerivativeWS.z);
+}
+
 float TerrainCubicBSpline(float p0, float p1, float p2, float p3, float t)
 {
     float t2 = t * t;
@@ -763,6 +768,8 @@ void ApplyTerrainMaterialInternal(
     uint materialFlags,
     uint terrainSetIndex,
     in float3 positionWS,
+    in float3 dpdxWS,
+    in float3 dpdyWS,
     in float3 normalWSBase,
     in float3 vertexColor,
     inout MaterialInputs inputs)
@@ -828,8 +835,8 @@ void ApplyTerrainMaterialInternal(
     float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
     float2 regionLocal = skyrimXY - regionOrigin;
 
-    float2 skyrimXYDdx = ddx(skyrimXY);
-    float2 skyrimXYDdy = ddy(skyrimXY);
+    float2 skyrimXYDdx = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
+    float2 skyrimXYDdy = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
     float3x3 terrainBasis = TerrainBasis(normalWSBase);
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
@@ -1004,21 +1011,25 @@ void ApplyTerrainMaterialInternal(
 void ApplyTerrainMaterial(
     in MaterialInfo materialInfo,
     in float3 positionWS,
+    in float3 dpdxWS,
+    in float3 dpdyWS,
     in float3 normalWSBase,
     in float3 vertexColor,
     inout MaterialInputs inputs)
 {
-    ApplyTerrainMaterialInternal(materialInfo.materialFlags, materialInfo.terrainSetIndex, positionWS, normalWSBase, vertexColor, inputs);
+    ApplyTerrainMaterialInternal(materialInfo.materialFlags, materialInfo.terrainSetIndex, positionWS, dpdxWS, dpdyWS, normalWSBase, vertexColor, inputs);
 }
 
 void ApplyTerrainMaterial(
     in MaterialEvalInfo materialInfo,
     in float3 positionWS,
+    in float3 dpdxWS,
+    in float3 dpdyWS,
     in float3 normalWSBase,
     in float3 vertexColor,
     inout MaterialInputs inputs)
 {
-    ApplyTerrainMaterialInternal(materialInfo.materialFlags, materialInfo.terrainSetIndex, positionWS, normalWSBase, vertexColor, inputs);
+    ApplyTerrainMaterialInternal(materialInfo.materialFlags, materialInfo.terrainSetIndex, positionWS, dpdxWS, dpdyWS, normalWSBase, vertexColor, inputs);
 }
 
 #endif // __TERRAIN_COMMON_HLSLI__

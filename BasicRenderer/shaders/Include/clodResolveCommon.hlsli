@@ -1653,7 +1653,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3x3 model3x3 = (float3x3)obj.model;
     float3 dpdx = 0.0f.xxx;
     float3 dpdy = 0.0f.xxx;
-    if ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX)) != 0u)
+    if ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX | MATERIAL_TERRAIN)) != 0u)
     {
         dpdx = mul(dpdxOS, model3x3);
         dpdy = mul(dpdyOS, model3x3);
@@ -1716,7 +1716,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         dpdy,
         materialInputs);
     #endif
-    ApplyTerrainMaterial(materialInfo, worldPosition, worldNormal, vertexColor, materialInputs);
+    ApplyTerrainMaterial(materialInfo, worldPosition, dpdx, dpdy, worldNormal, vertexColor, materialInputs);
 
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;
 
