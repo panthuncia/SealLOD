@@ -157,6 +157,4 @@ public:
         }
     }
 private:
-    int lastMouseX;
-    int lastMouseY;
 };

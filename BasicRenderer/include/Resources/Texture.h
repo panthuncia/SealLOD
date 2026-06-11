@@ -354,8 +354,8 @@ private:
         StorageVariant initialStorage,
         std::shared_ptr<Sampler> defaultSampler,
         TextureFileMeta meta)
-        : m_desc(std::move(desc))
-        , m_initialStorage(std::move(initialStorage))
+        : m_initialStorage(std::move(initialStorage))
+        , m_desc(std::move(desc))
         , m_sampler(defaultSampler ? std::move(defaultSampler) : Sampler::GetDefaultSampler())
         , m_meta(std::move(meta)) {
         m_streamingState.streamingTextureID = NextStreamingTextureID();

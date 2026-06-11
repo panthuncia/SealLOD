@@ -144,14 +144,12 @@ public:
         OpenPBRMaterialParameters canonicalOpenPBR = BuildCanonicalOpenPBRMaterial(desc);
         const auto transparency = PickTransparency(desc);
         materialFlags |= MaterialFlags::MATERIAL_PBR; // TODO: Non-PBR materials
-        BlendState blendState = BlendState::BLEND_STATE_OPAQUE; // Default blend state
         if (transparency.masked) {
             materialFlags |= MaterialFlags::MATERIAL_ALPHA_TEST;
         }
         if (desc.baseColor.texture) {
             if (!desc.baseColor.texture->Meta().alphaIsAllOpaque) {
                 materialFlags |= MaterialFlags::MATERIAL_DOUBLE_SIDED;
-                blendState = BlendState::BLEND_STATE_MASK; // Use mask blending for alpha-tested materials
             }
             materialFlags |= MaterialFlags::MATERIAL_BASE_COLOR_TEXTURE | MaterialFlags::MATERIAL_TEXTURED;
         }
@@ -180,12 +178,10 @@ public:
         auto emissiveColor = desc.emissiveColor;
         if (desc.opacity.texture) { // TODO: How can we tell if this should be used as a mask or as a blend?
             materialFlags |= MaterialFlags::MATERIAL_OPACITY_TEXTURE | MaterialFlags::MATERIAL_TEXTURED;
-            blendState = BlendState::BLEND_STATE_BLEND; // Use blend state for opacity
         }
         if (desc.opacity.factor.Get() < 1.0f) {
             materialFlags |= MaterialFlags::MATERIAL_DOUBLE_SIDED;
             diffuseColor.w = desc.opacity.factor.Get(); // Use opacity factor as alpha
-            blendState = BlendState::BLEND_STATE_BLEND; // Use blend state for opacity
         }
         if (desc.forceDoubleSided) {
             materialFlags |= MaterialFlags::MATERIAL_DOUBLE_SIDED;

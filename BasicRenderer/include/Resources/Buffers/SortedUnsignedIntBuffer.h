@@ -111,7 +111,7 @@ public:
 
 private:
     SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
-        : m_capacity(capacity), m_UAV(UAV), m_earliestModifiedIndex(0), m_activeEntryMode(activeEntryMode) {
+        : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode) {
         SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
         CreateBuffer(capacity);
         SetName(name);

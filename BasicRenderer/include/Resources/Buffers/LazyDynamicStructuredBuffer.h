@@ -285,7 +285,7 @@ public:
         return m_capacity;
     }
 
-	size_t GetElementSize() const {
+	size_t GetElementSize() const override {
 		return m_elementSize;
 	}
 
@@ -359,7 +359,7 @@ public:
 
 private:
     LazyDynamicStructuredBuffer(UINT capacity = 64, std::string name = "", uint64_t alignment = 1, bool UAV = false)
-        : m_capacity(capacity), m_UAV(UAV), m_needsUpdate(false) {
+        : m_capacity(capacity), m_needsUpdate(false), m_UAV(UAV) {
         SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
         if (alignment == 0) {
 			alignment = 1;
