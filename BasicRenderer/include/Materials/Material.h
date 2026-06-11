@@ -262,7 +262,7 @@ public:
     void SetHeightmapScale(float scale);
     void SetCompileFlagsID(uint32_t id);
     void SetOpenPBRMaterialDataIndex(uint32_t index);
-    void SetTerrainSetIndex(uint32_t index);
+    void SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable = false);
     void SetRasterBucketIndex(uint32_t index);
     PSOFlags GetPSOFlags() const { return m_psoFlags; }
     MaterialFlags GetMaterialFlags() const { return static_cast<MaterialFlags>(m_materialData.materialFlags); }

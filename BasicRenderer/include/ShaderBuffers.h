@@ -100,12 +100,21 @@ struct PerFrameCB {
     unsigned int terrainStochasticDerivativeNormalsEnabled = 1u;
     float terrainStochasticBlendCurve = 0.65f;
     unsigned int terrainGaussianStochasticEnabled = 0u;
+    unsigned int terrainStochasticRegisterPad = 0u;
     DirectX::XMUINT3 terrainStochasticPad{};
     unsigned int parallaxOcclusionMappingEnabled = 1u;
     unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
     float terrainParallaxHeightScale = 0.03f;
     unsigned int terrainParallaxMaxSteps = 16u;
 };
+
+static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 124, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad) == 128, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 140, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 144, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 148, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 152, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 160, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;

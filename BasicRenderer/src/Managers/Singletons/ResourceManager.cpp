@@ -1,7 +1,12 @@
 #include "Managers/Singletons/ResourceManager.h"
 
+#include <atomic>
+#include <cstdlib>
+#include <memory>
 #include <rhi_helpers.h>
+#include <string_view>
 #include <OpenRenderGraph/OpenRenderGraph.h>
+#include <spdlog/spdlog.h>
 
 #include "Utilities/Utilities.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -33,6 +38,26 @@ namespace
 				shadowCascadeSplits.size() > 3 ? shadowCascadeSplits[3] : 0.0f);
 			break;
 		}
+	}
+
+	bool TerrainParallaxDiagnosticsEnabled()
+	{
+		static const bool enabled = [] {
+			const auto envEnabled = [](const char* name) {
+				char* rawValue = nullptr;
+				std::size_t valueLength = 0;
+				if (_dupenv_s(&rawValue, &valueLength, name) != 0 || rawValue == nullptr) {
+					return false;
+				}
+				const std::unique_ptr<char, decltype(&std::free)> valueStorage{ rawValue, &std::free };
+				const std::string_view value{ valueStorage.get() };
+				return !(value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF");
+			};
+			return envEnabled("SARP_TERRAIN_TEXTURE_DIAGNOSTICS") ||
+				envEnabled("SARP_TERRAIN_LAYER_DIAGNOSTICS") ||
+				envEnabled("SARP_TERRAIN_PARALLAX_DIAGNOSTICS");
+		}();
+		return enabled;
 	}
 
     uint32_t PackDirectionalVirtualShadowSmrtCounts(uint32_t rayCount, uint32_t samplesPerRay)
@@ -102,6 +127,18 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxHeightScale")();
 	perFrameCBData.terrainParallaxMaxSteps =
 		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainParallaxMaxSteps")();
+	if (TerrainParallaxDiagnosticsEnabled()) {
+		static std::atomic_bool logged{ false };
+		bool expected = false;
+		if (logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+			spdlog::info(
+				"SARP terrain: per-frame parallax constants pom={} terrainPom={} heightScale={} maxSteps={}",
+				perFrameCBData.parallaxOcclusionMappingEnabled,
+				perFrameCBData.terrainParallaxOcclusionMappingEnabled,
+				perFrameCBData.terrainParallaxHeightScale,
+				perFrameCBData.terrainParallaxMaxSteps);
+		}
+	}
 
 	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), rg::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
 }

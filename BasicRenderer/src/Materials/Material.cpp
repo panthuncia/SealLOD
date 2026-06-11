@@ -304,13 +304,28 @@ void Material::SetOpenPBRMaterialDataIndex(uint32_t index) {
     m_materialData.openPBRMaterialDataIndex = index;
 }
 
-void Material::SetTerrainSetIndex(uint32_t index) {
+void Material::SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable) {
     m_materialData.materialFlags |= MaterialFlags::MATERIAL_TERRAIN;
     m_materialData.terrainSetIndex = index;
     if (m_materialData.geometricDisplacementEnabled != 0u) {
+        m_materialData.materialFlags &= ~MaterialFlags::MATERIAL_PARALLAX;
         m_materialData.materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         m_technique.compileFlags |= MaterialCompileFlags::MaterialCompileGeometricDisplacement;
+        m_technique.compileFlags = static_cast<MaterialCompileFlags>(
+            static_cast<uint64_t>(m_technique.compileFlags) &
+            ~static_cast<uint64_t>(MaterialCompileFlags::MaterialCompileParallax));
         m_technique.rasterFlags |= MaterialRasterFlags::MaterialRasterFlagsGeometricDisplacement;
+    }
+    else if (terrainParallaxCapable) {
+        m_materialData.materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED;
+        m_materialData.materialFlags &= ~MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
+        m_technique.compileFlags |= MaterialCompileFlags::MaterialCompileParallax;
+        m_technique.compileFlags = static_cast<MaterialCompileFlags>(
+            static_cast<uint64_t>(m_technique.compileFlags) &
+            ~static_cast<uint64_t>(MaterialCompileFlags::MaterialCompileGeometricDisplacement));
+        m_technique.rasterFlags = static_cast<MaterialRasterFlags>(
+            static_cast<uint32_t>(m_technique.rasterFlags) &
+            ~static_cast<uint32_t>(MaterialRasterFlags::MaterialRasterFlagsGeometricDisplacement));
     }
 }
 
