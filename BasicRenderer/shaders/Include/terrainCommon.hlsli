@@ -207,6 +207,19 @@ float TerrainVariancePreservingBlend1(float a, float b, float c, float3 weights)
     return saturate(((a - 0.5f) * weights.x + (b - 0.5f) * weights.y + (c - 0.5f) * weights.z) * varianceScale + 0.5f);
 }
 
+float3 TerrainHeightBlendWeights(float3 stochasticWeights, float3 heights, float blendCurve)
+{
+    stochasticWeights = TerrainNormalizeWeights(stochasticWeights);
+    heights = saturate(heights);
+
+    float contrast = lerp(0.35f, 0.08f, saturate(blendCurve));
+    float3 ranked = heights + stochasticWeights;
+    float peak = max(ranked.x, max(ranked.y, ranked.z));
+    float3 heightMask = saturate((ranked - (peak - contrast)) / max(contrast, 1.0e-4f));
+
+    return TerrainNormalizeWeights(stochasticWeights * max(heightMask, 1.0e-4f.xxx));
+}
+
 float TerrainLutY(float lod, float lutHeight)
 {
     return saturate((max(lod, 0.0f) + 0.5f) / max(lutHeight, 1.0f));
@@ -339,6 +352,31 @@ bool TerrainCanSampleHeight(TerrainLayerInfo layer)
     return TerrainLayerUsesDiffuseAlphaHeight(layer) || TerrainLayerUsesExplicitHeight(layer);
 }
 
+float3 TerrainSampleLayerHeightTriplet(TerrainLayerInfo layer, TerrainStochasticContext ctx)
+{
+    if (TerrainLayerUsesDiffuseAlphaHeight(layer))
+    {
+        Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+        SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+        return float3(
+            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).a,
+            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a,
+            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a);
+    }
+
+    if (TerrainLayerUsesExplicitHeight(layer))
+    {
+        Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+        return float3(
+            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r,
+            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r,
+            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r);
+    }
+
+    return 0.5f.xxx;
+}
+
 bool TerrainTryBuildLayerStochasticContext(
     TerrainLayerInfo layer,
     float2 uv,
@@ -403,6 +441,7 @@ float TerrainSampleLayerHeight(
                 duDy,
                 stochasticScale,
                 blendCurve);
+            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
             return TerrainSampleStochasticDiffuseAlpha(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx);
         }
         return SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy).a;
@@ -424,6 +463,7 @@ float TerrainSampleLayerHeight(
                 duDy,
                 stochasticScale,
                 blendCurve);
+            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
             return TerrainSampleMikkelsenHeight(heightTex, heightSampler, layer.heightStreamingTextureID, ctx);
         }
         if (terrainStochasticHeightEnabled &&
@@ -443,6 +483,7 @@ float TerrainSampleLayerHeight(
                 duDy,
                 stochasticScale,
                 blendCurve);
+            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
             return TerrainSampleStochasticHeight(stochasticLayer, ctx, heightSampler);
         }
         return SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy).r;
@@ -920,6 +961,14 @@ void ApplyTerrainMaterialInternal(
                 contextScale,
                 perFrameBuffer.terrainStochasticBlendCurve,
                 stochasticContext);
+            if (hasStochasticContext && TerrainCanSampleHeight(layer))
+            {
+                const float3 heightSamples = TerrainSampleLayerHeightTriplet(layer, stochasticContext);
+                stochasticContext.weights = TerrainHeightBlendWeights(
+                    stochasticContext.weights,
+                    heightSamples,
+                    perFrameBuffer.terrainStochasticBlendCurve);
+            }
         }
 
         float3 layerBaseColor = layer.fallbackColor.rgb;
