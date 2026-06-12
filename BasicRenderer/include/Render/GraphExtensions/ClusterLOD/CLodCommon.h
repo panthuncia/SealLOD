@@ -16,6 +16,8 @@ inline constexpr const char* CLodStreamingMeshManagerGetterSettingName = "getMes
 inline constexpr const char* CLodStreamingCpuUploadBudgetSettingName = "clodStreamingCpuUploadBudgetRequests";
 inline constexpr const char* CLodStreamingEnableDirectStorageSettingName = "clodStreamingEnableDirectStorage";
 inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDisableReyesRasterization";
+inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
+inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
 inline constexpr const char* CLodEnablePageJobVSMSettingName = "clodEnablePageJobVSM";
@@ -1150,6 +1152,16 @@ struct CLodReyesTelemetry
     uint32_t rasterMicroTriangleOverflowCount = 0u;
     uint32_t rasterNearPlaneClippedQuadCount = 0u;
     uint32_t rasterTinyTriangleFallbackCount = 0u;
+    uint32_t splitOcclusionTestCount = 0u;
+    uint32_t splitOcclusionDeferCount = 0u;
+    uint32_t splitOcclusionDropCount = 0u;
+    uint32_t diceOcclusionTestCount = 0u;
+    uint32_t diceOcclusionDeferCount = 0u;
+    uint32_t diceOcclusionDropCount = 0u;
+    uint32_t replaySplitQueueOverflowCount = 0u;
+    uint32_t replayDiceQueueOverflowCount = 0u;
+    uint32_t replaySplitMergeCount = 0u;
+    uint32_t replayDiceMergeCount = 0u;
 };
 
 inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u; // 200 MB physical, GPU uses first 100 MB

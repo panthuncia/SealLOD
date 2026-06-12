@@ -28,6 +28,7 @@
 #include "PerPassRootConstants/clodVirtualShadowResolveMarkedBlocksRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowSetupRootConstants.h"
 #include "PerPassRootConstants/clodReyesSplitRootConstants.h"
+#include "PerPassRootConstants/clodReyesReplayMergeRootConstants.h"
 #include "include/indirectCommands.hlsli"
 #include "include/clodStructs.hlsli"
 #include "include/visibleClusterPacking.hlsli"
@@ -918,6 +919,27 @@ void ClearReyesQueueCountersCSMain()
         diceQueueCounter[0] = 0u;
     }
     diceQueueOverflow[0] = 0u;
+
+    if (CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> replaySplitCounter = ResourceDescriptorHeap[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX];
+        replaySplitCounter[0] = 0u;
+    }
+    if (CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> replaySplitOverflow = ResourceDescriptorHeap[CLOD_REYES_RESET_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX];
+        replaySplitOverflow[0] = 0u;
+    }
+    if (CLOD_REYES_RESET_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> replayDiceCounter = ResourceDescriptorHeap[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX];
+        replayDiceCounter[0] = 0u;
+    }
+    if (CLOD_REYES_RESET_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> replayDiceOverflow = ResourceDescriptorHeap[CLOD_REYES_RESET_REPLAY_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX];
+        replayDiceOverflow[0] = 0u;
+    }
 }
 
 [shader("compute")]
@@ -951,6 +973,80 @@ void BuildReyesDispatchArgsCSMain()
     indirectArgsBuffer[0].dispatchX = (workItemCount + threadsPerGroup - 1u) / threadsPerGroup;
     indirectArgsBuffer[0].dispatchY = 1u;
     indirectArgsBuffer[0].dispatchZ = 1u;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void MergeReyesReplaySplitQueueCSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    StructuredBuffer<CLodReyesSplitQueueEntry> sourceQueue =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_SOURCE_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> sourceCounter =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_SOURCE_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesSplitQueueEntry> destQueue =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> destCounter =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> destOverflow =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_OVERFLOW_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_TELEMETRY_DESCRIPTOR_INDEX];
+
+    const uint sourceIndex = dispatchThreadID.x;
+    const uint sourceCount = sourceCounter[0];
+    if (sourceIndex >= sourceCount)
+    {
+        return;
+    }
+
+    uint destIndex = 0u;
+    InterlockedAdd(destCounter[0], 1u, destIndex);
+    if (destIndex >= CLOD_REYES_REPLAY_MERGE_CAPACITY)
+    {
+        InterlockedAdd(destOverflow[0], 1u);
+        InterlockedAdd(telemetryBuffer[0].replaySplitQueueOverflowCount, 1u);
+        return;
+    }
+
+    destQueue[destIndex] = sourceQueue[sourceIndex];
+    InterlockedAdd(telemetryBuffer[0].replaySplitMergeCount, 1u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void MergeReyesReplayDiceQueueCSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    StructuredBuffer<CLodReyesDiceQueueEntry> sourceQueue =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_SOURCE_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> sourceCounter =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_SOURCE_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesDiceQueueEntry> destQueue =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> destCounter =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> destOverflow =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_DEST_OVERFLOW_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer =
+        ResourceDescriptorHeap[CLOD_REYES_REPLAY_MERGE_TELEMETRY_DESCRIPTOR_INDEX];
+
+    const uint sourceIndex = dispatchThreadID.x;
+    const uint sourceCount = sourceCounter[0];
+    if (sourceIndex >= sourceCount)
+    {
+        return;
+    }
+
+    uint destIndex = 0u;
+    InterlockedAdd(destCounter[0], 1u, destIndex);
+    if (destIndex >= CLOD_REYES_REPLAY_MERGE_CAPACITY)
+    {
+        InterlockedAdd(destOverflow[0], 1u);
+        InterlockedAdd(telemetryBuffer[0].replayDiceQueueOverflowCount, 1u);
+        return;
+    }
+
+    destQueue[destIndex] = sourceQueue[sourceIndex];
+    InterlockedAdd(telemetryBuffer[0].replayDiceMergeCount, 1u);
 }
 
 [shader("compute")]

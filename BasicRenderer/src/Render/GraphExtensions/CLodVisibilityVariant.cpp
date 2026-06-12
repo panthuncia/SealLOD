@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/CLodExtension.h"
 #include "Render/GraphExtensions/CLodExtensionShared.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -77,6 +78,14 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
         throw std::runtime_error("Unsupported CLod visibility Reyes raster phase.");
     }
 
+    const bool enablePatchOcclusion =
+        traits.usesPhase2OcclusionReplay &&
+        SettingsManager::GetInstance().getSettingGetter<bool>("enableOcclusionCulling")() &&
+        (phaseIndex == 1u || phaseIndex == 2u);
+    const auto viewDepthSrvIndicesBuffer = enablePatchOcclusion
+        ? (phaseIndex == 1u ? extension.m_viewDepthSrvIndicesBuffer : extension.m_viewDepthSrvIndicesBufferPhase2)
+        : nullptr;
+
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, std::string("ReyesBuildRasterWorkPass") + phaseSuffix),
@@ -89,7 +98,15 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
                 rasterWorkCounterBuffer,
                 diceIndirectArgsBuffer,
                 telemetryBuffer,
-                extension.m_reyesRasterWorkCapacity)));
+                extension.m_reyesRasterWorkCapacity,
+                phaseIndex,
+                enablePatchOcclusion ? extension.m_visibleClustersBuffer : nullptr,
+                viewDepthSrvIndicesBuffer,
+                enablePatchOcclusion ? extension.m_reyesReplayDiceQueueBuffer : nullptr,
+                enablePatchOcclusion ? extension.m_reyesReplayDiceQueueCounterBuffer : nullptr,
+                enablePatchOcclusion ? extension.m_reyesReplayDiceQueueOverflowBuffer : nullptr,
+                extension.m_reyesDiceQueueCapacity,
+                slabGroup)));
 
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(

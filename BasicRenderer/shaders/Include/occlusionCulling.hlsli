@@ -211,6 +211,108 @@ void OcclusionCullingPerspectiveTexture2D(
     fullyCulled = fMaxOcclusionDepth < boundingSphereDepth - scaledBoundingRadius;
 }
 
+void OcclusionCullingPerspectiveViewAABBTexture2D(
+    out bool fullyCulled,
+    uint2 depthRes,
+    uint numDepthMips,
+    row_major matrix projMatrix,
+    float3 viewMin,
+    float3 viewMax,
+    uint depthMapDescriptorIndex)
+{
+    fullyCulled = false;
+    if (depthRes.x == 0u || depthRes.y == 0u || numDepthMips == 0u ||
+        !all(isfinite(viewMin)) || !all(isfinite(viewMax)) || any(viewMax < viewMin))
+    {
+        return;
+    }
+
+    float2 uvMin = float2(1.0e30f, 1.0e30f);
+    float2 uvMax = float2(-1.0e30f, -1.0e30f);
+    float nearestDepth = 1.0e30f;
+
+    [unroll]
+    for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex)
+    {
+        const float3 viewCorner = float3(
+            (cornerIndex & 0x1u) != 0u ? viewMax.x : viewMin.x,
+            (cornerIndex & 0x2u) != 0u ? viewMax.y : viewMin.y,
+            (cornerIndex & 0x4u) != 0u ? viewMax.z : viewMin.z);
+        const float cornerDepth = -viewCorner.z;
+        if (!all(isfinite(viewCorner)) || cornerDepth <= 0.0f)
+        {
+            return;
+        }
+
+        const float4 clipCorner = mul(float4(viewCorner, 1.0f), projMatrix);
+        if (!all(isfinite(clipCorner)) || clipCorner.w <= 1.0e-6f)
+        {
+            return;
+        }
+
+        const float2 ndc = clipCorner.xy / clipCorner.w;
+        const float2 uv = float2(ndc.x * 0.5f + 0.5f, -ndc.y * 0.5f + 0.5f);
+        uvMin = min(uvMin, uv);
+        uvMax = max(uvMax, uv);
+        nearestDepth = min(nearestDepth, cornerDepth);
+    }
+
+    if (uvMax.x < 0.0f || uvMin.x > 1.0f || uvMax.y < 0.0f || uvMin.y > 1.0f ||
+        !all(isfinite(uvMin)) || !all(isfinite(uvMax)) || !isfinite(nearestDepth))
+    {
+        return;
+    }
+
+    const float2 viewResF = float2(depthRes);
+    const float2 rectMinPx = saturate(uvMin) * viewResF;
+    const float2 rectMaxPx = saturate(uvMax) * viewResF;
+    int2 p0 = int2(floor(rectMinPx));
+    int2 p1 = int2(ceil(rectMaxPx)) - int2(1, 1);
+    const int2 maxPixel = int2(depthRes) - int2(1, 1);
+    p0 = clamp(p0, int2(0, 0), maxPixel);
+    p1 = clamp(p1, int2(0, 0), maxPixel);
+    if (any(p1 < p0))
+    {
+        return;
+    }
+
+    const uint maxMipLevel = numDepthMips - 1u;
+    uint mipLevel = 0u;
+    [loop]
+    while (mipLevel < maxMipLevel)
+    {
+        const int2 t0 = p0 >> mipLevel;
+        const int2 t1 = p1 >> mipLevel;
+        const int2 span = t1 - t0 + int2(1, 1);
+        if (span.x <= 2 && span.y <= 2)
+        {
+            break;
+        }
+        ++mipLevel;
+    }
+
+    const int2 q0 = p0 >> mipLevel;
+    const int2 q1 = p1 >> mipLevel;
+    const int2 qn = q1 - q0 + int2(1, 1);
+    Texture2D<float> depthBuffer = ResourceDescriptorHeap[depthMapDescriptorIndex];
+
+    float hzbMax = depthBuffer.Load(int3(q0.x, q0.y, (int)mipLevel));
+    if (qn.x == 2)
+    {
+        hzbMax = max(hzbMax, depthBuffer.Load(int3(q1.x, q0.y, (int)mipLevel)));
+    }
+    if (qn.y == 2)
+    {
+        hzbMax = max(hzbMax, depthBuffer.Load(int3(q0.x, q1.y, (int)mipLevel)));
+        if (qn.x == 2)
+        {
+            hzbMax = max(hzbMax, depthBuffer.Load(int3(q1.x, q1.y, (int)mipLevel)));
+        }
+    }
+
+    fullyCulled = hzbMax < nearestDepth;
+}
+
 bool ConservativeAnyHitTexture2DArraySphereQuery(
     Texture2DArray<uint> queryTexture,
     uint arrayLayer,

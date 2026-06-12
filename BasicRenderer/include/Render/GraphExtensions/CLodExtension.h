@@ -143,10 +143,16 @@ private:
     std::shared_ptr<Buffer> m_reyesSplitQueueBufferB;
     std::shared_ptr<Buffer> m_reyesSplitQueueCounterBufferB;
     std::shared_ptr<Buffer> m_reyesSplitQueueOverflowBufferB;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueBuffer;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_reyesReplaySplitQueueOverflowBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueuePhase1CountBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueOverflowBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_reyesReplayDiceQueueOverflowBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkCounterBuffer;
     std::shared_ptr<Buffer> m_reyesRasterWorkIndirectArgsBuffer;

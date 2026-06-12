@@ -976,6 +976,16 @@ struct CLodReyesTelemetry
     uint rasterMicroTriangleOverflowCount;
     uint rasterNearPlaneClippedQuadCount;
     uint rasterTinyTriangleFallbackCount;
+    uint splitOcclusionTestCount;
+    uint splitOcclusionDeferCount;
+    uint splitOcclusionDropCount;
+    uint diceOcclusionTestCount;
+    uint diceOcclusionDeferCount;
+    uint diceOcclusionDropCount;
+    uint replaySplitQueueOverflowCount;
+    uint replayDiceQueueOverflowCount;
+    uint replaySplitMergeCount;
+    uint replayDiceMergeCount;
 };
 
 #endif // __STRUCTS_HLSL__

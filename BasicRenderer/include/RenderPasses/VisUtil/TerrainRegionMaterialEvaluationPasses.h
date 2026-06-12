@@ -582,6 +582,8 @@ public:
         miscRootConstants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = m_reyesTessTableConfigsBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] = m_reyesTessTableVerticesBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = m_reyesTessTableTrianglesBufferSRVIndex;
+        miscRootConstants[VISBUF_REYES_USE_NORMAL_MAPS] =
+            SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseNormalMapsSettingName)() ? 1u : 0u;
         cl.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, miscRootConstants);
 
         cl.ExecuteIndirect(

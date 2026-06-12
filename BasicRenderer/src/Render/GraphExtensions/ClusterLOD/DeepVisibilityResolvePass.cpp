@@ -3,6 +3,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Managers/ViewManager.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
@@ -178,6 +179,8 @@ PassReturn DeepVisibilityResolvePass::Execute(PassExecutionContext& executionCon
     misc[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = m_reyesTessTableTrianglesBuffer
         ? m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;
+    misc[VISBUF_REYES_USE_NORMAL_MAPS] =
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseNormalMapsSettingName)() ? 1u : 0u;
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,

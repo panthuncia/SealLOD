@@ -6,6 +6,7 @@
 #include "include/clodStructs.hlsli"
 #include "include/clodResolveCommon.hlsli"
 #include "include/reyesPatchCommon.hlsli"
+#include "include/occlusionCulling.hlsli"
 #include "PerPassRootConstants/clodReyesSplitRootConstants.h"
 
 static const uint REYES_SPLIT_GROUP_SIZE = 64u;
@@ -37,6 +38,14 @@ bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera 
     return false;
 }
 
+float ReyesMaxAxisScale_RowVector(row_major matrix m)
+{
+    const float3 row0 = float3(m._11, m._12, m._13);
+    const float3 row1 = float3(m._21, m._22, m._23);
+    const float3 row2 = float3(m._31, m._32, m._33);
+    return sqrt(max(dot(row0, row0), max(dot(row1, row1), dot(row2, row2))));
+}
+
 float ReyesPatchMaxDisplacementMagnitude(MaterialInfo materialInfo)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
@@ -59,6 +68,185 @@ void ReyesPatchBuildConservativeSphere(
     radiusWorld = max(
         distance(centerWorld, worldPosition0),
         max(distance(centerWorld, worldPosition1), distance(centerWorld, worldPosition2))) + displacementMagnitude;
+}
+
+void ReyesPatchBuildConservativeObjectSphere(
+    float3 objectPosition0,
+    float3 objectPosition1,
+    float3 objectPosition2,
+    float displacementMagnitude,
+    out float3 centerObject,
+    out float radiusObject)
+{
+    centerObject = (objectPosition0 + objectPosition1 + objectPosition2) / 3.0f;
+    radiusObject = max(
+        distance(centerObject, objectPosition0),
+        max(distance(centerObject, objectPosition1), distance(centerObject, objectPosition2))) + displacementMagnitude;
+}
+
+void ReyesPatchBuildConservativeViewAABB(
+    float3 objectPosition0,
+    float3 objectPosition1,
+    float3 objectPosition2,
+    float displacementMagnitude,
+    row_major matrix modelMatrix,
+    row_major matrix viewMatrix,
+    out float3 viewMin,
+    out float3 viewMax)
+{
+    const float3 objectMin = min(objectPosition0, min(objectPosition1, objectPosition2)) - displacementMagnitude.xxx;
+    const float3 objectMax = max(objectPosition0, max(objectPosition1, objectPosition2)) + displacementMagnitude.xxx;
+    viewMin = 1.0e30f.xxx;
+    viewMax = -1.0e30f.xxx;
+
+    [unroll]
+    for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex)
+    {
+        const float3 objectCorner = float3(
+            (cornerIndex & 0x1u) != 0u ? objectMax.x : objectMin.x,
+            (cornerIndex & 0x2u) != 0u ? objectMax.y : objectMin.y,
+            (cornerIndex & 0x4u) != 0u ? objectMax.z : objectMin.z);
+        const float3 viewCorner = mul(mul(float4(objectCorner, 1.0f), modelMatrix), viewMatrix).xyz;
+        viewMin = min(viewMin, viewCorner);
+        viewMax = max(viewMax, viewCorner);
+    }
+}
+
+bool ReyesPatchOcclusionEnabled()
+{
+    return CLOD_REYES_SPLIT_ENABLE_PATCH_OCCLUSION != 0u &&
+        CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu;
+}
+
+bool ReyesPatchHZBOccluded(
+    float3 objectPosition0,
+    float3 objectPosition1,
+    float3 objectPosition2,
+    float displacementMagnitude,
+    PerObjectBuffer objectData,
+    Camera camera,
+    uint viewID,
+    uint phaseIndex,
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer)
+{
+    if (!ReyesPatchOcclusionEnabled())
+    {
+        return false;
+    }
+
+    StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
+        ResourceDescriptorHeap[CLOD_REYES_SPLIT_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+    const uint depthMapDescriptorIndex = viewDepthSRVIndices[viewID].linearDepthSRVIndex;
+    if (depthMapDescriptorIndex == 0u)
+    {
+        return false;
+    }
+
+    float3 objectCenter = 0.0f.xxx;
+    float objectRadius = 0.0f;
+    ReyesPatchBuildConservativeObjectSphere(
+        objectPosition0,
+        objectPosition1,
+        objectPosition2,
+        displacementMagnitude,
+        objectCenter,
+        objectRadius);
+    if (!all(isfinite(objectCenter)) || !isfinite(objectRadius) || objectRadius <= 0.0f)
+    {
+        return false;
+    }
+
+    const bool phaseOne = phaseIndex == 1u;
+    row_major matrix modelMatrix = objectData.model;
+    row_major matrix viewMatrix = camera.view;
+    row_major matrix projectionMatrix = camera.projection;
+    if (phaseOne)
+    {
+        modelMatrix = objectData.prevModel;
+        viewMatrix = camera.prevView;
+        projectionMatrix = camera.prevUnjitteredProjection;
+    }
+    const float scaledRadius = objectRadius * ReyesMaxAxisScale_RowVector(modelMatrix);
+    const float3 viewSpaceCenter = mul(mul(float4(objectCenter, 1.0f), modelMatrix), viewMatrix).xyz;
+    const float boundingSphereDepth = -viewSpaceCenter.z;
+    if (!all(isfinite(viewSpaceCenter)) || !isfinite(scaledRadius) || boundingSphereDepth <= scaledRadius)
+    {
+        return false;
+    }
+
+    bool occluded = false;
+    InterlockedAdd(telemetryBuffer[0].splitOcclusionTestCount, 1u);
+    if (CLOD_REYES_SPLIT_USE_AABB_OCCLUSION != 0u)
+    {
+        float3 viewMin = 0.0f.xxx;
+        float3 viewMax = 0.0f.xxx;
+        ReyesPatchBuildConservativeViewAABB(
+            objectPosition0,
+            objectPosition1,
+            objectPosition2,
+            displacementMagnitude,
+            modelMatrix,
+            viewMatrix,
+            viewMin,
+            viewMax);
+        OcclusionCullingPerspectiveViewAABBTexture2D(
+            occluded,
+            uint2(camera.depthResX, camera.depthResY),
+            camera.numDepthMips,
+            projectionMatrix,
+            viewMin,
+            viewMax,
+            depthMapDescriptorIndex);
+    }
+    else
+    {
+        OcclusionCullingPerspectiveTexture2D(
+            occluded,
+            uint2(camera.depthResX, camera.depthResY),
+            camera.numDepthMips,
+            camera.UVScaleToNextPowerOf2,
+            projectionMatrix,
+            viewSpaceCenter,
+            boundingSphereDepth,
+            scaledRadius,
+            depthMapDescriptorIndex);
+    }
+    return occluded;
+}
+
+void ReyesReplayOrDropOccludedSplitPatch(
+    CLodReyesSplitQueueEntry entry,
+    uint phaseIndex,
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer)
+{
+    if (phaseIndex == 1u &&
+        CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX != 0xFFFFFFFFu &&
+        CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX != 0xFFFFFFFFu &&
+        CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<CLodReyesSplitQueueEntry> replayQueue =
+            ResourceDescriptorHeap[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_DESCRIPTOR_INDEX];
+        RWStructuredBuffer<uint> replayCounter =
+            ResourceDescriptorHeap[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_COUNTER_DESCRIPTOR_INDEX];
+        RWStructuredBuffer<uint> replayOverflow =
+            ResourceDescriptorHeap[CLOD_REYES_SPLIT_REPLAY_SPLIT_QUEUE_OVERFLOW_DESCRIPTOR_INDEX];
+
+        uint replayIndex = 0u;
+        InterlockedAdd(replayCounter[0], 1u, replayIndex);
+        if (replayIndex < CLOD_REYES_SPLIT_QUEUE_CAPACITY)
+        {
+            replayQueue[replayIndex] = entry;
+            InterlockedAdd(telemetryBuffer[0].splitOcclusionDeferCount, 1u);
+        }
+        else
+        {
+            InterlockedAdd(replayOverflow[0], 1u);
+            InterlockedAdd(telemetryBuffer[0].replaySplitQueueOverflowCount, 1u);
+        }
+        return;
+    }
+
+    InterlockedAdd(telemetryBuffer[0].splitOcclusionDropCount, 1u);
 }
 
 bool CLodVirtualShadowComputeSphereAabbUvBounds(
@@ -534,6 +722,21 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    if (ReyesPatchHZBOccluded(
+            currentPosition0OS,
+            currentPosition1OS,
+            currentPosition2OS,
+            displacementMagnitude,
+            objectData,
+            sceneCamera,
+            splitEntry.viewID,
+            CLOD_REYES_SPLIT_PHASE_INDEX,
+            telemetryBuffer))
+    {
+        ReyesReplayOrDropOccludedSplitPatch(splitEntry, CLOD_REYES_SPLIT_PHASE_INDEX, telemetryBuffer);
+        return;
+    }
+
     const uint nextSplitLevel = splitEntry.splitLevel + 1u;
     InterlockedMax(telemetryBuffer[0].deepestSplitLevelReached, nextSplitLevel);
 
@@ -713,6 +916,35 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             telemetryBuffer,
             true))
         {
+            continue;
+        }
+
+        CLodReyesSplitQueueEntry childEntryForOcclusion;
+        childEntryForOcclusion.visibleClusterIndex = splitEntry.visibleClusterIndex;
+        childEntryForOcclusion.instanceID = splitEntry.instanceID;
+        childEntryForOcclusion.localMeshletIndex = splitEntry.localMeshletIndex;
+        childEntryForOcclusion.materialIndex = splitEntry.materialIndex;
+        childEntryForOcclusion.viewID = splitEntry.viewID;
+        childEntryForOcclusion.splitLevel = nextSplitLevel;
+        childEntryForOcclusion.quantizedTessFactor = nextQuantizedTessFactor;
+        childEntryForOcclusion.flags = splitEntry.flags;
+        childEntryForOcclusion.sourcePrimitiveAndSplitConfig = (sourceTriangleIndex & 0xFFFFu);
+        childEntryForOcclusion.domainVertex0UV = ReyesPatchBarycentricsToUV(childDomain0);
+        childEntryForOcclusion.domainVertex1UV = ReyesPatchBarycentricsToUV(childDomain1);
+        childEntryForOcclusion.domainVertex2UV = ReyesPatchBarycentricsToUV(childDomain2);
+
+        if (ReyesPatchHZBOccluded(
+                childPosition0OS,
+                childPosition1OS,
+                childPosition2OS,
+                displacementMagnitude,
+                objectData,
+                sceneCamera,
+                splitEntry.viewID,
+                CLOD_REYES_SPLIT_PHASE_INDEX,
+                telemetryBuffer))
+        {
+            ReyesReplayOrDropOccludedSplitPatch(childEntryForOcclusion, CLOD_REYES_SPLIT_PHASE_INDEX, telemetryBuffer);
             continue;
         }
 

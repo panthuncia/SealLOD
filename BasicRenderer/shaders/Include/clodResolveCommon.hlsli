@@ -1610,6 +1610,12 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     MaterialInfo materialInfo = materialDataBuffer[md.materialDataIndex];
 #endif
     uint materialFlags = materialInfo.materialFlags;
+    const bool useReyesGeometricNormal = isReyesPatch && VISBUF_REYES_USE_NORMAL_MAPS == 0u;
+    if (useReyesGeometricNormal)
+    {
+        materialFlags &= ~MATERIAL_NORMAL_MAP;
+        materialInfo.materialFlags = materialFlags;
+    }
 
     float4x4 viewProj = mul(cam.view, cam.projection);
     float4x4 objectToClip = mul(obj.model, viewProj);
@@ -1709,6 +1715,15 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 
     StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
     float3x3 normalMatrix = (float3x3)normalMatrixBuffer[obj.normalMatrixBufferIndex].value;
+    if (useReyesGeometricNormal)
+    {
+        const float3 geometricNormalRawOS = cross(evalPos1 - evalPos0, evalPos2 - evalPos0);
+        if (dot(geometricNormalRawOS, geometricNormalRawOS) > 1.0e-16f)
+        {
+            const float3 geometricNormalOS = normalize(geometricNormalRawOS);
+            normalOS = dot(geometricNormalOS, normalOS) < 0.0f ? -geometricNormalOS : geometricNormalOS;
+        }
+    }
     float3 worldNormal = normalize(mul(normalOS, normalMatrix));
     float4 tangentWS = float4(1.0f, 0.0f, 0.0f, 0.0f);
     if ((md.pageAttributeMask & CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME) != 0u)

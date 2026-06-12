@@ -1452,9 +1452,10 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainStochasticBlendCurve", 0.65f);
     settingsManager.registerSetting<bool>("enableTerrainGaussianStochasticSampling", false);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
-    settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
+    settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", false);
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
+    settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
     settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2048.0f);
@@ -1488,6 +1489,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
+    settingsManager.registerSetting<bool>(CLodReyesUseNormalMapsSettingName, false);
+    settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,
         CLodReyesShadowCoarseTargetPagesPerTriangleDefault);

@@ -554,6 +554,14 @@ private:
     std::function<bool()> getCLodDisableReyesRasterization;
     std::function<void(bool)> setCLodDisableReyesRasterization;
 
+    bool m_clodReyesUseNormalMaps = false;
+    std::function<bool()> getCLodReyesUseNormalMaps;
+    std::function<void(bool)> setCLodReyesUseNormalMaps;
+
+    bool m_clodReyesUseAabbOcclusion = false;
+    std::function<bool()> getCLodReyesUseAabbOcclusion;
+    std::function<void(bool)> setCLodReyesUseAabbOcclusion;
+
     bool m_clodDisableVirtualShadowPageCaching = false;
     std::function<bool()> getCLodDisableVirtualShadowPageCaching;
     std::function<void(bool)> setCLodDisableVirtualShadowPageCaching;
@@ -700,6 +708,9 @@ private:
     bool m_terrainReyesDisplacementEnabled = true;
     std::function<bool()> getTerrainReyesDisplacementEnabled;
     std::function<void(bool)> setTerrainReyesDisplacementEnabled;
+    float m_terrainReyesDisplacementScale = 32.0f;
+    std::function<float()> getTerrainReyesDisplacementScale;
+    std::function<void(float)> setTerrainReyesDisplacementScale;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1050,6 +1061,16 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_clodDisableReyesRasterization = getCLodDisableReyesRasterization();
     observerSetting(m_clodDisableReyesRasterization, CLodDisableReyesRasterizationSettingName);
 
+    getCLodReyesUseNormalMaps = settingsManager.getSettingGetter<bool>(CLodReyesUseNormalMapsSettingName);
+    setCLodReyesUseNormalMaps = settingsManager.getSettingSetter<bool>(CLodReyesUseNormalMapsSettingName);
+    m_clodReyesUseNormalMaps = getCLodReyesUseNormalMaps();
+    observerSetting(m_clodReyesUseNormalMaps, CLodReyesUseNormalMapsSettingName);
+
+    getCLodReyesUseAabbOcclusion = settingsManager.getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName);
+    setCLodReyesUseAabbOcclusion = settingsManager.getSettingSetter<bool>(CLodReyesUseAabbOcclusionSettingName);
+    m_clodReyesUseAabbOcclusion = getCLodReyesUseAabbOcclusion();
+    observerSetting(m_clodReyesUseAabbOcclusion, CLodReyesUseAabbOcclusionSettingName);
+
     getCLodDisableVirtualShadowPageCaching = settingsManager.getSettingGetter<bool>(CLodDisableVirtualShadowPageCachingSettingName);
     setCLodDisableVirtualShadowPageCaching = settingsManager.getSettingSetter<bool>(CLodDisableVirtualShadowPageCachingSettingName);
     m_clodDisableVirtualShadowPageCaching = getCLodDisableVirtualShadowPageCaching();
@@ -1230,6 +1251,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainReyesDisplacementEnabled = settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement");
     m_terrainReyesDisplacementEnabled = getTerrainReyesDisplacementEnabled();
     observerSetting(m_terrainReyesDisplacementEnabled, "enableTerrainReyesDisplacement");
+    setTerrainReyesDisplacementScale = settingsManager.getSettingSetter<float>("terrainReyesDisplacementScale");
+    getTerrainReyesDisplacementScale = settingsManager.getSettingGetter<float>("terrainReyesDisplacementScale");
+    m_terrainReyesDisplacementScale = getTerrainReyesDisplacementScale();
+    observerSetting(m_terrainReyesDisplacementScale, "terrainReyesDisplacementScale");
     setTerrainParallaxHeightScale = settingsManager.getSettingSetter<float>("terrainParallaxHeightScale");
     getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
     m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
@@ -1652,6 +1677,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Disable Reyes Tessellation / VSM Reyes Routing", &m_clodDisableReyesRasterization)) {
             setCLodDisableReyesRasterization(m_clodDisableReyesRasterization);
         }
+        if (ImGui::Checkbox("Reyes Normal Maps", &m_clodReyesUseNormalMaps)) {
+            setCLodReyesUseNormalMaps(m_clodReyesUseNormalMaps);
+        }
+        if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
+            setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);
+        }
         if (ImGui::Checkbox("Disable VSM Page Caching", &m_clodDisableVirtualShadowPageCaching)) {
             setCLodDisableVirtualShadowPageCaching(m_clodDisableVirtualShadowPageCaching);
         }
@@ -1897,6 +1928,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Terrain Reyes Displacement", &m_terrainReyesDisplacementEnabled)) {
             setTerrainReyesDisplacementEnabled(m_terrainReyesDisplacementEnabled);
+        }
+        if (ImGui::SliderFloat("Terrain Reyes Displacement Scale", &m_terrainReyesDisplacementScale, 0.0f, 256.0f, "%.1f")) {
+            m_terrainReyesDisplacementScale = std::max(0.0f, m_terrainReyesDisplacementScale);
+            setTerrainReyesDisplacementScale(m_terrainReyesDisplacementScale);
         }
         if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
             setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);

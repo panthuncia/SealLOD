@@ -46,6 +46,7 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesVirtualShadowRasterizationPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesVirtualShadowHardwareRasterPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesQueueResetPass.h"
+#include "Render/GraphExtensions/ClusterLOD/ReyesReplayMergePass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesSeedPatchesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesSplitPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesTessellationTable.h"
@@ -304,6 +305,11 @@ ReyesResourceSizing BuildReyesResourceSizing(const CLodVariantTraits& traits, ui
     addFlexibleItem("splitQueueB", BufferBytes(idealSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry)), sizeof(CLodReyesSplitQueueEntry));
     addFixedItem("splitQueueCounterB", sizeof(uint32_t));
     addFixedItem("splitQueueOverflowB", sizeof(uint32_t));
+    if (usesPhase2ReyesResources) {
+        addFlexibleItem("replaySplitQueue", BufferBytes(idealSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry)), sizeof(CLodReyesSplitQueueEntry));
+        addFixedItem("replaySplitQueueCounter", sizeof(uint32_t));
+        addFixedItem("replaySplitQueueOverflow", sizeof(uint32_t));
+    }
 
     addFlexibleItem(
         "diceQueue",
@@ -312,6 +318,9 @@ ReyesResourceSizing BuildReyesResourceSizing(const CLodVariantTraits& traits, ui
     addFixedItem("diceQueueCounter", sizeof(uint32_t));
     if (usesPhase2ReyesResources) {
         addFixedItem("diceQueuePhase1Count", sizeof(uint32_t));
+        addFlexibleItem("replayDiceQueue", BufferBytes(idealDiceQueueCapacity, sizeof(CLodReyesDiceQueueEntry)), sizeof(CLodReyesDiceQueueEntry));
+        addFixedItem("replayDiceQueueCounter", sizeof(uint32_t));
+        addFixedItem("replayDiceQueueOverflow", sizeof(uint32_t));
     }
     addFixedItem("diceQueueOverflow", sizeof(uint32_t));
 
@@ -411,7 +420,45 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 reyesOwnershipBitsetBuffer,
                 telemetryBuffer,
                 phaseIndex,
-                phaseIndex == 1u)));
+                phaseIndex == 1u,
+                phaseIndex == 1u ? m_reyesReplaySplitQueueCounterBuffer : nullptr,
+                phaseIndex == 1u ? m_reyesReplaySplitQueueOverflowBuffer : nullptr,
+                phaseIndex == 1u ? m_reyesReplayDiceQueueCounterBuffer : nullptr,
+                phaseIndex == 1u ? m_reyesReplayDiceQueueOverflowBuffer : nullptr)));
+
+    const bool enableReyesPatchOcclusion =
+        traits.type == CLodExtensionType::VisiblityBuffer &&
+        (phaseIndex == 2u || preserveDiceCountForPhase2Replay);
+    const std::shared_ptr<Buffer> reyesPatchOcclusionDepthIndices =
+        enableReyesPatchOcclusion
+            ? (phaseIndex == 1u ? m_viewDepthSrvIndicesBuffer : m_viewDepthSrvIndicesBufferPhase2)
+            : nullptr;
+
+    if (phaseIndex == 2u && traits.type == CLodExtensionType::VisiblityBuffer) {
+        outPasses.push_back(
+            RenderGraph::ExternalPassDesc::Compute(
+                MakeVariantPassName(traits, "ReyesCreateReplayDiceMergeDispatchArgs2"),
+                std::make_shared<ReyesCreateDispatchArgsPass>(
+                    m_reyesReplayDiceQueueCounterBuffer,
+                    diceIndirectArgsBuffer,
+                    nullptr,
+                    64u,
+                    reyesDiceQueueCapacity)));
+
+        outPasses.push_back(
+            RenderGraph::ExternalPassDesc::Compute(
+                MakeVariantPassName(traits, "ReyesReplayDiceMergePass2"),
+                std::make_shared<ReyesReplayMergePass>(
+                    ReyesReplayMergeKind::Dice,
+                    m_reyesReplayDiceQueueBuffer,
+                    m_reyesReplayDiceQueueCounterBuffer,
+                    m_reyesDiceQueueBuffer,
+                    m_reyesDiceQueueCounterBuffer,
+                    m_reyesDiceQueueOverflowBuffer,
+                    diceIndirectArgsBuffer,
+                    telemetryBuffer,
+                    m_reyesDiceQueuePhysicalCapacity)));
+    }
 
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(
@@ -463,6 +510,32 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 reyesSplitQueueCapacity,
                 phaseIndex)));
 
+    if (phaseIndex == 2u && traits.type == CLodExtensionType::VisiblityBuffer) {
+        outPasses.push_back(
+            RenderGraph::ExternalPassDesc::Compute(
+                MakeVariantPassName(traits, "ReyesCreateReplaySplitMergeDispatchArgs2"),
+                std::make_shared<ReyesCreateDispatchArgsPass>(
+                    m_reyesReplaySplitQueueCounterBuffer,
+                    splitIndirectArgsBuffer,
+                    nullptr,
+                    64u,
+                    reyesSplitQueueCapacity)));
+
+        outPasses.push_back(
+            RenderGraph::ExternalPassDesc::Compute(
+                MakeVariantPassName(traits, "ReyesReplaySplitMergePass2"),
+                std::make_shared<ReyesReplayMergePass>(
+                    ReyesReplayMergeKind::Split,
+                    m_reyesReplaySplitQueueBuffer,
+                    m_reyesReplaySplitQueueCounterBuffer,
+                    m_reyesSplitQueueBufferA,
+                    m_reyesSplitQueueCounterBufferA,
+                    m_reyesSplitQueueOverflowBufferA,
+                    splitIndirectArgsBuffer,
+                    telemetryBuffer,
+                    reyesSplitQueueCapacity)));
+    }
+
     const std::shared_ptr<Buffer> reyesSplitBuffers[] = { m_reyesSplitQueueBufferA, m_reyesSplitQueueBufferB };
     const std::shared_ptr<Buffer> reyesSplitCounters[] = { m_reyesSplitQueueCounterBufferA, m_reyesSplitQueueCounterBufferB };
     const std::shared_ptr<Buffer> reyesSplitOverflows[] = { m_reyesSplitQueueOverflowBufferA, m_reyesSplitQueueOverflowBufferB };
@@ -501,7 +574,11 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     reyesSplitQueueCapacity,
                     splitPassIndex,
                     CLodReyesMaxSplitPassCount,
-                    phaseIndex)));
+                    phaseIndex,
+                    reyesPatchOcclusionDepthIndices,
+                    enableReyesPatchOcclusion ? m_reyesReplaySplitQueueBuffer : nullptr,
+                    enableReyesPatchOcclusion ? m_reyesReplaySplitQueueCounterBuffer : nullptr,
+                    enableReyesPatchOcclusion ? m_reyesReplaySplitQueueOverflowBuffer : nullptr)));
     }
 
     if (phaseIndex == 1u) {
@@ -574,7 +651,15 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 rasterWorkCounterBuffer,
                 diceIndirectArgsBuffer,
                 telemetryBuffer,
-                reyesRasterWorkCapacity)));
+                reyesRasterWorkCapacity,
+                phaseIndex,
+                enableReyesPatchOcclusion ? m_visibleClustersBuffer : nullptr,
+                reyesPatchOcclusionDepthIndices,
+                enableReyesPatchOcclusion ? m_reyesReplayDiceQueueBuffer : nullptr,
+                enableReyesPatchOcclusion ? m_reyesReplayDiceQueueCounterBuffer : nullptr,
+                enableReyesPatchOcclusion ? m_reyesReplayDiceQueueOverflowBuffer : nullptr,
+                reyesDiceQueueCapacity,
+                slabGroup)));
 
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(
@@ -940,10 +1025,16 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_reyesSplitQueueBufferB);
     releaseBufferBacking(m_reyesSplitQueueCounterBufferB);
     releaseBufferBacking(m_reyesSplitQueueOverflowBufferB);
+    releaseBufferBacking(m_reyesReplaySplitQueueBuffer);
+    releaseBufferBacking(m_reyesReplaySplitQueueCounterBuffer);
+    releaseBufferBacking(m_reyesReplaySplitQueueOverflowBuffer);
     releaseBufferBacking(m_reyesDiceQueueBuffer);
     releaseBufferBacking(m_reyesDiceQueueCounterBuffer);
     releaseBufferBacking(m_reyesDiceQueuePhase1CountBuffer);
     releaseBufferBacking(m_reyesDiceQueueOverflowBuffer);
+    releaseBufferBacking(m_reyesReplayDiceQueueBuffer);
+    releaseBufferBacking(m_reyesReplayDiceQueueCounterBuffer);
+    releaseBufferBacking(m_reyesReplayDiceQueueOverflowBuffer);
     releaseBufferBacking(m_reyesRasterWorkBuffer);
     releaseBufferBacking(m_reyesRasterWorkCounterBuffer);
     releaseBufferBacking(m_reyesRasterWorkIndirectArgsBuffer);
@@ -1160,6 +1251,15 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         .add<CLodReyesSplitQueueOverflowBTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
+    m_reyesReplaySplitQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
+    m_reyesReplaySplitQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Split Queue Buffer"));
+
+    m_reyesReplaySplitQueueCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
+    m_reyesReplaySplitQueueCounterBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Split Queue Counter Buffer"));
+
+    m_reyesReplaySplitQueueOverflowBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
+    m_reyesReplaySplitQueueOverflowBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Split Queue Overflow Buffer"));
+
     m_reyesDiceQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesDiceQueuePhysicalCapacity, sizeof(CLodReyesDiceQueueEntry), true, false, true);
     m_reyesDiceQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Dice Queue Buffer"));
     m_reyesDiceQueueBuffer->GetECSEntity()
@@ -1225,6 +1325,15 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         .set<Components::Resource>({ m_reyesDiceQueueOverflowBuffer })
         .add<CLodReyesDiceQueueOverflowTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
+
+    m_reyesReplayDiceQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesDiceQueueCapacity, sizeof(CLodReyesDiceQueueEntry), true, false, true);
+    m_reyesReplayDiceQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Dice Queue Buffer"));
+
+    m_reyesReplayDiceQueueCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
+    m_reyesReplayDiceQueueCounterBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Dice Queue Counter Buffer"));
+
+    m_reyesReplayDiceQueueOverflowBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
+    m_reyesReplayDiceQueueOverflowBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Dice Queue Overflow Buffer"));
 
     m_reyesRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesRasterWorkCapacity, sizeof(CLodReyesRasterWorkEntry), true, false, false, true);
     m_reyesRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Reyes Raster Work Buffer"));
@@ -1298,6 +1407,9 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     tagBufferUsage(m_reyesSplitQueueBufferB, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueCounterBufferB, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueOverflowBufferB, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplaySplitQueueBuffer, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplaySplitQueueCounterBuffer, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplaySplitQueueOverflowBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesDiceQueueBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesTessTableConfigsBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesTessTableVerticesBuffer, "Cluster LOD Reyes");
@@ -1305,6 +1417,9 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     tagBufferUsage(m_reyesDiceQueueCounterBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesDiceQueuePhase1CountBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesDiceQueueOverflowBuffer, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplayDiceQueueBuffer, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplayDiceQueueCounterBuffer, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesReplayDiceQueueOverflowBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesRasterWorkBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesRasterWorkCounterBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesRasterWorkIndirectArgsBuffer, "Cluster LOD Reyes");
