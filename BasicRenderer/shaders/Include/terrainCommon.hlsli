@@ -501,7 +501,7 @@ float TerrainSampleLayerHeight(
     return 1.0f;
 }
 
-float3 TerrainParallaxCoordsAndHeight(
+float2 TerrainParallaxCoords(
     TerrainLayerInfo layer,
     TerrainStochasticLayerInfo stochasticLayer,
     bool hasStochasticLayer,
@@ -524,66 +524,99 @@ float3 TerrainParallaxCoordsAndHeight(
     float maxHeight = max(heightmapScale, 0.0f);
     if (maxHeight <= 1.0e-5f)
     {
-        return float3(uv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, uv, dUVdx, dUVdy));
+        return uv;
     }
 
-    const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
-    const float stepSize = rcp((float)numSteps);
-    float prevBound = 1.0f;
-    float2 prevUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, prevBound);
-    float prevHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, prevUv, dUVdx, dUVdy);
-    float prevF = prevBound - prevHeight;
-    float hitBound = 0.0f;
-    float hitF = prevF;
-    float missBound = prevBound;
-    float missF = prevF;
-    bool foundIntersection = false;
+    uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
+    numSteps = (numSteps + 3u) & ~3u;
+    float stepSize = rcp((float)numSteps);
+    float2 offsetPerStep = parallaxDirection * maxHeight * stepSize;
+    uint refineSteps = numSteps;
 
-    [loop] for (uint i = 1u; i <= numSteps; ++i)
+    float prevBound = 1.0f;
+    float prevHeight = 1.0f;
+    float2 prevUv = uv + parallaxDirection * (maxHeight * 0.5f);
+    float2 pt1 = float2(0.0f, 0.0f);
+    float2 pt2 = float2(prevBound, prevHeight);
+    float2 hitUv = uv;
+    bool foundIntersection = false;
+    bool contactRefinement = false;
+
+    [loop] while (numSteps > 0u)
     {
-        const float currentBound = 1.0f - (float)i * stepSize;
-        const float2 currentUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, currentBound);
-        const float currentHeight = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv, dUVdx, dUVdy);
-        const float currentF = currentBound - currentHeight;
-        if (currentF <= 0.0f)
+        float4 currentUv01 = prevUv.xyxy - offsetPerStep.xyxy * float4(1.0f, 1.0f, 2.0f, 2.0f);
+        float4 currentUv23 = prevUv.xyxy - offsetPerStep.xyxy * float4(3.0f, 3.0f, 4.0f, 4.0f);
+        float4 currentBound = prevBound.xxxx - stepSize.xxxx * float4(1.0f, 2.0f, 3.0f, 4.0f);
+        float4 currentHeight;
+        currentHeight.x = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv01.xy, dUVdx, dUVdy);
+        currentHeight.y = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv01.zw, dUVdx, dUVdy);
+        currentHeight.z = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv23.xy, dUVdx, dUVdy);
+        currentHeight.w = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv23.zw, dUVdx, dUVdy);
+
+        bool4 hit = currentHeight >= currentBound;
+        if (any(hit))
         {
-            hitBound = currentBound;
-            hitF = currentF;
-            missBound = prevBound;
-            missF = prevF;
             foundIntersection = true;
-            break;
+            if (hit.w)
+            {
+                hitUv = currentUv23.zw;
+                pt1 = float2(currentBound.w, currentHeight.w);
+                pt2 = float2(currentBound.z, currentHeight.z);
+            }
+            if (hit.z)
+            {
+                hitUv = currentUv23.xy;
+                pt1 = float2(currentBound.z, currentHeight.z);
+                pt2 = float2(currentBound.y, currentHeight.y);
+            }
+            if (hit.y)
+            {
+                hitUv = currentUv01.zw;
+                pt1 = float2(currentBound.y, currentHeight.y);
+                pt2 = float2(currentBound.x, currentHeight.x);
+            }
+            if (hit.x)
+            {
+                hitUv = prevUv;
+                pt1 = float2(currentBound.x, currentHeight.x);
+                pt2 = float2(prevBound, prevHeight);
+            }
+
+            if (contactRefinement)
+            {
+                break;
+            }
+
+            contactRefinement = true;
+            prevUv = hitUv;
+            prevBound = pt2.x;
+            prevHeight = pt2.y;
+            numSteps = refineSteps;
+            stepSize *= rcp((float)refineSteps);
+            offsetPerStep *= rcp((float)refineSteps);
+            continue;
         }
-        prevBound = currentBound;
-        prevF = currentF;
+
+        prevUv = currentUv23.zw;
+        prevBound = currentBound.w;
+        prevHeight = currentHeight.w;
+        numSteps -= 4u;
     }
 
     if (!foundIntersection)
     {
-        const float2 bottomUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, 0.0f);
-        return float3(bottomUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, bottomUv, dUVdx, dUVdy));
+        return uv - parallaxDirection * (maxHeight * 0.5f);
     }
 
-    [unroll] for (uint refine = 0u; refine < 3u; ++refine)
-    {
-        const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
-        const float2 rootUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, rootBound);
-        const float rootF = rootBound - TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, rootUv, dUVdx, dUVdy);
-        if (rootF <= 0.0f)
-        {
-            hitBound = rootBound;
-            hitF = rootF;
-        }
-        else
-        {
-            missBound = rootBound;
-            missF = rootF;
-        }
-    }
-
-    const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
-    const float2 parallaxUv = ParallaxUvFromBound(uv, parallaxDirection, maxHeight, finalBound);
-    return float3(parallaxUv, TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, parallaxUv, dUVdx, dUVdy));
+    float delta2 = pt2.x - pt2.y;
+    float delta1 = pt1.x - pt1.y;
+    float denominator = delta2 - delta1;
+    float parallaxAmount = abs(denominator) > 1.0e-5f
+        ? (pt1.x * delta2 - pt2.x * delta1) / denominator
+        : pt1.x;
+    parallaxAmount = saturate(parallaxAmount);
+    float offset = (1.0f - parallaxAmount) * -maxHeight + maxHeight * 0.5f;
+    return uv + parallaxDirection * offset;
 }
 
 float3 TerrainSampleStochasticNormalDerivative(
@@ -934,7 +967,7 @@ void ApplyTerrainMaterialInternal(
         if (terrainParallaxEnabled && weight >= TERRAIN_PARALLAX_MIN_LAYER_WEIGHT && TerrainCanSampleHeight(layer))
         {
             float layerHeightScale = perFrameBuffer.terrainParallaxHeightScale * terrainParallaxFade * max(layer.heightScale, 0.0f);
-            float3 parallaxUvHeight = TerrainParallaxCoordsAndHeight(
+            layerUv = TerrainParallaxCoords(
                 layer,
                 stochasticLayer,
                 hasStochasticLayer,
@@ -950,7 +983,6 @@ void ApplyTerrainMaterialInternal(
                 terrainParallaxMaxSteps,
                 layerDUdx,
                 layerDUdy);
-            layerUv = parallaxUvHeight.xy;
             inputs.parallaxApplied = 1u;
         }
         bool wantsDerivativeNormalContext = terrainStochasticDerivativeNormalsEnabled &&
