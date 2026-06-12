@@ -40,8 +40,8 @@ void ExclusiveScanBlock(uint Nblock, uint threadId)
     // Upsweep (build sums) on range [0..P-1]
     for (uint stride = 1; stride < P; stride <<= 1)
     {
-        uint idx = (threadId + 1) * (stride << 1) - 1;
-        if (idx < P)
+        uint step = stride << 1;
+        for (uint idx = (threadId + 1) * step - 1; idx < P; idx += THREADS * step)
         {
             s_scan[idx] += s_scan[idx - stride];
         }
@@ -58,8 +58,8 @@ void ExclusiveScanBlock(uint Nblock, uint threadId)
     // Downsweep on range [0..P-1]
     for (uint stride = (P >> 1); stride >= 1; stride >>= 1)
     {
-        uint idx = (threadId + 1) * (stride << 1) - 1;
-        if (idx < P)
+        uint step = stride << 1;
+        for (uint idx = (threadId + 1) * step - 1; idx < P; idx += THREADS * step)
         {
             uint t = s_scan[idx - stride];
             s_scan[idx - stride] = s_scan[idx];

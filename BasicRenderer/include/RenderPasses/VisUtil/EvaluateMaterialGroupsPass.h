@@ -236,8 +236,11 @@ public:
         auto argBuf = m_materialEvalCmds->GetAPIResource();
         RefreshDescriptorIndices();
 
+        const bool terrainRegionMaterialEvaluation =
+            SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
-            if ((flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
+            if (terrainRegionMaterialEvaluation &&
+                (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
                 continue;
             }
 			unsigned int slot = 0u;

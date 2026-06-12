@@ -1,4 +1,5 @@
 #define TERRAIN_REGION_GROUPSHARED_WEIGHTS 1
+#define TERRAIN_REGION_KNOWN_REGION 1
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/visUtilCommon.hlsli"

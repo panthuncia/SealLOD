@@ -359,6 +359,7 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
 	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
 	bool visibilityRendering = SettingsManager::GetInstance().getSettingGetter<bool>("enableVisibilityRendering")();
+    bool terrainRegionMaterialEvaluation = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
 
     if (!useMeshShaders) {
         indirect = false; // Mesh shader pipelines are required for indirect draws
@@ -395,29 +396,31 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         graph->BuildComputePass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
         TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
 
-        graph->BuildComputePass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
-        TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+        if (terrainRegionMaterialEvaluation) {
+            graph->BuildComputePass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
+            TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
-        TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
+            TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
-        TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
+            TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
-        TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
+            TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
-        TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
+            TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
-        TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
+            TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
-        TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
+            TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
-        graph->BuildComputePass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass");
-        TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+            graph->BuildComputePass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass");
+            TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+        }
 
         // Evaluate material groups
         graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass");

@@ -323,8 +323,10 @@ void TerrainRegionHistogramFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
 {
     uint baseOffset = IndirectCommandSignatureRootConstant1;
     uint count = IndirectCommandSignatureRootConstant2;
+    uint dispatchXDimension = IndirectCommandSignatureRootConstant3;
     uint terrainSetIndex = UintRootConstant0;
-    if (tid.x >= count)
+    uint idx = tid.y * dispatchXDimension + tid.x;
+    if (idx >= count)
     {
         return;
     }
@@ -335,7 +337,7 @@ void TerrainRegionHistogramFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint> activeRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionActiveListBuffer)];
     RWStructuredBuffer<uint> activeCount = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionActiveCountBuffer)];
 
-    PixelRef ref = pixelList[baseOffset + tid.x];
+    PixelRef ref = pixelList[baseOffset + idx];
     uint2 pixel = uint2(ref.pixelXY & 0xFFFFu, ref.pixelXY >> 16);
     uint64_t vis = visibility[pixel];
     if (vis == 0xFFFFFFFFFFFFFFFF)
@@ -353,15 +355,23 @@ void TerrainRegionHistogramFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
         return;
     }
 
+    uint4 groupMask = WaveMatch(regionIndex);
+    uint groupSize = CountBits128(groupMask);
+    uint lane = WaveGetLaneIndex();
+    uint leaderLane = GetWaveGroupLeaderLane(groupMask);
+
     uint oldCount = 0u;
-    InterlockedAdd(regionCounts[regionIndex], 1u, oldCount);
-    if (oldCount == 0u)
+    if (lane == leaderLane)
     {
-        uint activeSlot = 0u;
-        InterlockedAdd(activeCount[0], 1u, activeSlot);
-        if (activeSlot < TERRAIN_REGION_BIN_COUNT)
+        InterlockedAdd(regionCounts[regionIndex], groupSize, oldCount);
+        if (oldCount == 0u)
         {
-            activeRegions[activeSlot] = regionIndex;
+            uint activeSlot = 0u;
+            InterlockedAdd(activeCount[0], 1u, activeSlot);
+            if (activeSlot < TERRAIN_REGION_BIN_COUNT)
+            {
+                activeRegions[activeSlot] = regionIndex;
+            }
         }
     }
 }
@@ -372,8 +382,10 @@ void TerrainRegionListFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
 {
     uint baseOffset = IndirectCommandSignatureRootConstant1;
     uint count = IndirectCommandSignatureRootConstant2;
+    uint dispatchXDimension = IndirectCommandSignatureRootConstant3;
     uint terrainSetIndex = UintRootConstant0;
-    if (tid.x >= count)
+    uint idx = tid.y * dispatchXDimension + tid.x;
+    if (idx >= count)
     {
         return;
     }
@@ -384,7 +396,7 @@ void TerrainRegionListFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint> regionCursors = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionWriteCursorBuffer)];
     RWStructuredBuffer<PixelRef> terrainPixelList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::VisUtil::TerrainRegionPixelListBuffer)];
 
-    PixelRef ref = pixelList[baseOffset + tid.x];
+    PixelRef ref = pixelList[baseOffset + idx];
     uint2 pixel = uint2(ref.pixelXY & 0xFFFFu, ref.pixelXY >> 16);
     uint64_t vis = visibility[pixel];
     if (vis == 0xFFFFFFFFFFFFFFFF)
@@ -402,9 +414,20 @@ void TerrainRegionListFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
         return;
     }
 
-    uint cursor = 0u;
-    InterlockedAdd(regionCursors[regionIndex], 1u, cursor);
-    terrainPixelList[regionOffsets[regionIndex] + cursor] = ref;
+    uint4 groupMask = WaveMatch(regionIndex);
+    uint groupSize = CountBits128(groupMask);
+    uint lane = WaveGetLaneIndex();
+    uint leaderLane = GetWaveGroupLeaderLane(groupMask);
+
+    uint groupBase = 0u;
+    if (lane == leaderLane)
+    {
+        InterlockedAdd(regionCursors[regionIndex], groupSize, groupBase);
+    }
+    groupBase = WaveReadLaneAt(groupBase, leaderLane);
+
+    uint rankInGroup = GetLaneRankInGroup(groupMask, lane);
+    terrainPixelList[regionOffsets[regionIndex] + groupBase + rankInGroup] = ref;
 }
 
 [shader("compute")]

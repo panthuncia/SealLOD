@@ -1453,6 +1453,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainGaussianStochasticSampling", false);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
+    settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
@@ -1628,6 +1629,10 @@ void Renderer::SetSettings() {
 		m_visibilityRendering = newValue;
 		rebuildRenderGraph = true;
 		}));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableTerrainRegionMaterialEvaluation", [this](const bool& newValue) {
+        (void)newValue;
+        rebuildRenderGraph = true;
+        }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableOcclusionCulling", [this](const bool& newValue) {
 		m_occlusionCulling = newValue;
 		rebuildRenderGraph = true;

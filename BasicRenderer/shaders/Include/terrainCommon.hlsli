@@ -24,6 +24,9 @@ groupshared uint g_terrainSharedWeightWords[TERRAIN_SHARED_WEIGHT_WORD_CAPACITY]
 groupshared uint g_terrainSharedWeightWordCount;
 groupshared uint g_terrainSharedWeightBaseWord;
 groupshared uint g_terrainSharedRegionWeightBlockStart;
+groupshared uint g_terrainSharedRegionLayerRefStart;
+groupshared int g_terrainSharedRegionX;
+groupshared int g_terrainSharedRegionY;
 #endif
 
 float TerrainDynamicSwizzle(float4 value, uint channel)
@@ -338,6 +341,14 @@ float TerrainSampleMikkelsenHeight(Texture2D<float4> heightTex, SamplerState hei
     return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
 }
 
+float TerrainSampleMikkelsenHeightRaw(Texture2D<float4> heightTex, SamplerState heightSampler, TerrainStochasticContext ctx)
+{
+    float h0 = Sample2DGrad(heightTex, heightSampler, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
+    float h1 = Sample2DGrad(heightTex, heightSampler, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
+    float h2 = Sample2DGrad(heightTex, heightSampler, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
+    return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
+}
+
 float2 TerrainNormalToDerivative(float3 normalTS)
 {
     normalTS = normalize(normalTS);
@@ -508,6 +519,114 @@ float TerrainSampleLayerHeight(
     return 1.0f;
 }
 
+bool TerrainCanSampleGaussianStochasticHeight(
+    TerrainStochasticLayerInfo stochasticLayer,
+    bool hasStochasticLayer)
+{
+    return hasStochasticLayer &&
+        (stochasticLayer.heightFlags & TERRAIN_STOCHASTIC_FLAG_HEIGHT) != 0u &&
+        stochasticLayer.heightGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+        stochasticLayer.heightInverseLutTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+        stochasticLayer.heightInverseLutSamplerIndex != TERRAIN_INVALID_DESCRIPTOR;
+}
+
+bool TerrainTryBuildLayerParallaxHeightContext(
+    TerrainLayerInfo layer,
+    TerrainStochasticLayerInfo stochasticLayer,
+    bool hasStochasticLayer,
+    bool terrainStochasticHeightEnabled,
+    bool terrainGaussianStochasticEnabled,
+    bool useStochasticContext,
+    float stochasticScale,
+    float blendCurve,
+    float2 uv,
+    float2 duDx,
+    float2 duDy,
+    out TerrainStochasticContext ctx)
+{
+    ctx = (TerrainStochasticContext)0;
+    if (!terrainStochasticHeightEnabled || !useStochasticContext)
+    {
+        return false;
+    }
+
+    if (TerrainLayerUsesDiffuseAlphaHeight(layer))
+    {
+        Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+        SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+        ctx = TerrainBuildStochasticContext(diffuseTex, diffuseSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
+        return true;
+    }
+
+    if (TerrainLayerUsesExplicitHeight(layer))
+    {
+        if (terrainGaussianStochasticEnabled &&
+            !TerrainCanSampleGaussianStochasticHeight(stochasticLayer, hasStochasticLayer))
+        {
+            return false;
+        }
+
+        Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+        ctx = TerrainBuildStochasticContext(heightTex, heightSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
+        return true;
+    }
+
+    return false;
+}
+
+float TerrainSampleLayerHeightWithParallaxContext(
+    TerrainLayerInfo layer,
+    TerrainStochasticLayerInfo stochasticLayer,
+    bool hasStochasticLayer,
+    bool terrainStochasticHeightEnabled,
+    bool terrainGaussianStochasticEnabled,
+    bool useStochasticContext,
+    bool hasParallaxHeightContext,
+    TerrainStochasticContext parallaxHeightContext,
+    float2 uv,
+    float2 duDx,
+    float2 duDy)
+{
+    if (TerrainLayerUsesDiffuseAlphaHeight(layer))
+    {
+        Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
+        SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
+        if (terrainStochasticHeightEnabled && useStochasticContext && hasParallaxHeightContext)
+        {
+            TerrainStochasticContext ctx = parallaxHeightContext;
+            ctx.uv = uv;
+            return TerrainSampleStochasticDiffuseAlpha(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx);
+        }
+        return SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy).a;
+    }
+
+    if (TerrainLayerUsesExplicitHeight(layer))
+    {
+        Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+        if (terrainStochasticHeightEnabled && useStochasticContext && hasParallaxHeightContext)
+        {
+            TerrainStochasticContext ctx = parallaxHeightContext;
+            ctx.uv = uv;
+            if (terrainGaussianStochasticEnabled &&
+                TerrainCanSampleGaussianStochasticHeight(stochasticLayer, hasStochasticLayer))
+            {
+                return TerrainSampleStochasticHeight(stochasticLayer, ctx, heightSampler);
+            }
+            if (!terrainGaussianStochasticEnabled)
+            {
+                return TerrainSampleMikkelsenHeightRaw(heightTex, heightSampler, ctx);
+            }
+        }
+        return SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy).r;
+    }
+
+    return 1.0f;
+}
+
 float2 TerrainParallaxCoords(
     TerrainLayerInfo layer,
     TerrainStochasticLayerInfo stochasticLayer,
@@ -548,6 +667,20 @@ float2 TerrainParallaxCoords(
     float2 hitUv = uv;
     bool foundIntersection = false;
     bool contactRefinement = false;
+    TerrainStochasticContext parallaxHeightContext = (TerrainStochasticContext)0;
+    bool hasParallaxHeightContext = TerrainTryBuildLayerParallaxHeightContext(
+        layer,
+        stochasticLayer,
+        hasStochasticLayer,
+        terrainStochasticHeightEnabled,
+        terrainGaussianStochasticEnabled,
+        useStochasticContext,
+        stochasticScale,
+        blendCurve,
+        uv,
+        dUVdx,
+        dUVdy,
+        parallaxHeightContext);
 
     [loop] while (numSteps > 0u)
     {
@@ -555,10 +688,10 @@ float2 TerrainParallaxCoords(
         float4 currentUv23 = prevUv.xyxy - offsetPerStep.xyxy * float4(3.0f, 3.0f, 4.0f, 4.0f);
         float4 currentBound = prevBound.xxxx - stepSize.xxxx * float4(1.0f, 2.0f, 3.0f, 4.0f);
         float4 currentHeight;
-        currentHeight.x = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv01.xy, dUVdx, dUVdy);
-        currentHeight.y = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv01.zw, dUVdx, dUVdy);
-        currentHeight.z = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv23.xy, dUVdx, dUVdy);
-        currentHeight.w = TerrainSampleLayerHeight(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, stochasticScale, blendCurve, currentUv23.zw, dUVdx, dUVdy);
+        currentHeight.x = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv01.xy, dUVdx, dUVdy);
+        currentHeight.y = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv01.zw, dUVdx, dUVdy);
+        currentHeight.z = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv23.xy, dUVdx, dUVdy);
+        currentHeight.w = TerrainSampleLayerHeightWithParallaxContext(layer, stochasticLayer, hasStochasticLayer, terrainStochasticHeightEnabled, terrainGaussianStochasticEnabled, useStochasticContext, hasParallaxHeightContext, parallaxHeightContext, currentUv23.zw, dUVdx, dUVdy);
 
         bool4 hit = currentHeight >= currentBound;
         if (any(hit))
@@ -697,6 +830,9 @@ float TerrainLoadWeightSample(
     }
 #if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
     if (region.weightBlockStart == g_terrainSharedRegionWeightBlockStart &&
+        region.layerRefStart == g_terrainSharedRegionLayerRefStart &&
+        region.regionX == g_terrainSharedRegionX &&
+        region.regionY == g_terrainSharedRegionY &&
         wordIndex >= g_terrainSharedWeightBaseWord)
     {
         uint sharedWordIndex = wordIndex - g_terrainSharedWeightBaseWord;
@@ -727,6 +863,9 @@ void TerrainLoadRegionWeightBlocksToShared(
         g_terrainSharedWeightWordCount = min(requestedWords, TERRAIN_SHARED_WEIGHT_WORD_CAPACITY);
         g_terrainSharedWeightBaseWord = terrain.weightBlockBase + region.weightBlockStart;
         g_terrainSharedRegionWeightBlockStart = region.weightBlockStart;
+        g_terrainSharedRegionLayerRefStart = region.layerRefStart;
+        g_terrainSharedRegionX = region.regionX;
+        g_terrainSharedRegionY = region.regionY;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -915,6 +1054,10 @@ void ApplyTerrainMaterialInternal(
         return;
     }
 
+#if defined(TERRAIN_REGION_KNOWN_REGION)
+    terrainSetIndex = IndirectCommandSignatureRootConstant0;
+#endif
+
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
     StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
@@ -945,6 +1088,21 @@ void ApplyTerrainMaterialInternal(
     }
 
     float2 skyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+#if defined(TERRAIN_REGION_KNOWN_REGION)
+    uint regionIndex = IndirectCommandSignatureRootConstant1;
+    if (regionIndex < terrain.regionBase || regionIndex >= terrain.regionBase + terrain.regionCount)
+    {
+        return;
+    }
+
+    TerrainRegionInfo region = terrainRegions[regionIndex];
+    if (region.layerRefCount == 0u || region.weightSampleSide < 2u)
+    {
+        return;
+    }
+
+    float2 regionOrigin = float2(region.regionX, region.regionY) * terrain.regionSizeWorld;
+#else
     int2 regionCoord = int2(floor(skyrimXY / terrain.regionSizeWorld));
     uint2 localRegion;
     localRegion.x = (uint)(regionCoord.x - terrain.minRegionX);
@@ -967,26 +1125,32 @@ void ApplyTerrainMaterialInternal(
     }
 
     float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
+#endif
     float2 regionLocal = skyrimXY - regionOrigin;
 
     float2 skyrimXYDdx = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
     float2 skyrimXYDdy = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
     float3x3 terrainBasis = TerrainBasis(normalWSBase);
-    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-    Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
-    float3 terrainViewDir = normalize(mainCamera.positionWorldSpace.xyz - positionWS);
-    float terrainViewDistance = length(mainCamera.positionWorldSpace.xyz - positionWS);
-    float terrainParallaxFade = terrainParallaxEnabled
-        ? TerrainParallaxDistanceFade(
+
+    float terrainParallaxFade = 0.0f;
+    float3 terrainViewDir = 0.0f.xxx;
+    if (terrainParallaxEnabled)
+    {
+        StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+        Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
+        float3 cameraDelta = mainCamera.positionWorldSpace.xyz - positionWS;
+        float terrainViewDistance = length(cameraDelta);
+        terrainViewDir = cameraDelta * rcp(max(terrainViewDistance, 1.0e-5f));
+        terrainParallaxFade = TerrainParallaxDistanceFade(
             terrainViewDistance,
             perFrameBuffer.terrainParallaxFadeStartDistance,
-            perFrameBuffer.terrainParallaxFadeEndDistance)
-        : 0.0f;
-    terrainParallaxEnabled = terrainParallaxFade > TERRAIN_PARALLAX_MIN_FADE;
-    terrainParallaxMaxSteps = max(4u, (uint)ceil((float)terrainParallaxMaxSteps * terrainParallaxFade));
+            perFrameBuffer.terrainParallaxFadeEndDistance);
+        terrainParallaxEnabled = terrainParallaxFade > TERRAIN_PARALLAX_MIN_FADE;
+        terrainParallaxMaxSteps = max(4u, (uint)ceil((float)terrainParallaxMaxSteps * terrainParallaxFade));
+    }
 
     float3 blendedBaseColor = 0.0f.xxx;
-    float3 blendedNormalTS = 0.0f.xxx;
+    float2 blendedNormalDerivative = 0.0f.xx;
     float weightSum = 0.0f;
     for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
@@ -1138,7 +1302,7 @@ void ApplyTerrainMaterialInternal(
                 SampleMaterialTexture2DGrad(normalTex, normalSampler, layer.normalStreamingTextureID, layerUv, layerDUdx, layerDUdy, inputs),
                 layer.normalChannels);
         }
-        blendedNormalTS += layerNormalTS * weight;
+        blendedNormalDerivative += TerrainNormalToDerivative(layerNormalTS) * weight;
     }
 
     if (weightSum <= 1.0e-4f)
@@ -1147,10 +1311,10 @@ void ApplyTerrainMaterialInternal(
     }
     float invWeightSum = rcp(weightSum);
     blendedBaseColor *= invWeightSum;
-    blendedNormalTS *= invWeightSum;
+    blendedNormalDerivative *= invWeightSum;
 
     inputs.albedo = blendedBaseColor * vertexColor;
-    inputs.normalWS = normalize(mul(normalize(blendedNormalTS), terrainBasis));
+    inputs.normalWS = normalize(mul(TerrainDerivativeToNormal(blendedNormalDerivative), terrainBasis));
     inputs.metallic = 0.0f;
     inputs.roughness = 0.9f;
     inputs.ambientOcclusion = 1.0f;

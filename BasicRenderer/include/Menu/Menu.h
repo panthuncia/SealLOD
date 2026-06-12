@@ -669,6 +669,9 @@ private:
 	bool m_visibilityRenderingEnabled = true;
 	std::function<bool()> getVisibilityRenderingEnabled;
 	std::function<void(bool)> setVisibilityRenderingEnabled;
+    bool m_terrainRegionMaterialEvaluationEnabled = false;
+    std::function<bool()> getTerrainRegionMaterialEvaluationEnabled;
+    std::function<void(bool)> setTerrainRegionMaterialEvaluationEnabled;
 
     bool m_terrainStochasticSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticSamplingEnabled;
@@ -1186,6 +1189,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	getVisibilityRenderingEnabled = settingsManager.getSettingGetter<bool>("enableVisibilityRendering");
 	m_visibilityRenderingEnabled = getVisibilityRenderingEnabled();
 	observerSetting(m_visibilityRenderingEnabled, "enableVisibilityRendering");
+    setTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation");
+    getTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation");
+    m_terrainRegionMaterialEvaluationEnabled = getTerrainRegionMaterialEvaluationEnabled();
+    observerSetting(m_terrainRegionMaterialEvaluationEnabled, "enableTerrainRegionMaterialEvaluation");
 
     setTerrainStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticSampling");
     getTerrainStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticSampling");
@@ -1860,6 +1867,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Visibility Rendering", &m_visibilityRenderingEnabled)) {
             setVisibilityRenderingEnabled(m_visibilityRenderingEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Region Material Evaluation", &m_terrainRegionMaterialEvaluationEnabled)) {
+            setTerrainRegionMaterialEvaluationEnabled(m_terrainRegionMaterialEvaluationEnabled);
         }
         if (ImGui::Checkbox("Terrain Stochastic Sampling", &m_terrainStochasticSamplingEnabled)) {
             setTerrainStochasticSamplingEnabled(m_terrainStochasticSamplingEnabled);
