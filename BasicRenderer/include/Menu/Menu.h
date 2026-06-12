@@ -703,6 +703,12 @@ private:
     uint32_t m_terrainParallaxMaxSteps = 16u;
     std::function<uint32_t()> getTerrainParallaxMaxSteps;
     std::function<void(uint32_t)> setTerrainParallaxMaxSteps;
+    float m_terrainParallaxFadeStartDistance = 2048.0f;
+    std::function<float()> getTerrainParallaxFadeStartDistance;
+    std::function<void(float)> setTerrainParallaxFadeStartDistance;
+    float m_terrainParallaxFadeEndDistance = 8192.0f;
+    std::function<float()> getTerrainParallaxFadeEndDistance;
+    std::function<void(float)> setTerrainParallaxFadeEndDistance;
 
 	bool m_gtaoEnabled = true;
 	std::function<bool()> getGTAOEnabled;
@@ -1225,6 +1231,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
     m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
     observerSetting(m_terrainParallaxMaxSteps, "terrainParallaxMaxSteps");
+    setTerrainParallaxFadeStartDistance = settingsManager.getSettingSetter<float>("terrainParallaxFadeStartDistance");
+    getTerrainParallaxFadeStartDistance = settingsManager.getSettingGetter<float>("terrainParallaxFadeStartDistance");
+    m_terrainParallaxFadeStartDistance = getTerrainParallaxFadeStartDistance();
+    observerSetting(m_terrainParallaxFadeStartDistance, "terrainParallaxFadeStartDistance");
+    setTerrainParallaxFadeEndDistance = settingsManager.getSettingSetter<float>("terrainParallaxFadeEndDistance");
+    getTerrainParallaxFadeEndDistance = settingsManager.getSettingGetter<float>("terrainParallaxFadeEndDistance");
+    m_terrainParallaxFadeEndDistance = getTerrainParallaxFadeEndDistance();
+    observerSetting(m_terrainParallaxFadeEndDistance, "terrainParallaxFadeEndDistance");
 
 	getGTAOEnabled = settingsManager.getSettingGetter<bool>("enableGTAO");
 	setGTAOEnabled = settingsManager.getSettingSetter<bool>("enableGTAO");
@@ -1881,6 +1895,18 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::SliderInt("Terrain Parallax Max Steps", &terrainParallaxMaxSteps, 4, 32)) {
             m_terrainParallaxMaxSteps = static_cast<uint32_t>(std::clamp(terrainParallaxMaxSteps, 4, 32));
             setTerrainParallaxMaxSteps(m_terrainParallaxMaxSteps);
+        }
+        if (ImGui::SliderFloat("Terrain Parallax Fade Start", &m_terrainParallaxFadeStartDistance, 0.0f, 32768.0f, "%.0f")) {
+            m_terrainParallaxFadeStartDistance = std::max(0.0f, m_terrainParallaxFadeStartDistance);
+            if (m_terrainParallaxFadeEndDistance < m_terrainParallaxFadeStartDistance) {
+                m_terrainParallaxFadeEndDistance = m_terrainParallaxFadeStartDistance;
+                setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
+            }
+            setTerrainParallaxFadeStartDistance(m_terrainParallaxFadeStartDistance);
+        }
+        if (ImGui::SliderFloat("Terrain Parallax Fade End", &m_terrainParallaxFadeEndDistance, 0.0f, 65536.0f, "%.0f")) {
+            m_terrainParallaxFadeEndDistance = std::max(m_terrainParallaxFadeStartDistance, m_terrainParallaxFadeEndDistance);
+            setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
         }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);

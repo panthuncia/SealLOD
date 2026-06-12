@@ -1720,11 +1720,15 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         tangentWS = float4(normalize(mul(float3(interpTX, interpTY, interpTZ), normalMatrix)), interpTW < 0.0f ? -1.0f : 1.0f);
     }
 
+    MaterialInputs materialInputs;
+#if defined(PSO_TERRAIN)
+    materialInputs = (MaterialInputs)0;
+    InitializeMaterialSelectedMipDebug(materialInputs);
+    ApplyTerrainMaterial(materialInfo, worldPosition, dpdx, dpdy, worldNormal, vertexColor, materialInputs);
+#else
     MaterialUvCache uvCache;
     MaterialUvBindings uvBindings;
     BuildClodMaterialUvData(materialInfo, materialFlags, md, triIdx, bary, uvCache, uvBindings);
-
-    MaterialInputs materialInputs;
 #if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL)
     SampleMaterialEvalFromUvCache(
         uvCache,
@@ -1751,8 +1755,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         dpdy,
         materialInputs);
     #endif
-#if defined(PSO_TERRAIN)
-    ApplyTerrainMaterial(materialInfo, worldPosition, dpdx, dpdy, worldNormal, vertexColor, materialInputs);
 #endif
 
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;

@@ -127,16 +127,22 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxHeightScale")();
 	perFrameCBData.terrainParallaxMaxSteps =
 		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainParallaxMaxSteps")();
+	perFrameCBData.terrainParallaxFadeStartDistance =
+		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeStartDistance")();
+	perFrameCBData.terrainParallaxFadeEndDistance =
+		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeEndDistance")();
 	if (TerrainParallaxDiagnosticsEnabled()) {
 		static std::atomic_bool logged{ false };
 		bool expected = false;
 		if (logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
 			spdlog::info(
-				"SARP terrain: per-frame parallax constants pom={} terrainPom={} heightScale={} maxSteps={}",
+				"SARP terrain: per-frame parallax constants pom={} terrainPom={} heightScale={} maxSteps={} fadeStart={} fadeEnd={}",
 				perFrameCBData.parallaxOcclusionMappingEnabled,
 				perFrameCBData.terrainParallaxOcclusionMappingEnabled,
 				perFrameCBData.terrainParallaxHeightScale,
-				perFrameCBData.terrainParallaxMaxSteps);
+				perFrameCBData.terrainParallaxMaxSteps,
+				perFrameCBData.terrainParallaxFadeStartDistance,
+				perFrameCBData.terrainParallaxFadeEndDistance);
 		}
 	}
 

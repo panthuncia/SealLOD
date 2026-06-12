@@ -1456,6 +1456,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
+    settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2048.0f);
+    settingsManager.registerSetting<float>("terrainParallaxFadeEndDistance", 8192.0f);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);

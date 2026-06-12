@@ -16,6 +16,8 @@ static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 static const uint TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
 static const uint TERRAIN_STOCHASTIC_FLAG_HEIGHT = 1u << 3;
+static const float TERRAIN_PARALLAX_MIN_LAYER_WEIGHT = 0.02f;
+static const float TERRAIN_PARALLAX_MIN_FADE = 0.01f;
 
 float TerrainDynamicSwizzle(float4 value, uint channel)
 {
@@ -81,6 +83,13 @@ float3 TerrainNormalizeWeights(float3 weights)
     weights = max(weights, 0.0f.xxx);
     float sumWeights = weights.x + weights.y + weights.z;
     return sumWeights > 1.0e-5f ? weights / sumWeights : float3(1.0f, 0.0f, 0.0f);
+}
+
+float TerrainParallaxDistanceFade(float viewDistance, float fadeStart, float fadeEnd)
+{
+    fadeStart = max(fadeStart, 0.0f);
+    fadeEnd = max(fadeEnd, fadeStart + 1.0f);
+    return 1.0f - smoothstep(fadeStart, fadeEnd, viewDistance);
 }
 
 float3 TerrainShapeStochasticWeights(float3 weights, float blendCurve)
@@ -882,6 +891,15 @@ void ApplyTerrainMaterialInternal(
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
     float3 terrainViewDir = normalize(mainCamera.positionWorldSpace.xyz - positionWS);
+    float terrainViewDistance = length(mainCamera.positionWorldSpace.xyz - positionWS);
+    float terrainParallaxFade = terrainParallaxEnabled
+        ? TerrainParallaxDistanceFade(
+            terrainViewDistance,
+            perFrameBuffer.terrainParallaxFadeStartDistance,
+            perFrameBuffer.terrainParallaxFadeEndDistance)
+        : 0.0f;
+    terrainParallaxEnabled = terrainParallaxFade > TERRAIN_PARALLAX_MIN_FADE;
+    terrainParallaxMaxSteps = max(4u, (uint)ceil((float)terrainParallaxMaxSteps * terrainParallaxFade));
 
     float3 blendedBaseColor = 0.0f.xxx;
     float3 blendedNormalTS = 0.0f.xxx;
@@ -913,9 +931,9 @@ void ApplyTerrainMaterialInternal(
             stochasticLayer = terrainStochasticLayers[layer.stochasticLayerIndex];
             contextScale = max(stochasticLayer.stochasticScale, 0.001f);
         }
-        if (terrainParallaxEnabled && TerrainCanSampleHeight(layer))
+        if (terrainParallaxEnabled && weight >= TERRAIN_PARALLAX_MIN_LAYER_WEIGHT && TerrainCanSampleHeight(layer))
         {
-            float layerHeightScale = perFrameBuffer.terrainParallaxHeightScale * max(layer.heightScale, 0.0f);
+            float layerHeightScale = perFrameBuffer.terrainParallaxHeightScale * terrainParallaxFade * max(layer.heightScale, 0.0f);
             float3 parallaxUvHeight = TerrainParallaxCoordsAndHeight(
                 layer,
                 stochasticLayer,

@@ -106,6 +106,9 @@ struct PerFrameCB {
     unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
     float terrainParallaxHeightScale = 0.03f;
     unsigned int terrainParallaxMaxSteps = 16u;
+    float terrainParallaxFadeStartDistance = 2048.0f;
+    float terrainParallaxFadeEndDistance = 8192.0f;
+    DirectX::XMUINT2 terrainParallaxPad{};
 };
 
 static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 124, "PerFrameCB layout mismatch.");
@@ -114,7 +117,10 @@ static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 140, "Per
 static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 144, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 148, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 152, "PerFrameCB layout mismatch.");
-static_assert(sizeof(PerFrameCB) == 160, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxFadeStartDistance) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxFadeEndDistance) == 160, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxPad) == 164, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 176, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;
