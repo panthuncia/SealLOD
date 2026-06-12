@@ -237,6 +237,9 @@ public:
         RefreshDescriptorIndices();
 
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
+            if ((flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
+                continue;
+            }
 			unsigned int slot = 0u;
             if (!ctx.materialManager->TryGetCompileFlagsSlot(flags, slot) ||
                 slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {

@@ -871,5 +871,6 @@ enum IndirectCommandSignatureRootConstants {
     IndirectCommandSignatureRootConstant1,
     IndirectCommandSignatureRootConstant2,
     IndirectCommandSignatureRootConstant3,
+    IndirectCommandSignatureRootConstant4,
     NumIndirectCommandSignatureRootConstants
 };

@@ -12,6 +12,8 @@
 #include "RenderPasses/VisUtil/MaterialBlockScanPass.h"
 #include "RenderPasses/VisUtil/MaterialBlockOffsetsPass.h"
 #include "RenderPasses/VisUtil/BuildMaterialIndirectCommandBufferPass.h"
+#include "RenderPasses/VisUtil/TerrainRegionMaterialEvaluationPasses.h"
+#include "Render/IndirectCommand.h"
 #include "RenderPasses/brdfIntegrationPass.h"
 #include "RenderPasses/GTAO/XeGTAODenoisePass.h"
 #include "RenderPasses/GTAO/XeGTAOFilterPass.h"
@@ -215,6 +217,139 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     pixelListBuffer->SetName("VisUtil::PixelListBuffer");
     rg::memory::SetResourceUsageHint(*pixelListBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::PixelListBuffer", pixelListBuffer);
+
+    constexpr uint32_t maxTerrainRegions = 65536u;
+    auto terrainRegionPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionPixelCountBuffer->SetAllowAlias(true);
+    terrainRegionPixelCountBuffer->SetName("VisUtil::TerrainRegionPixelCountBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionPixelCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelCountBuffer", terrainRegionPixelCountBuffer);
+
+    auto terrainRegionOffsetBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionOffsetBuffer->SetAllowAlias(true);
+    terrainRegionOffsetBuffer->SetName("VisUtil::TerrainRegionOffsetBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionOffsetBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionOffsetBuffer", terrainRegionOffsetBuffer);
+
+    auto terrainRegionWriteCursorBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionWriteCursorBuffer->SetAllowAlias(true);
+    terrainRegionWriteCursorBuffer->SetName("VisUtil::TerrainRegionWriteCursorBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionWriteCursorBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionWriteCursorBuffer", terrainRegionWriteCursorBuffer);
+
+    auto terrainRegionBlockSumsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        (maxTerrainRegions + 1023u) / 1024u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionBlockSumsBuffer->SetAllowAlias(true);
+    terrainRegionBlockSumsBuffer->SetName("VisUtil::TerrainRegionBlockSumsBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionBlockSumsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionBlockSumsBuffer", terrainRegionBlockSumsBuffer);
+
+    auto terrainRegionScannedBlockSumsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        (maxTerrainRegions + 1023u) / 1024u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionScannedBlockSumsBuffer->SetAllowAlias(true);
+    terrainRegionScannedBlockSumsBuffer->SetName("VisUtil::TerrainRegionScannedBlockSumsBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionScannedBlockSumsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer", terrainRegionScannedBlockSumsBuffer);
+
+    auto terrainRegionTotalPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionTotalPixelCountBuffer->SetAllowAlias(true);
+    terrainRegionTotalPixelCountBuffer->SetName("VisUtil::TerrainRegionTotalPixelCountBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionTotalPixelCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer", terrainRegionTotalPixelCountBuffer);
+
+    auto terrainRegionActiveListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionActiveListBuffer->SetAllowAlias(true);
+    terrainRegionActiveListBuffer->SetName("VisUtil::TerrainRegionActiveListBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionActiveListBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveListBuffer", terrainRegionActiveListBuffer);
+
+    auto terrainRegionActiveCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionActiveCountBuffer->SetAllowAlias(true);
+    terrainRegionActiveCountBuffer->SetName("VisUtil::TerrainRegionActiveCountBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionActiveCountBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer", terrainRegionActiveCountBuffer);
+
+    auto terrainRegionPixelListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxPixels,
+        sizeof(PixelRefPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionPixelListBuffer->SetAllowAlias(true);
+    terrainRegionPixelListBuffer->SetName("VisUtil::TerrainRegionPixelListBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionPixelListBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::VisUtil::TerrainRegionPixelListBuffer", terrainRegionPixelListBuffer);
+
+    auto terrainRegionMaterialEvalCommandBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        maxTerrainRegions,
+        sizeof(TerrainRegionMaterialEvaluationIndirectCommand),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionMaterialEvalCommandBuffer->SetAllowAlias(true);
+    terrainRegionMaterialEvalCommandBuffer->SetName("IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer", terrainRegionMaterialEvalCommandBuffer);
+
+    auto terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(D3D12_DISPATCH_ARGUMENTS),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer->SetAllowAlias(true);
+    terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer->SetName("IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
+    rg::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer, "Visibility Buffer Resources");
+    graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer", terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer);
 }
 
 void BuildGBufferPipeline(RenderGraph* graph) {
@@ -259,6 +394,30 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         // Build indirect command buffer for material passes
         graph->BuildComputePass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
         TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        graph->BuildComputePass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
+        TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
+        TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
+        TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
+        TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
+        TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
+        TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
+        TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+
+        graph->BuildComputePass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass");
+        TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 
         // Evaluate material groups
         graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass");

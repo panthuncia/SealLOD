@@ -24,3 +24,13 @@ struct MaterialEvaluationIndirectCommand {
 	unsigned int dispatchXDimension; // IndirectCommandSignatureRootConstant3
 	D3D12_DISPATCH_ARGUMENTS dispatchArguments;
 };
+
+struct TerrainRegionMaterialEvaluationIndirectCommand {
+	// Root constants (all uints):
+	unsigned int terrainSetIndex; // IndirectCommandSignatureRootConstant0
+	unsigned int regionIndex; // IndirectCommandSignatureRootConstant1
+	unsigned int baseOffset; // IndirectCommandSignatureRootConstant2
+	unsigned int count; // IndirectCommandSignatureRootConstant3
+	unsigned int dispatchXDimension; // IndirectCommandSignatureRootConstant4
+	D3D12_DISPATCH_ARGUMENTS dispatchArguments;
+};

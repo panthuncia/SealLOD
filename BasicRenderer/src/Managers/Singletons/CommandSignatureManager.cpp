@@ -42,6 +42,14 @@ void CommandSignatureManager::Initialize() {
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(materialEvaluationArgs, 2), sizeof(MaterialEvaluationIndirectCommand) },
         computeLayout.GetHandle(), m_materialEvaluationCommandSignature);
 
+    rhi::IndirectArg terrainRegionMaterialEvaluationArgs[] = {
+        {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 5 } } },
+        {.kind = rhi::IndirectArgKind::Dispatch }
+    };
+    result = device.CreateCommandSignature(
+        rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(terrainRegionMaterialEvaluationArgs, 2), sizeof(TerrainRegionMaterialEvaluationIndirectCommand) },
+        computeLayout.GetHandle(), m_terrainRegionMaterialEvaluationCommandSignature);
+
 }
 
 void CommandSignatureManager::Cleanup() {
@@ -49,4 +57,5 @@ void CommandSignatureManager::Cleanup() {
     m_dispatchCommandSignature.Reset();
     m_rawDispatchCommandSignature.Reset();
     m_materialEvaluationCommandSignature.Reset();
+    m_terrainRegionMaterialEvaluationCommandSignature.Reset();
 }

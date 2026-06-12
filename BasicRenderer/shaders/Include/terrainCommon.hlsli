@@ -18,6 +18,13 @@ static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
 static const uint TERRAIN_STOCHASTIC_FLAG_HEIGHT = 1u << 3;
 static const float TERRAIN_PARALLAX_MIN_LAYER_WEIGHT = 0.02f;
 static const float TERRAIN_PARALLAX_MIN_FADE = 0.01f;
+#if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
+static const uint TERRAIN_SHARED_WEIGHT_WORD_CAPACITY = 2048u;
+groupshared uint g_terrainSharedWeightWords[TERRAIN_SHARED_WEIGHT_WORD_CAPACITY];
+groupshared uint g_terrainSharedWeightWordCount;
+groupshared uint g_terrainSharedWeightBaseWord;
+groupshared uint g_terrainSharedRegionWeightBlockStart;
+#endif
 
 float TerrainDynamicSwizzle(float4 value, uint channel)
 {
@@ -688,8 +695,52 @@ float TerrainLoadWeightSample(
     {
         return 0.0f;
     }
+#if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
+    if (region.weightBlockStart == g_terrainSharedRegionWeightBlockStart &&
+        wordIndex >= g_terrainSharedWeightBaseWord)
+    {
+        uint sharedWordIndex = wordIndex - g_terrainSharedWeightBaseWord;
+        if (sharedWordIndex < g_terrainSharedWeightWordCount)
+        {
+            return TerrainUnpackWeightByte(g_terrainSharedWeightWords[sharedWordIndex], sampleIndex);
+        }
+    }
+#endif
     return TerrainUnpackWeightByte(weightBlocks[wordIndex], sampleIndex);
 }
+
+#if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
+void TerrainLoadRegionWeightBlocksToShared(
+    StructuredBuffer<TerrainSetInfo> terrainSets,
+    StructuredBuffer<TerrainRegionInfo> terrainRegions,
+    StructuredBuffer<uint> terrainWeightBlocks,
+    uint terrainSetIndex,
+    uint regionIndex,
+    uint groupIndex)
+{
+    if (groupIndex == 0u)
+    {
+        TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+        TerrainRegionInfo region = terrainRegions[regionIndex];
+        uint packedWordsPerLayer = (region.weightSampleSide * region.weightSampleSide + 3u) / 4u;
+        uint requestedWords = packedWordsPerLayer * region.layerRefCount;
+        g_terrainSharedWeightWordCount = min(requestedWords, TERRAIN_SHARED_WEIGHT_WORD_CAPACITY);
+        g_terrainSharedWeightBaseWord = terrain.weightBlockBase + region.weightBlockStart;
+        g_terrainSharedRegionWeightBlockStart = region.weightBlockStart;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint i = groupIndex; i < g_terrainSharedWeightWordCount; i += MATERIAL_EXECUTION_GROUP_SIZE)
+    {
+        uint globalWord = g_terrainSharedWeightBaseWord + i;
+        TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+        g_terrainSharedWeightWords[i] = globalWord < terrain.weightBlockBase + terrain.weightBlockCount
+            ? terrainWeightBlocks[globalWord]
+            : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+#endif
 
 float TerrainLoadWeightRowCubic(
     StructuredBuffer<uint> weightBlocks,

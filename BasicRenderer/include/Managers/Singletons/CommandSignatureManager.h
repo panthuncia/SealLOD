@@ -22,12 +22,16 @@ public:
 	const rhi::CommandSignature& GetMaterialEvaluationCommandSignature() {
 		return m_materialEvaluationCommandSignature.Get();
 	}
+	const rhi::CommandSignature& GetTerrainRegionMaterialEvaluationCommandSignature() {
+		return m_terrainRegionMaterialEvaluationCommandSignature.Get();
+	}
 
 private:
 	rhi::CommandSignaturePtr m_dispatchMeshCommandSignature;
 	rhi::CommandSignaturePtr m_dispatchCommandSignature;
 	rhi::CommandSignaturePtr m_rawDispatchCommandSignature;
 	rhi::CommandSignaturePtr m_materialEvaluationCommandSignature;
+	rhi::CommandSignaturePtr m_terrainRegionMaterialEvaluationCommandSignature;
 };
 
 inline CommandSignatureManager& CommandSignatureManager::GetInstance() {

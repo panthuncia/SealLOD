@@ -113,6 +113,7 @@ cbuffer IndirectCommandSignatureRootConstants : register(b6)
     uint IndirectCommandSignatureRootConstant1;
     uint IndirectCommandSignatureRootConstant2;
     uint IndirectCommandSignatureRootConstant3;
+    uint IndirectCommandSignatureRootConstant4;
 };
 
 uint GetRootPerObjectBufferIndex()
