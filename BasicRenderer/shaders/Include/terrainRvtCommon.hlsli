@@ -329,78 +329,51 @@ bool TerrainRvtTrySampleHeightFast(
 {
     heightValue = 0.0f;
 
-    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
-    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
-    TerrainRvtInfo info = infoBuffer[0];
-    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-    if (terrain.regionSizeWorld <= 0.0f ||
-        terrain.regionCountX == 0u ||
-        terrain.regionCountY == 0u ||
-        info.pageSize == 0u ||
-        info.maxVirtualPagesPerAxis == 0u ||
-        info.mipCount == 0u)
+    TerrainRvtInfo info;
+    TerrainSetInfo terrain;
+    uint mip;
+    uint2 pageCoord;
+    float2 pageUv;
+    uint pageTableIndex;
+    if (!TerrainRvtTryComputePageFromPosition(terrainSetIndex, positionWS, dpdxWS, dpdyWS, info, terrain, mip, pageCoord, pageUv, pageTableIndex))
     {
         return false;
     }
-
-    const float2 skyrimXY = TerrainRvtSkyrimXYFromRendererPosition(positionWS);
-    const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;
-    const float2 terrainSize = float2(terrain.regionCountX, terrain.regionCountY) * terrain.regionSizeWorld;
-    const float2 local = skyrimXY - terrainOrigin;
-    if (any(local < 0.0f.xx) || any(local >= terrainSize))
-    {
-        return false;
-    }
-
-    const float basePageWorldSize = TerrainRvtBasePageWorldSize(info);
-    const float invTexelWorldSize0 = (float)max(info.pageSize, 1u) / basePageWorldSize;
-    const float2 skyrimXYDdx = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
-    const float2 skyrimXYDdy = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
-    const float footprintWorldSq = max(dot(skyrimXYDdx, skyrimXYDdx), dot(skyrimXYDdy, skyrimXYDdy));
-    const float footprintTexelSq = max(footprintWorldSq * invTexelWorldSize0 * invTexelWorldSize0, 1.0e-8f);
-    const float requestedMip = 0.5f + 0.5f * log2(footprintTexelSq);
-    const uint firstMip = min((uint)max(0.0f, floor(requestedMip)), info.mipCount - 1u);
-
-    const uint entriesPerTerrainSet = TerrainRvtPageTableEntriesPerTerrainSet(info);
-    const uint terrainPageTableBase = terrainSetIndex * entriesPerTerrainSet;
-    const uint2 basePageCount = max(
-        uint2(1u, 1u),
-        (uint2)ceil(terrainSize / basePageWorldSize));
-    uint mipOffset = TerrainRvtPageTableMipOffset(info, firstMip);
 
     StructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
+    uint physicalPageIndex = 0u;
+    bool foundResidentPage = false;
     [loop]
-    for (uint sampleMip = firstMip; sampleMip < info.mipCount; ++sampleMip)
+    for (uint sampleMip = mip; sampleMip < info.mipCount; ++sampleMip)
     {
-        const uint mipShift = min(sampleMip, 31u);
-        const uint mipScale = 1u << mipShift;
-        const uint axis = max(1u, info.maxVirtualPagesPerAxis >> mipShift);
-        const uint2 terrainMipPageCount = max(uint2(1u, 1u), (basePageCount + mipScale - 1u) >> mipShift);
-        const float pageWorldSize = basePageWorldSize * (float)mipScale;
-        const float2 pageFloat = local / pageWorldSize;
-        const uint2 pageCoord = (uint2)floor(pageFloat);
-        if (pageCoord.x < axis && pageCoord.y < axis &&
-            pageCoord.x < terrainMipPageCount.x && pageCoord.y < terrainMipPageCount.y)
+        if (!TerrainRvtTryComputePageAtMip(
+                terrainSetIndex,
+                info,
+                terrain,
+                TerrainRvtSkyrimXYFromRendererPosition(positionWS),
+                sampleMip,
+                pageCoord,
+                pageUv,
+                pageTableIndex))
         {
-            const uint pageTableIndex = terrainPageTableBase + mipOffset + pageCoord.y * axis + pageCoord.x;
-            if (pageTableIndex < info.maxVirtualPageTableEntries)
-            {
-                uint physicalPageIndex = 0u;
-                if (TerrainRvtUnpackPageTableEntry(pageTable[pageTableIndex], TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex))
-                {
-                    float3 atlasUv;
-                    TerrainRvtPhysicalPageUv(info, physicalPageIndex, frac(pageFloat), atlasUv);
-                    Texture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
-                    heightValue = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f));
-                    return true;
-                }
-            }
+            continue;
         }
-
-        mipOffset += axis * axis;
+        if (TerrainRvtUnpackPageTableEntry(pageTable[pageTableIndex], TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex))
+        {
+            foundResidentPage = true;
+            break;
+        }
+    }
+    if (!foundResidentPage)
+    {
+        return false;
     }
 
-    return false;
+    float3 atlasUv;
+    TerrainRvtPhysicalPageUv(info, physicalPageIndex, pageUv, atlasUv);
+    Texture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
+    heightValue = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f));
+    return true;
 }
 
 bool TerrainRvtTrySampleHeight(
