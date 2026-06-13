@@ -79,6 +79,8 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
             Builtin::CullingCameraBuffer,
             Builtin::CameraBuffer,
             Builtin::PerMaterialDataBuffer,
+            Builtin::Terrain::Sets,
+            Builtin::Terrain::RvtInfo,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
@@ -86,7 +88,12 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
         .WithUnorderedAccess(
             m_rasterWorkBuffer,
             m_rasterWorkCounterBuffer,
-            m_telemetryBuffer);
+            m_telemetryBuffer,
+            Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtStats)
+        .WithConstantBuffer(Builtin::PerFrameBuffer);
     if (m_diceQueueReadOffsetBuffer) {
         builder->WithShaderResource(m_diceQueueReadOffsetBuffer);
     }
@@ -164,6 +171,8 @@ PassReturn ReyesBuildRasterWorkPass::Execute(PassExecutionContext& executionCont
     uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_REPLAY_DICE_QUEUE_CAPACITY] = m_replayDiceQueueCapacity;
     uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_USE_AABB_OCCLUSION] =
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)() ? 1u : 0u;
+    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED] =
+        SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")() ? 1u : 0u;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

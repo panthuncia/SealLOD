@@ -5,6 +5,7 @@
 #include "materialFlags.hlsli"
 #include "parallax.hlsli"
 #include "utilities.hlsli"
+#include "terrainRvtCommon.hlsli"
 
 static const float TERRAIN_CELL_SIZE = 4096.0f;
 static const float TERRAIN_QUADRANT_SIZE = 2048.0f;
@@ -924,6 +925,14 @@ float TerrainInterpolateLayerWeight(
 
 float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
 {
+#if !defined(TERRAIN_RVT_GENERATION)
+    float rvtHeight = 0.0f;
+    if (TerrainRvtTrySampleHeight(terrainSetIndex, positionWS, 0.0f.xxx, 0.0f.xxx, rvtHeight))
+    {
+        return rvtHeight;
+    }
+#endif
+
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
     StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
@@ -1056,6 +1065,66 @@ void ApplyTerrainMaterialInternal(
 
 #if defined(TERRAIN_REGION_KNOWN_REGION)
     terrainSetIndex = IndirectCommandSignatureRootConstant0;
+#endif
+
+#if !defined(TERRAIN_RVT_GENERATION)
+    TerrainRvtMaterialSample rvtSample;
+    if (TerrainRvtTrySampleMaterial(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtSample))
+    {
+        inputs.albedo = rvtSample.albedo * vertexColor;
+        inputs.normalWS = rvtSample.normalWS;
+        inputs.metallic = rvtSample.metallic;
+        inputs.roughness = rvtSample.roughness;
+        inputs.ambientOcclusion = rvtSample.ambientOcclusion;
+        inputs.opacity = 1.0f;
+        inputs.emissive = 0.0f.xxx;
+        inputs.terrainRvtDebugFlags = 0x3u;
+        inputs.terrainRvtRequestedMip = rvtSample.requestedMip;
+        inputs.terrainRvtResidentMip = rvtSample.residentMip;
+        inputs.terrainRvtPageTableIndex = rvtSample.residentPageTableIndex;
+        inputs.terrainRvtPhysicalPageIndex = rvtSample.physicalPageIndex;
+        inputs.terrainRvtAtlasPoolIndex = rvtSample.atlasPoolIndex;
+        inputs.terrainRvtOwnerPageTableIndex = rvtSample.ownerPageTableIndex;
+        inputs.terrainRvtFallbackReason = rvtSample.fallbackReason;
+        inputs.terrainRvtPageCoord = rvtSample.pageCoord;
+        inputs.terrainRvtPageUv = rvtSample.pageUv;
+        inputs.terrainRvtAtlasUv = rvtSample.atlasUv;
+        inputs.terrainRvtPhysicalTileUv = rvtSample.physicalTileUv;
+        inputs.terrainRvtSampleAlbedo = rvtSample.albedo;
+        inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
+        inputs.terrainRvtSampleNormal = rvtSample.normalWS;
+        inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
+        inputs.terrainRvtPageStamp = rvtSample.pageStamp;
+        inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
+        inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+        return;
+    }
+    else
+    {
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        if (perFrameBuffer.terrainRvtEnabled != 0u)
+        {
+            inputs.terrainRvtDebugFlags = 0x1u;
+        }
+        inputs.terrainRvtFallbackReason = rvtSample.fallbackReason;
+        inputs.terrainRvtRequestedMip = rvtSample.requestedMip;
+        inputs.terrainRvtResidentMip = rvtSample.residentMip;
+        inputs.terrainRvtPageTableIndex = rvtSample.residentPageTableIndex;
+        inputs.terrainRvtPhysicalPageIndex = rvtSample.physicalPageIndex;
+        inputs.terrainRvtAtlasPoolIndex = rvtSample.atlasPoolIndex;
+        inputs.terrainRvtOwnerPageTableIndex = rvtSample.ownerPageTableIndex;
+        inputs.terrainRvtPageCoord = rvtSample.pageCoord;
+        inputs.terrainRvtPageUv = rvtSample.pageUv;
+        inputs.terrainRvtAtlasUv = rvtSample.atlasUv;
+        inputs.terrainRvtPhysicalTileUv = rvtSample.physicalTileUv;
+        inputs.terrainRvtSampleAlbedo = rvtSample.albedo;
+        inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
+        inputs.terrainRvtSampleNormal = rvtSample.normalWS;
+        inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
+        inputs.terrainRvtPageStamp = rvtSample.pageStamp;
+        inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
+        inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+    }
 #endif
 
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];

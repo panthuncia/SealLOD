@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <array>
 #include <stacktrace>
 #include <thread>
 #include <unordered_set>
@@ -123,6 +124,81 @@ void D3D12DebugCallback(
 namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
+constexpr const char* TerrainRvtTelemetryDebugSettingName = "terrainRvtTelemetryDebug";
+constexpr size_t TerrainRvtTelemetryMipBins = 16u;
+
+struct TerrainRvtTelemetryStatsReadback {
+    uint32_t heightRequests;
+    uint32_t materialRequests;
+    uint32_t requestOverflows;
+    uint32_t generatedPages;
+    uint32_t allocationFailures;
+    uint32_t heightFallbacks;
+    uint32_t materialFallbacks;
+    uint32_t residentHits;
+    uint32_t heightSampleAttempts;
+    uint32_t materialSampleAttempts;
+    uint32_t heightSampleHits;
+    uint32_t materialSampleHits;
+    uint32_t heightPageTableMisses;
+    uint32_t materialPageTableMisses;
+    uint32_t heightComputePageFailures;
+    uint32_t materialComputePageFailures;
+    uint32_t heightDisabledFallbacks;
+    uint32_t materialDisabledFallbacks;
+    uint32_t heightForcedFallbacks;
+    uint32_t materialForcedFallbacks;
+    uint32_t markComputePageFailures;
+    uint32_t markWorldRectCalls;
+    uint32_t markWorldRectPages;
+    uint32_t resolveResidentPages;
+    uint32_t generationHeightPages;
+    uint32_t generationMaterialPages;
+    uint32_t generationCombinedPages;
+    uint32_t generationTexels;
+    uint32_t materialSampleRequestedPageXor;
+    uint32_t materialSampleResidentPageXor;
+    uint32_t materialSamplePhysicalPageXor;
+    uint32_t materialSampleRequestedPageMin;
+    uint32_t materialSampleRequestedPageMax;
+    uint32_t materialSampleResidentPageMin;
+    uint32_t materialSampleResidentPageMax;
+    uint32_t materialSamplePhysicalPageMin;
+    uint32_t materialSamplePhysicalPageMax;
+    uint32_t materialSampleCoarserResidentHits;
+    uint32_t materialSampleAtlasPoolMask;
+    uint32_t heightOwnerMismatches;
+    uint32_t materialOwnerMismatches;
+    uint32_t materialSamplePageStampMismatches;
+    uint32_t generationPageTableXor;
+    uint32_t generationPhysicalPageXor;
+    uint32_t generationPairHashXor;
+    uint32_t physicalPageOwnerCollisions;
+    std::array<uint32_t, TerrainRvtTelemetryMipBins> heightRequestMipHistogram;
+    std::array<uint32_t, TerrainRvtTelemetryMipBins> materialRequestMipHistogram;
+    std::array<uint32_t, TerrainRvtTelemetryMipBins> heightSampleMipHistogram;
+    std::array<uint32_t, TerrainRvtTelemetryMipBins> materialSampleMipHistogram;
+    std::array<uint32_t, TerrainRvtTelemetryMipBins> generationMipHistogram;
+};
+
+static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (46u + TerrainRvtTelemetryMipBins * 5u));
+
+std::string FormatTerrainRvtMipHistogram(const std::array<uint32_t, TerrainRvtTelemetryMipBins>& histogram)
+{
+    std::ostringstream output;
+    bool any = false;
+    for (size_t i = 0; i < histogram.size(); ++i) {
+        if (histogram[i] == 0u) {
+            continue;
+        }
+        if (any) {
+            output << ",";
+        }
+        output << i << ":" << histogram[i];
+        any = true;
+    }
+    return any ? output.str() : "none";
+}
 
 std::string RendererExceptionStacktraceString()
 {
@@ -269,6 +345,22 @@ bool IsCLodVisibilityTelemetryEnabledByEnvironment() {
 bool IsCLodVisibilityTelemetryDebugEnabled() {
 	return IsCLodVisibilityTelemetryEnabledByEnvironment() ||
 		SettingsManager::GetInstance().getSettingGetter<bool>(CLodVisibilityTelemetryDebugSettingName)();
+}
+
+bool IsTerrainRvtTelemetryEnabledByEnvironment() {
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, "SARP_TERRAIN_RVT_TELEMETRY") != 0 || value == nullptr) {
+        return false;
+    }
+    const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+    free(value);
+    return enabled;
+}
+
+bool IsTerrainRvtTelemetryDebugEnabled() {
+    return IsTerrainRvtTelemetryEnabledByEnvironment() ||
+        SettingsManager::GetInstance().getSettingGetter<bool>(TerrainRvtTelemetryDebugSettingName)();
 }
 
 bool DefaultEnableReShapeForBuild() {
@@ -1454,7 +1546,19 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", false);
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
+    settingsManager.registerSetting<bool>("enableTerrainRvt", true);
+    settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
+    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, true);
+    settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 32u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 32u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPoolCount", 1u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxVirtualPagesPerAxis", 4096u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 10u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtBasePageWorldSize", 128u);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
@@ -1521,7 +1625,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("rayTracedReflectionLodBias", 0.0f);
     settingsManager.registerSetting<bool>("useAsyncCompute", false);
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
-	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
+	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, false);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
     settingsManager.registerSetting<bool>("renderGraphDisableCaching", true);
@@ -2263,8 +2367,12 @@ void Renderer::Update(float elapsedSeconds) {
     context.frameFenceValue = m_currentFrameFenceValue;
     context.deltaTime = elapsedSeconds;
     context.hostData = &updateHostData;
+    context.beforeCompileFrame = [this]() {
+        ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
+        MaybeRequestTerrainRvtTelemetry();
+    };
 
-	auto& deviceManager = DeviceManager::GetInstance();
+    auto& deviceManager = DeviceManager::GetInstance();
 
     runCapturedStage("RenderGraphUpdate", [&]() {
         ZoneScopedN("Renderer::Update::RenderGraphUpdate");
@@ -2513,6 +2621,210 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 requestedFrame,
                 visibleClusters);
         });
+}
+
+void Renderer::MaybeRequestTerrainRvtTelemetry() {
+    if (!currentRenderGraph) {
+        return;
+    }
+
+    if (!IsTerrainRvtTelemetryDebugEnabled()) {
+        m_loggedTerrainRvtTelemetryEnabled = false;
+        return;
+    }
+
+    if (!SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")()) {
+        return;
+    }
+
+    if (!m_loggedTerrainRvtTelemetryEnabled) {
+        spdlog::info(
+            "SARP terrain RVT telemetry debug enabled (setting '{}' or SARP_TERRAIN_RVT_TELEMETRY).",
+            TerrainRvtTelemetryDebugSettingName);
+        m_loggedTerrainRvtTelemetryEnabled = true;
+    }
+
+    constexpr uint64_t kCaptureIntervalFrames = 30;
+    if (m_lastTerrainRvtTelemetryRequestFrame != UINT64_MAX &&
+        m_totalFramesRendered - m_lastTerrainRvtTelemetryRequestFrame < kCaptureIntervalFrames) {
+        return;
+    }
+    if (m_terrainRvtStatsReadbackPending || m_terrainRvtCountersReadbackPending) {
+        return;
+    }
+
+    auto* readbackService = currentRenderGraph->GetReadbackService();
+    if (!readbackService) {
+        return;
+    }
+
+    auto statsResource = currentRenderGraph->RequestResourcePtr(Builtin::Terrain::RvtStats, /*allowFailure=*/true);
+    auto countersResource = currentRenderGraph->RequestResourcePtr(Builtin::Terrain::RvtCounters, /*allowFailure=*/true);
+    if (!statsResource || !countersResource) {
+        return;
+    }
+
+    const uint64_t requestedFrame = m_totalFramesRendered;
+    m_lastTerrainRvtTelemetryRequestFrame = requestedFrame;
+    m_terrainRvtStatsReadbackPending = true;
+    m_terrainRvtCountersReadbackPending = true;
+    spdlog::info("SARP terrain RVT telemetry: frame={} queued stats/counters readback.", requestedFrame);
+
+    const auto pageSize = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtPageSize")();
+    const auto borderTexels = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtBorderTexels")();
+    const auto atlasPagesWide = TerrainRvt::AtlasPagesWide();
+    const auto atlasPagesHigh = TerrainRvt::AtlasPagesHigh();
+    const auto atlasPoolCount = TerrainRvt::AtlasPoolCount();
+    const auto maxVirtualPagesPerAxis = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMaxVirtualPagesPerAxis")();
+    const auto mipCount = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMipCount")();
+    const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtBasePageWorldSize")();
+    const auto forcedFallback = SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")();
+
+    readbackService->RequestReadbackCapture(
+        "EvaluateMaterialGroupsPass",
+        statsResource.get(),
+        RangeSpec{},
+        [this, requestedFrame](ReadbackCaptureResult&& result) {
+            m_terrainRvtStatsReadbackPending = false;
+
+            if (result.data.size() < sizeof(TerrainRvtTelemetryStatsReadback)) {
+                spdlog::warn(
+                    "SARP terrain RVT telemetry: frame={} stats payload too small ({} bytes, expected {}).",
+                    requestedFrame,
+                    result.data.size(),
+                    sizeof(TerrainRvtTelemetryStatsReadback));
+                return;
+            }
+
+            TerrainRvtTelemetryStatsReadback stats{};
+            std::memcpy(&stats, result.data.data(), sizeof(stats));
+            const uint32_t heightMisses = stats.heightSampleAttempts - (std::min)(stats.heightSampleAttempts, stats.heightSampleHits);
+            const uint32_t materialMisses = stats.materialSampleAttempts - (std::min)(stats.materialSampleAttempts, stats.materialSampleHits);
+            const auto rangeMinOrZero = [](uint32_t value) {
+                return value == 0xffffffffu ? 0u : value;
+            };
+
+            spdlog::info(
+                "SARP terrain RVT telemetry: frame={} requests(height={} material={} resident_hits={} overflows={} mark_fail={} rect_calls={} rect_pages={}) generation(pages={} height={} material={} combined={} texels={} resident_skips={} alloc_fail={}) samples(height_attempts={} height_hits={} height_misses={} material_attempts={} material_hits={} material_misses={})",
+                requestedFrame,
+                stats.heightRequests,
+                stats.materialRequests,
+                stats.residentHits,
+                stats.requestOverflows,
+                stats.markComputePageFailures,
+                stats.markWorldRectCalls,
+                stats.markWorldRectPages,
+                stats.generatedPages,
+                stats.generationHeightPages,
+                stats.generationMaterialPages,
+                stats.generationCombinedPages,
+                stats.generationTexels,
+                stats.resolveResidentPages,
+                stats.allocationFailures,
+                stats.heightSampleAttempts,
+                stats.heightSampleHits,
+                heightMisses,
+                stats.materialSampleAttempts,
+                stats.materialSampleHits,
+                materialMisses);
+
+            spdlog::info(
+                "SARP terrain RVT telemetry fallback: frame={} height(total={} disabled={} forced={} compute_fail={} page_miss={} owner_mismatch={}) material(total={} disabled={} forced={} compute_fail={} page_miss={} owner_mismatch={})",
+                requestedFrame,
+                stats.heightFallbacks,
+                stats.heightDisabledFallbacks,
+                stats.heightForcedFallbacks,
+                stats.heightComputePageFailures,
+                stats.heightPageTableMisses,
+                stats.heightOwnerMismatches,
+                stats.materialFallbacks,
+                stats.materialDisabledFallbacks,
+                stats.materialForcedFallbacks,
+                stats.materialComputePageFailures,
+                stats.materialPageTableMisses,
+                stats.materialOwnerMismatches);
+
+            spdlog::info(
+                "SARP terrain RVT telemetry mips: frame={} request_height=[{}] request_material=[{}] sample_height=[{}] sample_material=[{}] generated=[{}]",
+                requestedFrame,
+                FormatTerrainRvtMipHistogram(stats.heightRequestMipHistogram),
+                FormatTerrainRvtMipHistogram(stats.materialRequestMipHistogram),
+                FormatTerrainRvtMipHistogram(stats.heightSampleMipHistogram),
+                FormatTerrainRvtMipHistogram(stats.materialSampleMipHistogram),
+                FormatTerrainRvtMipHistogram(stats.generationMipHistogram));
+
+            spdlog::info(
+                "SARP terrain RVT telemetry pages: frame={} requested_page_range=[{},{}] resident_page_range=[{},{}] physical_page_range=[{},{}] xor(requested=0x{:08X} resident=0x{:08X} physical=0x{:08X}) coarser_resident_hits={} atlas_pool_mask=0x{:08X}",
+                requestedFrame,
+                rangeMinOrZero(stats.materialSampleRequestedPageMin),
+                stats.materialSampleRequestedPageMax,
+                rangeMinOrZero(stats.materialSampleResidentPageMin),
+                stats.materialSampleResidentPageMax,
+                rangeMinOrZero(stats.materialSamplePhysicalPageMin),
+                stats.materialSamplePhysicalPageMax,
+                stats.materialSampleRequestedPageXor,
+                stats.materialSampleResidentPageXor,
+                stats.materialSamplePhysicalPageXor,
+                stats.materialSampleCoarserResidentHits,
+                stats.materialSampleAtlasPoolMask);
+
+            spdlog::info(
+                "SARP terrain RVT telemetry atlas-stamp: frame={} mismatches={} owner_collisions={} generation_xor(page=0x{:08X} physical=0x{:08X} pair=0x{:08X})",
+                requestedFrame,
+                stats.materialSamplePageStampMismatches,
+                stats.physicalPageOwnerCollisions,
+                stats.generationPageTableXor,
+                stats.generationPhysicalPageXor,
+                stats.generationPairHashXor);
+        },
+        QueueKind::Copy);
+
+    readbackService->RequestReadbackCapture(
+        "EvaluateMaterialGroupsPass",
+        countersResource.get(),
+        RangeSpec{},
+        [this,
+         requestedFrame,
+         pageSize,
+         borderTexels,
+         basePageWorldSize,
+         atlasPagesWide,
+         atlasPagesHigh,
+         atlasPoolCount,
+         maxVirtualPagesPerAxis,
+         mipCount,
+         forcedFallback](ReadbackCaptureResult&& result) {
+            m_terrainRvtCountersReadbackPending = false;
+
+            constexpr size_t counterBytes = sizeof(uint32_t) * 4u;
+            if (result.data.size() < counterBytes) {
+                spdlog::warn(
+                    "SARP terrain RVT telemetry: frame={} counters payload too small ({} bytes).",
+                    requestedFrame,
+                    result.data.size());
+                return;
+            }
+
+            uint32_t counters[4] = {};
+            std::memcpy(counters, result.data.data(), counterBytes);
+            spdlog::info(
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={} atlas={}x{}x{} max_virtual_axis={} mips={} forced_fallback={})",
+                requestedFrame,
+                counters[0],
+                counters[1],
+                counters[2],
+                counters[3],
+                pageSize,
+                borderTexels,
+                basePageWorldSize,
+                atlasPagesWide,
+                atlasPagesHigh,
+                atlasPoolCount,
+                maxVirtualPagesPerAxis,
+                mipCount,
+                forcedFallback ? 1 : 0);
+        },
+        QueueKind::Copy);
 }
 
 void Renderer::Render() {

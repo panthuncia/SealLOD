@@ -13,6 +13,7 @@
 #include "RenderPasses/VisUtil/MaterialBlockOffsetsPass.h"
 #include "RenderPasses/VisUtil/BuildMaterialIndirectCommandBufferPass.h"
 #include "RenderPasses/VisUtil/TerrainRegionMaterialEvaluationPasses.h"
+#include "RenderPasses/TerrainRvtPasses.h"
 #include "Render/IndirectCommand.h"
 #include "RenderPasses/brdfIntegrationPass.h"
 #include "RenderPasses/GTAO/XeGTAODenoisePass.h"
@@ -190,6 +191,7 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     const uint32_t maxPixels = resolution.x * resolution.y;
 
     auto& rm = ResourceManager::GetInstance();
+    (void)rm;
 
     // Total pixel count buffer (uint[1])
     auto totalPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
@@ -350,6 +352,220 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer->SetName("IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
     rg::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer", terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer);
+
+    struct TerrainRvtInfoPOD {
+        uint32_t pageSize;
+        uint32_t borderTexels;
+        uint32_t physicalTileTexelSide;
+        uint32_t physicalAtlasPagesWide;
+        uint32_t physicalAtlasPagesHigh;
+        uint32_t maxPhysicalPages;
+        uint32_t maxVirtualPageTableEntries;
+        uint32_t maxRequests;
+        uint32_t maxGenerationEntries;
+        uint32_t mipCount;
+        uint32_t maxVirtualPagesPerAxis;
+        uint32_t flags;
+        float basePageWorldSize;
+        uint32_t physicalAtlasPoolCount;
+        uint32_t pad0[2];
+    };
+    struct TerrainRvtGenerationRequestPOD {
+        uint32_t pageTableIndex;
+        uint32_t physicalPageIndex;
+        uint32_t contentMask;
+        uint32_t pad0;
+    };
+    struct TerrainRvtStatsPOD {
+        uint32_t heightRequests;
+        uint32_t materialRequests;
+        uint32_t requestOverflows;
+        uint32_t generatedPages;
+        uint32_t allocationFailures;
+        uint32_t heightFallbacks;
+        uint32_t materialFallbacks;
+        uint32_t residentHits;
+        uint32_t heightSampleAttempts;
+        uint32_t materialSampleAttempts;
+        uint32_t heightSampleHits;
+        uint32_t materialSampleHits;
+        uint32_t heightPageTableMisses;
+        uint32_t materialPageTableMisses;
+        uint32_t heightComputePageFailures;
+        uint32_t materialComputePageFailures;
+        uint32_t heightDisabledFallbacks;
+        uint32_t materialDisabledFallbacks;
+        uint32_t heightForcedFallbacks;
+        uint32_t materialForcedFallbacks;
+        uint32_t markComputePageFailures;
+        uint32_t markWorldRectCalls;
+        uint32_t markWorldRectPages;
+        uint32_t resolveResidentPages;
+        uint32_t generationHeightPages;
+        uint32_t generationMaterialPages;
+        uint32_t generationCombinedPages;
+        uint32_t generationTexels;
+        uint32_t materialSampleRequestedPageXor;
+        uint32_t materialSampleResidentPageXor;
+        uint32_t materialSamplePhysicalPageXor;
+        uint32_t materialSampleRequestedPageMin;
+        uint32_t materialSampleRequestedPageMax;
+        uint32_t materialSampleResidentPageMin;
+        uint32_t materialSampleResidentPageMax;
+        uint32_t materialSamplePhysicalPageMin;
+        uint32_t materialSamplePhysicalPageMax;
+        uint32_t materialSampleCoarserResidentHits;
+        uint32_t materialSampleAtlasPoolMask;
+        uint32_t heightOwnerMismatches;
+        uint32_t materialOwnerMismatches;
+        uint32_t materialSamplePageStampMismatches;
+        uint32_t generationPageTableXor;
+        uint32_t generationPhysicalPageXor;
+        uint32_t generationPairHashXor;
+        uint32_t physicalPageOwnerCollisions;
+        uint32_t heightRequestMipHistogram[16];
+        uint32_t materialRequestMipHistogram[16];
+        uint32_t heightSampleMipHistogram[16];
+        uint32_t materialSampleMipHistogram[16];
+        uint32_t generationMipHistogram[16];
+    };
+
+    const uint32_t terrainRvtPageTableEntries = TerrainRvt::MaxPageTableEntries();
+    auto terrainRvtInfoBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(TerrainRvtInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtInfoBuffer->SetAllowAlias(false);
+    terrainRvtInfoBuffer->SetName("TerrainRvt::Info");
+    rg::memory::SetResourceUsageHint(*terrainRvtInfoBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtInfo, terrainRvtInfoBuffer);
+
+    auto terrainRvtPageTableBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPageTableBuffer->SetAllowAlias(false);
+    terrainRvtPageTableBuffer->SetName("TerrainRvt::PageTable");
+    rg::memory::SetResourceUsageHint(*terrainRvtPageTableBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPageTable, terrainRvtPageTableBuffer);
+
+    auto terrainRvtPhysicalPageOwnerBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPhysicalPageOwnerBuffer->SetAllowAlias(false);
+    terrainRvtPhysicalPageOwnerBuffer->SetName("TerrainRvt::PhysicalPageOwner");
+    rg::memory::SetResourceUsageHint(*terrainRvtPhysicalPageOwnerBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageOwner, terrainRvtPhysicalPageOwnerBuffer);
+
+    auto terrainRvtRequestMasksBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtRequestMasksBuffer->SetAllowAlias(false);
+    terrainRvtRequestMasksBuffer->SetName("TerrainRvt::RequestMasks");
+    rg::memory::SetResourceUsageHint(*terrainRvtRequestMasksBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtRequestMasks, terrainRvtRequestMasksBuffer);
+
+    auto terrainRvtRequestListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtRequestListBuffer->SetAllowAlias(false);
+    terrainRvtRequestListBuffer->SetName("TerrainRvt::RequestList");
+    rg::memory::SetResourceUsageHint(*terrainRvtRequestListBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtRequestList, terrainRvtRequestListBuffer);
+
+    auto terrainRvtCountersBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::CounterCount,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtCountersBuffer->SetAllowAlias(false);
+    terrainRvtCountersBuffer->SetName("TerrainRvt::Counters");
+    rg::memory::SetResourceUsageHint(*terrainRvtCountersBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtCounters, terrainRvtCountersBuffer);
+
+    auto terrainRvtGenerationListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(TerrainRvtGenerationRequestPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtGenerationListBuffer->SetAllowAlias(false);
+    terrainRvtGenerationListBuffer->SetName("TerrainRvt::GenerationList");
+    rg::memory::SetResourceUsageHint(*terrainRvtGenerationListBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtGenerationList, terrainRvtGenerationListBuffer);
+
+    auto terrainRvtStatsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(TerrainRvtStatsPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtStatsBuffer->SetAllowAlias(false);
+    terrainRvtStatsBuffer->SetName("TerrainRvt::Stats");
+    rg::memory::SetResourceUsageHint(*terrainRvtStatsBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtStats, terrainRvtStatsBuffer);
+
+    auto terrainRvtGenerateDispatchArgsBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        1,
+        sizeof(D3D12_DISPATCH_ARGUMENTS),
+        true,
+        true,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtGenerateDispatchArgsBuffer->SetAllowAlias(false);
+    terrainRvtGenerateDispatchArgsBuffer->SetName("TerrainRvt::GenerateDispatchArgs");
+    rg::memory::SetResourceUsageHint(*terrainRvtGenerateDispatchArgsBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtGenerateDispatchArgs, terrainRvtGenerateDispatchArgsBuffer);
+
+    const uint32_t terrainRvtPhysicalTileSide = TerrainRvt::PageSize() + TerrainRvt::BorderTexels() * 2u;
+    const uint32_t terrainRvtAtlasSide = TerrainRvt::AtlasPagesWide() * terrainRvtPhysicalTileSide;
+    const uint32_t terrainRvtAtlasHeight = TerrainRvt::AtlasPagesHigh() * terrainRvtPhysicalTileSide;
+    auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels) {
+        TextureDescription desc;
+        desc.arraySize = TerrainRvt::AtlasPoolCount();
+        desc.channels = channels;
+        desc.isCubemap = false;
+        desc.isArray = true;
+        desc.hasSRV = true;
+        desc.hasUAV = true;
+        desc.hasNonShaderVisibleUAV = true;
+        desc.format = format;
+        desc.srvFormat = format;
+        desc.uavFormat = format;
+        desc.allowAlias = false;
+        desc.imageDimensions.push_back({ terrainRvtAtlasSide, terrainRvtAtlasHeight, 0, 0 });
+        auto texture = PixelBuffer::CreateSharedUnmaterialized(desc);
+        texture->SetName(debugName);
+        rg::memory::SetResourceUsageHint(*texture, "Terrain RVT");
+        graph->RegisterResource(name, texture);
+    };
+
+    createTerrainRvtAtlas(Builtin::Terrain::RvtHeightAtlas, "TerrainRvt::HeightAtlas", rhi::Format::R16_Float, 1);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R16G16B16A16_Float, 4);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
 }
 
 void BuildGBufferPipeline(RenderGraph* graph) {
@@ -358,8 +574,9 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 	bool enableWireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
 	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
 	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
-	bool visibilityRendering = SettingsManager::GetInstance().getSettingGetter<bool>("enableVisibilityRendering")();
+    bool visibilityRendering = SettingsManager::GetInstance().getSettingGetter<bool>("enableVisibilityRendering")();
     bool terrainRegionMaterialEvaluation = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
+    bool terrainRvt = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")();
 
     if (!useMeshShaders) {
         indirect = false; // Mesh shader pipelines are required for indirect draws
@@ -372,6 +589,10 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         clearRTVs = true; // We will not run an earlier pass
     }
     if (needsVisibilityMaterialEvaluation) {
+        if (terrainRvt) {
+            graph->BuildComputePass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
+            TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
+        }
 
         // Reset material counters
         graph->BuildComputePass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
@@ -420,6 +641,20 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 
             graph->BuildComputePass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass");
             TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+        }
+
+        if (terrainRvt) {
+            graph->BuildComputePass<TerrainRvtMarkVisibilityMaterialPagesPass>("TerrainRvtMarkVisibilityMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtMarkVisibilityMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
+            TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
         }
 
         // Evaluate material groups

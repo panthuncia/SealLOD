@@ -332,7 +332,8 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const CLodReyesDiceQueueEntry diceEntry = diceQueue[diceIndex];
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    if (CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u &&
+    if ((CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u ||
+         CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED != 0u) &&
         CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
         ByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
@@ -354,19 +355,55 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
             const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
             const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
-            const Camera camera = cameras[diceEntry.viewID];
-            if (ReyesBuildRasterHZBOccluded(
-                    diceEntry,
-                    sourcePosition0,
-                    sourcePosition1,
-                    sourcePosition2,
-                    displacementMagnitude,
-                    objectData,
-                    camera,
-                    telemetryBuffer))
+
+            if (CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED != 0u &&
+                (materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
             {
-                ReyesBuildRasterReplayOrDropDice(diceEntry, telemetryBuffer);
-                return;
+                const float3 domain0 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex0UV);
+                const float3 domain1 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex1UV);
+                const float3 domain2 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex2UV);
+                if (ReyesPatchDomainHasValidSimplex(domain0, domain1, domain2))
+                {
+                    const float3 patchPosition0 = ReyesBuildRasterInterpolateTriangle(sourcePosition0, sourcePosition1, sourcePosition2, domain0);
+                    const float3 patchPosition1 = ReyesBuildRasterInterpolateTriangle(sourcePosition0, sourcePosition1, sourcePosition2, domain1);
+                    const float3 patchPosition2 = ReyesBuildRasterInterpolateTriangle(sourcePosition0, sourcePosition1, sourcePosition2, domain2);
+                    const float3 worldPosition0 = mul(float4(patchPosition0, 1.0f), objectData.model).xyz;
+                    const float3 worldPosition1 = mul(float4(patchPosition1, 1.0f), objectData.model).xyz;
+                    const float3 worldPosition2 = mul(float4(patchPosition2, 1.0f), objectData.model).xyz;
+                    const float2 terrainXY0 = TerrainRvtSkyrimXYFromRendererPosition(worldPosition0);
+                    const float2 terrainXY1 = TerrainRvtSkyrimXYFromRendererPosition(worldPosition1);
+                    const float2 terrainXY2 = TerrainRvtSkyrimXYFromRendererPosition(worldPosition2);
+                    const float expansion = displacementMagnitude * ReyesBuildRasterMaxAxisScale_RowVector(objectData.model);
+                    StructuredBuffer<TerrainRvtInfo> terrainRvtInfoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+                    const TerrainRvtInfo terrainRvtInfo = terrainRvtInfoBuffer[0];
+                    const float2 rvtMinXY = min(terrainXY0, min(terrainXY1, terrainXY2)) - expansion.xx;
+                    const float2 rvtMaxXY = max(terrainXY0, max(terrainXY1, terrainXY2)) + expansion.xx;
+                    const uint heightMip = TerrainRvtMipForWorldRect(terrainRvtInfo, rvtMinXY, rvtMaxXY, 2.0f);
+                    TerrainRvtMarkWorldRect(
+                        materialInfo.terrainSetIndex,
+                        rvtMinXY,
+                        rvtMaxXY,
+                        heightMip,
+                        TERRAIN_RVT_CONTENT_HEIGHT);
+                }
+            }
+
+            if (CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u)
+            {
+                const Camera camera = cameras[diceEntry.viewID];
+                if (ReyesBuildRasterHZBOccluded(
+                        diceEntry,
+                        sourcePosition0,
+                        sourcePosition1,
+                        sourcePosition2,
+                        displacementMagnitude,
+                        objectData,
+                        camera,
+                        telemetryBuffer))
+                {
+                    ReyesBuildRasterReplayOrDropDice(diceEntry, telemetryBuffer);
+                    return;
+                }
             }
         }
     }

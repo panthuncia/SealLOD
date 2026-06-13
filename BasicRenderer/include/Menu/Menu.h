@@ -680,6 +680,24 @@ private:
     bool m_terrainRegionMaterialEvaluationEnabled = false;
     std::function<bool()> getTerrainRegionMaterialEvaluationEnabled;
     std::function<void(bool)> setTerrainRegionMaterialEvaluationEnabled;
+    bool m_terrainRvtEnabled = false;
+    std::function<bool()> getTerrainRvtEnabled;
+    std::function<void(bool)> setTerrainRvtEnabled;
+    bool m_forceDirectTerrainRvtFallback = false;
+    std::function<bool()> getForceDirectTerrainRvtFallback;
+    std::function<void(bool)> setForceDirectTerrainRvtFallback;
+    bool m_terrainRvtTelemetryDebug = false;
+    std::function<bool()> getTerrainRvtTelemetryDebug;
+    std::function<void(bool)> setTerrainRvtTelemetryDebug;
+    int m_terrainRvtDebugView = 0;
+    std::function<uint32_t()> getTerrainRvtDebugView;
+    std::function<void(uint32_t)> setTerrainRvtDebugView;
+    int m_terrainRvtBasePageWorldSize = 128;
+    std::function<uint32_t()> getTerrainRvtBasePageWorldSize;
+    std::function<void(uint32_t)> setTerrainRvtBasePageWorldSize;
+    int m_terrainRvtPhysicalAtlasPoolCount = 1;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPoolCount;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPoolCount;
 
     bool m_terrainStochasticSamplingEnabled = true;
     std::function<bool()> getTerrainStochasticSamplingEnabled;
@@ -1214,6 +1232,42 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation");
     m_terrainRegionMaterialEvaluationEnabled = getTerrainRegionMaterialEvaluationEnabled();
     observerSetting(m_terrainRegionMaterialEvaluationEnabled, "enableTerrainRegionMaterialEvaluation");
+    setTerrainRvtEnabled = settingsManager.getSettingSetter<bool>("enableTerrainRvt");
+    getTerrainRvtEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRvt");
+    m_terrainRvtEnabled = getTerrainRvtEnabled();
+    observerSetting(m_terrainRvtEnabled, "enableTerrainRvt");
+    setForceDirectTerrainRvtFallback = settingsManager.getSettingSetter<bool>("forceDirectTerrainRvtFallback");
+    getForceDirectTerrainRvtFallback = settingsManager.getSettingGetter<bool>("forceDirectTerrainRvtFallback");
+    m_forceDirectTerrainRvtFallback = getForceDirectTerrainRvtFallback();
+    observerSetting(m_forceDirectTerrainRvtFallback, "forceDirectTerrainRvtFallback");
+    setTerrainRvtTelemetryDebug = settingsManager.getSettingSetter<bool>("terrainRvtTelemetryDebug");
+    getTerrainRvtTelemetryDebug = settingsManager.getSettingGetter<bool>("terrainRvtTelemetryDebug");
+    m_terrainRvtTelemetryDebug = getTerrainRvtTelemetryDebug();
+    observerSetting(m_terrainRvtTelemetryDebug, "terrainRvtTelemetryDebug");
+    setTerrainRvtDebugView = settingsManager.getSettingSetter<uint32_t>("terrainRvtDebugView");
+    getTerrainRvtDebugView = settingsManager.getSettingGetter<uint32_t>("terrainRvtDebugView");
+    m_terrainRvtDebugView = static_cast<int>(getTerrainRvtDebugView());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtDebugView",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtDebugView = static_cast<int>(newValue);
+        }));
+    setTerrainRvtBasePageWorldSize = settingsManager.getSettingSetter<uint32_t>("terrainRvtBasePageWorldSize");
+    getTerrainRvtBasePageWorldSize = settingsManager.getSettingGetter<uint32_t>("terrainRvtBasePageWorldSize");
+    m_terrainRvtBasePageWorldSize = static_cast<int>(getTerrainRvtBasePageWorldSize());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtBasePageWorldSize",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtBasePageWorldSize = static_cast<int>(newValue);
+        }));
+    setTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
+    getTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
+    m_terrainRvtPhysicalAtlasPoolCount = static_cast<int>(getTerrainRvtPhysicalAtlasPoolCount());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPoolCount",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPoolCount = static_cast<int>(newValue);
+        }));
 
     setTerrainStochasticSamplingEnabled = settingsManager.getSettingSetter<bool>("enableTerrainStochasticSampling");
     getTerrainStochasticSamplingEnabled = settingsManager.getSettingGetter<bool>("enableTerrainStochasticSampling");
@@ -1901,6 +1955,24 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Terrain Region Material Evaluation", &m_terrainRegionMaterialEvaluationEnabled)) {
             setTerrainRegionMaterialEvaluationEnabled(m_terrainRegionMaterialEvaluationEnabled);
+        }
+        if (ImGui::Checkbox("Terrain Runtime Virtual Texture", &m_terrainRvtEnabled)) {
+            setTerrainRvtEnabled(m_terrainRvtEnabled);
+        }
+        if (ImGui::Checkbox("Force Terrain RVT Direct Fallback", &m_forceDirectTerrainRvtFallback)) {
+            setForceDirectTerrainRvtFallback(m_forceDirectTerrainRvtFallback);
+        }
+        if (ImGui::Checkbox("Terrain RVT Telemetry", &m_terrainRvtTelemetryDebug)) {
+            setTerrainRvtTelemetryDebug(m_terrainRvtTelemetryDebug);
+        }
+        if (ImGui::SliderInt("Terrain RVT Debug View", &m_terrainRvtDebugView, 0, 4)) {
+            setTerrainRvtDebugView(static_cast<uint32_t>(std::max(0, m_terrainRvtDebugView)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 128, 2048)) {
+            setTerrainRvtBasePageWorldSize(static_cast<uint32_t>(std::max(128, m_terrainRvtBasePageWorldSize)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pools", &m_terrainRvtPhysicalAtlasPoolCount, 1, 8)) {
+            setTerrainRvtPhysicalAtlasPoolCount(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPoolCount, 1, 8)));
         }
         if (ImGui::Checkbox("Terrain Stochastic Sampling", &m_terrainStochasticSamplingEnabled)) {
             setTerrainStochasticSamplingEnabled(m_terrainStochasticSamplingEnabled);

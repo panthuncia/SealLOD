@@ -108,7 +108,10 @@ struct PerFrameCB {
     unsigned int terrainParallaxMaxSteps = 16u;
     float terrainParallaxFadeStartDistance = 2048.0f;
     float terrainParallaxFadeEndDistance = 8192.0f;
-    DirectX::XMUINT2 terrainParallaxPad{};
+    unsigned int terrainRvtEnabled = 0u;
+    unsigned int terrainRvtForceDirectFallback = 0u;
+    unsigned int terrainRvtDebugView = 0u;
+    unsigned int terrainRvtTelemetryEnabled = 0u;
 };
 
 static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 124, "PerFrameCB layout mismatch.");
@@ -119,8 +122,11 @@ static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 148, "PerFrame
 static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 152, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxFadeStartDistance) == 156, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxFadeEndDistance) == 160, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainParallaxPad) == 164, "PerFrameCB layout mismatch.");
-static_assert(sizeof(PerFrameCB) == 176, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtEnabled) == 164, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtForceDirectFallback) == 168, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtDebugView) == 172, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 176, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 192, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;

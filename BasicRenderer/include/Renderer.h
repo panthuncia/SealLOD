@@ -217,6 +217,7 @@ private:
         const std::chrono::steady_clock::time_point& stageEnd);
     void PublishFrameTaskGraphCapture();
     void MaybeRequestCLodVisibilityTelemetry();
+    void MaybeRequestTerrainRvtTelemetry();
 
     void StallPipeline();
 
@@ -257,9 +258,14 @@ private:
     std::function<bool()> getDrawBoundingSpheres;
 	std::function<bool()> getImageBasedLightingEnabled;
 
-	std::vector<SettingsManager::Subscription> m_settingsSubscriptions;
+    std::vector<SettingsManager::Subscription> m_settingsSubscriptions;
 
-	DeferredFunctions m_preFrameDeferredFunctions;
+    uint64_t m_lastTerrainRvtTelemetryRequestFrame = UINT64_MAX;
+    bool m_terrainRvtStatsReadbackPending = false;
+    bool m_terrainRvtCountersReadbackPending = false;
+    bool m_loggedTerrainRvtTelemetryEnabled = false;
+
+    DeferredFunctions m_preFrameDeferredFunctions;
     int32_t m_lastFrameTaskNodeIndex = -1;
     br::render::SceneRenderBridge m_sceneRenderBridge;
     bool m_sceneRenderOverlapEnabled = true;

@@ -70,6 +70,16 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_VSM_RERENDERED_THIS_FRAME:
         case OUTPUT_TRANSPARENT_DEPTH_COMPLEXITY:
         case OUTPUT_PARALLAX_PIXELS:
+        case OUTPUT_TERRAIN_RVT_HIT:
+        case OUTPUT_TERRAIN_RVT_PAGE_UV:
+        case OUTPUT_TERRAIN_RVT_ATLAS_UV:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO:
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_TILE_UV:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_NORMAL:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
+        case OUTPUT_TERRAIN_RVT_PAGE_STAMP:
+        case OUTPUT_TERRAIN_RVT_PAGE_STAMP_DELTA:
             color = UnpackDebugFloat3(payload);
             break;
         case OUTPUT_TRANSPARENT_VBOIT_TRANSMITTANCE:
@@ -93,12 +103,20 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_GEOMETRY_GROUP:
         case OUTPUT_LIGHT_CLUSTER_ID:
         case OUTPUT_VSM_PHYSICAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_VIRTUAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_PAGE:
+        case OUTPUT_TERRAIN_RVT_ATLAS_POOL:
+        case OUTPUT_TERRAIN_RVT_FALLBACK_REASON:
+        case OUTPUT_TERRAIN_RVT_OWNER_PAGE:
+        case OUTPUT_TERRAIN_RVT_PAGE_DELTA:
             color = HashToColor(UnpackDebugUint(payload));
             break;
         case OUTPUT_LIGHT_CLUSTER_LIGHT_COUNT:
             color = HashToColor(UnpackDebugUint(payload));
             break;
         case OUTPUT_MATERIAL_SELECTED_MIP:
+        case OUTPUT_TERRAIN_RVT_REQUESTED_MIP:
+        case OUTPUT_TERRAIN_RVT_RESIDENT_MIP:
             color = MaterialSelectedMipDebugColor(payload.x, max(payload.x, payload.y));
             break;
     }

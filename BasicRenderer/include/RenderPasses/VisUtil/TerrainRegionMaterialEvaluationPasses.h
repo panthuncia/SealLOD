@@ -443,6 +443,13 @@ public:
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
             Builtin::Terrain::TextureGroup,
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPhysicalPageOwner,
+            Builtin::Terrain::RvtHeightAtlas,
+            Builtin::Terrain::RvtAlbedoAtlas,
+            Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CLod::Offsets,
             Builtin::CLod::GroupChunks,
@@ -460,6 +467,7 @@ public:
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
 				Builtin::DebugVisualization,
+                Builtin::Terrain::RvtStats,
 				Builtin::Material::TextureStreamingFeedbackBuffer)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
         b->WithIndirectArguments(

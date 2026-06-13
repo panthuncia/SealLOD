@@ -233,7 +233,99 @@ struct PerFrameBuffer {
     uint terrainParallaxMaxSteps;
     float terrainParallaxFadeStartDistance;
     float terrainParallaxFadeEndDistance;
-    uint2 terrainParallaxPad;
+    uint terrainRvtEnabled;
+    uint terrainRvtForceDirectFallback;
+    uint terrainRvtDebugView;
+    uint terrainRvtTelemetryEnabled;
+};
+
+static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
+static const uint TERRAIN_RVT_CONTENT_MATERIAL = 1u << 1;
+static const uint TERRAIN_RVT_PAGE_VALID = 1u << 31;
+static const uint TERRAIN_RVT_PAGE_CONTENT_SHIFT = 28u;
+static const uint TERRAIN_RVT_PAGE_CONTENT_MASK = 0x3u << TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+static const uint TERRAIN_RVT_PAGE_PHYSICAL_MASK = 0x00FFFFFFu;
+
+struct TerrainRvtInfo
+{
+    uint pageSize;
+    uint borderTexels;
+    uint physicalTileTexelSide;
+    uint physicalAtlasPagesWide;
+    uint physicalAtlasPagesHigh;
+    uint maxPhysicalPages;
+    uint maxVirtualPageTableEntries;
+    uint maxRequests;
+    uint maxGenerationEntries;
+    uint mipCount;
+    uint maxVirtualPagesPerAxis;
+    uint flags;
+    float basePageWorldSize;
+    uint physicalAtlasPoolCount;
+    uint2 pad0;
+};
+
+struct TerrainRvtGenerationRequest
+{
+    uint pageTableIndex;
+    uint physicalPageIndex;
+    uint contentMask;
+    uint pad0;
+};
+
+struct TerrainRvtStats
+{
+    uint heightRequests;
+    uint materialRequests;
+    uint requestOverflows;
+    uint generatedPages;
+    uint allocationFailures;
+    uint heightFallbacks;
+    uint materialFallbacks;
+    uint residentHits;
+    uint heightSampleAttempts;
+    uint materialSampleAttempts;
+    uint heightSampleHits;
+    uint materialSampleHits;
+    uint heightPageTableMisses;
+    uint materialPageTableMisses;
+    uint heightComputePageFailures;
+    uint materialComputePageFailures;
+    uint heightDisabledFallbacks;
+    uint materialDisabledFallbacks;
+    uint heightForcedFallbacks;
+    uint materialForcedFallbacks;
+    uint markComputePageFailures;
+    uint markWorldRectCalls;
+    uint markWorldRectPages;
+    uint resolveResidentPages;
+    uint generationHeightPages;
+    uint generationMaterialPages;
+    uint generationCombinedPages;
+    uint generationTexels;
+    uint materialSampleRequestedPageXor;
+    uint materialSampleResidentPageXor;
+    uint materialSamplePhysicalPageXor;
+    uint materialSampleRequestedPageMin;
+    uint materialSampleRequestedPageMax;
+    uint materialSampleResidentPageMin;
+    uint materialSampleResidentPageMax;
+    uint materialSamplePhysicalPageMin;
+    uint materialSamplePhysicalPageMax;
+    uint materialSampleCoarserResidentHits;
+    uint materialSampleAtlasPoolMask;
+    uint heightOwnerMismatches;
+    uint materialOwnerMismatches;
+    uint materialSamplePageStampMismatches;
+    uint generationPageTableXor;
+    uint generationPhysicalPageXor;
+    uint generationPairHashXor;
+    uint physicalPageOwnerCollisions;
+    uint heightRequestMipHistogram[16];
+    uint materialRequestMipHistogram[16];
+    uint heightSampleMipHistogram[16];
+    uint materialSampleMipHistogram[16];
+    uint generationMipHistogram[16];
 };
 
 struct BoundingSphere {
@@ -783,6 +875,25 @@ struct MaterialInputs
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
     uint parallaxApplied;
+    uint terrainRvtDebugFlags;
+    uint terrainRvtRequestedMip;
+    uint terrainRvtResidentMip;
+    uint terrainRvtPageTableIndex;
+    uint terrainRvtPhysicalPageIndex;
+    uint terrainRvtAtlasPoolIndex;
+    uint terrainRvtOwnerPageTableIndex;
+    uint terrainRvtFallbackReason;
+    uint2 terrainRvtPageCoord;
+    float2 terrainRvtPageUv;
+    float3 terrainRvtAtlasUv;
+    float2 terrainRvtPhysicalTileUv;
+    float3 terrainRvtSampleAlbedo;
+    float3 terrainRvtSampleAlbedoPoint;
+    float3 terrainRvtSampleNormal;
+    float3 terrainRvtSampleMaterial;
+    float terrainRvtPageStamp;
+    float terrainRvtExpectedPageStamp;
+    float terrainRvtPageStampDelta;
 };
 
 struct SkinningInstanceGPUInfo

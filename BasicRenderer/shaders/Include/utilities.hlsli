@@ -445,6 +445,25 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
     materialInputs.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     materialInputs.selectedMaterialMipMaxLevel = 0u;
     materialInputs.parallaxApplied = 0u;
+    materialInputs.terrainRvtDebugFlags = 0u;
+    materialInputs.terrainRvtRequestedMip = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    materialInputs.terrainRvtResidentMip = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    materialInputs.terrainRvtPageTableIndex = 0xffffffffu;
+    materialInputs.terrainRvtPhysicalPageIndex = 0xffffffffu;
+    materialInputs.terrainRvtAtlasPoolIndex = 0xffffffffu;
+    materialInputs.terrainRvtOwnerPageTableIndex = 0xffffffffu;
+    materialInputs.terrainRvtFallbackReason = 0u;
+    materialInputs.terrainRvtPageCoord = 0xffffffffu.xx;
+    materialInputs.terrainRvtPageUv = 0.0f.xx;
+    materialInputs.terrainRvtAtlasUv = 0.0f.xxx;
+    materialInputs.terrainRvtPhysicalTileUv = 0.0f.xx;
+    materialInputs.terrainRvtSampleAlbedo = 0.0f.xxx;
+    materialInputs.terrainRvtSampleAlbedoPoint = 0.0f.xxx;
+    materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
+    materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
+    materialInputs.terrainRvtPageStamp = 0.0f;
+    materialInputs.terrainRvtExpectedPageStamp = 0.0f;
+    materialInputs.terrainRvtPageStampDelta = 0.0f;
 }
 
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)

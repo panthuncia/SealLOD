@@ -108,6 +108,113 @@ void EvaluateGBufferOptimized(uint2 pixel)
         case OUTPUT_PARALLAX_PIXELS:
             payload = PackDebugFloat3(sample.materialInputs.parallaxApplied != 0u ? 1.0f.xxx : 0.0f.xxx);
             break;
+        case OUTPUT_TERRAIN_RVT_HIT:
+            payload = PackDebugFloat3(
+                (sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u ? float3(0.10f, 0.95f, 0.20f) :
+                ((sample.materialInputs.terrainRvtDebugFlags & 0x1u) != 0u ? float3(0.95f, 0.15f, 0.10f) : 0.0f.xxx));
+            break;
+        case OUTPUT_TERRAIN_RVT_REQUESTED_MIP:
+            if (sample.materialInputs.terrainRvtRequestedMip != MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+            {
+                payload = PackDebugUint2(sample.materialInputs.terrainRvtRequestedMip, 15u);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_RESIDENT_MIP:
+            if (sample.materialInputs.terrainRvtResidentMip != MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+            {
+                payload = PackDebugUint2(sample.materialInputs.terrainRvtResidentMip, 15u);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_VIRTUAL_PAGE:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_PAGE:
+            if (sample.materialInputs.terrainRvtPhysicalPageIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPhysicalPageIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(float3(sample.materialInputs.terrainRvtPageUv, 0.0f));
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_ATLAS_POOL:
+            if (sample.materialInputs.terrainRvtAtlasPoolIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtAtlasPoolIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_ATLAS_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtAtlasUv);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleAlbedo);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_FALLBACK_REASON:
+            payload = PackDebugUint(sample.materialInputs.terrainRvtFallbackReason);
+            break;
+        case OUTPUT_TERRAIN_RVT_OWNER_PAGE:
+            if (sample.materialInputs.terrainRvtOwnerPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtOwnerPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_DELTA:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainRvtPageTableIndex ^ sample.materialInputs.terrainRvtOwnerPageTableIndex);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PHYSICAL_TILE_UV:
+            if (sample.materialInputs.terrainRvtPageTableIndex != 0xffffffffu)
+            {
+                payload = PackDebugFloat3(float3(sample.materialInputs.terrainRvtPhysicalTileUv, 0.0f));
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_NORMAL:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleNormal * 0.5f + 0.5f);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleMaterial);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleAlbedoPoint);
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_STAMP:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(float3(
+                    sample.materialInputs.terrainRvtPageStamp,
+                    sample.materialInputs.terrainRvtExpectedPageStamp,
+                    0.0f));
+            }
+            break;
+        case OUTPUT_TERRAIN_RVT_PAGE_STAMP_DELTA:
+            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
+            {
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtPageStampDelta.xxx);
+            }
+            break;
     }
     if (payload.x != DEBUG_SENTINEL) {
         WriteDebugPixel(debugVisTex, pixel, payload);
