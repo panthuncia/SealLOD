@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -31,7 +32,8 @@ namespace TerrainRvt
     inline constexpr uint32_t CounterCount = 4u;
     inline constexpr uint32_t MaxDispatchGroupsX = 65535u;
     inline constexpr uint32_t PhysicalAtlasTextureSide = 16384u;
-    inline constexpr float DefaultBasePageWorldSize = 128.0f;
+    inline constexpr float DefaultSourceTexelsPerWorld = 24.0f;
+    inline constexpr float DefaultBasePageWorldSize = 128.0f / DefaultSourceTexelsPerWorld;
 
     inline uint32_t FloatBits(float value)
     {
@@ -67,6 +69,16 @@ namespace TerrainRvt
     {
         try {
             return SettingsManager::GetInstance().getSettingGetter<uint32_t>(name)();
+        }
+        catch (...) {
+            return fallback;
+        }
+    }
+
+    inline float SettingFloat(const char* name, float fallback)
+    {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<float>(name)();
         }
         catch (...) {
             return fallback;
@@ -119,9 +131,9 @@ namespace TerrainRvt
         return AtlasPagesWide() * AtlasPagesHigh() * AtlasPoolCount();
     }
 
-    inline uint32_t BasePageWorldSize()
+    inline float BasePageWorldSize()
     {
-        return (std::max)(SettingU32("terrainRvtBasePageWorldSize", static_cast<uint32_t>(DefaultBasePageWorldSize)), 1u);
+        return (std::max)(SettingFloat("terrainRvtBasePageWorldSize", DefaultBasePageWorldSize), 0.125f);
     }
 
     inline void FillInfoRootConstants(uint32_t* rootConstants)
@@ -138,8 +150,10 @@ namespace TerrainRvt
         rootConstants[6] = MaxPhysicalPages();
         rootConstants[7] = MipCount();
         rootConstants[8] = MaxVirtualPagesPerAxis();
-        rootConstants[9] = FloatBits(static_cast<float>(BasePageWorldSize()));
+        rootConstants[9] = FloatBits(BasePageWorldSize());
         rootConstants[11] = AtlasPoolCount();
+        rootConstants[12] = 0u;
+        rootConstants[13] = 0u;
     }
 }
 
@@ -180,6 +194,13 @@ public:
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
         TerrainRvt::FillInfoRootConstants(rootConstants);
         rootConstants[10] = 1u;
+        const float basePageWorldSize = TerrainRvt::BasePageWorldSize();
+        const auto cameraPosition = renderContext->primaryCamera.info.positionWorldSpace;
+        const int32_t halfVirtualAxis = static_cast<int32_t>(TerrainRvt::MaxVirtualPagesPerAxis() >> 1u);
+        const int32_t cameraBasePageX = static_cast<int32_t>(std::floor(cameraPosition.x / basePageWorldSize));
+        const int32_t cameraBasePageY = static_cast<int32_t>(std::floor(-cameraPosition.z / basePageWorldSize));
+        rootConstants[12] = static_cast<uint32_t>(cameraBasePageX - halfVirtualAxis);
+        rootConstants[13] = static_cast<uint32_t>(cameraBasePageY - halfVirtualAxis);
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
         const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
         const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
@@ -187,11 +208,14 @@ public:
         if (!loggedDispatch) {
             loggedDispatch = true;
             spdlog::info(
-                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={}",
+                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} origin_page=({}, {})",
                 maxPageTableEntries,
                 dispatchX,
                 dispatchY,
-                static_cast<uint64_t>(dispatchX) * dispatchY * 64ull);
+                static_cast<uint64_t>(dispatchX) * dispatchY * 64ull,
+                basePageWorldSize,
+                static_cast<int32_t>(rootConstants[12]),
+                static_cast<int32_t>(rootConstants[13]));
         }
         commandList.Dispatch(dispatchX, dispatchY, 1u);
         return {};

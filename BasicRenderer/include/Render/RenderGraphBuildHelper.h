@@ -368,7 +368,8 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t flags;
         float basePageWorldSize;
         uint32_t physicalAtlasPoolCount;
-        uint32_t pad0[2];
+        int32_t pageTableOriginPageX;
+        int32_t pageTableOriginPageY;
     };
     struct TerrainRvtGenerationRequestPOD {
         uint32_t pageTableIndex;

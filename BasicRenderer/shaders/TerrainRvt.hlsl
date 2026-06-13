@@ -29,6 +29,8 @@ uint TerrainRvtInfoMipCount() { return UintRootConstant7; }
 uint TerrainRvtInfoMaxVirtualPagesPerAxis() { return UintRootConstant8; }
 float TerrainRvtInfoBasePageWorldSize() { return asfloat(UintRootConstant9); }
 uint TerrainRvtInfoAtlasPoolCount() { return UintRootConstant11; }
+int TerrainRvtInfoPageTableOriginPageX() { return asint(UintRootConstant12); }
+int TerrainRvtInfoPageTableOriginPageY() { return asint(UintRootConstant13); }
 
 float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
 {
@@ -70,8 +72,9 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     info.mipCount = max(TerrainRvtInfoMipCount(), 1u);
     info.maxVirtualPagesPerAxis = max(TerrainRvtInfoMaxVirtualPagesPerAxis(), 1u);
     info.flags = 0u;
-    info.basePageWorldSize = max(TerrainRvtInfoBasePageWorldSize(), 1.0f);
-    info.pad0 = 0u.xx;
+    info.basePageWorldSize = max(TerrainRvtInfoBasePageWorldSize(), 0.125f);
+    info.pageTableOriginPageX = TerrainRvtInfoPageTableOriginPageX();
+    info.pageTableOriginPageY = TerrainRvtInfoPageTableOriginPageY();
 
     const uint linearThreadIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
 
@@ -478,7 +481,7 @@ void TerrainRvtBuildGenerateDispatchArgsCS(uint3 tid : SV_DispatchThreadID)
     argsOut[0] = args;
 }
 
-void TerrainRvtDecodePageTableIndex(TerrainRvtInfo info, uint pageTableIndex, out uint terrainSetIndex, out uint mip, out uint2 pageCoord)
+void TerrainRvtDecodePageTableIndex(TerrainRvtInfo info, TerrainSetInfo terrain, uint pageTableIndex, out uint terrainSetIndex, out uint mip, out uint2 pageCoord)
 {
     const uint entriesPerTerrainSet = max(TerrainRvtPageTableEntriesPerTerrainSet(info), 1u);
     terrainSetIndex = pageTableIndex / entriesPerTerrainSet;
@@ -493,7 +496,9 @@ void TerrainRvtDecodePageTableIndex(TerrainRvtInfo info, uint pageTableIndex, ou
         if (remaining < mipEntries)
         {
             mip = i;
-            pageCoord = uint2(remaining % axis, remaining / axis);
+            const int2 tablePageCoord = int2(remaining % axis, remaining / axis);
+            const int2 worldPageCoord = tablePageCoord + TerrainRvtPageTableOriginForMip(info, mip);
+            pageCoord = (uint2)(worldPageCoord - TerrainRvtTerrainOriginPageForMip(info, terrain, mip));
             return;
         }
         remaining -= mipEntries;
@@ -551,7 +556,10 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     uint mip;
     uint2 pageCoord;
     uint terrainSetIndex;
-    TerrainRvtDecodePageTableIndex(info, generation.pageTableIndex, terrainSetIndex, mip, pageCoord);
+    const uint entriesPerTerrainSet = max(TerrainRvtPageTableEntriesPerTerrainSet(info), 1u);
+    terrainSetIndex = generation.pageTableIndex / entriesPerTerrainSet;
+    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    TerrainRvtDecodePageTableIndex(info, terrain, generation.pageTableIndex, terrainSetIndex, mip, pageCoord);
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     if (perFrame.terrainRvtTelemetryEnabled != 0u && texelInPage == 0u)
     {
@@ -559,7 +567,6 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         InterlockedAdd(stats[0].generationTexels, texelsPerPage);
     }
 
-    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     const float pageWorldSize = TerrainRvtPageWorldSize(info, mip);
     const float texelWorldSize = pageWorldSize / (float)max(info.pageSize, 1u);
     const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;

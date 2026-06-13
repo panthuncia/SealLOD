@@ -692,9 +692,9 @@ private:
     int m_terrainRvtDebugView = 0;
     std::function<uint32_t()> getTerrainRvtDebugView;
     std::function<void(uint32_t)> setTerrainRvtDebugView;
-    int m_terrainRvtBasePageWorldSize = 128;
-    std::function<uint32_t()> getTerrainRvtBasePageWorldSize;
-    std::function<void(uint32_t)> setTerrainRvtBasePageWorldSize;
+    float m_terrainRvtBasePageWorldSize = 128.0f / 24.0f;
+    std::function<float()> getTerrainRvtBasePageWorldSize;
+    std::function<void(float)> setTerrainRvtBasePageWorldSize;
     int m_terrainRvtPhysicalAtlasPoolCount = 1;
     std::function<uint32_t()> getTerrainRvtPhysicalAtlasPoolCount;
     std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPoolCount;
@@ -1252,13 +1252,13 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         [this](const uint32_t& newValue) {
             m_terrainRvtDebugView = static_cast<int>(newValue);
         }));
-    setTerrainRvtBasePageWorldSize = settingsManager.getSettingSetter<uint32_t>("terrainRvtBasePageWorldSize");
-    getTerrainRvtBasePageWorldSize = settingsManager.getSettingGetter<uint32_t>("terrainRvtBasePageWorldSize");
-    m_terrainRvtBasePageWorldSize = static_cast<int>(getTerrainRvtBasePageWorldSize());
-    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+    setTerrainRvtBasePageWorldSize = settingsManager.getSettingSetter<float>("terrainRvtBasePageWorldSize");
+    getTerrainRvtBasePageWorldSize = settingsManager.getSettingGetter<float>("terrainRvtBasePageWorldSize");
+    m_terrainRvtBasePageWorldSize = getTerrainRvtBasePageWorldSize();
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<float>(
         "terrainRvtBasePageWorldSize",
-        [this](const uint32_t& newValue) {
-            m_terrainRvtBasePageWorldSize = static_cast<int>(newValue);
+        [this](const float& newValue) {
+            m_terrainRvtBasePageWorldSize = newValue;
         }));
     setTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
     getTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
@@ -1968,8 +1968,8 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::SliderInt("Terrain RVT Debug View", &m_terrainRvtDebugView, 0, 4)) {
             setTerrainRvtDebugView(static_cast<uint32_t>(std::max(0, m_terrainRvtDebugView)));
         }
-        if (ImGui::SliderInt("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 128, 2048)) {
-            setTerrainRvtBasePageWorldSize(static_cast<uint32_t>(std::max(128, m_terrainRvtBasePageWorldSize)));
+        if (ImGui::SliderFloat("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 0.125f, 256.0f, "%.3f")) {
+            setTerrainRvtBasePageWorldSize(std::max(0.125f, m_terrainRvtBasePageWorldSize));
         }
         if (ImGui::SliderInt("Terrain RVT Physical Atlas Pools", &m_terrainRvtPhysicalAtlasPoolCount, 1, 8)) {
             setTerrainRvtPhysicalAtlasPoolCount(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPoolCount, 1, 8)));

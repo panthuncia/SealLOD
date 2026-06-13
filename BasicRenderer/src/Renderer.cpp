@@ -1559,7 +1559,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
     settingsManager.registerSetting<bool>("enableTerrainRvt", true);
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
-    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
+    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, true);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);
@@ -1568,7 +1568,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPoolCount", 1u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxVirtualPagesPerAxis", 4096u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 10u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtBasePageWorldSize", 128u);
+    settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
@@ -2688,7 +2688,8 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const auto atlasPoolCount = TerrainRvt::AtlasPoolCount();
     const auto maxVirtualPagesPerAxis = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMaxVirtualPagesPerAxis")();
     const auto mipCount = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMipCount")();
-    const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtBasePageWorldSize")();
+    const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<float>("terrainRvtBasePageWorldSize")();
+    const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
     const auto forcedFallback = SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")();
 
     readbackService->RequestReadbackCapture(
@@ -2814,6 +2815,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          pageSize,
          borderTexels,
          basePageWorldSize,
+         mip0TexelWorldSize,
          atlasPagesWide,
          atlasPagesHigh,
          atlasPoolCount,
@@ -2834,7 +2836,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
             uint32_t counters[4] = {};
             std::memcpy(counters, result.data.data(), counterBytes);
             spdlog::info(
-                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={} atlas={}x{}x{} max_virtual_axis={} mips={} forced_fallback={})",
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} max_virtual_axis={} mips={} forced_fallback={})",
                 requestedFrame,
                 counters[0],
                 counters[1],
@@ -2843,6 +2845,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 pageSize,
                 borderTexels,
                 basePageWorldSize,
+                mip0TexelWorldSize,
                 atlasPagesWide,
                 atlasPagesHigh,
                 atlasPoolCount,

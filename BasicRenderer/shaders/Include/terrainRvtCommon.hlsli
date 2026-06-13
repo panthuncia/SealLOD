@@ -73,12 +73,24 @@ uint TerrainRvtPageTableEntriesPerTerrainSet(TerrainRvtInfo info)
 
 float TerrainRvtBasePageWorldSize(TerrainRvtInfo info)
 {
-    return max(info.basePageWorldSize, 1.0f);
+    return max(info.basePageWorldSize, 0.125f);
 }
 
 float TerrainRvtPageWorldSize(TerrainRvtInfo info, uint mip)
 {
     return TerrainRvtBasePageWorldSize(info) * (float)(1u << min(mip, 31u));
+}
+
+int2 TerrainRvtPageTableOriginForMip(TerrainRvtInfo info, uint mip)
+{
+    const float mipScale = (float)(1u << min(mip, 31u));
+    return (int2)floor(float2(info.pageTableOriginPageX, info.pageTableOriginPageY) / mipScale);
+}
+
+int2 TerrainRvtTerrainOriginPageForMip(TerrainRvtInfo info, TerrainSetInfo terrain, uint mip)
+{
+    const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;
+    return (int2)floor(terrainOrigin / TerrainRvtPageWorldSize(info, mip));
 }
 
 uint2 TerrainRvtBasePageCount(TerrainRvtInfo info, TerrainSetInfo terrain)
@@ -231,21 +243,32 @@ bool TerrainRvtTryComputePageAtMip(
 
     const float pageWorldSize = TerrainRvtPageWorldSize(info, mip);
     const float2 pageFloat = local / pageWorldSize;
-    pageCoord = (uint2)floor(pageFloat);
+    const int2 terrainLocalPageCoord = (int2)floor(pageFloat);
     const uint axis = TerrainRvtMipAxis(info, mip);
     const uint2 terrainMipPageCount = TerrainRvtMipPageCount(info, terrain, mip);
-    if (pageCoord.x >= axis || pageCoord.y >= axis ||
-        pageCoord.x >= terrainMipPageCount.x || pageCoord.y >= terrainMipPageCount.y)
+    if (any(terrainLocalPageCoord < int2(0, 0)) ||
+        terrainLocalPageCoord.x >= (int)terrainMipPageCount.x ||
+        terrainLocalPageCoord.y >= (int)terrainMipPageCount.y)
     {
         return false;
     }
 
+    const int2 worldPageCoord = terrainLocalPageCoord + TerrainRvtTerrainOriginPageForMip(info, terrain, mip);
+    const int2 tablePageCoord = worldPageCoord - TerrainRvtPageTableOriginForMip(info, mip);
+    if (any(tablePageCoord < int2(0, 0)) ||
+        tablePageCoord.x >= (int)axis ||
+        tablePageCoord.y >= (int)axis)
+    {
+        return false;
+    }
+
+    pageCoord = (uint2)terrainLocalPageCoord;
     pageUv = frac(pageFloat);
     const uint entriesPerTerrainSet = TerrainRvtPageTableEntriesPerTerrainSet(info);
     pageTableIndex = terrainSetIndex * entriesPerTerrainSet +
         TerrainRvtPageTableMipOffset(info, mip) +
-        pageCoord.y * axis +
-        pageCoord.x;
+        (uint)tablePageCoord.y * axis +
+        (uint)tablePageCoord.x;
     return pageTableIndex < info.maxVirtualPageTableEntries;
 }
 
@@ -875,11 +898,13 @@ void TerrainRvtMarkWorldRect(
     int2 maxPage = (int2)floor((maxSkyrimXY - terrainOrigin) / pageWorldSize);
     const uint axis = TerrainRvtMipAxis(info, mip);
     const uint2 terrainMipPageCount = TerrainRvtMipPageCount(info, terrain, mip);
-    const int2 maxValidPage = int2(min(uint2(axis, axis), terrainMipPageCount) - 1u);
+    const int2 maxValidPage = int2(terrainMipPageCount - 1u);
     minPage = clamp(minPage, int2(0, 0), maxValidPage);
     maxPage = clamp(maxPage, int2(0, 0), maxValidPage);
 
     const uint mipOffset = terrainSetIndex * TerrainRvtPageTableEntriesPerTerrainSet(info) + TerrainRvtPageTableMipOffset(info, mip);
+    const int2 tableOrigin = TerrainRvtPageTableOriginForMip(info, mip);
+    const int2 terrainOriginPage = TerrainRvtTerrainOriginPageForMip(info, terrain, mip);
     const uint pageCount = (uint)((maxPage.x - minPage.x + 1) * (maxPage.y - minPage.y + 1));
     if (telemetryEnabled)
     {
@@ -892,7 +917,14 @@ void TerrainRvtMarkWorldRect(
         [loop]
         for (int x = minPage.x; x <= maxPage.x; ++x)
         {
-            TerrainRvtMarkPageTableIndex(mipOffset + (uint)y * axis + (uint)x, contentMask);
+            const int2 tablePageCoord = int2(x, y) + terrainOriginPage - tableOrigin;
+            if (any(tablePageCoord < int2(0, 0)) ||
+                tablePageCoord.x >= (int)axis ||
+                tablePageCoord.y >= (int)axis)
+            {
+                continue;
+            }
+            TerrainRvtMarkPageTableIndex(mipOffset + (uint)tablePageCoord.y * axis + (uint)tablePageCoord.x, contentMask);
         }
     }
 }

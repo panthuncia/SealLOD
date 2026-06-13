@@ -262,7 +262,8 @@ struct TerrainRvtInfo
     uint flags;
     float basePageWorldSize;
     uint physicalAtlasPoolCount;
-    uint2 pad0;
+    int pageTableOriginPageX;
+    int pageTableOriginPageY;
 };
 
 struct TerrainRvtGenerationRequest
