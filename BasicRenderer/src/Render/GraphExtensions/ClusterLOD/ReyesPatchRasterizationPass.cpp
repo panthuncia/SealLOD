@@ -101,6 +101,7 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             Builtin::SkeletonResources::SkinningInstanceInfo)
 		.WithUnorderedAccess(
             Builtin::Material::TextureStreamingFeedbackBuffer,
+            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtRequestList,
             Builtin::Terrain::RvtCounters,

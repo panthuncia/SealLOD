@@ -112,6 +112,7 @@ void TerrainRvtClearFeedbackRequestsCS(uint3 tid : SV_DispatchThreadID)
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     TerrainRvtInfo info = infoBuffer[0];
     RWStructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
+    RWStructuredBuffer<uint2> pageKeys = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
 
     const uint linearThreadIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
@@ -123,6 +124,7 @@ void TerrainRvtClearFeedbackRequestsCS(uint3 tid : SV_DispatchThreadID)
     if (linearThreadIndex < info.maxVirtualPageTableEntries)
     {
         requestMasks[linearThreadIndex] = 0u;
+        pageKeys[linearThreadIndex] = uint2(TERRAIN_RVT_EMPTY_PAGE_KEY, TERRAIN_RVT_EMPTY_PAGE_KEY);
     }
 }
 
@@ -339,6 +341,7 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     StructuredBuffer<uint> requestList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestList)];
     StructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
+    StructuredBuffer<uint2> pageKeys = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
     RWStructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
     RWStructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -350,6 +353,11 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     {
         const uint pageTableIndex = requestList[requestIndex];
         if (pageTableIndex >= info.maxVirtualPageTableEntries)
+        {
+            return;
+        }
+        const uint2 pageKey = pageKeys[pageTableIndex];
+        if (pageKey.x == TERRAIN_RVT_EMPTY_PAGE_KEY || pageKey.x == TERRAIN_RVT_RESERVED_PAGE_KEY)
         {
             return;
         }
@@ -435,7 +443,7 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
         {
             RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
             InterlockedAdd(stats[0].generatedPages, 1u);
-            const uint mip = TerrainRvtMipFromPageTableIndex(info, pageTableIndex);
+            const uint mip = TerrainRvtMipFromPageKey(pageKey);
             InterlockedAdd(stats[0].generationMipHistogram[TerrainRvtTelemetryMipBin(mip)], 1u);
             if ((requestedMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
             {
@@ -481,30 +489,6 @@ void TerrainRvtBuildGenerateDispatchArgsCS(uint3 tid : SV_DispatchThreadID)
     argsOut[0] = args;
 }
 
-void TerrainRvtDecodePageTableIndex(TerrainRvtInfo info, TerrainSetInfo terrain, uint pageTableIndex, out uint terrainSetIndex, out uint mip, out uint2 pageCoord)
-{
-    const uint entriesPerTerrainSet = max(TerrainRvtPageTableEntriesPerTerrainSet(info), 1u);
-    terrainSetIndex = pageTableIndex / entriesPerTerrainSet;
-    mip = 0u;
-    pageCoord = 0u.xx;
-    uint remaining = pageTableIndex - terrainSetIndex * entriesPerTerrainSet;
-    [loop]
-    for (uint i = 0u; i < info.mipCount; ++i)
-    {
-        const uint axis = TerrainRvtMipAxis(info, i);
-        const uint mipEntries = axis * axis;
-        if (remaining < mipEntries)
-        {
-            mip = i;
-            const int2 tablePageCoord = int2(remaining % axis, remaining / axis);
-            const int2 worldPageCoord = tablePageCoord + TerrainRvtPageTableOriginForMip(info, mip);
-            pageCoord = (uint2)(worldPageCoord - TerrainRvtTerrainOriginPageForMip(info, terrain, mip));
-            return;
-        }
-        remaining -= mipEntries;
-    }
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
@@ -512,6 +496,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     StructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     StructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
+    StructuredBuffer<uint2> pageKeys = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
 
     TerrainRvtInfo info = infoBuffer[0];
@@ -556,10 +541,13 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     uint mip;
     uint2 pageCoord;
     uint terrainSetIndex;
-    const uint entriesPerTerrainSet = max(TerrainRvtPageTableEntriesPerTerrainSet(info), 1u);
-    terrainSetIndex = generation.pageTableIndex / entriesPerTerrainSet;
+    const uint2 pageKey = pageKeys[generation.pageTableIndex];
+    if (pageKey.x == TERRAIN_RVT_EMPTY_PAGE_KEY || pageKey.x == TERRAIN_RVT_RESERVED_PAGE_KEY)
+    {
+        return;
+    }
+    TerrainRvtDecodePageKey(pageKey, terrainSetIndex, mip, pageCoord);
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-    TerrainRvtDecodePageTableIndex(info, terrain, generation.pageTableIndex, terrainSetIndex, mip, pageCoord);
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     if (perFrame.terrainRvtTelemetryEnabled != 0u && texelInPage == 0u)
     {

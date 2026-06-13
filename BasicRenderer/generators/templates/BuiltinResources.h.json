@@ -24,10 +24,11 @@
       "RvtGenerationList": {},
       "RvtStats": {},
       "RvtGenerateDispatchArgs": {},
-      "RvtHeightAtlas": {},
-      "RvtAlbedoAtlas": {},
-      "RvtNormalAtlas": {},
-      "RvtMaterialAtlas": {}
+        "RvtHeightAtlas": {},
+        "RvtAlbedoAtlas": {},
+        "RvtNormalAtlas": {},
+        "RvtPageKeys": {},
+        "RvtMaterialAtlas": {}
     },
     "PerMaterialDataBuffer": {},
     "PerMaterialOpenPBRDataBuffer": {},

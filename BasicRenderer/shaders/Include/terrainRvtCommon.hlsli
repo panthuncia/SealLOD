@@ -15,6 +15,8 @@ static const uint TERRAIN_RVT_FALLBACK_FORCED = 2u;
 static const uint TERRAIN_RVT_FALLBACK_COMPUTE_PAGE = 3u;
 static const uint TERRAIN_RVT_FALLBACK_PAGE_MISS = 4u;
 static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
+static const uint TERRAIN_RVT_EMPTY_PAGE_KEY = 0xffffffffu;
+static const uint TERRAIN_RVT_RESERVED_PAGE_KEY = 0xfffffffeu;
 #define TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG 0
 
 #if TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG
@@ -81,18 +83,6 @@ float TerrainRvtPageWorldSize(TerrainRvtInfo info, uint mip)
     return TerrainRvtBasePageWorldSize(info) * (float)(1u << min(mip, 31u));
 }
 
-int2 TerrainRvtPageTableOriginForMip(TerrainRvtInfo info, uint mip)
-{
-    const float mipScale = (float)(1u << min(mip, 31u));
-    return (int2)floor(float2(info.pageTableOriginPageX, info.pageTableOriginPageY) / mipScale);
-}
-
-int2 TerrainRvtTerrainOriginPageForMip(TerrainRvtInfo info, TerrainSetInfo terrain, uint mip)
-{
-    const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;
-    return (int2)floor(terrainOrigin / TerrainRvtPageWorldSize(info, mip));
-}
-
 uint2 TerrainRvtBasePageCount(TerrainRvtInfo info, TerrainSetInfo terrain)
 {
     const float basePageWorldSize = TerrainRvtBasePageWorldSize(info);
@@ -141,6 +131,123 @@ uint TerrainRvtTelemetryMipBin(uint mip)
     return min(mip, TERRAIN_RVT_TELEMETRY_MIP_BINS - 1u);
 }
 
+uint TerrainRvtHash(uint2 key)
+{
+    uint h = key.x * 0x9e3779b9u ^ key.y * 0x85ebca6bu;
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
+}
+
+uint2 TerrainRvtPackPageKey(uint terrainSetIndex, uint mip, uint2 pageCoord)
+{
+    return uint2(
+        ((pageCoord.x & 0x000fffffu) << 12u) |
+            ((mip & 0xfu) << 8u) |
+            (terrainSetIndex & 0xffu),
+        pageCoord.y);
+}
+
+void TerrainRvtDecodePageKey(uint2 key, out uint terrainSetIndex, out uint mip, out uint2 pageCoord)
+{
+    terrainSetIndex = key.x & 0xffu;
+    mip = (key.x >> 8u) & 0xfu;
+    pageCoord = uint2(key.x >> 12u, key.y);
+}
+
+uint TerrainRvtMipFromPageKey(uint2 key)
+{
+    return (key.x >> 8u) & 0xfu;
+}
+
+bool TerrainRvtPageKeyEquals(uint2 lhs, uint2 rhs)
+{
+    return lhs.x == rhs.x && lhs.y == rhs.y;
+}
+
+bool TerrainRvtFindOrClaimPageSlot(TerrainRvtInfo info, uint2 key, bool claim, out uint pageTableIndex)
+{
+    pageTableIndex = 0xffffffffu;
+    if (info.maxVirtualPageTableEntries == 0u ||
+        key.x == TERRAIN_RVT_EMPTY_PAGE_KEY ||
+        key.x == TERRAIN_RVT_RESERVED_PAGE_KEY)
+    {
+        return false;
+    }
+
+    RWStructuredBuffer<uint2> pageKeys = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
+    const uint capacity = info.maxVirtualPageTableEntries;
+    const uint firstSlot = TerrainRvtHash(key) % capacity;
+    const uint maxProbeCount = min(capacity, 32u);
+    [loop]
+    for (uint probe = 0u; probe < maxProbeCount; ++probe)
+    {
+        const uint slot = (firstSlot + probe) % capacity;
+        uint2 stored = pageKeys[slot];
+        if (TerrainRvtPageKeyEquals(stored, key))
+        {
+            pageTableIndex = slot;
+            return true;
+        }
+
+        if (stored.x == TERRAIN_RVT_RESERVED_PAGE_KEY)
+        {
+            [unroll]
+            for (uint waitIndex = 0u; waitIndex < 8u; ++waitIndex)
+            {
+                stored = pageKeys[slot];
+                if (stored.x != TERRAIN_RVT_RESERVED_PAGE_KEY)
+                {
+                    break;
+                }
+            }
+            if (TerrainRvtPageKeyEquals(stored, key))
+            {
+                pageTableIndex = slot;
+                return true;
+            }
+        }
+
+        if (stored.x == TERRAIN_RVT_EMPTY_PAGE_KEY)
+        {
+            if (!claim)
+            {
+                return false;
+            }
+
+            uint original = 0u;
+            InterlockedCompareExchange(pageKeys[slot].x, TERRAIN_RVT_EMPTY_PAGE_KEY, TERRAIN_RVT_RESERVED_PAGE_KEY, original);
+            if (original == TERRAIN_RVT_EMPTY_PAGE_KEY)
+            {
+                pageKeys[slot].y = key.y;
+                pageKeys[slot].x = key.x;
+                pageTableIndex = slot;
+                return true;
+            }
+            if (original == key.x)
+            {
+                stored = pageKeys[slot];
+                if (stored.y == key.y)
+                {
+                    pageTableIndex = slot;
+                    return true;
+                }
+            }
+        }
+    }
+
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if (perFrame.terrainRvtTelemetryEnabled != 0u)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].requestOverflows, 1u);
+    }
+    return false;
+}
+
 uint TerrainRvtPackPageTableEntry(uint physicalPageIndex, uint contentMask)
 {
     return TERRAIN_RVT_PAGE_VALID |
@@ -169,6 +276,7 @@ bool TerrainRvtTryComputePageAtMip(
 void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
 
 bool TerrainRvtTryComputePage(
+    uint terrainSetIndex,
     TerrainRvtInfo info,
     TerrainSetInfo terrain,
     float2 skyrimXY,
@@ -206,7 +314,7 @@ bool TerrainRvtTryComputePage(
     const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
     mip = min((uint)max(0.0f, floor(requestedMip)), info.mipCount - 1u);
 
-    return TerrainRvtTryComputePageAtMip(0u, info, terrain, skyrimXY, mip, pageCoord, pageUv, pageTableIndex);
+    return TerrainRvtTryComputePageAtMip(terrainSetIndex, info, terrain, skyrimXY, mip, pageCoord, pageUv, pageTableIndex);
 }
 
 bool TerrainRvtTryComputePageAtMip(
@@ -253,23 +361,10 @@ bool TerrainRvtTryComputePageAtMip(
         return false;
     }
 
-    const int2 worldPageCoord = terrainLocalPageCoord + TerrainRvtTerrainOriginPageForMip(info, terrain, mip);
-    const int2 tablePageCoord = worldPageCoord - TerrainRvtPageTableOriginForMip(info, mip);
-    if (any(tablePageCoord < int2(0, 0)) ||
-        tablePageCoord.x >= (int)axis ||
-        tablePageCoord.y >= (int)axis)
-    {
-        return false;
-    }
-
     pageCoord = (uint2)terrainLocalPageCoord;
     pageUv = frac(pageFloat);
-    const uint entriesPerTerrainSet = TerrainRvtPageTableEntriesPerTerrainSet(info);
-    pageTableIndex = terrainSetIndex * entriesPerTerrainSet +
-        TerrainRvtPageTableMipOffset(info, mip) +
-        (uint)tablePageCoord.y * axis +
-        (uint)tablePageCoord.x;
-    return pageTableIndex < info.maxVirtualPageTableEntries;
+    const uint2 pageKey = TerrainRvtPackPageKey(terrainSetIndex, mip, pageCoord);
+    return TerrainRvtFindOrClaimPageSlot(info, pageKey, true, pageTableIndex);
 }
 
 uint TerrainRvtMipForWorldRect(TerrainRvtInfo info, float2 minSkyrimXY, float2 maxSkyrimXY, float targetPagesPerAxis)
@@ -297,6 +392,7 @@ bool TerrainRvtTryComputePageFromPosition(
     info = infoBuffer[0];
     terrain = terrainSets[terrainSetIndex];
     if (!TerrainRvtTryComputePage(
+        terrainSetIndex,
         info,
         terrain,
         TerrainRvtSkyrimXYFromRendererPosition(positionWS),
@@ -310,9 +406,6 @@ bool TerrainRvtTryComputePageFromPosition(
         return false;
     }
 
-    const uint entriesPerTerrainSet = TerrainRvtPageTableEntriesPerTerrainSet(info);
-    const uint localPageTableIndex = pageTableIndex;
-    pageTableIndex = terrainSetIndex * entriesPerTerrainSet + localPageTableIndex;
     return pageTableIndex < info.maxVirtualPageTableEntries;
 }
 
@@ -351,6 +444,13 @@ bool TerrainRvtTrySampleHeightFast(
     out float heightValue)
 {
     heightValue = 0.0f;
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const bool telemetryEnabled = perFrame.terrainRvtTelemetryEnabled != 0u;
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].heightSampleAttempts, 1u);
+    }
 
     TerrainRvtInfo info;
     TerrainSetInfo terrain;
@@ -360,11 +460,24 @@ bool TerrainRvtTrySampleHeightFast(
     uint pageTableIndex;
     if (!TerrainRvtTryComputePageFromPosition(terrainSetIndex, positionWS, dpdxWS, dpdyWS, info, terrain, mip, pageCoord, pageUv, pageTableIndex))
     {
+        if (telemetryEnabled)
+        {
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            InterlockedAdd(stats[0].heightFallbacks, 1u);
+            InterlockedAdd(stats[0].heightComputePageFailures, 1u);
+        }
         return false;
+    }
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].heightSampleMipHistogram[TerrainRvtTelemetryMipBin(mip)], 1u);
     }
 
     StructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
     uint physicalPageIndex = 0u;
+    const uint requestedPageTableIndex = pageTableIndex;
+    uint residentPageTableIndex = pageTableIndex;
     bool foundResidentPage = false;
     [loop]
     for (uint sampleMip = mip; sampleMip < info.mipCount; ++sampleMip)
@@ -383,12 +496,33 @@ bool TerrainRvtTrySampleHeightFast(
         }
         if (TerrainRvtUnpackPageTableEntry(pageTable[pageTableIndex], TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex))
         {
+            residentPageTableIndex = pageTableIndex;
             foundResidentPage = true;
             break;
         }
     }
     if (!foundResidentPage)
     {
+        if (telemetryEnabled)
+        {
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            InterlockedAdd(stats[0].heightFallbacks, 1u);
+            InterlockedAdd(stats[0].heightPageTableMisses, 1u);
+        }
+        TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT);
+        return false;
+    }
+
+    StructuredBuffer<uint> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
+    const uint ownerPageTableIndex = physicalPageOwner[physicalPageIndex];
+    if (ownerPageTableIndex != residentPageTableIndex)
+    {
+        if (telemetryEnabled)
+        {
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            InterlockedAdd(stats[0].heightFallbacks, 1u);
+            InterlockedAdd(stats[0].heightOwnerMismatches, 1u);
+        }
         return false;
     }
 
@@ -396,6 +530,11 @@ bool TerrainRvtTrySampleHeightFast(
     TerrainRvtPhysicalPageUv(info, physicalPageIndex, pageUv, atlasUv);
     Texture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
     heightValue = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f));
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].heightSampleHits, 1u);
+    }
     return true;
 }
 
@@ -788,7 +927,9 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const bool telemetryEnabled = perFrame.terrainRvtTelemetryEnabled != 0u;
-    const uint mipBin = TerrainRvtTelemetryMipBin(TerrainRvtMipFromPageTableIndex(info, pageTableIndex));
+    StructuredBuffer<uint2> pageKeys = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
+    const uint2 pageKey = pageKeys[pageTableIndex];
+    const uint mipBin = TerrainRvtTelemetryMipBin(TerrainRvtMipFromPageKey(pageKey));
 
     uint previousMask = 0u;
     InterlockedOr(requestMasks[pageTableIndex], contentMask, previousMask);
@@ -902,9 +1043,6 @@ void TerrainRvtMarkWorldRect(
     minPage = clamp(minPage, int2(0, 0), maxValidPage);
     maxPage = clamp(maxPage, int2(0, 0), maxValidPage);
 
-    const uint mipOffset = terrainSetIndex * TerrainRvtPageTableEntriesPerTerrainSet(info) + TerrainRvtPageTableMipOffset(info, mip);
-    const int2 tableOrigin = TerrainRvtPageTableOriginForMip(info, mip);
-    const int2 terrainOriginPage = TerrainRvtTerrainOriginPageForMip(info, terrain, mip);
     const uint pageCount = (uint)((maxPage.x - minPage.x + 1) * (maxPage.y - minPage.y + 1));
     if (telemetryEnabled)
     {
@@ -917,14 +1055,13 @@ void TerrainRvtMarkWorldRect(
         [loop]
         for (int x = minPage.x; x <= maxPage.x; ++x)
         {
-            const int2 tablePageCoord = int2(x, y) + terrainOriginPage - tableOrigin;
-            if (any(tablePageCoord < int2(0, 0)) ||
-                tablePageCoord.x >= (int)axis ||
-                tablePageCoord.y >= (int)axis)
+            uint pageTableIndex = 0xffffffffu;
+            const uint2 pageKey = TerrainRvtPackPageKey(terrainSetIndex, mip, uint2((uint)x, (uint)y));
+            if (!TerrainRvtFindOrClaimPageSlot(info, pageKey, true, pageTableIndex))
             {
                 continue;
             }
-            TerrainRvtMarkPageTableIndex(mipOffset + (uint)tablePageCoord.y * axis + (uint)tablePageCoord.x, contentMask);
+            TerrainRvtMarkPageTableIndex(pageTableIndex, contentMask);
         }
     }
 }

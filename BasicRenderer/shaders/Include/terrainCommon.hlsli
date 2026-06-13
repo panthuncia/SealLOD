@@ -1071,8 +1071,6 @@ float TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(uint terrainSetIndex, 
         {
             return rvtHeight;
         }
-
-        return 0.0f;
     }
 #endif
 

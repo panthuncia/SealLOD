@@ -467,6 +467,7 @@ public:
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
 				Builtin::DebugVisualization,
+                Builtin::Terrain::RvtPageKeys,
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,
                 Builtin::Terrain::RvtCounters,

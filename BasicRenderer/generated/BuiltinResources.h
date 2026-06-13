@@ -155,6 +155,7 @@ struct Builtin {
     inline static constexpr std::string_view RvtInfo = "Builtin::Terrain::RvtInfo";
     inline static constexpr std::string_view RvtMaterialAtlas = "Builtin::Terrain::RvtMaterialAtlas";
     inline static constexpr std::string_view RvtNormalAtlas = "Builtin::Terrain::RvtNormalAtlas";
+    inline static constexpr std::string_view RvtPageKeys = "Builtin::Terrain::RvtPageKeys";
     inline static constexpr std::string_view RvtPageTable = "Builtin::Terrain::RvtPageTable";
     inline static constexpr std::string_view RvtPhysicalPageOwner = "Builtin::Terrain::RvtPhysicalPageOwner";
     inline static constexpr std::string_view RvtRequestList = "Builtin::Terrain::RvtRequestList";

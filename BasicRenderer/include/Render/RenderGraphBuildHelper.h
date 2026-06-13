@@ -467,6 +467,18 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     rg::memory::SetResourceUsageHint(*terrainRvtPageTableBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPageTable, terrainRvtPageTableBuffer);
 
+    auto terrainRvtPageKeysBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(uint32_t) * 2u,
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPageKeysBuffer->SetAllowAlias(false);
+    terrainRvtPageKeysBuffer->SetName("TerrainRvt::PageKeys");
+    rg::memory::SetResourceUsageHint(*terrainRvtPageKeysBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPageKeys, terrainRvtPageKeysBuffer);
+
     auto terrainRvtPhysicalPageOwnerBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxPhysicalPages(),
         sizeof(uint32_t),

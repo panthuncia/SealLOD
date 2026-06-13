@@ -194,13 +194,6 @@ public:
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
         TerrainRvt::FillInfoRootConstants(rootConstants);
         rootConstants[10] = 1u;
-        const float basePageWorldSize = TerrainRvt::BasePageWorldSize();
-        const auto cameraPosition = renderContext->primaryCamera.info.positionWorldSpace;
-        const int32_t halfVirtualAxis = static_cast<int32_t>(TerrainRvt::MaxVirtualPagesPerAxis() >> 1u);
-        const int32_t cameraBasePageX = static_cast<int32_t>(std::floor(cameraPosition.x / basePageWorldSize));
-        const int32_t cameraBasePageY = static_cast<int32_t>(std::floor(-cameraPosition.z / basePageWorldSize));
-        rootConstants[12] = static_cast<uint32_t>(cameraBasePageX - halfVirtualAxis);
-        rootConstants[13] = static_cast<uint32_t>(cameraBasePageY - halfVirtualAxis);
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
         const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
         const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
@@ -208,14 +201,12 @@ public:
         if (!loggedDispatch) {
             loggedDispatch = true;
             spdlog::info(
-                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} origin_page=({}, {})",
+                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} addressing=sparse_world",
                 maxPageTableEntries,
                 dispatchX,
                 dispatchY,
                 static_cast<uint64_t>(dispatchX) * dispatchY * 64ull,
-                basePageWorldSize,
-                static_cast<int32_t>(rootConstants[12]),
-                static_cast<int32_t>(rootConstants[13]));
+                TerrainRvt::BasePageWorldSize());
         }
         commandList.Dispatch(dispatchX, dispatchY, 1u);
         return {};
@@ -275,6 +266,7 @@ public:
             Builtin::Terrain::Sets,
             Builtin::Terrain::RvtInfo)
             .WithUnorderedAccess(
+                Builtin::Terrain::RvtPageKeys,
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,
                 Builtin::Terrain::RvtCounters,
@@ -370,7 +362,8 @@ public:
         b->WithShaderResource(
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtRequestList,
-            Builtin::Terrain::RvtRequestMasks)
+            Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtPageKeys)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
@@ -453,6 +446,7 @@ public:
         b->WithShaderResource(Builtin::Terrain::RvtInfo)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
+                Builtin::Terrain::RvtPageKeys,
                 Builtin::Terrain::RvtCounters);
     }
 
@@ -535,6 +529,7 @@ public:
             Builtin::CameraBuffer,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtGenerationList,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
