@@ -1649,6 +1649,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             reyesCamera.viewRightWorld = float4(cam.viewInverse._11, cam.viewInverse._12, cam.viewInverse._13, 0.0f);
             reyesCamera.viewUpWorld = float4(cam.viewInverse._21, cam.viewInverse._22, cam.viewInverse._23, 0.0f);
             reyesCamera.viewForwardWorld = float4(cam.viewInverse._31, cam.viewInverse._32, cam.viewInverse._33, 0.0f);
+            reyesCamera.viewProjection = mul(cam.view, cam.projection);
             const row_major matrix objectToView = mul(obj.model, cam.view);
             const float patchDepth = max(
                 (-mul(float4(p0, 1.0f), objectToView).z
@@ -1664,9 +1665,18 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             const float2 patchUv0 = heightUv0 * sourcePatchBary0.x + heightUv1 * sourcePatchBary0.y + heightUv2 * sourcePatchBary0.z;
             const float2 patchUv1 = heightUv0 * sourcePatchBary1.x + heightUv1 * sourcePatchBary1.y + heightUv2 * sourcePatchBary1.z;
             const float2 patchUv2 = heightUv0 * sourcePatchBary2.x + heightUv1 * sourcePatchBary2.y + heightUv2 * sourcePatchBary2.z;
-            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchNormal0, patchUv0, reyesCamera, patchDepth);
-            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchNormal1, patchUv1, reyesCamera, patchDepth);
-            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchNormal2, patchUv2, reyesCamera, patchDepth);
+            float3 terrainDpdxWS = 0.0f.xxx;
+            float3 terrainDpdyWS = 0.0f.xxx;
+            const bool useTerrainDerivatives = ReyesEstimateTerrainDerivativesFromPatch(
+                reyesCamera,
+                mul(float4(patchPos0, 1.0f), obj.model).xyz,
+                mul(float4(patchPos1, 1.0f), obj.model).xyz,
+                mul(float4(patchPos2, 1.0f), obj.model).xyz,
+                terrainDpdxWS,
+                terrainDpdyWS);
+            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchNormal0, patchUv0, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchNormal1, patchUv1, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchNormal2, patchUv2, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
         }
 
         evalPos0 = patchPos0;

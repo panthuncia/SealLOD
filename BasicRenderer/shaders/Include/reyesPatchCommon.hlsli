@@ -507,6 +507,59 @@ float2 ReyesEstimateUvDerivative(MaterialEvalInfo materialInfo, CullingCameraInf
     return max(materialInfo.reyesUvDensity, 1.0e-6f.xx) * worldUnitsPerPixel;
 }
 
+float2 ReyesProjectToReferencePixel(CullingCameraInfo camera, float3 positionWS, out bool valid)
+{
+    const float4 clip = mul(float4(positionWS, 1.0f), camera.viewProjection);
+    valid = abs(clip.w) > 1.0e-5f;
+    const float2 ndc = valid ? clip.xy / clip.w : 0.0f.xx;
+    const float aspect = max(abs(camera.projY / max(camera.projX, 1.0e-5f)), 1.0e-5f);
+    return float2(
+        (ndc.x * 0.5f + 0.5f) * REYES_SCREEN_SCALE_REFERENCE * aspect,
+        (0.5f - ndc.y * 0.5f) * REYES_SCREEN_SCALE_REFERENCE);
+}
+
+bool ReyesEstimateTerrainDerivativesFromPatch(
+    CullingCameraInfo camera,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    out float3 dpdxWS,
+    out float3 dpdyWS)
+{
+    dpdxWS = 0.0f.xxx;
+    dpdyWS = 0.0f.xxx;
+
+    bool valid0;
+    bool valid1;
+    bool valid2;
+    const float2 screen0 = ReyesProjectToReferencePixel(camera, position0WS, valid0);
+    const float2 screen1 = ReyesProjectToReferencePixel(camera, position1WS, valid1);
+    const float2 screen2 = ReyesProjectToReferencePixel(camera, position2WS, valid2);
+    if (!valid0 || !valid1 || !valid2)
+    {
+        return false;
+    }
+
+    const float2 screenEdge1 = screen1 - screen0;
+    const float2 screenEdge2 = screen2 - screen0;
+    const float det = screenEdge1.x * screenEdge2.y - screenEdge1.y * screenEdge2.x;
+    if (abs(det) <= 1.0e-5f)
+    {
+        return false;
+    }
+
+    const float2 terrain0 = TerrainSkyrimXYFromRendererPosition(position0WS);
+    const float2 terrainEdge1 = TerrainSkyrimXYFromRendererPosition(position1WS) - terrain0;
+    const float2 terrainEdge2 = TerrainSkyrimXYFromRendererPosition(position2WS) - terrain0;
+    const float invDet = rcp(det);
+    const float2 dTerrainDx = (screenEdge2.y * terrainEdge1 - screenEdge1.y * terrainEdge2) * invDet;
+    const float2 dTerrainDy = (-screenEdge2.x * terrainEdge1 + screenEdge1.x * terrainEdge2) * invDet;
+
+    dpdxWS = float3(dTerrainDx.x, 0.0f, -dTerrainDx.y);
+    dpdyWS = float3(dTerrainDy.x, 0.0f, -dTerrainDy.y);
+    return all(isfinite(dpdxWS)) && all(isfinite(dpdyWS));
+}
+
 float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv, CullingCameraInfo camera, float depth)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
@@ -564,6 +617,36 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
     return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
 }
 
+float ReyesSampleDisplacementOffset(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useTerrainDerivatives,
+    float3 terrainDpdxWS,
+    float3 terrainDpdyWS)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        if (!useTerrainDerivatives)
+        {
+            const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+            terrainDpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+            terrainDpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        }
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
 float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
@@ -583,15 +666,91 @@ float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positi
     return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
 }
 
+float ReyesSampleDisplacementOffset(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useTerrainDerivatives,
+    float3 terrainDpdxWS,
+    float3 terrainDpdyWS)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        if (!useTerrainDerivatives)
+        {
+            const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+            terrainDpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+            terrainDpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        }
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
     const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
+float3 ReyesApplyGeometricDisplacement(
+    MaterialInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useTerrainDerivatives,
+    float3 terrainDpdxWS,
+    float3 terrainDpdyWS)
+{
+    const float displacementOffset = ReyesSampleDisplacementOffset(
+        materialInfo,
+        positionOS,
+        uv,
+        camera,
+        depth,
+        useTerrainDerivatives,
+        terrainDpdxWS,
+        terrainDpdyWS);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
 float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
     const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(
+    MaterialEvalInfo materialInfo,
+    float3 positionOS,
+    float3 normalOS,
+    float2 uv,
+    CullingCameraInfo camera,
+    float depth,
+    bool useTerrainDerivatives,
+    float3 terrainDpdxWS,
+    float3 terrainDpdyWS)
+{
+    const float displacementOffset = ReyesSampleDisplacementOffset(
+        materialInfo,
+        positionOS,
+        uv,
+        camera,
+        depth,
+        useTerrainDerivatives,
+        terrainDpdxWS,
+        terrainDpdyWS);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -672,15 +831,24 @@ void ReyesEvaluateDisplacedPatchTriangle(
 
     if (displacementEnabled)
     {
+        float3 terrainDpdxWS = 0.0f.xxx;
+        float3 terrainDpdyWS = 0.0f.xxx;
+        const bool useTerrainDerivatives = ReyesEstimateTerrainDerivativesFromPatch(
+            camera,
+            patchPosition0,
+            patchPosition1,
+            patchPosition2,
+            terrainDpdxWS,
+            terrainDpdyWS);
         const float3 patchNormal0 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary0));
         const float3 patchNormal1 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary1));
         const float3 patchNormal2 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary2));
         const float2 patchUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0);
         const float2 patchUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1);
         const float2 patchUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2);
-        patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchNormal0, patchUv0, camera, patchDepth);
-        patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchNormal1, patchUv1, camera, patchDepth);
-        patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchNormal2, patchUv2, camera, patchDepth);
+        patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchNormal0, patchUv0, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+        patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchNormal1, patchUv1, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+        patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchNormal2, patchUv2, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
     }
 }
 

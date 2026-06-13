@@ -101,7 +101,9 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             Builtin::Terrain::WeightBlocks,
             Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtPhysicalPageOwner,
             Builtin::Terrain::RvtHeightAtlas,
             Builtin::Terrain::RvtAlbedoAtlas,
@@ -113,7 +115,6 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             Builtin::SkeletonResources::SkinningInstanceInfo)
 		.WithUnorderedAccess(
             Builtin::Material::TextureStreamingFeedbackBuffer,
-            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtRequestList,
             Builtin::Terrain::RvtCounters,

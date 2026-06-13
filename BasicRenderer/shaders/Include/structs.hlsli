@@ -242,9 +242,12 @@ struct PerFrameBuffer {
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
 static const uint TERRAIN_RVT_CONTENT_MATERIAL = 1u << 1;
 static const uint TERRAIN_RVT_PAGE_VALID = 1u << 31;
+static const uint TERRAIN_RVT_PAGE_VISITED = 1u << 30;
 static const uint TERRAIN_RVT_PAGE_CONTENT_SHIFT = 28u;
 static const uint TERRAIN_RVT_PAGE_CONTENT_MASK = 0x3u << TERRAIN_RVT_PAGE_CONTENT_SHIFT;
 static const uint TERRAIN_RVT_PAGE_PHYSICAL_MASK = 0x00FFFFFFu;
+static const uint TERRAIN_RVT_INFO_INITIALIZED = 1u << 0;
+static const uint TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT = 1u << 0;
 
 struct TerrainRvtInfo
 {
@@ -258,12 +261,46 @@ struct TerrainRvtInfo
     uint maxRequests;
     uint maxGenerationEntries;
     uint mipCount;
-    uint maxVirtualPagesPerAxis;
+    uint pageTableResolution;
     uint flags;
     float basePageWorldSize;
     uint physicalAtlasPoolCount;
-    int pageTableOriginPageX;
-    int pageTableOriginPageY;
+    uint maxTerrainSets;
+    uint maxClipLevels;
+};
+
+struct TerrainRvtClipInfo
+{
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint tableBaseSlot;
+    uint tableResolution;
+    uint2 originPage;
+    uint2 terrainPageCount;
+    float pageWorldSize;
+    uint valid;
+    int2 clearDelta;
+    uint2 pad0;
+};
+
+struct TerrainRvtPageTag
+{
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint pageX;
+    uint pageY;
+};
+
+struct TerrainRvtPageRequest
+{
+    uint pageTableIndex;
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint contentMask;
+    uint pageX;
+    uint pageY;
+    uint pad0;
+    uint pad1;
 };
 
 struct TerrainRvtGenerationRequest
@@ -271,6 +308,10 @@ struct TerrainRvtGenerationRequest
     uint pageTableIndex;
     uint physicalPageIndex;
     uint contentMask;
+    uint terrainSetIndex;
+    uint clipLevel;
+    uint pageX;
+    uint pageY;
     uint pad0;
 };
 
@@ -329,6 +370,17 @@ struct TerrainRvtStats
     uint materialSamplePageMissRequestedPageXor;
     uint materialSamplePageMissRequestedPageMin;
     uint materialSamplePageMissRequestedPageMax;
+    uint heightSampleAttemptedPageXor;
+    uint heightSampleAttemptedPageMin;
+    uint heightSampleAttemptedPageMax;
+    uint heightSamplePageMissRequestedPageXor;
+    uint heightSamplePageMissRequestedPageMin;
+    uint heightSamplePageMissRequestedPageMax;
+    uint heightFastSampleAttempts;
+    uint heightFastSampleHits;
+    uint heightFastPageMissRequests;
+    uint heightFullSampleAttempts;
+    uint heightFullSampleHits;
     uint generationPageTableXor;
     uint generationPhysicalPageXor;
     uint generationPairHashXor;

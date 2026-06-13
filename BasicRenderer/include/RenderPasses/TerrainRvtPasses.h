@@ -29,7 +29,7 @@
 
 namespace TerrainRvt
 {
-    inline constexpr uint32_t CounterCount = 4u;
+    inline constexpr uint32_t CounterCount = 5u;
     inline constexpr uint32_t MaxDispatchGroupsX = 65535u;
     inline constexpr uint32_t PhysicalAtlasTextureSide = 16384u;
     inline constexpr float DefaultSourceTexelsPerWorld = 24.0f;
@@ -40,21 +40,6 @@ namespace TerrainRvt
         uint32_t bits = 0u;
         std::memcpy(&bits, &value, sizeof(bits));
         return bits;
-    }
-
-    inline uint32_t MipAxis(uint32_t maxAxis, uint32_t mip)
-    {
-        return std::max(1u, maxAxis >> std::min(mip, 31u));
-    }
-
-    inline uint32_t PageTableEntryCount(uint32_t maxAxis, uint32_t mipCount)
-    {
-        uint32_t total = 0u;
-        for (uint32_t mip = 0u; mip < std::max(1u, mipCount); ++mip) {
-            const uint32_t axis = MipAxis(std::max(1u, maxAxis), mip);
-            total += axis * axis;
-        }
-        return total;
     }
 
     inline std::pair<uint32_t, uint32_t> Dispatch2DForItems(uint32_t itemCount, uint32_t threadsPerGroup)
@@ -111,19 +96,35 @@ namespace TerrainRvt
         return std::clamp(SettingU32("terrainRvtPhysicalAtlasPoolCount", 1u), 1u, 8u);
     }
 
-    inline uint32_t MaxVirtualPagesPerAxis()
+    inline uint32_t ClipPageTableResolution()
     {
-        return std::clamp(SettingU32("terrainRvtMaxVirtualPagesPerAxis", 4096u), 1u, 4096u);
+        return std::clamp(SettingU32("terrainRvtClipPageTableResolution", 128u), 16u, 512u);
+    }
+
+    inline uint32_t MaxTerrainSets()
+    {
+        return std::clamp(SettingU32("terrainRvtMaxTerrainSets", 8u), 1u, 16u);
+    }
+
+    inline uint32_t MaxClipLevels()
+    {
+        return std::clamp(SettingU32("terrainRvtMaxClipLevels", 24u), 1u, 24u);
     }
 
     inline uint32_t MipCount()
     {
-        return std::clamp(SettingU32("terrainRvtMipCount", 10u), 1u, 16u);
+        return std::clamp(SettingU32("terrainRvtMipCount", 14u), 1u, MaxClipLevels());
     }
 
     inline uint32_t MaxPageTableEntries()
     {
-        return PageTableEntryCount(MaxVirtualPagesPerAxis(), MipCount());
+        const uint32_t resolution = ClipPageTableResolution();
+        return resolution * resolution * MaxTerrainSets() * MaxClipLevels();
+    }
+
+    inline uint32_t MaxClipInfoCount()
+    {
+        return MaxTerrainSets() * MaxClipLevels();
     }
 
     inline uint32_t MaxPhysicalPages()
@@ -149,11 +150,12 @@ namespace TerrainRvt
         rootConstants[5] = maxEntries;
         rootConstants[6] = MaxPhysicalPages();
         rootConstants[7] = MipCount();
-        rootConstants[8] = MaxVirtualPagesPerAxis();
+        rootConstants[8] = ClipPageTableResolution();
         rootConstants[9] = FloatBits(BasePageWorldSize());
+        rootConstants[10] = MaxTerrainSets();
         rootConstants[11] = AtlasPoolCount();
-        rootConstants[12] = 0u;
-        rootConstants[13] = 0u;
+        rootConstants[12] = MaxClipLevels();
+        rootConstants[13] = MaxClipInfoCount();
     }
 }
 
@@ -173,11 +175,15 @@ public:
     {
         b->WithUnorderedAccess(
             Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtPhysicalPageOwner,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtCounters,
-            Builtin::Terrain::RvtStats);
+            Builtin::Terrain::RvtStats)
+            .WithShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets)
+            .WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     void Setup() override {}
@@ -193,7 +199,6 @@ public:
 
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
         TerrainRvt::FillInfoRootConstants(rootConstants);
-        rootConstants[10] = 1u;
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
         const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
         const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
@@ -201,12 +206,15 @@ public:
         if (!loggedDispatch) {
             loggedDispatch = true;
             spdlog::info(
-                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} addressing=sparse_world",
+                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} clip_table={} max_sets={} max_clips={} addressing=direct_clipmaps",
                 maxPageTableEntries,
                 dispatchX,
                 dispatchY,
                 static_cast<uint64_t>(dispatchX) * dispatchY * 64ull,
-                TerrainRvt::BasePageWorldSize());
+                TerrainRvt::BasePageWorldSize(),
+                TerrainRvt::ClipPageTableResolution(),
+                TerrainRvt::MaxTerrainSets(),
+                TerrainRvt::MaxClipLevels());
         }
         commandList.Dispatch(dispatchX, dispatchY, 1u);
         return {};
@@ -264,9 +272,11 @@ public:
             Builtin::PerMeshBuffer,
             "Builtin::PerMaterialEvalDataBuffer",
             Builtin::Terrain::Sets,
-            Builtin::Terrain::RvtInfo)
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys)
             .WithUnorderedAccess(
-                Builtin::Terrain::RvtPageKeys,
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,
                 Builtin::Terrain::RvtCounters,
@@ -367,6 +377,7 @@ public:
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
+                Builtin::Terrain::RvtPhysicalPageOwner,
                 Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtStats)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -446,7 +457,6 @@ public:
         b->WithShaderResource(Builtin::Terrain::RvtInfo)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
-                Builtin::Terrain::RvtPageKeys,
                 Builtin::Terrain::RvtCounters);
     }
 
@@ -529,7 +539,6 @@ public:
             Builtin::CameraBuffer,
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtCounters,
-            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtGenerationList,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,

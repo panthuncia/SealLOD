@@ -89,7 +89,9 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             Builtin::Terrain::WeightBlocks,
             Builtin::Terrain::TextureGroup,
             Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtPhysicalPageOwner,
             Builtin::Terrain::RvtHeightAtlas,
             Builtin::Terrain::RvtAlbedoAtlas,
@@ -99,9 +101,8 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
-		.WithUnorderedAccess(
+        .WithUnorderedAccess(
             Builtin::Material::TextureStreamingFeedbackBuffer,
-            Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtRequestList,
             Builtin::Terrain::RvtCounters,

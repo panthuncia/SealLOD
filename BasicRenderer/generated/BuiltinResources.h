@@ -148,6 +148,7 @@ struct Builtin {
     inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";
     inline static constexpr std::string_view Regions = "Builtin::Terrain::Regions";
     inline static constexpr std::string_view RvtAlbedoAtlas = "Builtin::Terrain::RvtAlbedoAtlas";
+    inline static constexpr std::string_view RvtClipInfos = "Builtin::Terrain::RvtClipInfos";
     inline static constexpr std::string_view RvtCounters = "Builtin::Terrain::RvtCounters";
     inline static constexpr std::string_view RvtGenerateDispatchArgs = "Builtin::Terrain::RvtGenerateDispatchArgs";
     inline static constexpr std::string_view RvtGenerationList = "Builtin::Terrain::RvtGenerationList";

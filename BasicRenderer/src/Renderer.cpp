@@ -181,6 +181,17 @@ struct TerrainRvtTelemetryStatsReadback {
     uint32_t materialSamplePageMissRequestedPageXor;
     uint32_t materialSamplePageMissRequestedPageMin;
     uint32_t materialSamplePageMissRequestedPageMax;
+    uint32_t heightSampleAttemptedPageXor;
+    uint32_t heightSampleAttemptedPageMin;
+    uint32_t heightSampleAttemptedPageMax;
+    uint32_t heightSamplePageMissRequestedPageXor;
+    uint32_t heightSamplePageMissRequestedPageMin;
+    uint32_t heightSamplePageMissRequestedPageMax;
+    uint32_t heightFastSampleAttempts;
+    uint32_t heightFastSampleHits;
+    uint32_t heightFastPageMissRequests;
+    uint32_t heightFullSampleAttempts;
+    uint32_t heightFullSampleHits;
     uint32_t generationPageTableXor;
     uint32_t generationPhysicalPageXor;
     uint32_t generationPairHashXor;
@@ -192,7 +203,7 @@ struct TerrainRvtTelemetryStatsReadback {
     std::array<uint32_t, TerrainRvtTelemetryMipBins> generationMipHistogram;
 };
 
-static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (57u + TerrainRvtTelemetryMipBins * 5u));
+static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (68u + TerrainRvtTelemetryMipBins * 5u));
 
 std::string FormatTerrainRvtMipHistogram(const std::array<uint32_t, TerrainRvtTelemetryMipBins>& histogram)
 {
@@ -1566,8 +1577,10 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 32u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 32u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPoolCount", 1u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtMaxVirtualPagesPerAxis", 4096u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 10u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtClipPageTableResolution", 128u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxTerrainSets", 8u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 24u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
@@ -2686,7 +2699,9 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const auto atlasPagesWide = TerrainRvt::AtlasPagesWide();
     const auto atlasPagesHigh = TerrainRvt::AtlasPagesHigh();
     const auto atlasPoolCount = TerrainRvt::AtlasPoolCount();
-    const auto maxVirtualPagesPerAxis = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMaxVirtualPagesPerAxis")();
+    const auto clipPageTableResolution = TerrainRvt::ClipPageTableResolution();
+    const auto maxTerrainSets = TerrainRvt::MaxTerrainSets();
+    const auto maxClipLevels = TerrainRvt::MaxClipLevels();
     const auto mipCount = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMipCount")();
     const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<float>("terrainRvtBasePageWorldSize")();
     const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
@@ -2796,6 +2811,21 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 stats.materialSamplePageMissRequestedPageXor);
 
             spdlog::info(
+                "SARP terrain RVT telemetry height-domain: frame={} attempts=[{},{}] misses=[{},{}] xor(attempt=0x{:08X} miss=0x{:08X}) fast(attempts={} hits={} miss_requests={}) full(attempts={} hits={})",
+                requestedFrame,
+                rangeMinOrZero(stats.heightSampleAttemptedPageMin),
+                stats.heightSampleAttemptedPageMax,
+                rangeMinOrZero(stats.heightSamplePageMissRequestedPageMin),
+                stats.heightSamplePageMissRequestedPageMax,
+                stats.heightSampleAttemptedPageXor,
+                stats.heightSamplePageMissRequestedPageXor,
+                stats.heightFastSampleAttempts,
+                stats.heightFastSampleHits,
+                stats.heightFastPageMissRequests,
+                stats.heightFullSampleAttempts,
+                stats.heightFullSampleHits);
+
+            spdlog::info(
                 "SARP terrain RVT telemetry atlas-stamp: frame={} mismatches={} owner_collisions={} generation_xor(page=0x{:08X} physical=0x{:08X} pair=0x{:08X})",
                 requestedFrame,
                 stats.materialSamplePageStampMismatches,
@@ -2819,7 +2849,9 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          atlasPagesWide,
          atlasPagesHigh,
          atlasPoolCount,
-         maxVirtualPagesPerAxis,
+         clipPageTableResolution,
+         maxTerrainSets,
+         maxClipLevels,
          mipCount,
          forcedFallback](ReadbackCaptureResult&& result) {
             m_terrainRvtCountersReadbackPending = false;
@@ -2836,7 +2868,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
             uint32_t counters[4] = {};
             std::memcpy(counters, result.data.data(), counterBytes);
             spdlog::info(
-                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} max_virtual_axis={} mips={} forced_fallback={})",
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} configured_mips={} forced_fallback={})",
                 requestedFrame,
                 counters[0],
                 counters[1],
@@ -2849,7 +2881,9 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 atlasPagesWide,
                 atlasPagesHigh,
                 atlasPoolCount,
-                maxVirtualPagesPerAxis,
+                clipPageTableResolution,
+                maxTerrainSets,
+                maxClipLevels,
                 mipCount,
                 forcedFallback ? 1 : 0);
         },

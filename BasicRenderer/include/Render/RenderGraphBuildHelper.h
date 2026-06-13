@@ -364,17 +364,49 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t maxRequests;
         uint32_t maxGenerationEntries;
         uint32_t mipCount;
-        uint32_t maxVirtualPagesPerAxis;
+        uint32_t pageTableResolution;
         uint32_t flags;
         float basePageWorldSize;
         uint32_t physicalAtlasPoolCount;
-        int32_t pageTableOriginPageX;
-        int32_t pageTableOriginPageY;
+        uint32_t maxTerrainSets;
+        uint32_t maxClipLevels;
+    };
+    struct TerrainRvtClipInfoPOD {
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t tableBaseSlot;
+        uint32_t tableResolution;
+        uint32_t originPage[2];
+        uint32_t terrainPageCount[2];
+        float pageWorldSize;
+        uint32_t valid;
+        int32_t clearDelta[2];
+        uint32_t pad0[2];
+    };
+    struct TerrainRvtPageTagPOD {
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t pageX;
+        uint32_t pageY;
+    };
+    struct TerrainRvtPageRequestPOD {
+        uint32_t pageTableIndex;
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t contentMask;
+        uint32_t pageX;
+        uint32_t pageY;
+        uint32_t pad0;
+        uint32_t pad1;
     };
     struct TerrainRvtGenerationRequestPOD {
         uint32_t pageTableIndex;
         uint32_t physicalPageIndex;
         uint32_t contentMask;
+        uint32_t terrainSetIndex;
+        uint32_t clipLevel;
+        uint32_t pageX;
+        uint32_t pageY;
         uint32_t pad0;
     };
     struct TerrainRvtStatsPOD {
@@ -431,6 +463,17 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t materialSamplePageMissRequestedPageXor;
         uint32_t materialSamplePageMissRequestedPageMin;
         uint32_t materialSamplePageMissRequestedPageMax;
+        uint32_t heightSampleAttemptedPageXor;
+        uint32_t heightSampleAttemptedPageMin;
+        uint32_t heightSampleAttemptedPageMax;
+        uint32_t heightSamplePageMissRequestedPageXor;
+        uint32_t heightSamplePageMissRequestedPageMin;
+        uint32_t heightSamplePageMissRequestedPageMax;
+        uint32_t heightFastSampleAttempts;
+        uint32_t heightFastSampleHits;
+        uint32_t heightFastPageMissRequests;
+        uint32_t heightFullSampleAttempts;
+        uint32_t heightFullSampleHits;
         uint32_t generationPageTableXor;
         uint32_t generationPhysicalPageXor;
         uint32_t generationPairHashXor;
@@ -455,6 +498,18 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     rg::memory::SetResourceUsageHint(*terrainRvtInfoBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtInfo, terrainRvtInfoBuffer);
 
+    auto terrainRvtClipInfosBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxClipInfoCount(),
+        sizeof(TerrainRvtClipInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtClipInfosBuffer->SetAllowAlias(false);
+    terrainRvtClipInfosBuffer->SetName("TerrainRvt::ClipInfos");
+    rg::memory::SetResourceUsageHint(*terrainRvtClipInfosBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtClipInfos, terrainRvtClipInfosBuffer);
+
     auto terrainRvtPageTableBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
         sizeof(uint32_t),
@@ -469,7 +524,7 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
 
     auto terrainRvtPageKeysBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
-        sizeof(uint32_t) * 2u,
+        sizeof(TerrainRvtPageTagPOD),
         true,
         false,
         false,
@@ -481,7 +536,7 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
 
     auto terrainRvtPhysicalPageOwnerBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         TerrainRvt::MaxPhysicalPages(),
-        sizeof(uint32_t),
+        sizeof(uint32_t) * 4u,
         true,
         false,
         false,
@@ -505,7 +560,7 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
 
     auto terrainRvtRequestListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
-        sizeof(uint32_t),
+        sizeof(TerrainRvtPageRequestPOD),
         true,
         false,
         false,
