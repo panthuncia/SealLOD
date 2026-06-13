@@ -1625,6 +1625,8 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3 evalPos0 = p0;
     float3 evalPos1 = p1;
     float3 evalPos2 = p2;
+    BarycentricDeriv sourceDerivativeBary = (BarycentricDeriv)0;
+    bool useSourceDerivativeBary = false;
 
     if (isReyesPatch)
     {
@@ -1638,6 +1640,21 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 
         if (materialInfo.geometricDisplacementEnabled != 0u)
         {
+            CullingCameraInfo reyesCamera = (CullingCameraInfo)0;
+            reyesCamera.positionWorldSpace = cam.positionWorldSpace;
+            reyesCamera.projX = cam.projection._11;
+            reyesCamera.projY = cam.projection._22;
+            reyesCamera.zNear = cam.zNear;
+            reyesCamera.isOrtho = cam.isOrtho ? 1u : 0u;
+            reyesCamera.viewRightWorld = float4(cam.viewInverse._11, cam.viewInverse._12, cam.viewInverse._13, 0.0f);
+            reyesCamera.viewUpWorld = float4(cam.viewInverse._21, cam.viewInverse._22, cam.viewInverse._23, 0.0f);
+            reyesCamera.viewForwardWorld = float4(cam.viewInverse._31, cam.viewInverse._32, cam.viewInverse._33, 0.0f);
+            const row_major matrix objectToView = mul(obj.model, cam.view);
+            const float patchDepth = max(
+                (-mul(float4(p0, 1.0f), objectToView).z
+                + -mul(float4(p1, 1.0f), objectToView).z
+                + -mul(float4(p2, 1.0f), objectToView).z) / 3.0f,
+                max(cam.zNear, 1.0e-3f));
             const float2 heightUv0 = DecodeCompressedUV(triIdx.x, materialInfo.heightUvSetIndex, md);
             const float2 heightUv1 = DecodeCompressedUV(triIdx.y, materialInfo.heightUvSetIndex, md);
             const float2 heightUv2 = DecodeCompressedUV(triIdx.z, materialInfo.heightUvSetIndex, md);
@@ -1647,9 +1664,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             const float2 patchUv0 = heightUv0 * sourcePatchBary0.x + heightUv1 * sourcePatchBary0.y + heightUv2 * sourcePatchBary0.z;
             const float2 patchUv1 = heightUv0 * sourcePatchBary1.x + heightUv1 * sourcePatchBary1.y + heightUv2 * sourcePatchBary1.z;
             const float2 patchUv2 = heightUv0 * sourcePatchBary2.x + heightUv1 * sourcePatchBary2.y + heightUv2 * sourcePatchBary2.z;
-            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchNormal0, patchUv0);
-            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchNormal1, patchUv1);
-            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchNormal2, patchUv2);
+            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchNormal0, patchUv0, reyesCamera, patchDepth);
+            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchNormal1, patchUv1, reyesCamera, patchDepth);
+            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchNormal2, patchUv2, reyesCamera, patchDepth);
         }
 
         evalPos0 = patchPos0;
@@ -1665,25 +1682,36 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float2 pixelNdc = float2(pixelUv.x * 2.0f - 1.0f, (1.0f - pixelUv.y) * 2.0f - 1.0f);
 
     BarycentricDeriv bary = CalcFullBary(clip0, clip1, clip2, pixelNdc, winSize);
+    BarycentricDeriv positionBary = bary;
     if (isReyesPatch)
     {
         const float3 sourcePatchBary0 = ReyesComposeSourceBarycentricsPoint(microTrianglePatchDomain0, patchDomain0, patchDomain1, patchDomain2);
         const float3 sourcePatchBary1 = ReyesComposeSourceBarycentricsPoint(microTrianglePatchDomain1, patchDomain0, patchDomain1, patchDomain2);
         const float3 sourcePatchBary2 = ReyesComposeSourceBarycentricsPoint(microTrianglePatchDomain2, patchDomain0, patchDomain1, patchDomain2);
-        bary = ReyesComposeSourceBarycentrics(bary, sourcePatchBary0, sourcePatchBary1, sourcePatchBary2);
+        sourceDerivativeBary = ReyesComposeSourceBarycentrics(bary, sourcePatchBary0, sourcePatchBary1, sourcePatchBary2);
+        useSourceDerivativeBary = true;
+        bary = sourceDerivativeBary;
     }
 
 #if defined(VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE)
     const bool clodGBufferResolveBackface = ClodBarycentricDerivativesAreBackFacing(bary);
 #endif
 
-    float3 interpPosX = InterpolateWithDeriv(bary, evalPos0.x, evalPos1.x, evalPos2.x);
-    float3 interpPosY = InterpolateWithDeriv(bary, evalPos0.y, evalPos1.y, evalPos2.y);
-    float3 interpPosZ = InterpolateWithDeriv(bary, evalPos0.z, evalPos1.z, evalPos2.z);
+    float3 interpPosX = InterpolateWithDeriv(positionBary, evalPos0.x, evalPos1.x, evalPos2.x);
+    float3 interpPosY = InterpolateWithDeriv(positionBary, evalPos0.y, evalPos1.y, evalPos2.y);
+    float3 interpPosZ = InterpolateWithDeriv(positionBary, evalPos0.z, evalPos1.z, evalPos2.z);
 
     float3 posOS = float3(interpPosX.x, interpPosY.x, interpPosZ.x);
     float3 dpdxOS = float3(interpPosX.y, interpPosY.y, interpPosZ.y);
     float3 dpdyOS = float3(interpPosX.z, interpPosY.z, interpPosZ.z);
+    if (useSourceDerivativeBary)
+    {
+        float3 sourceInterpPosX = InterpolateWithDeriv(sourceDerivativeBary, p0.x, p1.x, p2.x);
+        float3 sourceInterpPosY = InterpolateWithDeriv(sourceDerivativeBary, p0.y, p1.y, p2.y);
+        float3 sourceInterpPosZ = InterpolateWithDeriv(sourceDerivativeBary, p0.z, p1.z, p2.z);
+        dpdxOS = float3(sourceInterpPosX.y, sourceInterpPosY.y, sourceInterpPosZ.y);
+        dpdyOS = float3(sourceInterpPosX.z, sourceInterpPosY.z, sourceInterpPosZ.z);
+    }
 
     float3 worldPosition = mul(float4(posOS, 1.0f), obj.model).xyz;
 

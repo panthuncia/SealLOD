@@ -238,6 +238,7 @@ namespace {
 		result.aoStreamingTextureID = base.aoStreamingTextureID;
 		result.heightStreamingTextureID = base.heightStreamingTextureID;
 		result.opacityStreamingTextureID = base.opacityStreamingTextureID;
+		result.reyesUvDensity = base.reyesUvDensity;
 		return result;
 	}
 

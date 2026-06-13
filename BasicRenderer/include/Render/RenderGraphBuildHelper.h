@@ -419,6 +419,17 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t heightOwnerMismatches;
         uint32_t materialOwnerMismatches;
         uint32_t materialSamplePageStampMismatches;
+        uint32_t requestPageTableXor;
+        uint32_t requestPageTableMin;
+        uint32_t requestPageTableMax;
+        uint32_t generationPageTableMin;
+        uint32_t generationPageTableMax;
+        uint32_t materialSampleAttemptedPageXor;
+        uint32_t materialSampleAttemptedPageMin;
+        uint32_t materialSampleAttemptedPageMax;
+        uint32_t materialSamplePageMissRequestedPageXor;
+        uint32_t materialSamplePageMissRequestedPageMin;
+        uint32_t materialSamplePageMissRequestedPageMax;
         uint32_t generationPageTableXor;
         uint32_t generationPhysicalPageXor;
         uint32_t generationPairHashXor;
@@ -644,9 +655,6 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         }
 
         if (terrainRvt) {
-            graph->BuildComputePass<TerrainRvtMarkVisibilityMaterialPagesPass>("TerrainRvtMarkVisibilityMaterialPagesPass");
-            TagPassTechnique(graph, "TerrainRvtMarkVisibilityMaterialPagesPass", "Primary Visibility::Terrain RVT");
-
             graph->BuildComputePass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
             TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
 
@@ -655,6 +663,9 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 
             graph->BuildComputePass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
             TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
         }
 
         // Evaluate material groups

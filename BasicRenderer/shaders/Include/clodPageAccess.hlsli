@@ -60,7 +60,7 @@ CLodMeshletDescriptor LoadMeshletDescriptor(uint slabDescriptorIndex, uint pageB
     desc.triangleCountAndRefinedGroup = d2.x;
     desc.boneCount                   = d2.y;
     desc.sourceGroupLocalIndex       = d2.z;
-    desc.reserved3                   = d2.w;
+    desc.terrainRvtLocalSkyrimXYRadius = asfloat(d2.w);
     desc.bounds                      = asfloat(d3);
 
     return desc;

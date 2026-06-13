@@ -317,6 +317,17 @@ struct TerrainRvtStats
     uint heightOwnerMismatches;
     uint materialOwnerMismatches;
     uint materialSamplePageStampMismatches;
+    uint requestPageTableXor;
+    uint requestPageTableMin;
+    uint requestPageTableMax;
+    uint generationPageTableMin;
+    uint generationPageTableMax;
+    uint materialSampleAttemptedPageXor;
+    uint materialSampleAttemptedPageMin;
+    uint materialSampleAttemptedPageMax;
+    uint materialSamplePageMissRequestedPageXor;
+    uint materialSamplePageMissRequestedPageMin;
+    uint materialSamplePageMissRequestedPageMax;
     uint generationPageTableXor;
     uint generationPhysicalPageXor;
     uint generationPairHashXor;
@@ -426,6 +437,8 @@ struct MaterialInfo {
     uint aoStreamingTextureID;
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
+    float2 reyesUvDensity;
+    uint2 padReyesUvDensity;
 };
 
 struct MaterialEvalInfo {
@@ -492,6 +505,8 @@ struct MaterialEvalInfo {
     uint aoStreamingTextureID;
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
+    float2 reyesUvDensity;
+    uint2 padReyesUvDensity;
 };
 
 struct TerrainLayerInfo {

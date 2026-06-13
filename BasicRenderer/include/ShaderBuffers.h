@@ -247,6 +247,8 @@ struct PerMaterialCB {
     unsigned int aoStreamingTextureID;
     unsigned int heightStreamingTextureID;
     unsigned int opacityStreamingTextureID;
+    DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
+    DirectX::XMUINT2 padReyesUvDensity = {};
 };
 
 struct PerMaterialEvalCB {
@@ -312,12 +314,15 @@ struct PerMaterialEvalCB {
     unsigned int aoStreamingTextureID;
     unsigned int heightStreamingTextureID;
     unsigned int opacityStreamingTextureID;
+    DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
+    DirectX::XMUINT2 padReyesUvDensity = {};
 };
 
-static_assert(sizeof(PerMaterialEvalCB) == 256, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
+static_assert(sizeof(PerMaterialEvalCB) == 272, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
 static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, reyesUvDensity) == 256, "PerMaterialEvalCB layout mismatch.");
 
 struct TerrainLayerGPU {
     unsigned int diffuseTextureIndex;

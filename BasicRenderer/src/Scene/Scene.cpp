@@ -34,6 +34,23 @@
 namespace {
 	std::atomic<uint64_t> globalStableSceneId = 0;
 
+	void MergeMeshReyesUvDensityIntoMaterial(Mesh& mesh, Material& material, MaterialManager& materialManager)
+	{
+		const uint32_t heightUvSetIndex = material.GetData().heightUvSetIndex;
+		DirectX::XMFLOAT2 density = mesh.EstimateReyesUvDensity(heightUvSetIndex);
+		if ((material.GetMaterialFlags() & MaterialFlags::MATERIAL_TERRAIN) != MaterialFlags::MATERIAL_FLAGS_NONE) {
+			density.x = std::max(density.x, 1.0f);
+			density.y = std::max(density.y, 1.0f);
+		}
+
+		const DirectX::XMFLOAT2 previous = material.GetReyesUvDensity();
+		material.MergeReyesUvDensity(density);
+		const DirectX::XMFLOAT2 updated = material.GetReyesUvDensity();
+		if (updated.x != previous.x || updated.y != previous.y) {
+			materialManager.MarkMaterialDirty(material);
+		}
+	}
+
 	void EnsureSceneWorldInitialized() {
 		auto& worldManager = br::scene::SceneWorldManager::GetInstance();
 		if (worldManager.IsAlive()) {
@@ -407,6 +424,10 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 					*effectiveMaterial,
 					m_managerInterface.GetTextureFactory());
 			}
+			MergeMeshReyesUvDensityIntoMaterial(
+				*meshInstance->GetMesh(),
+				*effectiveMaterial,
+				*m_managerInterface.GetMaterialManager());
 			const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
 			const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
 			const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
@@ -823,6 +844,10 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 		const auto materialDataIndex = m_managerInterface.GetMaterialManager()->IncrementMaterialUsageCount(
 			*material,
 			m_managerInterface.GetTextureFactory());
+		MergeMeshReyesUvDensityIntoMaterial(
+			*mesh,
+			*material,
+			*m_managerInterface.GetMaterialManager());
 		const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*mesh, *material);
 		const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
 		const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*mesh, *material);

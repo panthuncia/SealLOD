@@ -30,6 +30,21 @@ uint TerrainRvtInfoMaxVirtualPagesPerAxis() { return UintRootConstant8; }
 float TerrainRvtInfoBasePageWorldSize() { return asfloat(UintRootConstant9); }
 uint TerrainRvtInfoAtlasPoolCount() { return UintRootConstant11; }
 
+float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
+{
+    const float3 row0 = float3(m._11, m._12, m._13);
+    const float3 row1 = float3(m._21, m._22, m._23);
+    const float3 row2 = float3(m._31, m._32, m._33);
+    return sqrt(max(dot(row0, row0), max(dot(row1, row1), dot(row2, row2))));
+}
+
+uint TerrainRvtMipForFootprintWorld(TerrainRvtInfo info, float footprintWorld)
+{
+    const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
+    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
+    return min((uint)max(0.0f, floor(requestedMip)), max(info.mipCount, 1u) - 1u);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
@@ -63,26 +78,48 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     if (linearThreadIndex == 0u)
     {
         infoBuffer[0] = info;
-        [unroll]
-        for (uint i = 0u; i < TERRAIN_RVT_COUNTER_COUNT; ++i)
-        {
-            counters[i] = 0u;
-        }
+        counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT] = 0u;
+        counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT] = 0u;
+        counters[TERRAIN_RVT_COUNTER_OVERFLOW_COUNT] = 0u;
         stats[0] = (TerrainRvtStats)0;
         stats[0].materialSampleRequestedPageMin = 0xffffffffu;
         stats[0].materialSampleResidentPageMin = 0xffffffffu;
         stats[0].materialSamplePhysicalPageMin = 0xffffffffu;
+        stats[0].requestPageTableMin = 0xffffffffu;
+        stats[0].generationPageTableMin = 0xffffffffu;
+        stats[0].materialSampleAttemptedPageMin = 0xffffffffu;
+        stats[0].materialSamplePageMissRequestedPageMin = 0xffffffffu;
     }
 
     const uint maxEntries = info.maxVirtualPageTableEntries;
     if (linearThreadIndex < maxEntries)
     {
         pageTable[linearThreadIndex] = 0u;
-        requestMasks[linearThreadIndex] = 0u;
     }
     if (linearThreadIndex < info.maxPhysicalPages)
     {
         physicalPageOwner[linearThreadIndex] = 0xffffffffu;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void TerrainRvtClearFeedbackRequestsCS(uint3 tid : SV_DispatchThreadID)
+{
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    TerrainRvtInfo info = infoBuffer[0];
+    RWStructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
+
+    const uint linearThreadIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
+    if (linearThreadIndex == 0u)
+    {
+        counters[TERRAIN_RVT_COUNTER_REQUEST_COUNT] = 0u;
+        counters[TERRAIN_RVT_COUNTER_OVERFLOW_COUNT] = 0u;
+    }
+    if (linearThreadIndex < info.maxVirtualPageTableEntries)
+    {
+        requestMasks[linearThreadIndex] = 0u;
     }
 }
 
@@ -123,6 +160,21 @@ float3 TerrainRvtReconstructWorldPosition(uint2 pixel, float linearDepth)
     float3 viewPosition = viewFar.xyz * viewScale;
     float4 worldPosition = mul(float4(viewPosition, 1.0f), cam.viewInverse);
     return worldPosition.xyz / max(abs(worldPosition.w), 1.0e-6f);
+}
+
+float TerrainRvtLoadVisibilityDepthOrDefault(Texture2D<uint64_t> visibility, uint2 pixel, float defaultDepth)
+{
+    const uint64_t vis = visibility[pixel];
+    if (vis == 0xFFFFFFFFFFFFFFFF)
+    {
+        return defaultDepth;
+    }
+
+    float depth;
+    uint clusterIndex;
+    uint primID;
+    UnpackVisKey(vis, depth, clusterIndex, primID);
+    return depth;
 }
 
 [shader("compute")]
@@ -167,14 +219,100 @@ void TerrainRvtMarkVisibilityMaterialPagesCS(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    const float3 positionWS = TerrainRvtReconstructWorldPosition(dtid.xy, depth);
-    const float3 positionWSX = TerrainRvtReconstructWorldPosition(uint2(min(dtid.x + 1u, perFrame.screenResX - 1u), dtid.y), depth);
-    const float3 positionWSY = TerrainRvtReconstructWorldPosition(uint2(dtid.x, min(dtid.y + 1u, perFrame.screenResY - 1u)), depth);
+    const uint2 pixel = dtid.xy;
+    const uint2 pixelX = uint2(min(dtid.x + 1u, perFrame.screenResX - 1u), dtid.y);
+    const uint2 pixelY = uint2(dtid.x, min(dtid.y + 1u, perFrame.screenResY - 1u));
+    const float depthX = TerrainRvtLoadVisibilityDepthOrDefault(visibility, pixelX, depth);
+    const float depthY = TerrainRvtLoadVisibilityDepthOrDefault(visibility, pixelY, depth);
+    const float3 positionWS = TerrainRvtReconstructWorldPosition(pixel, depth);
+    const float3 positionWSX = TerrainRvtReconstructWorldPosition(pixelX, depthX);
+    const float3 positionWSY = TerrainRvtReconstructWorldPosition(pixelY, depthY);
     TerrainRvtMarkPosition(
         materialInfo.terrainSetIndex,
         positionWS,
         positionWSX - positionWS,
         positionWSY - positionWS,
+        TERRAIN_RVT_CONTENT_MATERIAL | TERRAIN_RVT_CONTENT_HEIGHT);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void TerrainRvtMarkVisibleClusterPagesCS(uint3 dtid : SV_DispatchThreadID)
+{
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if (perFrame.terrainRvtEnabled == 0u ||
+        VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX == 0xFFFFFFFFu ||
+        VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return;
+    }
+
+    StructuredBuffer<uint> visibleClusterCounter = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
+    const uint visibleClusterCount = visibleClusterCounter[0];
+    const uint visibleClusterIndex = dtid.x;
+    if (visibleClusterIndex >= visibleClusterCount)
+    {
+        return;
+    }
+
+    ByteAddressBuffer visibleClusters = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusters, visibleClusterIndex);
+    if (CLodVisibleClusterIsVoxel(packedCluster))
+    {
+        return;
+    }
+    const uint localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
+    const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+    const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+    if (localMeshletIndex >= pageHeader.meshletCount || pageHeader.descriptorOffset == 0u)
+    {
+        return;
+    }
+    const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(
+        pageSlabDescriptorIndex,
+        pageSlabByteOffset,
+        pageHeader.descriptorOffset,
+        localMeshletIndex);
+
+    const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(drawRecordIndex);
+    StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    const PerMeshBuffer mesh = perMeshes[meshInstance.perMeshBufferIndex];
+    StructuredBuffer<MaterialEvalInfo> materialData = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
+    const MaterialEvalInfo materialInfo = materialData[mesh.materialDataIndex];
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) == 0u)
+    {
+        return;
+    }
+
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(drawRecordIndex);
+    const float scale = TerrainRvtMaxAxisScale_RowVector(objectData.model);
+    const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax)) * scale;
+
+    const float3 clusterCenterWS = mul(float4(meshletDesc.bounds.xyz, 1.0f), objectData.model).xyz;
+    const float2 clusterCenterXY = TerrainRvtSkyrimXYFromRendererPosition(clusterCenterWS);
+    const float clusterTerrainRadius = max(meshletDesc.terrainRvtLocalSkyrimXYRadius * scale, 1.0e-3f) + displacementMagnitude;
+    const float2 rvtMinXY = clusterCenterXY - clusterTerrainRadius.xx;
+    const float2 rvtMaxXY = clusterCenterXY + clusterTerrainRadius.xx;
+
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    const TerrainRvtInfo terrainRvtInfo = infoBuffer[0];
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    const Camera camera = cameras[CLodVisibleClusterViewID(packedCluster)];
+    const float radiusWS = max(clusterTerrainRadius, 1.0e-3f);
+    const float3 centerVS = mul(float4(clusterCenterWS, 1.0f), camera.view).xyz;
+    const float depth = max(abs(centerVS.z), radiusWS + 1.0e-3f);
+    const float projectedRadiusNdc = radiusWS * max(abs(camera.projection._11), abs(camera.projection._22)) / depth;
+    const float projectedDiameterPixels = max(projectedRadiusNdc * max((float)perFrame.screenResX, (float)perFrame.screenResY), 1.0f);
+    const float terrainExtentWorld = max(rvtMaxXY.x - rvtMinXY.x, rvtMaxXY.y - rvtMinXY.y);
+    const uint mip = TerrainRvtMipForFootprintWorld(terrainRvtInfo, terrainExtentWorld / projectedDiameterPixels);
+
+    TerrainRvtMarkWorldRect(
+        materialInfo.terrainSetIndex,
+        rvtMinXY,
+        rvtMaxXY,
+        mip,
         TERRAIN_RVT_CONTENT_MATERIAL | TERRAIN_RVT_CONTENT_HEIGHT);
 }
 
@@ -199,7 +337,6 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     StructuredBuffer<uint> requestList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestList)];
     StructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
     RWStructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
-    RWStructuredBuffer<uint> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
     RWStructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const bool telemetryEnabled = perFrame.terrainRvtTelemetryEnabled != 0u;
@@ -243,38 +380,31 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
             else
             {
                 bool allocatedPage = false;
-                const uint maxPhysicalPages = max(info.maxPhysicalPages, 1u);
-                const uint initialPhysicalPageIndex = TerrainRvtDebugHash(pageTableIndex) % maxPhysicalPages;
                 [loop]
-                for (uint probe = 0u; probe < maxPhysicalPages; ++probe)
+                while (!allocatedPage)
                 {
-                    const uint candidatePhysicalPageIndex = (initialPhysicalPageIndex + probe) % maxPhysicalPages;
-                    uint previousOwner = 0xffffffffu;
-                    InterlockedCompareExchange(
-                        physicalPageOwner[candidatePhysicalPageIndex],
-                        0xffffffffu,
-                        pageTableIndex,
-                        previousOwner);
-                    if (previousOwner == 0xffffffffu || previousOwner == pageTableIndex)
+                    const uint observedAllocatedPageCount = counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT];
+                    if (observedAllocatedPageCount >= info.maxPhysicalPages)
                     {
-                        physicalPageIndex = candidatePhysicalPageIndex;
-                        allocatedPage = true;
-                        if (previousOwner == 0xffffffffu)
+                        if (telemetryEnabled)
                         {
-                            InterlockedAdd(counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT], 1u);
+                            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+                            InterlockedAdd(stats[0].allocationFailures, 1u);
                         }
-                        break;
+                        return;
                     }
-                }
 
-                if (!allocatedPage)
-                {
-                    if (telemetryEnabled)
+                    uint originalAllocatedPageCount = 0u;
+                    InterlockedCompareExchange(
+                        counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT],
+                        observedAllocatedPageCount,
+                        observedAllocatedPageCount + 1u,
+                        originalAllocatedPageCount);
+                    if (originalAllocatedPageCount == observedAllocatedPageCount)
                     {
-                        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
-                        InterlockedAdd(stats[0].allocationFailures, 1u);
+                        physicalPageIndex = observedAllocatedPageCount;
+                        allocatedPage = true;
                     }
-                    return;
                 }
             }
         }
@@ -320,6 +450,8 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
             InterlockedXor(stats[0].generationPageTableXor, pageTableIndex);
             InterlockedXor(stats[0].generationPhysicalPageXor, physicalPageIndex);
             InterlockedXor(stats[0].generationPairHashXor, TerrainRvtDebugHash(pageTableIndex ^ (physicalPageIndex * 0x9e3779b9u)));
+            InterlockedMin(stats[0].generationPageTableMin, pageTableIndex);
+            InterlockedMax(stats[0].generationPageTableMax, pageTableIndex);
         }
     }
 }
@@ -470,8 +602,9 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         RWTexture2DArray<float4> albedoAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtAlbedoAtlas)];
         RWTexture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
         RWTexture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
+        const float3 normalTS = TerrainRvtWorldToTangentNormal(inputs.normalWS, float3(0.0f, 1.0f, 0.0f));
         albedoAtlas[atlasTexel] = float4(saturate(inputs.albedo), 1.0f);
-        normalAtlas[atlasTexel] = float4(saturate(inputs.normalWS * 0.5f + 0.5f), 1.0f);
+        normalAtlas[atlasTexel] = float4(saturate(normalTS * 0.5f + 0.5f), 1.0f);
         materialAtlas[atlasTexel] = float4(
             saturate(inputs.roughness),
             saturate(inputs.metallic),

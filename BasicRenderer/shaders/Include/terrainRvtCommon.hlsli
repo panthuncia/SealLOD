@@ -151,6 +151,8 @@ bool TerrainRvtTryComputePageAtMip(
     out float2 pageUv,
     out uint pageTableIndex);
 
+void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
+
 bool TerrainRvtTryComputePage(
     TerrainRvtInfo info,
     TerrainSetInfo terrain,
@@ -437,6 +439,7 @@ struct TerrainRvtMaterialSample
 {
     float3 albedo;
     float3 albedoPoint;
+    float3 normalTS;
     float3 normalWS;
     float roughness;
     float metallic;
@@ -458,11 +461,34 @@ struct TerrainRvtMaterialSample
     float pageStampDelta;
 };
 
+float3x3 TerrainRvtTerrainBasis(float3 normalWS)
+{
+    float3 tangentWS = cross(float3(0.0f, 0.0f, -1.0f), normalWS);
+    if (dot(tangentWS, tangentWS) < 1.0e-5f)
+    {
+        tangentWS = cross(float3(1.0f, 0.0f, 0.0f), normalWS);
+    }
+    tangentWS = normalize(tangentWS);
+    float3 bitangentWS = normalize(cross(normalWS, tangentWS));
+    return float3x3(tangentWS, bitangentWS, normalWS);
+}
+
+float3 TerrainRvtTangentToWorldNormal(float3 normalTS, float3 normalWSBase)
+{
+    return normalize(mul(normalize(normalTS), TerrainRvtTerrainBasis(normalize(normalWSBase))));
+}
+
+float3 TerrainRvtWorldToTangentNormal(float3 normalWS, float3 normalWSBase)
+{
+    return normalize(mul(normalize(normalWS), transpose(TerrainRvtTerrainBasis(normalize(normalWSBase)))));
+}
+
 bool TerrainRvtTrySampleMaterial(
     uint terrainSetIndex,
     float3 positionWS,
     float3 dpdxWS,
     float3 dpdyWS,
+    float3 normalWSBase,
     out TerrainRvtMaterialSample sampleOut)
 {
     sampleOut = (TerrainRvtMaterialSample)0;
@@ -534,6 +560,14 @@ bool TerrainRvtTrySampleMaterial(
     sampleOut.residentPageTableIndex = pageTableIndex;
     sampleOut.pageCoord = pageCoord;
     sampleOut.pageUv = pageUv;
+    TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL | TERRAIN_RVT_CONTENT_HEIGHT);
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedXor(stats[0].materialSampleAttemptedPageXor, requestedPageTableIndex);
+        InterlockedMin(stats[0].materialSampleAttemptedPageMin, requestedPageTableIndex);
+        InterlockedMax(stats[0].materialSampleAttemptedPageMax, requestedPageTableIndex);
+    }
     StructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
     uint physicalPageIndex = 0u;
     uint residentMip = mip;
@@ -574,6 +608,9 @@ bool TerrainRvtTrySampleMaterial(
             RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
             InterlockedAdd(stats[0].materialFallbacks, 1u);
             InterlockedAdd(stats[0].materialPageTableMisses, 1u);
+            InterlockedXor(stats[0].materialSamplePageMissRequestedPageXor, requestedPageTableIndex);
+            InterlockedMin(stats[0].materialSamplePageMissRequestedPageMin, requestedPageTableIndex);
+            InterlockedMax(stats[0].materialSamplePageMissRequestedPageMax, requestedPageTableIndex);
         }
         return false;
     }
@@ -604,7 +641,8 @@ bool TerrainRvtTrySampleMaterial(
 
     sampleOut.albedo = albedoAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).rgb;
     sampleOut.albedoPoint = albedoAtlas.SampleLevel(g_pointClamp, atlasUv, 0.0f).rgb;
-    sampleOut.normalWS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    sampleOut.normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    sampleOut.normalWS = TerrainRvtTangentToWorldNormal(sampleOut.normalTS, normalWSBase);
     const float4 materialParams = materialAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f);
     sampleOut.roughness = materialParams.r;
     sampleOut.metallic = materialParams.g;
@@ -689,6 +727,13 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
         InterlockedAdd(stats[0].materialRequests, 1u);
         InterlockedAdd(stats[0].materialRequestMipHistogram[mipBin], 1u);
+    }
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedXor(stats[0].requestPageTableXor, pageTableIndex);
+        InterlockedMin(stats[0].requestPageTableMin, pageTableIndex);
+        InterlockedMax(stats[0].requestPageTableMax, pageTableIndex);
     }
     if (previousMask == 0u)
     {

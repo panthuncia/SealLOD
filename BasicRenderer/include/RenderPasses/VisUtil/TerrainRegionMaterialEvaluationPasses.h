@@ -467,6 +467,9 @@ public:
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
 				Builtin::DebugVisualization,
+                Builtin::Terrain::RvtRequestMasks,
+                Builtin::Terrain::RvtRequestList,
+                Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtStats,
 				Builtin::Material::TextureStreamingFeedbackBuffer)
             .WithConstantBuffer(Builtin::PerFrameBuffer);

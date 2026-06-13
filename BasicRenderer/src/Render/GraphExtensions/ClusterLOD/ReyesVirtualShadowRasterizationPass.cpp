@@ -111,7 +111,12 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
-		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer, Builtin::Terrain::RvtStats)
+		.WithUnorderedAccess(
+            Builtin::Material::TextureStreamingFeedbackBuffer,
+            Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtStats)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(
             m_telemetryBuffer,

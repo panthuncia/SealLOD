@@ -1703,6 +1703,22 @@ namespace
 
 					const BoundingSphere& bounds = output.meshletBounds[mi];
 					desc.bounds = bounds.sphere;
+					float minTerrainX = (std::numeric_limits<float>::max)();
+					float minTerrainY = (std::numeric_limits<float>::max)();
+					float maxTerrainX = -(std::numeric_limits<float>::max)();
+					float maxTerrainY = -(std::numeric_limits<float>::max)();
+					for (uint32_t vi = 0; vi < meshlet.vertex_count; ++vi)
+					{
+						const uint32_t gv = output.meshletVertices[meshlet.vertex_offset + vi];
+						const DirectX::XMFLOAT3& position = groupPositions[gv];
+						minTerrainX = std::min(minTerrainX, position.x);
+						minTerrainY = std::min(minTerrainY, -position.z);
+						maxTerrainX = std::max(maxTerrainX, position.x);
+						maxTerrainY = std::max(maxTerrainY, -position.z);
+					}
+					desc.terrainRvtLocalSkyrimXYRadius = meshlet.vertex_count > 0u
+						? 0.5f * std::max(maxTerrainX - minTerrainX, maxTerrainY - minTerrainY)
+						: bounds.sphere.w;
 					if (pageHasUvSets)
 					{
 						for (uint32_t uvSetIndex = 0; uvSetIndex < page.uvSetCount; ++uvSetIndex)

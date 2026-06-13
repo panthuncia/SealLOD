@@ -416,6 +416,11 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
 
     row_major matrix modelViewProjection = mul(objectData.model, camera.viewProjection);
     float4 modelViewZ = mul(objectData.model, camera.viewZ);
+    const float patchDepth = max(
+        ( -dot(float4(sourcePosition0, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition1, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
+        max(camera.zNear, 1.0e-3f));
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
 
@@ -437,6 +442,8 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         ReyesEvaluateDisplacedPatchTriangle(
             materialInfo,
             displacementEnabled,
+            camera,
+            patchDepth,
             sourcePosition0,
             sourcePosition1,
             sourcePosition2,

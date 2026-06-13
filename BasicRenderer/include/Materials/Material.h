@@ -262,6 +262,8 @@ public:
     void SetHeightmapScale(float scale);
     void SetCompileFlagsID(uint32_t id);
     void SetOpenPBRMaterialDataIndex(uint32_t index);
+    void MergeReyesUvDensity(DirectX::XMFLOAT2 density);
+    DirectX::XMFLOAT2 GetReyesUvDensity() const { return m_materialData.reyesUvDensity; }
     void SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable = false);
     void SetRasterBucketIndex(uint32_t index);
     PSOFlags GetPSOFlags() const { return m_psoFlags; }

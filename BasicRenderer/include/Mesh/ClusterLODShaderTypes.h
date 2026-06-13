@@ -67,7 +67,7 @@ struct CLodMeshletDescriptor
 	uint32_t triangleCountAndRefinedGroup = 0; // [8]
 	uint32_t boneCount = 0;               // [9]
 	uint32_t sourceGroupLocalIndex = 0xFFFFFFFFu; // [10] temporary diagnostic source group tag
-	uint32_t reserved3 = 0;               // [11]
+	float terrainRvtLocalSkyrimXYRadius = 0.0f; // [11] local terrain XY footprint radius for cluster request mips
 
 	// Bounding sphere (object space)
 	DirectX::XMFLOAT4 bounds = {};        // [12-15] {cx, cy, cz, radius}

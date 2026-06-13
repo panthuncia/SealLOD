@@ -1,4 +1,6 @@
 #include "Materials/Material.h"
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <spdlog/spdlog.h>
 #include "Render/PSOFlags.h"
@@ -304,10 +306,21 @@ void Material::SetOpenPBRMaterialDataIndex(uint32_t index) {
     m_materialData.openPBRMaterialDataIndex = index;
 }
 
+void Material::MergeReyesUvDensity(DirectX::XMFLOAT2 density) {
+    if (std::isfinite(density.x) && density.x > 0.0f) {
+        m_materialData.reyesUvDensity.x = std::max(m_materialData.reyesUvDensity.x, density.x);
+    }
+    if (std::isfinite(density.y) && density.y > 0.0f) {
+        m_materialData.reyesUvDensity.y = std::max(m_materialData.reyesUvDensity.y, density.y);
+    }
+}
+
 void Material::SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable) {
     m_materialData.materialFlags |= MaterialFlags::MATERIAL_TERRAIN;
     m_technique.compileFlags |= MaterialCompileFlags::MaterialCompileTerrain;
     m_materialData.terrainSetIndex = index;
+    m_materialData.reyesUvDensity.x = std::max(m_materialData.reyesUvDensity.x, 1.0f);
+    m_materialData.reyesUvDensity.y = std::max(m_materialData.reyesUvDensity.y, 1.0f);
     if (m_materialData.geometricDisplacementEnabled != 0u) {
         m_materialData.materialFlags &= ~MaterialFlags::MATERIAL_PARALLAX;
         m_materialData.materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;

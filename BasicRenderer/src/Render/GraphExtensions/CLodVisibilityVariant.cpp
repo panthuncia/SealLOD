@@ -86,8 +86,6 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
     const auto viewDepthSrvIndicesBuffer = enablePatchOcclusion
         ? (phaseIndex == 1u ? extension.m_viewDepthSrvIndicesBuffer : extension.m_viewDepthSrvIndicesBufferPhase2)
         : nullptr;
-    const bool terrainRvt = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")();
-
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(
             MakeVariantPassName(traits, std::string("ReyesBuildRasterWorkPass") + phaseSuffix),
@@ -102,33 +100,13 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
                 telemetryBuffer,
                 extension.m_reyesRasterWorkCapacity,
                 phaseIndex,
-                (enablePatchOcclusion || terrainRvt) ? extension.m_visibleClustersBuffer : nullptr,
+                enablePatchOcclusion ? extension.m_visibleClustersBuffer : nullptr,
                 viewDepthSrvIndicesBuffer,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueCounterBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueOverflowBuffer : nullptr,
                 extension.m_reyesDiceQueueCapacity,
                 slabGroup)));
-
-    if (terrainRvt) {
-        auto resolveHeightPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, std::string("TerrainRvtResolveReyesHeightRequestsPass") + phaseSuffix),
-            std::make_shared<TerrainRvtResolveRequestsPass>());
-        resolveHeightPagesPassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
-        outPasses.push_back(std::move(resolveHeightPagesPassDesc));
-
-        auto buildHeightGenerateArgsPassDesc = RenderGraph::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, std::string("TerrainRvtBuildReyesHeightGenerateDispatchArgsPass") + phaseSuffix),
-            std::make_shared<TerrainRvtBuildGenerateDispatchArgsPass>());
-        buildHeightGenerateArgsPassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
-        outPasses.push_back(std::move(buildHeightGenerateArgsPassDesc));
-
-        auto generateHeightPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
-            MakeVariantPassName(traits, std::string("TerrainRvtGenerateReyesHeightPagesPass") + phaseSuffix),
-            std::make_shared<TerrainRvtGeneratePagesPass>());
-        generateHeightPagesPassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
-        outPasses.push_back(std::move(generateHeightPagesPassDesc));
-    }
 
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(

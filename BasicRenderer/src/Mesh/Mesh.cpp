@@ -38,6 +38,88 @@ namespace
 	constexpr float kAnimationBoundsMaxUniformSampleStep = 1.0f / 30.0f;
 	constexpr uint32_t kAnimationBoundsMaxUniformSamples = 256u;
 
+	DirectX::XMFLOAT3 ReadPositionFromVertexBytes(const std::vector<std::byte>& vertices, uint32_t vertexStrideBytes, uint32_t vertexIndex)
+	{
+		DirectX::XMFLOAT3 position{};
+		const size_t offset = static_cast<size_t>(vertexIndex) * static_cast<size_t>(vertexStrideBytes);
+		if (vertexStrideBytes >= sizeof(position) && offset + sizeof(position) <= vertices.size()) {
+			std::memcpy(&position, vertices.data() + offset, sizeof(position));
+		}
+		return position;
+	}
+
+	DirectX::XMFLOAT3 SubFloat3(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+	{
+		return { a.x - b.x, a.y - b.y, a.z - b.z };
+	}
+
+	DirectX::XMFLOAT3 MulFloat3(const DirectX::XMFLOAT3& value, float scale)
+	{
+		return { value.x * scale, value.y * scale, value.z * scale };
+	}
+
+	float LengthFloat3(const DirectX::XMFLOAT3& value)
+	{
+		return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+	}
+
+	DirectX::XMFLOAT2 EstimateUvDensityForSet(
+		const std::vector<std::byte>& vertices,
+		uint32_t vertexStrideBytes,
+		const std::vector<UINT32>& indices,
+		const MeshUvSetData& uvSet)
+	{
+		DirectX::XMFLOAT2 density{ 1.0f, 1.0f };
+		if (vertexStrideBytes < sizeof(DirectX::XMFLOAT3) || indices.size() < 3u || uvSet.values.empty()) {
+			return density;
+		}
+
+		const uint32_t vertexCount = static_cast<uint32_t>(
+			std::min<size_t>(vertices.size() / static_cast<size_t>(vertexStrideBytes), uvSet.values.size()));
+		for (size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+			const uint32_t i0 = indices[tri + 0u];
+			const uint32_t i1 = indices[tri + 1u];
+			const uint32_t i2 = indices[tri + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT3 p0 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i0);
+			const DirectX::XMFLOAT3 p1 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i1);
+			const DirectX::XMFLOAT3 p2 = ReadPositionFromVertexBytes(vertices, vertexStrideBytes, i2);
+			const DirectX::XMFLOAT2 uv0 = uvSet.values[i0];
+			const DirectX::XMFLOAT2 uv1 = uvSet.values[i1];
+			const DirectX::XMFLOAT2 uv2 = uvSet.values[i2];
+
+			const DirectX::XMFLOAT3 edge1 = SubFloat3(p1, p0);
+			const DirectX::XMFLOAT3 edge2 = SubFloat3(p2, p0);
+			const DirectX::XMFLOAT2 duv1{ uv1.x - uv0.x, uv1.y - uv0.y };
+			const DirectX::XMFLOAT2 duv2{ uv2.x - uv0.x, uv2.y - uv0.y };
+			const float det = duv1.x * duv2.y - duv2.x * duv1.y;
+			if (std::abs(det) <= 1.0e-10f || !std::isfinite(det)) {
+				continue;
+			}
+
+			const float invDet = 1.0f / det;
+			const DirectX::XMFLOAT3 dPdu = MulFloat3(
+				SubFloat3(MulFloat3(edge1, duv2.y), MulFloat3(edge2, duv1.y)),
+				invDet);
+			const DirectX::XMFLOAT3 dPdv = MulFloat3(
+				SubFloat3(MulFloat3(edge2, duv1.x), MulFloat3(edge1, duv2.x)),
+				invDet);
+			const float lenU = LengthFloat3(dPdu);
+			const float lenV = LengthFloat3(dPdv);
+			if (std::isfinite(lenU) && lenU > 1.0e-6f) {
+				density.x = std::max(density.x, 1.0f / lenU);
+			}
+			if (std::isfinite(lenV) && lenV > 1.0e-6f) {
+				density.y = std::max(density.y, 1.0f / lenV);
+			}
+		}
+
+		return density;
+	}
+
 	float MaxAxisScale_RowVector(const DirectX::XMMATRIX& matrix)
 	{
 		using namespace DirectX;
@@ -350,6 +432,11 @@ Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertex
 		m_prebuiltClusterLOD = std::move(prebuiltClusterLOD);
 	}
 	m_uvSets = std::move(uvSets);
+	const uint32_t cachedUvSetCount = static_cast<uint32_t>(
+		std::min<size_t>(std::size(m_reyesUvDensityBySet), m_uvSets.size()));
+	for (uint32_t uvSetIndex = 0; uvSetIndex < cachedUvSetCount; ++uvSetIndex) {
+		m_reyesUvDensityBySet[uvSetIndex] = EstimateUvDensityForSet(*vertices, vertexSize, indices, m_uvSets[uvSetIndex]);
+	}
 	m_perMeshBufferData.vertexFlags = flags;
 	m_perMeshBufferData.vertexByteSize = vertexSize;
 	m_perMeshBufferData.numVertices = 0; //static_cast<uint32_t>(m_vertices->size() / vertexSize);
@@ -539,6 +626,16 @@ ClusterLODCacheBuildPayload Mesh::GetClusterLODCacheBuildPayload() const
 	payload.groupPageBlobs = &m_clodCacheBuildChunkData.groupPageBlobs;
 	payload.meshPageBlobs = &m_clodCacheBuildChunkData.meshPageBlobs;
 	return payload;
+}
+
+DirectX::XMFLOAT2 Mesh::EstimateReyesUvDensity(uint32_t uvSetIndex) const
+{
+	if (uvSetIndex < std::size(m_reyesUvDensityBySet) &&
+		m_reyesUvDensityBySet[uvSetIndex].x > 0.0f &&
+		m_reyesUvDensityBySet[uvSetIndex].y > 0.0f) {
+		return m_reyesUvDensityBySet[uvSetIndex];
+	}
+	return { 1.0f, 1.0f };
 }
 
 ClusterLODCacheBuildOwnedData Mesh::GetClusterLODCacheBuildOwnedData() const

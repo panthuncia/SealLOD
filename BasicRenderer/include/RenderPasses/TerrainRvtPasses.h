@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <utility>
 #include <vector>
 
 #include <spdlog/spdlog.h>
 
 #include "BuiltinResources.h"
+#include "Managers/MeshManager.h"
 #include "Managers/Singletons/CommandSignatureManager.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
@@ -18,7 +20,9 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "RenderPasses/Base/ComputePass.h"
+#include "Resources/Buffers/PagePool.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
+#include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "Resources/components.h"
 #include "../shaders/PerPassRootConstants/visUtilRootConstants.h"
 
@@ -206,9 +210,9 @@ public:
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
-            L"TerrainRvtMarkVisibilityMaterialPagesCS",
+            L"TerrainRvtMarkVisibleClusterPagesCS",
             {},
-            "TerrainRvt.MarkVisibilityMaterialPages.PSO");
+            "TerrainRvt.MarkVisibleClusterPages.PSO");
 
         auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
         auto visBufferTag = ecsWorld.component<CLodExtensionVisibilityBufferTag>();
@@ -216,27 +220,34 @@ public:
             .with<CLodExtensionTypeTag>(visBufferTag)
             .with<VisibleClustersBufferTag>()
             .build();
-        m_reyesDiceQueueQuery = ecsWorld.query_builder<>()
+        m_visibleClustersCounterQuery = ecsWorld.query_builder<>()
             .with<CLodExtensionTypeTag>(visBufferTag)
-            .with<CLodReyesDiceQueueTag>()
+            .with<VisibleClustersCounterTag>()
             .build();
+        try {
+            auto getter = SettingsManager::GetInstance().getSettingGetter<std::function<MeshManager*()>>(CLodStreamingMeshManagerGetterSettingName);
+            if (auto* meshManager = getter()()) {
+                if (auto* pool = meshManager->GetCLodPagePool()) {
+                    m_slabResourceGroup = pool->GetSlabResourceGroup();
+                }
+            }
+        } catch (...) {}
     }
 
     void DeclareResourceUsages(ComputePassBuilder* b) override
     {
         b->WithShaderResource(ECSResourceResolver(m_visibleClustersQuery));
-        b->WithShaderResource(ECSResourceResolver(m_reyesDiceQueueQuery));
+        b->WithShaderResource(ECSResourceResolver(m_visibleClustersCounterQuery));
+        if (m_slabResourceGroup) {
+            b->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
+        }
         b->WithShaderResource(
-            Builtin::PrimaryCamera::VisibilityTexture,
             Builtin::CameraBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
+            Builtin::PerInstanceTransformBuffer,
             Builtin::PerMeshBuffer,
-            Builtin::PerMaterialDataBuffer,
             "Builtin::PerMaterialEvalDataBuffer",
-            Builtin::CLod::GroupChunks,
-            Builtin::CLod::Groups,
-            Builtin::CLod::MeshMetadata,
             Builtin::Terrain::Sets,
             Builtin::Terrain::RvtInfo)
             .WithUnorderedAccess(
@@ -266,36 +277,37 @@ public:
 
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
         rootConstants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClusterSRVIndex;
-        rootConstants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = m_reyesDiceQueueSRVIndex;
-        rootConstants[VISBUF_REYES_PATCH_INDEX_BASE] = m_patchVisibilityIndexBase;
+        rootConstants[VISBUF_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClusterCounterSRVIndex;
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
-        commandList.Dispatch((context.renderResolution.x + 7u) / 8u, (context.renderResolution.y + 7u) / 8u, 1u);
+        commandList.Dispatch((std::max(m_visibleClusterCapacity, 1u) + 63u) / 64u, 1u, 1u);
         return {};
     }
 
     void Cleanup() override
     {
         m_visibleClustersQuery = {};
-        m_reyesDiceQueueQuery = {};
+        m_visibleClustersCounterQuery = {};
+        m_slabResourceGroup.reset();
     }
 
 private:
     void RefreshResourcePointers()
     {
         m_visibleClusterSRVIndex = 0xFFFFFFFFu;
-        m_reyesDiceQueueSRVIndex = 0xFFFFFFFFu;
+        m_visibleClusterCounterSRVIndex = 0xFFFFFFFFu;
+        m_visibleClusterCapacity = 0u;
         m_visibleClustersQuery.each([&](flecs::entity e) {
             auto& res = e.get<Components::Resource>();
             if (const auto resource = std::static_pointer_cast<GloballyIndexedResource>(res.resource.lock()); resource) {
                 m_visibleClusterSRVIndex = resource->GetSRVInfo(0).slot.index;
             }
             const auto capacity = e.get<CLodVisibleClusterCapacity>();
-            m_patchVisibilityIndexBase = CLodReyesPatchVisibilityIndexBase(capacity.maxVisibleClusters);
+            m_visibleClusterCapacity = capacity.maxVisibleClusters;
         });
-        m_reyesDiceQueueQuery.each([&](flecs::entity e) {
+        m_visibleClustersCounterQuery.each([&](flecs::entity e) {
             if (const auto res = e.try_get<Components::Resource>(); res) {
                 if (const auto resource = std::static_pointer_cast<GloballyIndexedResource>(res->resource.lock()); resource) {
-                    m_reyesDiceQueueSRVIndex = resource->GetSRVInfo(0).slot.index;
+                    m_visibleClusterCounterSRVIndex = resource->GetSRVInfo(0).slot.index;
                 }
             }
         });
@@ -303,10 +315,11 @@ private:
 
     PipelineState m_pso;
     flecs::query<> m_visibleClustersQuery;
-    flecs::query<> m_reyesDiceQueueQuery;
+    flecs::query<> m_visibleClustersCounterQuery;
+    std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     uint32_t m_visibleClusterSRVIndex = 0xFFFFFFFFu;
-    uint32_t m_reyesDiceQueueSRVIndex = 0xFFFFFFFFu;
-    uint32_t m_patchVisibilityIndexBase = 0u;
+    uint32_t m_visibleClusterCounterSRVIndex = 0xFFFFFFFFu;
+    uint32_t m_visibleClusterCapacity = 0u;
 };
 
 class TerrainRvtResolveRequestsPass final : public ComputePass {
@@ -337,7 +350,6 @@ public:
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
-                Builtin::Terrain::RvtPhysicalPageOwner,
                 Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtStats)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -398,6 +410,47 @@ private:
     PipelineState m_clearPso;
     PipelineState m_resolvePso;
     Resource* m_counterBuffer = nullptr;
+};
+
+class TerrainRvtClearFeedbackRequestsPass final : public ComputePass {
+public:
+    TerrainRvtClearFeedbackRequestsPass()
+    {
+        m_pso = PSOManager::GetInstance().MakeComputePipeline(
+            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+            L"shaders/TerrainRvt.hlsl",
+            L"TerrainRvtClearFeedbackRequestsCS",
+            {},
+            "TerrainRvt.ClearFeedbackRequests.PSO");
+    }
+
+    void DeclareResourceUsages(ComputePassBuilder* b) override
+    {
+        b->WithShaderResource(Builtin::Terrain::RvtInfo)
+            .WithUnorderedAccess(
+                Builtin::Terrain::RvtRequestMasks,
+                Builtin::Terrain::RvtCounters);
+    }
+
+    void Setup() override {}
+
+    PassReturn Execute(PassExecutionContext& executionContext) override
+    {
+        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        auto& commandList = executionContext.commandList;
+        commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
+        commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+        commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+        commandList.Dispatch(dispatchX, dispatchY, 1u);
+        return {};
+    }
+
+    void Cleanup() override {}
+
+private:
+    PipelineState m_pso;
 };
 
 class TerrainRvtBuildGenerateDispatchArgsPass final : public ComputePass {

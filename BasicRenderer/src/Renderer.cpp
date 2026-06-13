@@ -170,6 +170,17 @@ struct TerrainRvtTelemetryStatsReadback {
     uint32_t heightOwnerMismatches;
     uint32_t materialOwnerMismatches;
     uint32_t materialSamplePageStampMismatches;
+    uint32_t requestPageTableXor;
+    uint32_t requestPageTableMin;
+    uint32_t requestPageTableMax;
+    uint32_t generationPageTableMin;
+    uint32_t generationPageTableMax;
+    uint32_t materialSampleAttemptedPageXor;
+    uint32_t materialSampleAttemptedPageMin;
+    uint32_t materialSampleAttemptedPageMax;
+    uint32_t materialSamplePageMissRequestedPageXor;
+    uint32_t materialSamplePageMissRequestedPageMin;
+    uint32_t materialSamplePageMissRequestedPageMax;
     uint32_t generationPageTableXor;
     uint32_t generationPhysicalPageXor;
     uint32_t generationPairHashXor;
@@ -181,7 +192,7 @@ struct TerrainRvtTelemetryStatsReadback {
     std::array<uint32_t, TerrainRvtTelemetryMipBins> generationMipHistogram;
 };
 
-static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (46u + TerrainRvtTelemetryMipBins * 5u));
+static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (57u + TerrainRvtTelemetryMipBins * 5u));
 
 std::string FormatTerrainRvtMipHistogram(const std::array<uint32_t, TerrainRvtTelemetryMipBins>& histogram)
 {
@@ -1558,7 +1569,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxVirtualPagesPerAxis", 4096u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 10u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBasePageWorldSize", 128u);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
@@ -2767,6 +2778,21 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 stats.materialSamplePhysicalPageXor,
                 stats.materialSampleCoarserResidentHits,
                 stats.materialSampleAtlasPoolMask);
+
+            spdlog::info(
+                "SARP terrain RVT telemetry page-domains: frame={} requests=[{},{}] generation=[{},{}] sample_attempts=[{},{}] sample_misses=[{},{}] xor(request=0x{:08X} attempt=0x{:08X} miss=0x{:08X})",
+                requestedFrame,
+                rangeMinOrZero(stats.requestPageTableMin),
+                stats.requestPageTableMax,
+                rangeMinOrZero(stats.generationPageTableMin),
+                stats.generationPageTableMax,
+                rangeMinOrZero(stats.materialSampleAttemptedPageMin),
+                stats.materialSampleAttemptedPageMax,
+                rangeMinOrZero(stats.materialSamplePageMissRequestedPageMin),
+                stats.materialSamplePageMissRequestedPageMax,
+                stats.requestPageTableXor,
+                stats.materialSampleAttemptedPageXor,
+                stats.materialSamplePageMissRequestedPageXor);
 
             spdlog::info(
                 "SARP terrain RVT telemetry atlas-stamp: frame={} mismatches={} owner_collisions={} generation_xor(page=0x{:08X} physical=0x{:08X} pair=0x{:08X})",

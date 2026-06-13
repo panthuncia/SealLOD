@@ -724,6 +724,11 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     row_major matrix modelViewProjection = mul(objectData.model, camera.viewProjection);
     float4 modelViewZ = mul(objectData.model, camera.viewZ);
+    const float patchDepth = max(
+        ( -dot(float4(sourcePosition0, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition1, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
+        max(camera.zNear, 1.0e-3f));
 
     const uint patchVisibilityIndex = CLOD_REYES_PATCH_RASTER_PATCH_INDEX_BASE + diceIndex;
     const uint visibilityDescriptorIndex = viewRasterInfo.visibilityUAVDescriptorIndex;
@@ -749,6 +754,8 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         ReyesEvaluateDisplacedPatchTriangle(
             materialInfo,
             displacementEnabled,
+            camera,
+            patchDepth,
             sourcePosition0,
             sourcePosition1,
             sourcePosition2,

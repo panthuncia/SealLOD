@@ -923,13 +923,16 @@ float TerrainInterpolateLayerWeight(
     return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
 
-float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
+float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 positionWS, float3 dpdxWS, float3 dpdyWS, bool useRvt)
 {
 #if !defined(TERRAIN_RVT_GENERATION)
-    float rvtHeight = 0.0f;
-    if (TerrainRvtTrySampleHeight(terrainSetIndex, positionWS, 0.0f.xxx, 0.0f.xxx, rvtHeight))
+    if (useRvt)
     {
-        return rvtHeight;
+        float rvtHeight = 0.0f;
+        if (TerrainRvtTrySampleHeight(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtHeight))
+        {
+            return rvtHeight;
+        }
     }
 #endif
 
@@ -979,7 +982,8 @@ float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
         perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
     bool terrainGaussianStochasticEnabled = terrainStochasticHeightEnabled &&
         perFrameBuffer.terrainGaussianStochasticEnabled != 0u;
-    float2 zeroDerivative = 0.0f.xx;
+    const float2 skyrimXYDdx = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
+    const float2 skyrimXYDdy = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
 
     float heightSum = 0.0f;
     float weightSum = 0.0f;
@@ -1006,6 +1010,8 @@ float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
         }
 
         float2 layerUv = skyrimXY * layer.uvScale;
+        float2 layerUvDdx = skyrimXYDdx * layer.uvScale;
+        float2 layerUvDdy = skyrimXYDdy * layer.uvScale;
         bool hasStochasticLayer = layer.stochasticLayerIndex != TERRAIN_INVALID_DESCRIPTOR;
         TerrainStochasticLayerInfo stochasticLayer = (TerrainStochasticLayerInfo)0;
         float contextScale = TERRAIN_DEFAULT_STOCHASTIC_SCALE;
@@ -1025,13 +1031,33 @@ float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
             contextScale,
             perFrameBuffer.terrainStochasticBlendCurve,
             layerUv,
-            zeroDerivative,
-            zeroDerivative);
+            layerUvDdx,
+            layerUvDdy);
         heightSum += layerHeight * weight * max(layer.heightScale, 0.0f);
         weightSum += weight;
     }
 
     return weightSum > 1.0e-4f ? heightSum / weightSum : 0.0f;
+}
+
+float TerrainSampleGeometricHeight(uint terrainSetIndex, float3 positionWS)
+{
+    return TerrainSampleGeometricHeightInternal(terrainSetIndex, positionWS, 0.0f.xxx, 0.0f.xxx, true);
+}
+
+float TerrainSampleGeometricHeightGrad(uint terrainSetIndex, float3 positionWS, float3 dpdxWS, float3 dpdyWS)
+{
+    return TerrainSampleGeometricHeightInternal(terrainSetIndex, positionWS, dpdxWS, dpdyWS, true);
+}
+
+float TerrainSampleGeometricHeightDirect(uint terrainSetIndex, float3 positionWS)
+{
+    return TerrainSampleGeometricHeightInternal(terrainSetIndex, positionWS, 0.0f.xxx, 0.0f.xxx, false);
+}
+
+float TerrainSampleGeometricHeightDirectGrad(uint terrainSetIndex, float3 positionWS, float3 dpdxWS, float3 dpdyWS)
+{
+    return TerrainSampleGeometricHeightInternal(terrainSetIndex, positionWS, dpdxWS, dpdyWS, false);
 }
 
 float3x3 TerrainBasis(float3 normalWS)
@@ -1069,7 +1095,7 @@ void ApplyTerrainMaterialInternal(
 
 #if !defined(TERRAIN_RVT_GENERATION)
     TerrainRvtMaterialSample rvtSample;
-    if (TerrainRvtTrySampleMaterial(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtSample))
+    if (TerrainRvtTrySampleMaterial(terrainSetIndex, positionWS, dpdxWS, dpdyWS, normalWSBase, rvtSample))
     {
         inputs.albedo = rvtSample.albedo * vertexColor;
         inputs.normalWS = rvtSample.normalWS;
@@ -1092,7 +1118,7 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtPhysicalTileUv = rvtSample.physicalTileUv;
         inputs.terrainRvtSampleAlbedo = rvtSample.albedo;
         inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
-        inputs.terrainRvtSampleNormal = rvtSample.normalWS;
+        inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
         inputs.terrainRvtPageStamp = rvtSample.pageStamp;
         inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
@@ -1119,7 +1145,7 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtPhysicalTileUv = rvtSample.physicalTileUv;
         inputs.terrainRvtSampleAlbedo = rvtSample.albedo;
         inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
-        inputs.terrainRvtSampleNormal = rvtSample.normalWS;
+        inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
         inputs.terrainRvtPageStamp = rvtSample.pageStamp;
         inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;

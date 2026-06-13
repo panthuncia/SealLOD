@@ -484,7 +484,30 @@ float2 ReyesInterpolateFloat2Precise(float2 value0, float2 value1, float2 value2
     return result;
 }
 
-float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv)
+float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
+{
+    const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * REYES_SCREEN_SCALE_REFERENCE);
+    if (camera.isOrtho != 0u)
+    {
+        return REYES_DICE_RATE_PIXELS / max(projectionScale, 1.0e-5f);
+    }
+
+    return REYES_DICE_RATE_PIXELS * max(depth, max(camera.zNear, 1.0e-3f)) / projectionScale;
+}
+
+float2 ReyesEstimateUvDerivative(MaterialInfo materialInfo, CullingCameraInfo camera, float depth)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+    return max(materialInfo.reyesUvDensity, 1.0e-6f.xx) * worldUnitsPerPixel;
+}
+
+float2 ReyesEstimateUvDerivative(MaterialEvalInfo materialInfo, CullingCameraInfo camera, float depth)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+    return max(materialInfo.reyesUvDensity, 1.0e-6f.xx) * worldUnitsPerPixel;
+}
+
+float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv, CullingCameraInfo camera, float depth)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
     {
@@ -496,13 +519,83 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
         heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
         heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
-    const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
+    const float2 uvDerivative = ReyesEstimateUvDerivative(materialInfo, camera, depth);
+    const float4 heightSample = heightTexture.SampleGrad(heightSampler, uv, float2(uvDerivative.x, 0.0f), float2(0.0f, uvDerivative.y));
     const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
     const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
-float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv)
+float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
+        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
+    const float2 uvDerivative = ReyesEstimateUvDerivative(materialInfo, camera, depth);
+    const float4 heightSample = heightTexture.SampleGrad(heightSampler, uv, float2(uvDerivative.x, 0.0f), float2(0.0f, uvDerivative.y));
+    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
+    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+        const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+        const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        const float heightValue = saturate(TerrainSampleGeometricHeightDirectGrad(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return 0.0f;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
+        const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+        const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        const float heightValue = saturate(TerrainSampleGeometricHeightDirectGrad(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+    }
+
+    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
+}
+
+float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
+{
+    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    return positionOS + normalize(normalOS) * displacementOffset;
+}
+
+float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv)
 {
     if (materialInfo.geometricDisplacementEnabled == 0u)
     {
@@ -529,23 +622,7 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
 
     if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
     {
-        const float heightValue = saturate(TerrainSampleGeometricHeight(materialInfo.terrainSetIndex, positionOS));
-        return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
-    }
-
-    return ReyesSampleMaterialDisplacementOffset(materialInfo, uv);
-}
-
-float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv)
-{
-    if (materialInfo.geometricDisplacementEnabled == 0u)
-    {
-        return 0.0f;
-    }
-
-    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
-    {
-        const float heightValue = saturate(TerrainSampleGeometricHeight(materialInfo.terrainSetIndex, positionOS));
+        const float heightValue = saturate(TerrainSampleGeometricHeightDirect(materialInfo.terrainSetIndex, positionOS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
 
@@ -558,10 +635,53 @@ float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positio
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
-float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
+void ReyesEvaluateDisplacedPatchTriangle(
+    MaterialInfo materialInfo,
+    bool displacementEnabled,
+    CullingCameraInfo camera,
+    float patchDepth,
+    float3 sourcePosition0,
+    float3 sourcePosition1,
+    float3 sourcePosition2,
+    float3 sourceNormal0,
+    float3 sourceNormal1,
+    float3 sourceNormal2,
+    float2 sourceUv0,
+    float2 sourceUv1,
+    float2 sourceUv2,
+    float3 domain0,
+    float3 domain1,
+    float3 domain2,
+    float3 patchBary0,
+    float3 patchBary1,
+    float3 patchBary2,
+    out float3 sourceBary0,
+    out float3 sourceBary1,
+    out float3 sourceBary2,
+    out float3 patchPosition0,
+    out float3 patchPosition1,
+    out float3 patchPosition2)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
-    return positionOS + normalize(normalOS) * displacementOffset;
+    sourceBary0 = ReyesComposeSourceBarycentricsPoint(patchBary0, domain0, domain1, domain2);
+    sourceBary1 = ReyesComposeSourceBarycentricsPoint(patchBary1, domain0, domain1, domain2);
+    sourceBary2 = ReyesComposeSourceBarycentricsPoint(patchBary2, domain0, domain1, domain2);
+
+    patchPosition0 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary0);
+    patchPosition1 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary1);
+    patchPosition2 = ReyesInterpolateFloat3Precise(sourcePosition0, sourcePosition1, sourcePosition2, sourceBary2);
+
+    if (displacementEnabled)
+    {
+        const float3 patchNormal0 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary0));
+        const float3 patchNormal1 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary1));
+        const float3 patchNormal2 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary2));
+        const float2 patchUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0);
+        const float2 patchUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1);
+        const float2 patchUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2);
+        patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchNormal0, patchUv0, camera, patchDepth);
+        patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchNormal1, patchUv1, camera, patchDepth);
+        patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchNormal2, patchUv2, camera, patchDepth);
+    }
 }
 
 void ReyesEvaluateDisplacedPatchTriangle(

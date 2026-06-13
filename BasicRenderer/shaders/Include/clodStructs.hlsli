@@ -96,7 +96,7 @@ struct CLodMeshletDescriptor
     uint triangleCountAndRefinedGroup; // [8] triangleCount:16 | (refinedGroupId+1):16
     uint boneCount;                   // [9]
     uint sourceGroupLocalIndex;       // [10] temporary diagnostic source group tag
-    uint reserved3;                   // [11]
+    float terrainRvtLocalSkyrimXYRadius; // [11] local terrain XY footprint radius for cluster request mips
 
     float4 bounds;                    // [12-15] bounding sphere {cx, cy, cz, radius}
 };

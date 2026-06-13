@@ -197,6 +197,8 @@ public:
 		return m_uvSets;
 	}
 
+	DirectX::XMFLOAT2 EstimateReyesUvDensity(uint32_t uvSetIndex) const;
+
 	ClusterLODPrebuiltData GetClusterLODPrebuiltData() const;
 	ClusterLODCacheBuildPayload GetClusterLODCacheBuildPayload() const;
 	ClusterLODCacheBuildOwnedData GetClusterLODCacheBuildOwnedData() const;
@@ -269,8 +271,9 @@ private:
     //rhi::VertexBufferView m_vertexBufferView;
     //rhi::IndexBufferView m_indexBufferView;
 
-    PerMeshCB m_perMeshBufferData = { 0 };
+	PerMeshCB m_perMeshBufferData = { 0 };
 	unsigned int m_skinningVertexSize = 0;
+	DirectX::XMFLOAT2 m_reyesUvDensityBySet[8] = {};
 	std::vector<MeshUvSetData> m_uvSets;
 	mutable std::vector<BoundingSphere> m_animationBoundingSpheres;
 	std::unique_ptr<BufferView> m_perMeshBufferView;
