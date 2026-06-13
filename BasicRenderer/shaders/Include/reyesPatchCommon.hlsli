@@ -557,7 +557,7 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
         const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
         const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
         const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
-        const float heightValue = saturate(TerrainSampleGeometricHeightDirectGrad(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
 
@@ -576,7 +576,7 @@ float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positi
         const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
         const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
         const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
-        const float heightValue = saturate(TerrainSampleGeometricHeightDirectGrad(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
+        const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
 

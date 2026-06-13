@@ -449,7 +449,9 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
             }
             InterlockedXor(stats[0].generationPageTableXor, pageTableIndex);
             InterlockedXor(stats[0].generationPhysicalPageXor, physicalPageIndex);
+#if TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG
             InterlockedXor(stats[0].generationPairHashXor, TerrainRvtDebugHash(pageTableIndex ^ (physicalPageIndex * 0x9e3779b9u)));
+#endif
             InterlockedMin(stats[0].generationPageTableMin, pageTableIndex);
             InterlockedMax(stats[0].generationPageTableMax, pageTableIndex);
         }
@@ -605,10 +607,14 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         const float3 normalTS = TerrainRvtWorldToTangentNormal(inputs.normalWS, float3(0.0f, 1.0f, 0.0f));
         albedoAtlas[atlasTexel] = float4(saturate(inputs.albedo), 1.0f);
         normalAtlas[atlasTexel] = float4(saturate(normalTS * 0.5f + 0.5f), 1.0f);
+        float pageStamp = 1.0f;
+#if TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG
+        pageStamp = TerrainRvtDebugPageStampValue(generation.pageTableIndex);
+#endif
         materialAtlas[atlasTexel] = float4(
             saturate(inputs.roughness),
             saturate(inputs.metallic),
             saturate(inputs.ambientOcclusion),
-            TerrainRvtDebugPageStampValue(generation.pageTableIndex));
+            pageStamp);
     }
 }

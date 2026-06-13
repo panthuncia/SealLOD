@@ -1559,7 +1559,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
     settingsManager.registerSetting<bool>("enableTerrainRvt", true);
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
-    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, true);
+    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);

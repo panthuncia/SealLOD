@@ -1060,6 +1060,25 @@ float TerrainSampleGeometricHeightDirectGrad(uint terrainSetIndex, float3 positi
     return TerrainSampleGeometricHeightInternal(terrainSetIndex, positionWS, dpdxWS, dpdyWS, false);
 }
 
+float TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(uint terrainSetIndex, float3 positionWS, float3 dpdxWS, float3 dpdyWS)
+{
+#if !defined(TERRAIN_RVT_GENERATION)
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if (perFrameBuffer.terrainRvtEnabled != 0u && perFrameBuffer.terrainRvtForceDirectFallback == 0u)
+    {
+        float rvtHeight = 0.0f;
+        if (TerrainRvtTrySampleHeightFast(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtHeight))
+        {
+            return rvtHeight;
+        }
+
+        return 0.0f;
+    }
+#endif
+
+    return TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
+}
+
 float3x3 TerrainBasis(float3 normalWS)
 {
     float3 tangentWS = cross(float3(0.0f, 0.0f, -1.0f), normalWS);
