@@ -18,6 +18,8 @@ inline constexpr const char* CLodStreamingEnableDirectStorageSettingName = "clod
 inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDisableReyesRasterization";
 inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
+inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
+inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodReyesTerrainNormalMipBias";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
@@ -39,10 +41,28 @@ inline constexpr uint32_t CLodForceTraversalDepthRootDisabled = 0xFFFFFFFFu;
 inline constexpr const char* CLodWorkGraphComputePageJobDescriptorBufferId = "CLod::WorkGraphComputePageJobDescriptors";
 inline constexpr const char* CLodLevelInfosBufferId = "Builtin::CLod::LevelInfos";
 inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSettingName = "clodDirectionalVirtualShadowMaxBackingResolution";
+inline constexpr float CLodReyesTerrainNormalBlendDefault = 0.35f;
+inline constexpr uint32_t CLodReyesTerrainNormalMipBiasDefault = 2u;
+inline constexpr uint32_t CLodReyesTerrainNormalMipBiasMax = 8u;
 
 inline bool CLodReyesUseNormalMaps()
 {
     return !SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesGeometricNormalSettingName)();
+}
+
+inline float CLodReyesTerrainNormalBlend()
+{
+    return std::clamp(
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesTerrainNormalBlendSettingName)(),
+        0.0f,
+        1.0f);
+}
+
+inline uint32_t CLodReyesTerrainNormalMipBias()
+{
+    return std::min(
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName)(),
+        CLodReyesTerrainNormalMipBiasMax);
 }
 inline constexpr const char* CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName = "clodDirectionalVirtualShadowMaxPhysicalPages";
 inline constexpr const char* CLodDirectionalVirtualShadowLodBiasSettingName = "clodDirectionalVirtualShadowLodBias";

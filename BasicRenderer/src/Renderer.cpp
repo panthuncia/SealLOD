@@ -1610,6 +1610,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
     settingsManager.registerSetting<bool>(CLodReyesUseNormalMapsSettingName, false);
     settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
+    settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
+    settingsManager.registerSetting<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName, CLodReyesTerrainNormalMipBiasDefault);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,

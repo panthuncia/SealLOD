@@ -1840,6 +1840,8 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 
     StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
     float3x3 normalMatrix = (float3x3)normalMatrixBuffer[obj.normalMatrixBufferIndex].value;
+    const float3 interpolatedNormalOS = normalOS;
+    const float3 interpolatedWorldNormal = normalize(mul(interpolatedNormalOS, normalMatrix));
     if (useReyesGeometricNormal)
     {
         const float3 geometricNormalRawOS = cross(evalPos1 - evalPos0, evalPos2 - evalPos0);
@@ -1876,6 +1878,31 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     materialInputs = (MaterialInputs)0;
     InitializeMaterialSelectedMipDebug(materialInputs);
     ApplyTerrainMaterial(materialInfo, worldPosition, dpdx, dpdy, worldNormal, vertexColor, materialInputs);
+    if (useReyesGeometricNormal && (materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        const float reyesTerrainNormalBlend = saturate(asfloat(VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT));
+        if (reyesTerrainNormalBlend > 1.0e-4f)
+        {
+            float3 lowFrequencyTerrainNormalTS;
+            float3 lowFrequencyTerrainNormalWS;
+            if (TerrainRvtTrySampleNormalBiased(
+                materialInfo.terrainSetIndex,
+                worldPosition,
+                dpdx,
+                dpdy,
+                interpolatedWorldNormal,
+                VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS,
+                lowFrequencyTerrainNormalTS,
+                lowFrequencyTerrainNormalWS))
+            {
+                const float highFrequencyNormalLengthSq = dot(materialInputs.normalWS, materialInputs.normalWS);
+                const float3 highFrequencyTerrainNormalWS = highFrequencyNormalLengthSq > 1.0e-8f
+                    ? materialInputs.normalWS * rsqrt(highFrequencyNormalLengthSq)
+                    : worldNormal;
+                materialInputs.normalWS = normalize(lerp(highFrequencyTerrainNormalWS, lowFrequencyTerrainNormalWS, reyesTerrainNormalBlend));
+            }
+        }
+    }
 #else
     MaterialUvCache uvCache;
     MaterialUvBindings uvBindings;

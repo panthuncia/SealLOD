@@ -558,6 +558,14 @@ private:
     std::function<bool()> getCLodReyesGeometricNormal;
     std::function<void(bool)> setCLodReyesGeometricNormal;
 
+    float m_clodReyesTerrainNormalBlend = CLodReyesTerrainNormalBlendDefault;
+    std::function<float()> getCLodReyesTerrainNormalBlend;
+    std::function<void(float)> setCLodReyesTerrainNormalBlend;
+
+    int m_clodReyesTerrainNormalMipBias = static_cast<int>(CLodReyesTerrainNormalMipBiasDefault);
+    std::function<uint32_t()> getCLodReyesTerrainNormalMipBias;
+    std::function<void(uint32_t)> setCLodReyesTerrainNormalMipBias;
+
     bool m_clodReyesUseAabbOcclusion = false;
     std::function<bool()> getCLodReyesUseAabbOcclusion;
     std::function<void(bool)> setCLodReyesUseAabbOcclusion;
@@ -1089,6 +1097,20 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodReyesGeometricNormal = settingsManager.getSettingSetter<bool>(CLodReyesGeometricNormalSettingName);
     m_clodReyesGeometricNormal = getCLodReyesGeometricNormal();
     observerSetting(m_clodReyesGeometricNormal, CLodReyesGeometricNormalSettingName);
+
+    getCLodReyesTerrainNormalBlend = settingsManager.getSettingGetter<float>(CLodReyesTerrainNormalBlendSettingName);
+    setCLodReyesTerrainNormalBlend = settingsManager.getSettingSetter<float>(CLodReyesTerrainNormalBlendSettingName);
+    m_clodReyesTerrainNormalBlend = getCLodReyesTerrainNormalBlend();
+    observerSetting(m_clodReyesTerrainNormalBlend, CLodReyesTerrainNormalBlendSettingName);
+
+    getCLodReyesTerrainNormalMipBias = settingsManager.getSettingGetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName);
+    setCLodReyesTerrainNormalMipBias = settingsManager.getSettingSetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName);
+    m_clodReyesTerrainNormalMipBias = static_cast<int>(getCLodReyesTerrainNormalMipBias());
+    m_settingSubscriptions.push_back(settingsManager.addObserver<uint32_t>(
+        CLodReyesTerrainNormalMipBiasSettingName,
+        [this](const uint32_t& newValue) {
+            m_clodReyesTerrainNormalMipBias = static_cast<int>(newValue);
+        }));
 
     getCLodReyesUseAabbOcclusion = settingsManager.getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName);
     setCLodReyesUseAabbOcclusion = settingsManager.getSettingSetter<bool>(CLodReyesUseAabbOcclusionSettingName);
@@ -1755,6 +1777,17 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Reyes Geometric Normal", &m_clodReyesGeometricNormal)) {
             setCLodReyesGeometricNormal(m_clodReyesGeometricNormal);
+        }
+        if (ImGui::SliderFloat("Reyes Terrain Normal Blend", &m_clodReyesTerrainNormalBlend, 0.0f, 1.0f, "%.2f")) {
+            m_clodReyesTerrainNormalBlend = std::clamp(m_clodReyesTerrainNormalBlend, 0.0f, 1.0f);
+            setCLodReyesTerrainNormalBlend(m_clodReyesTerrainNormalBlend);
+        }
+        if (ImGui::SliderInt("Reyes Terrain Normal Mip Bias", &m_clodReyesTerrainNormalMipBias, 0, static_cast<int>(CLodReyesTerrainNormalMipBiasMax))) {
+            m_clodReyesTerrainNormalMipBias = std::clamp(
+                m_clodReyesTerrainNormalMipBias,
+                0,
+                static_cast<int>(CLodReyesTerrainNormalMipBiasMax));
+            setCLodReyesTerrainNormalMipBias(static_cast<uint32_t>(m_clodReyesTerrainNormalMipBias));
         }
         if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
             setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);

@@ -1,5 +1,7 @@
 #include "Render/GraphExtensions/ClusterLOD/DeepVisibilityResolvePass.h"
 
+#include <bit>
+
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Managers/ViewManager.h"
@@ -180,6 +182,8 @@ PassReturn DeepVisibilityResolvePass::Execute(PassExecutionContext& executionCon
         ? m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;
     misc[VISBUF_REYES_USE_NORMAL_MAPS] = CLodReyesUseNormalMaps() ? 1u : 0u;
+    misc[VISBUF_REYES_TERRAIN_NORMAL_BLEND_AS_UINT] = std::bit_cast<uint32_t>(CLodReyesTerrainNormalBlend());
+    misc[VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS] = CLodReyesTerrainNormalMipBias();
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,

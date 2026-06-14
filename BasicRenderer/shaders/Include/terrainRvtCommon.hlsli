@@ -1042,6 +1042,111 @@ bool TerrainRvtTrySampleMaterial(
     return true;
 }
 
+bool TerrainRvtTrySampleNormalBiased(
+    uint terrainSetIndex,
+    float3 positionWS,
+    float3 dpdxWS,
+    float3 dpdyWS,
+    float3 normalWSBase,
+    uint mipBias,
+    out float3 normalTS,
+    out float3 normalWS)
+{
+    normalTS = float3(0.0f, 0.0f, 1.0f);
+    normalWS = normalize(normalWSBase);
+
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if (perFrame.terrainRvtEnabled == 0u || perFrame.terrainRvtForceDirectFallback != 0u)
+    {
+        return false;
+    }
+
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    const TerrainRvtInfo info = infoBuffer[0];
+    const TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+
+    const float2 skyrimXY = TerrainRvtSkyrimXYFromRendererPosition(positionWS);
+    float2 local;
+    uint terrainClipCount;
+    if (!TerrainRvtTryPrepareSampleLocal(terrainSetIndex, info, terrain, skyrimXY, local, terrainClipCount))
+    {
+        return false;
+    }
+
+    uint baseMip;
+    uint2 basePageCoord;
+    float2 basePageUv;
+    uint basePageTableIndex;
+    if (!TerrainRvtTryComputePageLocal(
+        terrainSetIndex,
+        info,
+        local,
+        TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+        TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+        terrainClipCount,
+        baseMip,
+        basePageCoord,
+        basePageUv,
+        basePageTableIndex))
+    {
+        return false;
+    }
+
+    const uint biasedMip = min(baseMip + mipBias, terrainClipCount - 1u);
+    uint2 requestedPageCoord;
+    float2 requestedPageUv;
+    uint requestedPageTableIndex;
+    if (!TerrainRvtTryComputePageAtClipLocal(
+        terrainSetIndex,
+        info,
+        local,
+        biasedMip,
+        terrainClipCount,
+        requestedPageCoord,
+        requestedPageUv,
+        requestedPageTableIndex))
+    {
+        return false;
+    }
+
+    TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL);
+
+    TerrainRvtAddress residentAddress = (TerrainRvtAddress)0;
+    residentAddress.terrainSetIndex = terrainSetIndex;
+    residentAddress.clipLevel = biasedMip;
+    residentAddress.pageCoord = requestedPageCoord;
+    residentAddress.pageUv = requestedPageUv;
+    residentAddress.pageTableIndex = requestedPageTableIndex;
+
+    uint physicalPageIndex = 0u;
+    if (!TerrainRvtLookupResidentPage(terrainSetIndex, biasedMip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
+#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
+        && !TerrainRvtTryFindCoarserResidentFromPageLocal(
+            terrainSetIndex,
+            info,
+            terrainClipCount,
+            biasedMip,
+            requestedPageCoord,
+            requestedPageUv,
+            TERRAIN_RVT_CONTENT_MATERIAL,
+            residentAddress,
+            physicalPageIndex)
+#endif
+        )
+    {
+        return false;
+    }
+
+    TerrainRvtMarkVisited(residentAddress.pageTableIndex);
+    float3 atlasUv;
+    TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
+    Texture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
+    normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    normalWS = TerrainRvtTangentToWorldNormal(normalTS, normalWSBase);
+    return true;
+}
+
 void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
 {
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
