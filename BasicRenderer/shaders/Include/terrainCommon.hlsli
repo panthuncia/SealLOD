@@ -19,6 +19,7 @@ static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
 static const uint TERRAIN_STOCHASTIC_FLAG_HEIGHT = 1u << 3;
 static const float TERRAIN_PARALLAX_MIN_LAYER_WEIGHT = 0.02f;
 static const float TERRAIN_PARALLAX_MIN_FADE = 0.01f;
+static const float TERRAIN_DEFAULT_LAYER_UV_SCALE = 24.0f / 4096.0f;
 #if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
 static const uint TERRAIN_SHARED_WEIGHT_WORD_CAPACITY = 2048u;
 groupshared uint g_terrainSharedWeightWords[TERRAIN_SHARED_WEIGHT_WORD_CAPACITY];
@@ -923,6 +924,112 @@ float TerrainInterpolateLayerWeight(
     return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
 
+float3x3 TerrainBasis(float3 normalWS);
+
+float3 TerrainRvtParallaxPosition(
+    uint materialFlags,
+    uint terrainSetIndex,
+    float3 positionWS,
+    float3 dpdxWS,
+    float3 dpdyWS,
+    float3 normalWSBase,
+    out bool applied)
+{
+    applied = false;
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const bool terrainGeometricDisplacementEnabled = (materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
+    if (terrainGeometricDisplacementEnabled ||
+        perFrameBuffer.terrainRvtEnabled == 0u ||
+        perFrameBuffer.terrainRvtForceDirectFallback != 0u ||
+        perFrameBuffer.parallaxOcclusionMappingEnabled == 0u ||
+        perFrameBuffer.terrainParallaxOcclusionMappingEnabled == 0u ||
+        perFrameBuffer.terrainParallaxHeightScale <= 0.0f)
+    {
+        return positionWS;
+    }
+
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    Camera mainCamera = cameras[perFrameBuffer.mainCameraIndex];
+    const float3 cameraDelta = mainCamera.positionWorldSpace.xyz - positionWS;
+    const float terrainViewDistance = length(cameraDelta);
+    const float terrainParallaxFade = TerrainParallaxDistanceFade(
+        terrainViewDistance,
+        perFrameBuffer.terrainParallaxFadeStartDistance,
+        perFrameBuffer.terrainParallaxFadeEndDistance);
+    if (terrainParallaxFade <= TERRAIN_PARALLAX_MIN_FADE)
+    {
+        return positionWS;
+    }
+
+    const float3 viewDir = cameraDelta * rcp(max(terrainViewDistance, 1.0e-5f));
+    const float3x3 terrainBasis = TerrainBasis(normalWSBase);
+    const float3 viewDirTS = ParallaxViewDirectionTS(terrainBasis, viewDir);
+    const float3 parallaxDirectionWS = terrainBasis[0] * viewDirTS.x + terrainBasis[1] * viewDirTS.y;
+    const float2 parallaxDirection = TerrainSkyrimXYDerivativeFromRendererDerivative(parallaxDirectionWS);
+
+    const float maxHeightWorld =
+        perFrameBuffer.terrainParallaxHeightScale *
+        terrainParallaxFade *
+        rcp(TERRAIN_DEFAULT_LAYER_UV_SCALE);
+    if (maxHeightWorld <= 1.0e-5f)
+    {
+        return positionWS;
+    }
+
+    uint maxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
+    maxSteps = max(4u, (uint)ceil((float)maxSteps * terrainParallaxFade));
+    const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
+    const float stepSize = rcp((float)numSteps);
+    const float2 offsetPerStep = parallaxDirection * maxHeightWorld * stepSize;
+
+    const float2 baseSkyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+    float prevBound = 1.0f;
+    float prevHeight = 1.0f;
+    float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (maxHeightWorld * 0.5f);
+    float2 pt1 = float2(0.0f, 0.0f);
+    float2 pt2 = float2(prevBound, prevHeight);
+    bool foundIntersection = false;
+
+    [loop]
+    for (uint i = 1u; i <= numSteps; ++i)
+    {
+        const float currentBound = 1.0f - (float)i * stepSize;
+        const float2 currentSkyrimXY = prevSkyrimXY - offsetPerStep;
+        const float3 currentPositionWS = float3(currentSkyrimXY.x, positionWS.y, -currentSkyrimXY.y);
+        float currentHeight = 0.0f;
+        TerrainRvtTrySampleHeightFast(terrainSetIndex, currentPositionWS, dpdxWS, dpdyWS, currentHeight);
+
+        if (currentHeight >= currentBound)
+        {
+            pt1 = float2(currentBound, currentHeight);
+            pt2 = float2(prevBound, prevHeight);
+            foundIntersection = true;
+            break;
+        }
+
+        prevSkyrimXY = currentSkyrimXY;
+        prevBound = currentBound;
+        prevHeight = currentHeight;
+    }
+
+    float2 parallaxSkyrimXY = baseSkyrimXY - parallaxDirection * (maxHeightWorld * 0.5f);
+    if (foundIntersection)
+    {
+        const float delta2 = pt2.x - pt2.y;
+        const float delta1 = pt1.x - pt1.y;
+        const float denominator = delta2 - delta1;
+        float parallaxAmount = abs(denominator) > 1.0e-5f
+            ? (pt1.x * delta2 - pt2.x * delta1) / denominator
+            : pt1.x;
+        parallaxAmount = saturate(parallaxAmount);
+        const float offset = (1.0f - parallaxAmount) * -maxHeightWorld + maxHeightWorld * 0.5f;
+        parallaxSkyrimXY = baseSkyrimXY + parallaxDirection * offset;
+    }
+
+    applied = true;
+    return float3(parallaxSkyrimXY.x, positionWS.y, -parallaxSkyrimXY.y);
+}
+
 float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 positionWS, float3 dpdxWS, float3 dpdyWS, bool useRvt)
 {
 #if !defined(TERRAIN_RVT_GENERATION)
@@ -1114,9 +1221,20 @@ void ApplyTerrainMaterialInternal(
     terrainSetIndex = IndirectCommandSignatureRootConstant0;
 #endif
 
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+
 #if !defined(TERRAIN_RVT_GENERATION)
     TerrainRvtMaterialSample rvtSample;
-    if (TerrainRvtTrySampleMaterial(terrainSetIndex, positionWS, dpdxWS, dpdyWS, normalWSBase, rvtSample))
+    bool rvtParallaxApplied = false;
+    const float3 rvtSamplePositionWS = TerrainRvtParallaxPosition(
+        materialFlags,
+        terrainSetIndex,
+        positionWS,
+        dpdxWS,
+        dpdyWS,
+        normalWSBase,
+        rvtParallaxApplied);
+    if (TerrainRvtTrySampleMaterial(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS, normalWSBase, rvtSample))
     {
         inputs.albedo = rvtSample.albedo * vertexColor;
         inputs.normalWS = rvtSample.normalWS;
@@ -1144,11 +1262,11 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtPageStamp = rvtSample.pageStamp;
         inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
         inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+        inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
     }
     else
     {
-        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         if (perFrameBuffer.terrainRvtEnabled != 0u)
         {
             inputs.terrainRvtDebugFlags = 0x1u;
@@ -1185,7 +1303,6 @@ void ApplyTerrainMaterialInternal(
     StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     bool terrainStochasticSamplingEnabled = perFrameBuffer.terrainStochasticSamplingEnabled != 0u;
     bool terrainStochasticDiffuseEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticDiffuseEnabled != 0u;
     bool terrainStochasticNormalEnabled = terrainStochasticSamplingEnabled && perFrameBuffer.terrainStochasticNormalEnabled != 0u;

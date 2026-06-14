@@ -1550,7 +1550,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainStochasticBlendCurve", 0.65f);
     settingsManager.registerSetting<bool>("enableTerrainGaussianStochasticSampling", false);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
-    settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", false);
+    settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
     settingsManager.registerSetting<bool>("enableTerrainRvt", true);
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
@@ -1567,7 +1567,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
