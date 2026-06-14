@@ -660,15 +660,6 @@ float2 TerrainParallaxCoords(
     float stepSize = rcp((float)numSteps);
     float2 offsetPerStep = parallaxDirection * maxHeight * stepSize;
     uint refineSteps = numSteps;
-
-    float prevBound = 1.0f;
-    float prevHeight = 1.0f;
-    float2 prevUv = uv + parallaxDirection * (maxHeight * 0.5f);
-    float2 pt1 = float2(0.0f, 0.0f);
-    float2 pt2 = float2(prevBound, prevHeight);
-    float2 hitUv = uv;
-    bool foundIntersection = false;
-    bool contactRefinement = false;
     TerrainStochasticContext parallaxHeightContext = (TerrainStochasticContext)0;
     bool hasParallaxHeightContext = TerrainTryBuildLayerParallaxHeightContext(
         layer,
@@ -683,6 +674,26 @@ float2 TerrainParallaxCoords(
         dUVdx,
         dUVdy,
         parallaxHeightContext);
+
+    float prevBound = 1.0f;
+    float2 prevUv = uv + parallaxDirection * (maxHeight * 0.5f);
+    float prevHeight = TerrainSampleLayerHeightWithParallaxContext(
+        layer,
+        stochasticLayer,
+        hasStochasticLayer,
+        terrainStochasticHeightEnabled,
+        terrainGaussianStochasticEnabled,
+        useStochasticContext,
+        hasParallaxHeightContext,
+        parallaxHeightContext,
+        prevUv,
+        dUVdx,
+        dUVdy);
+    float2 pt1 = float2(0.0f, 0.0f);
+    float2 pt2 = float2(prevBound, prevHeight);
+    float2 hitUv = uv;
+    bool foundIntersection = false;
+    bool contactRefinement = false;
 
     [loop] while (numSteps > 0u)
     {
@@ -924,6 +935,77 @@ float TerrainInterpolateLayerWeight(
     return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
 
+float TerrainSampleBlendedHeightScale(uint terrainSetIndex, float3 positionWS)
+{
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
+    StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
+    StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
+    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+
+    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    if (terrain.regionSizeWorld <= 0.0f ||
+        terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
+    {
+        return 0.0f;
+    }
+
+    float2 skyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+    int2 regionCoord = int2(floor(skyrimXY / terrain.regionSizeWorld));
+    uint2 localRegion;
+    localRegion.x = (uint)(regionCoord.x - terrain.minRegionX);
+    localRegion.y = (uint)(regionCoord.y - terrain.minRegionY);
+    if (regionCoord.x < terrain.minRegionX || regionCoord.y < terrain.minRegionY ||
+        localRegion.x >= terrain.regionCountX || localRegion.y >= terrain.regionCountY)
+    {
+        return 0.0f;
+    }
+
+    uint regionIndex = terrain.regionBase + localRegion.y * terrain.regionCountX + localRegion.x;
+    if (regionIndex >= terrain.regionBase + terrain.regionCount)
+    {
+        return 0.0f;
+    }
+
+    TerrainRegionInfo region = terrainRegions[regionIndex];
+    if (region.layerRefCount == 0u || region.weightSampleSide < 2u)
+    {
+        return 0.0f;
+    }
+
+    float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
+    float2 regionLocal = skyrimXY - regionOrigin;
+    float heightScaleSum = 0.0f;
+    float weightSum = 0.0f;
+    [loop]
+    for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
+    {
+        const float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
+        if (weight <= 0.0001f)
+        {
+            continue;
+        }
+
+        const uint layerRefIndex = terrain.layerRefBase + region.layerRefStart + localLayer;
+        if (layerRefIndex >= terrain.layerRefBase + terrain.layerRefCount)
+        {
+            continue;
+        }
+
+        const uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
+        TerrainLayerInfo layer = terrainLayers[layerIndex];
+        if (!TerrainCanSampleHeight(layer))
+        {
+            continue;
+        }
+
+        heightScaleSum += weight * max(layer.heightScale, 0.0f);
+        weightSum += weight;
+    }
+
+    return weightSum > 1.0e-4f ? heightScaleSum / weightSum : 0.0f;
+}
+
 float3x3 TerrainBasis(float3 normalWS);
 
 float3 TerrainRvtParallaxPosition(
@@ -967,11 +1049,18 @@ float3 TerrainRvtParallaxPosition(
     const float3 parallaxDirectionWS = terrainBasis[0] * viewDirTS.x + terrainBasis[1] * viewDirTS.y;
     const float2 parallaxDirection = TerrainSkyrimXYDerivativeFromRendererDerivative(parallaxDirectionWS);
 
-    const float maxHeightWorld =
+    const float2 baseSkyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+    float localHeightScale = 0.0f;
+    if (!TerrainRvtTrySampleHeightScaleFast(terrainSetIndex, positionWS, dpdxWS, dpdyWS, localHeightScale))
+    {
+        return positionWS;
+    }
+
+    const float heightToWorldScale =
         perFrameBuffer.terrainParallaxHeightScale *
         terrainParallaxFade *
         rcp(TERRAIN_DEFAULT_LAYER_UV_SCALE);
-    if (maxHeightWorld <= 1.0e-5f)
+    if (heightToWorldScale <= 1.0e-5f)
     {
         return positionWS;
     }
@@ -979,51 +1068,75 @@ float3 TerrainRvtParallaxPosition(
     uint maxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
     maxSteps = max(4u, (uint)ceil((float)maxSteps * terrainParallaxFade));
     const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
-    const float stepSize = rcp((float)numSteps);
-    const float2 offsetPerStep = parallaxDirection * maxHeightWorld * stepSize;
+    const float stepSize = localHeightScale * rcp((float)numSteps);
+    const float centeredHeight = localHeightScale * 0.5f;
 
-    const float2 baseSkyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
-    float prevBound = 1.0f;
-    float prevHeight = 1.0f;
-    float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (maxHeightWorld * 0.5f);
-    float2 pt1 = float2(0.0f, 0.0f);
-    float2 pt2 = float2(prevBound, prevHeight);
+    float prevBound = localHeightScale;
+    float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (prevBound - centeredHeight));
+    float prevHeight = 0.0f;
+    TerrainRvtTrySampleHeightFast(
+        terrainSetIndex,
+        float3(prevSkyrimXY.x, positionWS.y, -prevSkyrimXY.y),
+        dpdxWS,
+        dpdyWS,
+        prevHeight);
+    float prevF = prevBound - prevHeight;
+    float hitBound = 0.0f;
+    float hitF = prevF;
+    float missBound = prevBound;
+    float missF = prevF;
     bool foundIntersection = false;
 
     [loop]
     for (uint i = 1u; i <= numSteps; ++i)
     {
-        const float currentBound = 1.0f - (float)i * stepSize;
-        const float2 currentSkyrimXY = prevSkyrimXY - offsetPerStep;
+        const float currentBound = max(localHeightScale - (float)i * stepSize, 0.0f);
+        const float2 currentSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (currentBound - centeredHeight));
         const float3 currentPositionWS = float3(currentSkyrimXY.x, positionWS.y, -currentSkyrimXY.y);
         float currentHeight = 0.0f;
         TerrainRvtTrySampleHeightFast(terrainSetIndex, currentPositionWS, dpdxWS, dpdyWS, currentHeight);
+        const float currentF = currentBound - currentHeight;
 
-        if (currentHeight >= currentBound)
+        if (currentF <= 0.0f)
         {
-            pt1 = float2(currentBound, currentHeight);
-            pt2 = float2(prevBound, prevHeight);
+            hitBound = currentBound;
+            hitF = currentF;
+            missBound = prevBound;
+            missF = prevF;
             foundIntersection = true;
             break;
         }
 
-        prevSkyrimXY = currentSkyrimXY;
         prevBound = currentBound;
-        prevHeight = currentHeight;
+        prevF = currentF;
     }
 
-    float2 parallaxSkyrimXY = baseSkyrimXY - parallaxDirection * (maxHeightWorld * 0.5f);
+    float2 parallaxSkyrimXY = baseSkyrimXY - parallaxDirection * (heightToWorldScale * centeredHeight);
     if (foundIntersection)
     {
-        const float delta2 = pt2.x - pt2.y;
-        const float delta1 = pt1.x - pt1.y;
-        const float denominator = delta2 - delta1;
-        float parallaxAmount = abs(denominator) > 1.0e-5f
-            ? (pt1.x * delta2 - pt2.x * delta1) / denominator
-            : pt1.x;
-        parallaxAmount = saturate(parallaxAmount);
-        const float offset = (1.0f - parallaxAmount) * -maxHeightWorld + maxHeightWorld * 0.5f;
-        parallaxSkyrimXY = baseSkyrimXY + parallaxDirection * offset;
+        [unroll]
+        for (uint refine = 0u; refine < 3u; ++refine)
+        {
+            const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+            const float2 rootSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (rootBound - centeredHeight));
+            const float3 rootPositionWS = float3(rootSkyrimXY.x, positionWS.y, -rootSkyrimXY.y);
+            float rootHeight = 0.0f;
+            TerrainRvtTrySampleHeightFast(terrainSetIndex, rootPositionWS, dpdxWS, dpdyWS, rootHeight);
+            const float rootF = rootBound - rootHeight;
+            if (rootF <= 0.0f)
+            {
+                hitBound = rootBound;
+                hitF = rootF;
+            }
+            else
+            {
+                missBound = rootBound;
+                missF = rootF;
+            }
+        }
+
+        const float finalBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
+        parallaxSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (finalBound - centeredHeight));
     }
 
     applied = true;
@@ -1259,9 +1372,7 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
         inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
-        inputs.terrainRvtPageStamp = rvtSample.pageStamp;
-        inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
-        inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+        inputs.terrainRvtHeightScale = rvtSample.heightScale;
         inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
     }
@@ -1286,9 +1397,7 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtSampleAlbedoPoint = rvtSample.albedoPoint;
         inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
-        inputs.terrainRvtPageStamp = rvtSample.pageStamp;
-        inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
-        inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+        inputs.terrainRvtHeightScale = rvtSample.heightScale;
 #if !TERRAIN_RVT_ENABLE_DIRECT_FALLBACK
         return;
 #endif

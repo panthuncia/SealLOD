@@ -200,19 +200,10 @@ void EvaluateGBufferOptimized(uint2 pixel)
                 payload = PackDebugFloat3(sample.materialInputs.terrainRvtSampleAlbedoPoint);
             }
             break;
-        case OUTPUT_TERRAIN_RVT_PAGE_STAMP:
+        case OUTPUT_TERRAIN_RVT_HEIGHT_SCALE:
             if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
             {
-                payload = PackDebugFloat3(float3(
-                    sample.materialInputs.terrainRvtPageStamp,
-                    sample.materialInputs.terrainRvtExpectedPageStamp,
-                    0.0f));
-            }
-            break;
-        case OUTPUT_TERRAIN_RVT_PAGE_STAMP_DELTA:
-            if ((sample.materialInputs.terrainRvtDebugFlags & 0x2u) != 0u)
-            {
-                payload = PackDebugFloat3(sample.materialInputs.terrainRvtPageStampDelta.xxx);
+                payload = PackDebugFloat3(sample.materialInputs.terrainRvtHeightScale.xxx);
             }
             break;
     }

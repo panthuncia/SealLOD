@@ -461,9 +461,7 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
     materialInputs.terrainRvtSampleAlbedoPoint = 0.0f.xxx;
     materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
     materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
-    materialInputs.terrainRvtPageStamp = 0.0f;
-    materialInputs.terrainRvtExpectedPageStamp = 0.0f;
-    materialInputs.terrainRvtPageStampDelta = 0.0f;
+    materialInputs.terrainRvtHeightScale = 0.0f;
 }
 
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)

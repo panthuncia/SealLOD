@@ -169,7 +169,6 @@ struct TerrainRvtTelemetryStatsReadback {
     uint32_t materialSampleAtlasPoolMask;
     uint32_t heightOwnerMismatches;
     uint32_t materialOwnerMismatches;
-    uint32_t materialSamplePageStampMismatches;
     uint32_t requestPageTableXor;
     uint32_t requestPageTableMin;
     uint32_t requestPageTableMax;
@@ -194,7 +193,6 @@ struct TerrainRvtTelemetryStatsReadback {
     uint32_t heightFullSampleHits;
     uint32_t generationPageTableXor;
     uint32_t generationPhysicalPageXor;
-    uint32_t generationPairHashXor;
     uint32_t physicalPageOwnerCollisions;
     std::array<uint32_t, TerrainRvtTelemetryMipBins> heightRequestMipHistogram;
     std::array<uint32_t, TerrainRvtTelemetryMipBins> materialRequestMipHistogram;
@@ -203,7 +201,7 @@ struct TerrainRvtTelemetryStatsReadback {
     std::array<uint32_t, TerrainRvtTelemetryMipBins> generationMipHistogram;
 };
 
-static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (68u + TerrainRvtTelemetryMipBins * 5u));
+static_assert(sizeof(TerrainRvtTelemetryStatsReadback) == sizeof(uint32_t) * (66u + TerrainRvtTelemetryMipBins * 5u));
 
 std::string FormatTerrainRvtMipHistogram(const std::array<uint32_t, TerrainRvtTelemetryMipBins>& histogram)
 {
@@ -2812,13 +2810,11 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 stats.heightFullSampleHits);
 
             spdlog::info(
-                "SARP terrain RVT telemetry atlas-stamp: frame={} mismatches={} owner_collisions={} generation_xor(page=0x{:08X} physical=0x{:08X} pair=0x{:08X})",
+                "SARP terrain RVT telemetry atlas-owner: frame={} owner_collisions={} generation_xor(page=0x{:08X} physical=0x{:08X})",
                 requestedFrame,
-                stats.materialSamplePageStampMismatches,
                 stats.physicalPageOwnerCollisions,
                 stats.generationPageTableXor,
-                stats.generationPhysicalPageXor,
-                stats.generationPairHashXor);
+                stats.generationPhysicalPageXor);
         },
         QueueKind::Copy);
 

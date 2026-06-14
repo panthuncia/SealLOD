@@ -78,8 +78,7 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_TERRAIN_RVT_SAMPLED_NORMAL:
         case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
         case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
-        case OUTPUT_TERRAIN_RVT_PAGE_STAMP:
-        case OUTPUT_TERRAIN_RVT_PAGE_STAMP_DELTA:
+        case OUTPUT_TERRAIN_RVT_HEIGHT_SCALE:
             color = UnpackDebugFloat3(payload);
             break;
         case OUTPUT_TRANSPARENT_VBOIT_TRANSMITTANCE:

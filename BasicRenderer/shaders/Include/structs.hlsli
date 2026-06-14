@@ -359,7 +359,6 @@ struct TerrainRvtStats
     uint materialSampleAtlasPoolMask;
     uint heightOwnerMismatches;
     uint materialOwnerMismatches;
-    uint materialSamplePageStampMismatches;
     uint requestPageTableXor;
     uint requestPageTableMin;
     uint requestPageTableMax;
@@ -384,7 +383,6 @@ struct TerrainRvtStats
     uint heightFullSampleHits;
     uint generationPageTableXor;
     uint generationPhysicalPageXor;
-    uint generationPairHashXor;
     uint physicalPageOwnerCollisions;
     uint heightRequestMipHistogram[16];
     uint materialRequestMipHistogram[16];
@@ -960,9 +958,7 @@ struct MaterialInputs
     float3 terrainRvtSampleAlbedoPoint;
     float3 terrainRvtSampleNormal;
     float3 terrainRvtSampleMaterial;
-    float terrainRvtPageStamp;
-    float terrainRvtExpectedPageStamp;
-    float terrainRvtPageStampDelta;
+    float terrainRvtHeightScale;
 };
 
 struct SkinningInstanceGPUInfo

@@ -452,7 +452,6 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t materialSampleAtlasPoolMask;
         uint32_t heightOwnerMismatches;
         uint32_t materialOwnerMismatches;
-        uint32_t materialSamplePageStampMismatches;
         uint32_t requestPageTableXor;
         uint32_t requestPageTableMin;
         uint32_t requestPageTableMax;
@@ -477,7 +476,6 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t heightFullSampleHits;
         uint32_t generationPageTableXor;
         uint32_t generationPhysicalPageXor;
-        uint32_t generationPairHashXor;
         uint32_t physicalPageOwnerCollisions;
         uint32_t heightRequestMipHistogram[16];
         uint32_t materialRequestMipHistogram[16];

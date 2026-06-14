@@ -54,8 +54,7 @@ enum OutputType {
 	TERRAIN_RVT_SAMPLED_NORMAL = 50,
 	TERRAIN_RVT_SAMPLED_MATERIAL = 51,
 	TERRAIN_RVT_SAMPLED_ALBEDO_POINT = 52,
-	TERRAIN_RVT_PAGE_STAMP = 53,
-	TERRAIN_RVT_PAGE_STAMP_DELTA = 54,
+	TERRAIN_RVT_HEIGHT_SCALE = 53,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -112,6 +111,5 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Terrain RVT Sampled Normal",
 	"Terrain RVT Sampled Material",
 	"Terrain RVT Sampled Albedo Point",
-	"Terrain RVT Page Stamp",
-	"Terrain RVT Page Stamp Delta",
+	"Terrain RVT Height Scale",
 };

@@ -20,7 +20,6 @@ static const uint TERRAIN_RVT_FALLBACK_FORCED = 2u;
 static const uint TERRAIN_RVT_FALLBACK_COMPUTE_PAGE = 3u;
 static const uint TERRAIN_RVT_FALLBACK_PAGE_MISS = 4u;
 static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
-#define TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG 0
 #define TERRAIN_RVT_VALIDATE_SAMPLE_OWNER 0
 #define TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG 0
 #define TERRAIN_RVT_ENABLE_DIRECT_FALLBACK 1
@@ -30,28 +29,6 @@ static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
 #define TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) ((perFrame).terrainRvtTelemetryEnabled != 0u)
 #else
 #define TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) false
-#endif
-
-#if TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG
-uint TerrainRvtDebugHash(uint value)
-{
-    value ^= value >> 16u;
-    value *= 0x7feb352du;
-    value ^= value >> 15u;
-    value *= 0x846ca68bu;
-    value ^= value >> 16u;
-    return value;
-}
-
-float TerrainRvtDebugPageStampValue(uint pageTableIndex)
-{
-    return (float)(TerrainRvtDebugHash(pageTableIndex) & 0xffu) / 255.0f;
-}
-
-uint TerrainRvtDebugDecodePageStampByte(float stamp)
-{
-    return min(255u, (uint)floor(saturate(stamp) * 255.0f + 0.5f));
-}
 #endif
 
 float2 TerrainRvtSkyrimXYFromRendererPosition(float3 positionWS)
@@ -722,6 +699,67 @@ bool TerrainRvtTrySampleHeight(
     return result;
 }
 
+bool TerrainRvtTrySampleHeightScaleFast(
+    uint terrainSetIndex,
+    float3 positionWS,
+    float3 dpdxWS,
+    float3 dpdyWS,
+    out float heightScale)
+{
+    heightScale = 0.0f;
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    TerrainRvtInfo info = infoBuffer[0];
+    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+
+    const float2 skyrimXY = TerrainRvtSkyrimXYFromRendererPosition(positionWS);
+    float2 local;
+    uint terrainClipCount;
+    uint mip;
+    uint2 requestedPageCoord;
+    float2 requestedPageUv;
+    uint requestedPageTableIndex;
+    if (!TerrainRvtTryPrepareSampleLocal(terrainSetIndex, info, terrain, skyrimXY, local, terrainClipCount) ||
+        !TerrainRvtTryComputePageLocal(
+            terrainSetIndex,
+            info,
+            local,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+            terrainClipCount,
+            mip,
+            requestedPageCoord,
+            requestedPageUv,
+            requestedPageTableIndex))
+    {
+        return false;
+    }
+
+    TerrainRvtAddress residentAddress = (TerrainRvtAddress)0;
+    residentAddress.terrainSetIndex = terrainSetIndex;
+    residentAddress.clipLevel = mip;
+    residentAddress.pageCoord = requestedPageCoord;
+    residentAddress.pageUv = requestedPageUv;
+    residentAddress.pageTableIndex = requestedPageTableIndex;
+
+    uint physicalPageIndex = 0u;
+    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
+#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
+        && !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_MATERIAL, residentAddress, physicalPageIndex)
+#endif
+        )
+    {
+        return false;
+    }
+
+    TerrainRvtMarkVisited(residentAddress.pageTableIndex);
+    float3 atlasUv;
+    TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
+    Texture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
+    heightScale = materialAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).a;
+    return heightScale > 1.0e-5f;
+}
+
 struct TerrainRvtMaterialSample
 {
     float3 albedo;
@@ -743,9 +781,7 @@ struct TerrainRvtMaterialSample
     float2 pageUv;
     float3 atlasUv;
     float2 physicalTileUv;
-    float pageStamp;
-    float expectedPageStamp;
-    float pageStampDelta;
+    float heightScale;
 };
 
 float3x3 TerrainRvtTerrainBasis(float3 normalWS)
@@ -931,6 +967,7 @@ bool TerrainRvtTrySampleMaterial(
     sampleOut.roughness = materialParams.r;
     sampleOut.metallic = materialParams.g;
     sampleOut.ambientOcclusion = materialParams.b;
+    sampleOut.heightScale = materialParams.a;
     sampleOut.residentMip = residentAddress.clipLevel;
     sampleOut.residentPageTableIndex = residentAddress.pageTableIndex;
     sampleOut.physicalPageIndex = physicalPageIndex;
