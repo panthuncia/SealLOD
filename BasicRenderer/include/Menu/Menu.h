@@ -606,6 +606,10 @@ private:
     std::function<uint32_t()> getCLodForceTraversalDepthRoot;
     std::function<void(uint32_t)> setCLodForceTraversalDepthRoot;
 
+    uint32_t m_clodVisibleClusterCapacity = CLodDefaultVisibleClusterCapacity;
+    std::function<uint32_t()> getCLodVisibleClusterCapacity;
+    std::function<void(uint32_t)> setCLodVisibleClusterCapacity;
+
     uint32_t m_clodDirectionalVirtualShadowMaxBackingResolution = CLodVirtualShadowDefaultBackingResolution;
     std::function<uint32_t()> getCLodDirectionalVirtualShadowMaxBackingResolution;
     std::function<void(uint32_t)> setCLodDirectionalVirtualShadowMaxBackingResolution;
@@ -700,6 +704,12 @@ private:
     int m_terrainRvtDebugView = 0;
     std::function<uint32_t()> getTerrainRvtDebugView;
     std::function<void(uint32_t)> setTerrainRvtDebugView;
+    int m_terrainRvtPageSize = 128;
+    std::function<uint32_t()> getTerrainRvtPageSize;
+    std::function<void(uint32_t)> setTerrainRvtPageSize;
+    int m_terrainRvtBorderTexels = 4;
+    std::function<uint32_t()> getTerrainRvtBorderTexels;
+    std::function<void(uint32_t)> setTerrainRvtBorderTexels;
     int m_terrainRvtMipCount = 14;
     std::function<uint32_t()> getTerrainRvtMipCount;
     std::function<void(uint32_t)> setTerrainRvtMipCount;
@@ -709,6 +719,12 @@ private:
     float m_terrainRvtBasePageWorldSize = 128.0f / 24.0f;
     std::function<float()> getTerrainRvtBasePageWorldSize;
     std::function<void(float)> setTerrainRvtBasePageWorldSize;
+    int m_terrainRvtPhysicalAtlasPagesWide = 32;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPagesWide;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPagesWide;
+    int m_terrainRvtPhysicalAtlasPagesHigh = 32;
+    std::function<uint32_t()> getTerrainRvtPhysicalAtlasPagesHigh;
+    std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPagesHigh;
     int m_terrainRvtPhysicalAtlasPoolCount = 1;
     std::function<uint32_t()> getTerrainRvtPhysicalAtlasPoolCount;
     std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPoolCount;
@@ -1162,6 +1178,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_clodForceTraversalDepthRoot = getCLodForceTraversalDepthRoot();
     observerSetting(m_clodForceTraversalDepthRoot, CLodForceTraversalDepthRootSettingName);
 
+    getCLodVisibleClusterCapacity = settingsManager.getSettingGetter<uint32_t>(CLodVisibleClusterCapacitySettingName);
+    setCLodVisibleClusterCapacity = settingsManager.getSettingSetter<uint32_t>(CLodVisibleClusterCapacitySettingName);
+    m_clodVisibleClusterCapacity = getCLodVisibleClusterCapacity();
+    observerSetting(m_clodVisibleClusterCapacity, CLodVisibleClusterCapacitySettingName);
+
     getCLodDirectionalVirtualShadowMaxBackingResolution = settingsManager.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName);
     setCLodDirectionalVirtualShadowMaxBackingResolution = settingsManager.getSettingSetter<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName);
     m_clodDirectionalVirtualShadowMaxBackingResolution = getCLodDirectionalVirtualShadowMaxBackingResolution();
@@ -1280,6 +1301,22 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         [this](const uint32_t& newValue) {
             m_terrainRvtDebugView = static_cast<int>(newValue);
         }));
+    setTerrainRvtPageSize = settingsManager.getSettingSetter<uint32_t>("terrainRvtPageSize");
+    getTerrainRvtPageSize = settingsManager.getSettingGetter<uint32_t>("terrainRvtPageSize");
+    m_terrainRvtPageSize = static_cast<int>(getTerrainRvtPageSize());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPageSize",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPageSize = static_cast<int>(newValue);
+        }));
+    setTerrainRvtBorderTexels = settingsManager.getSettingSetter<uint32_t>("terrainRvtBorderTexels");
+    getTerrainRvtBorderTexels = settingsManager.getSettingGetter<uint32_t>("terrainRvtBorderTexels");
+    m_terrainRvtBorderTexels = static_cast<int>(getTerrainRvtBorderTexels());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtBorderTexels",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtBorderTexels = static_cast<int>(newValue);
+        }));
     setTerrainRvtMipCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtMipCount");
     getTerrainRvtMipCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtMipCount");
     m_terrainRvtMipCount = static_cast<int>(getTerrainRvtMipCount());
@@ -1303,6 +1340,22 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         "terrainRvtBasePageWorldSize",
         [this](const float& newValue) {
             m_terrainRvtBasePageWorldSize = newValue;
+        }));
+    setTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
+    getTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
+    m_terrainRvtPhysicalAtlasPagesWide = static_cast<int>(getTerrainRvtPhysicalAtlasPagesWide());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPagesWide",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPagesWide = static_cast<int>(newValue);
+        }));
+    setTerrainRvtPhysicalAtlasPagesHigh = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPagesHigh");
+    getTerrainRvtPhysicalAtlasPagesHigh = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPagesHigh");
+    m_terrainRvtPhysicalAtlasPagesHigh = static_cast<int>(getTerrainRvtPhysicalAtlasPagesHigh());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtPhysicalAtlasPagesHigh",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtPhysicalAtlasPagesHigh = static_cast<int>(newValue);
         }));
     setTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
     getTerrainRvtPhysicalAtlasPoolCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPoolCount");
@@ -1808,6 +1861,15 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 setCLodForceTraversalDepthRoot(m_clodForceTraversalDepthRoot);
             }
         }
+        int visibleClusterCapacityM = static_cast<int>((m_clodVisibleClusterCapacity + 999999u) / 1000000u);
+        if (ImGui::SliderInt("CLod Visible Cluster Capacity (M)", &visibleClusterCapacityM, 1, 30)) {
+            const uint32_t capacity = static_cast<uint32_t>(std::clamp(visibleClusterCapacityM, 1, 30)) * 1000000u;
+            m_clodVisibleClusterCapacity = std::clamp(
+                capacity,
+                CLodMinVisibleClusterCapacity,
+                CLodMaxVisibleClusterCapacity);
+            setCLodVisibleClusterCapacity(m_clodVisibleClusterCapacity);
+        }
         if (ImGui::SliderFloat(
                 "Shadow Reyes Coarse Target Pages/Triangle",
                 &m_clodReyesShadowCoarseTargetPagesPerTriangle,
@@ -2023,6 +2085,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::SliderInt("Terrain RVT Debug View", &m_terrainRvtDebugView, 0, 4)) {
             setTerrainRvtDebugView(static_cast<uint32_t>(std::max(0, m_terrainRvtDebugView)));
         }
+        if (ImGui::SliderInt("Terrain RVT Page Size", &m_terrainRvtPageSize, 16, 512)) {
+            setTerrainRvtPageSize(static_cast<uint32_t>(std::clamp(m_terrainRvtPageSize, 16, 512)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Border Texels", &m_terrainRvtBorderTexels, 0, 16)) {
+            setTerrainRvtBorderTexels(static_cast<uint32_t>(std::clamp(m_terrainRvtBorderTexels, 0, 16)));
+        }
         if (ImGui::SliderInt("Terrain RVT Clipmaps", &m_terrainRvtMipCount, 1, 24)) {
             setTerrainRvtMipCount(static_cast<uint32_t>(std::clamp(m_terrainRvtMipCount, 1, 24)));
         }
@@ -2031,6 +2099,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::SliderFloat("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 0.125f, 256.0f, "%.3f")) {
             setTerrainRvtBasePageWorldSize(std::max(0.125f, m_terrainRvtBasePageWorldSize));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pages Wide", &m_terrainRvtPhysicalAtlasPagesWide, 1, 128)) {
+            setTerrainRvtPhysicalAtlasPagesWide(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPagesWide, 1, 128)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Physical Atlas Pages High", &m_terrainRvtPhysicalAtlasPagesHigh, 1, 128)) {
+            setTerrainRvtPhysicalAtlasPagesHigh(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPagesHigh, 1, 128)));
         }
         if (ImGui::SliderInt("Terrain RVT Physical Atlas Pools", &m_terrainRvtPhysicalAtlasPoolCount, 1, 8)) {
             setTerrainRvtPhysicalAtlasPoolCount(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPoolCount, 1, 8)));

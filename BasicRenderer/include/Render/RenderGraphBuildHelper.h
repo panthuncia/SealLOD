@@ -622,6 +622,23 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     const uint32_t terrainRvtPhysicalTileSide = TerrainRvt::PageSize() + TerrainRvt::BorderTexels() * 2u;
     const uint32_t terrainRvtAtlasSide = TerrainRvt::AtlasPagesWide() * terrainRvtPhysicalTileSide;
     const uint32_t terrainRvtAtlasHeight = TerrainRvt::AtlasPagesHigh() * terrainRvtPhysicalTileSide;
+    const uint64_t terrainRvtAtlasTexels =
+        static_cast<uint64_t>(terrainRvtAtlasSide) *
+        static_cast<uint64_t>(terrainRvtAtlasHeight) *
+        static_cast<uint64_t>(TerrainRvt::AtlasPoolCount());
+    const uint64_t terrainRvtAtlasBytes = terrainRvtAtlasTexels * (2u + 4u + 8u + 4u);
+    spdlog::info(
+        "Terrain RVT atlas allocation: pageSize={} border={} tileSide={} pages={}x{} pools={} texture={}x{} totalAtlasBytes={} ({:.2f} MiB)",
+        TerrainRvt::PageSize(),
+        TerrainRvt::BorderTexels(),
+        terrainRvtPhysicalTileSide,
+        TerrainRvt::AtlasPagesWide(),
+        TerrainRvt::AtlasPagesHigh(),
+        TerrainRvt::AtlasPoolCount(),
+        terrainRvtAtlasSide,
+        terrainRvtAtlasHeight,
+        terrainRvtAtlasBytes,
+        static_cast<double>(terrainRvtAtlasBytes) / (1024.0 * 1024.0));
     auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels) {
         TextureDescription desc;
         desc.arraySize = TerrainRvt::AtlasPoolCount();

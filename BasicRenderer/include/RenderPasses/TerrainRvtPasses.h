@@ -32,7 +32,7 @@ namespace TerrainRvt
 {
     inline constexpr uint32_t CounterCount = 5u;
     inline constexpr uint32_t MaxDispatchGroupsX = 65535u;
-    inline constexpr uint32_t PhysicalAtlasTextureSide = 16384u;
+    inline constexpr uint32_t MaxPhysicalAtlasTextureSide = 16384u;
     inline constexpr float DefaultSourceTexelsPerWorld = 24.0f;
     inline constexpr float DefaultBasePageWorldSize = 128.0f / DefaultSourceTexelsPerWorld;
 
@@ -81,15 +81,20 @@ namespace TerrainRvt
         return std::min(SettingU32("terrainRvtBorderTexels", 4u), 16u);
     }
 
-    inline uint32_t AtlasPagesWide()
+    inline uint32_t MaxAtlasPagesPerAxis()
     {
         const uint32_t tileSide = PageSize() + BorderTexels() * 2u;
-        return std::max(1u, PhysicalAtlasTextureSide / std::max(tileSide, 1u));
+        return std::max(1u, MaxPhysicalAtlasTextureSide / std::max(tileSide, 1u));
+    }
+
+    inline uint32_t AtlasPagesWide()
+    {
+        return std::clamp(SettingU32("terrainRvtPhysicalAtlasPagesWide", MaxAtlasPagesPerAxis()), 1u, MaxAtlasPagesPerAxis());
     }
 
     inline uint32_t AtlasPagesHigh()
     {
-        return AtlasPagesWide();
+        return std::clamp(SettingU32("terrainRvtPhysicalAtlasPagesHigh", MaxAtlasPagesPerAxis()), 1u, MaxAtlasPagesPerAxis());
     }
 
     inline uint32_t AtlasPoolCount()

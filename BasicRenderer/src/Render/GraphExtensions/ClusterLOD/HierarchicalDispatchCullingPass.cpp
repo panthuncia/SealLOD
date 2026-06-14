@@ -189,6 +189,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_maxVisibleClusters = inputs.maxVisibleClusters;
     m_workGraphMode = inputs.workGraphMode;
     m_rasterOutputKind = inputs.rasterOutputKind;
+    const std::string passIdentifierForLog = stablePassIdentifier;
     m_workGraphComputePageJobDescriptorResourceId =
         std::string(CLodWorkGraphComputePageJobDescriptorBufferId) + "." + std::move(stablePassIdentifier);
     m_voxelRasterQueueDescriptorResourceId =
@@ -220,6 +221,14 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD pure compute");
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
+    const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodNodeReplayStrideBytes;
+    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodMeshletReplayStrideBytes;
+    spdlog::info(
+        "CLod pure compute frontier allocation '{}': capacity={} nodeFrontier={} MiB each clusterFrontier={} MiB",
+        passIdentifierForLog,
+        frontierCapacity,
+        static_cast<double>(nodeFrontierBytes) / (1024.0 * 1024.0),
+        static_cast<double>(clusterFrontierBytes) / (1024.0 * 1024.0));
     m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
     m_pureComputeCurrentNodeFrontierBuffer->SetName("CLod Pure Compute Current Node Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
