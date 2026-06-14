@@ -21,6 +21,8 @@ static const uint TERRAIN_RVT_FALLBACK_COMPUTE_PAGE = 3u;
 static const uint TERRAIN_RVT_FALLBACK_PAGE_MISS = 4u;
 static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
 #define TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG 0
+#define TERRAIN_RVT_VALIDATE_SAMPLE_OWNER 0
+#define TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG 0
 
 #if defined(TERRAIN_RVT_TELEMETRY)
 #define TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) ((perFrame).terrainRvtTelemetryEnabled != 0u)
@@ -229,8 +231,8 @@ bool TerrainRvtTryComputePageAtClipLocal(
         return false;
     }
 
-    const float pageWorldSize = max(clipInfo.pageWorldSize, 0.125f);
-    const float2 pageFloat = local / pageWorldSize;
+    const float invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
+    const float2 pageFloat = local * invPageWorldSize;
     pageCoord = (uint2)floor(pageFloat);
     if (any(pageCoord >= clipInfo.terrainPageCount) ||
         any(pageCoord < clipInfo.originPage) ||
@@ -243,6 +245,34 @@ bool TerrainRvtTryComputePageAtClipLocal(
     pageUv = frac(pageFloat);
     pageTableIndex = TerrainRvtPageTableSlot(clipInfo, pageCoord);
     return pageTableIndex < info.maxVirtualPageTableEntries;
+}
+
+bool TerrainRvtTryComputePageLocal(
+    uint terrainSetIndex,
+    TerrainRvtInfo info,
+    float2 local,
+    float2 skyrimXYDdx,
+    float2 skyrimXYDdy,
+    uint terrainClipCount,
+    out uint mip,
+    out uint2 pageCoord,
+    out float2 pageUv,
+    out uint pageTableIndex)
+{
+    const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
+    const float footprintWorld = max(length(skyrimXYDdx), length(skyrimXYDdy));
+    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
+    mip = min((uint)max(0.0f, floor(requestedMip)), terrainClipCount - 1u);
+
+    return TerrainRvtTryComputePageAtClipLocal(
+        terrainSetIndex,
+        info,
+        local,
+        mip,
+        terrainClipCount,
+        pageCoord,
+        pageUv,
+        pageTableIndex);
 }
 
 bool TerrainRvtTryComputePageAtClip(
@@ -299,17 +329,14 @@ bool TerrainRvtTryComputePage(
         return false;
     }
 
-    const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
-    const float footprintWorld = max(length(skyrimXYDdx), length(skyrimXYDdy));
-    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
-    mip = min((uint)max(0.0f, floor(requestedMip)), terrainClipCount - 1u);
-
-    return TerrainRvtTryComputePageAtClipLocal(
+    return TerrainRvtTryComputePageLocal(
         terrainSetIndex,
         info,
         local,
-        mip,
+        skyrimXYDdx,
+        skyrimXYDdy,
         terrainClipCount,
+        mip,
         pageCoord,
         pageUv,
         pageTableIndex);
@@ -391,9 +418,15 @@ void TerrainRvtPhysicalPageUv(
 {
     const uint tileSide = max(info.physicalTileTexelSide, 1u);
     const uint pagesWide = max(info.physicalAtlasPagesWide, 1u);
-    const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
-    const uint poolIndex = min(physicalPageIndex / pagesPerPool, max(info.physicalAtlasPoolCount, 1u) - 1u);
-    const uint localPhysicalPageIndex = physicalPageIndex - poolIndex * pagesPerPool;
+    const uint poolCount = max(info.physicalAtlasPoolCount, 1u);
+    uint poolIndex = 0u;
+    uint localPhysicalPageIndex = physicalPageIndex;
+    if (poolCount > 1u)
+    {
+        const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
+        poolIndex = min(physicalPageIndex / pagesPerPool, poolCount - 1u);
+        localPhysicalPageIndex = physicalPageIndex - poolIndex * pagesPerPool;
+    }
     const uint2 physicalPage = uint2(localPhysicalPageIndex % pagesWide, localPhysicalPageIndex / pagesWide);
     const float2 atlasTexel = (float2)physicalPage * (float)tileSide +
         (float)info.borderTexels +
@@ -461,6 +494,43 @@ bool TerrainRvtTryFindResident(
     return false;
 }
 
+bool TerrainRvtTryFindResidentLocal(
+    uint terrainSetIndex,
+    TerrainRvtInfo info,
+    float2 local,
+    uint terrainClipCount,
+    uint requestedMip,
+    uint requiredContentMask,
+    out TerrainRvtAddress residentAddress,
+    out uint physicalPageIndex)
+{
+    residentAddress = (TerrainRvtAddress)0;
+    residentAddress.pageTableIndex = 0xffffffffu;
+    physicalPageIndex = 0u;
+
+    [loop]
+    for (uint sampleMip = requestedMip; sampleMip < terrainClipCount; ++sampleMip)
+    {
+        uint2 pageCoord;
+        float2 pageUv;
+        uint pageTableIndex;
+        if (!TerrainRvtTryComputePageAtClipLocal(terrainSetIndex, info, local, sampleMip, terrainClipCount, pageCoord, pageUv, pageTableIndex))
+        {
+            continue;
+        }
+        if (TerrainRvtLookupResidentPage(terrainSetIndex, sampleMip, pageCoord, pageTableIndex, requiredContentMask, physicalPageIndex))
+        {
+            residentAddress.terrainSetIndex = terrainSetIndex;
+            residentAddress.clipLevel = sampleMip;
+            residentAddress.pageCoord = pageCoord;
+            residentAddress.pageUv = pageUv;
+            residentAddress.pageTableIndex = pageTableIndex;
+            return true;
+        }
+    }
+    return false;
+}
+
 void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
 
 bool TerrainRvtTrySampleHeightFast(
@@ -486,7 +556,26 @@ bool TerrainRvtTrySampleHeightFast(
     uint2 requestedPageCoord;
     float2 requestedPageUv;
     uint requestedPageTableIndex;
-    if (!TerrainRvtTryComputePageFromPosition(terrainSetIndex, positionWS, dpdxWS, dpdyWS, info, terrain, mip, requestedPageCoord, requestedPageUv, requestedPageTableIndex))
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    info = infoBuffer[0];
+    terrain = terrainSets[terrainSetIndex];
+
+    const float2 skyrimXY = TerrainRvtSkyrimXYFromRendererPosition(positionWS);
+    float2 local;
+    uint terrainClipCount;
+    if (!TerrainRvtTryPrepareSampleLocal(terrainSetIndex, info, terrain, skyrimXY, local, terrainClipCount) ||
+        !TerrainRvtTryComputePageLocal(
+            terrainSetIndex,
+            info,
+            local,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+            terrainClipCount,
+            mip,
+            requestedPageCoord,
+            requestedPageUv,
+            requestedPageTableIndex))
     {
         if (telemetryEnabled)
         {
@@ -512,7 +601,7 @@ bool TerrainRvtTrySampleHeightFast(
     residentAddress.pageTableIndex = requestedPageTableIndex;
     uint physicalPageIndex = 0u;
     if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex) &&
-        !TerrainRvtTryFindResident(terrainSetIndex, info, terrain, positionWS, mip + 1u, TERRAIN_RVT_CONTENT_HEIGHT, residentAddress, physicalPageIndex))
+        !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_HEIGHT, residentAddress, physicalPageIndex))
     {
         if (telemetryEnabled)
         {
@@ -525,6 +614,7 @@ bool TerrainRvtTrySampleHeightFast(
         }
         return false;
     }
+#if TERRAIN_RVT_VALIDATE_SAMPLE_OWNER
     if (!TerrainRvtValidatePhysicalOwner(physicalPageIndex, residentAddress.pageTableIndex))
     {
         if (telemetryEnabled)
@@ -535,6 +625,7 @@ bool TerrainRvtTrySampleHeightFast(
         }
         return false;
     }
+#endif
 
     TerrainRvtMarkVisited(residentAddress.pageTableIndex);
     float3 atlasUv;
@@ -696,7 +787,26 @@ bool TerrainRvtTrySampleMaterial(
     uint2 requestedPageCoord;
     float2 requestedPageUv;
     uint requestedPageTableIndex;
-    if (!TerrainRvtTryComputePageFromPosition(terrainSetIndex, positionWS, dpdxWS, dpdyWS, info, terrain, mip, requestedPageCoord, requestedPageUv, requestedPageTableIndex))
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    info = infoBuffer[0];
+    terrain = terrainSets[terrainSetIndex];
+
+    const float2 skyrimXY = TerrainRvtSkyrimXYFromRendererPosition(positionWS);
+    float2 local;
+    uint terrainClipCount;
+    if (!TerrainRvtTryPrepareSampleLocal(terrainSetIndex, info, terrain, skyrimXY, local, terrainClipCount) ||
+        !TerrainRvtTryComputePageLocal(
+            terrainSetIndex,
+            info,
+            local,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+            terrainClipCount,
+            mip,
+            requestedPageCoord,
+            requestedPageUv,
+            requestedPageTableIndex))
     {
         sampleOut.fallbackReason = TERRAIN_RVT_FALLBACK_COMPUTE_PAGE;
         if (telemetryEnabled)
@@ -728,7 +838,7 @@ bool TerrainRvtTrySampleMaterial(
     residentAddress.pageTableIndex = requestedPageTableIndex;
     uint physicalPageIndex = 0u;
     if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex) &&
-        !TerrainRvtTryFindResident(terrainSetIndex, info, terrain, positionWS, mip + 1u, TERRAIN_RVT_CONTENT_MATERIAL, residentAddress, physicalPageIndex))
+        !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_MATERIAL, residentAddress, physicalPageIndex))
     {
         sampleOut.fallbackReason = TERRAIN_RVT_FALLBACK_PAGE_MISS;
         if (telemetryEnabled)
@@ -743,6 +853,7 @@ bool TerrainRvtTrySampleMaterial(
         return false;
     }
 
+#if TERRAIN_RVT_VALIDATE_SAMPLE_OWNER
     StructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
     const uint4 owner = physicalPageOwner[physicalPageIndex];
     sampleOut.ownerPageTableIndex = owner.x;
@@ -758,18 +869,22 @@ bool TerrainRvtTrySampleMaterial(
         }
         return false;
     }
+#else
+    sampleOut.ownerPageTableIndex = residentAddress.pageTableIndex;
+#endif
 
     TerrainRvtMarkVisited(residentAddress.pageTableIndex);
     float3 atlasUv;
     TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
-    const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
-    const uint atlasPoolIndex = min(physicalPageIndex / pagesPerPool, max(info.physicalAtlasPoolCount, 1u) - 1u);
+    const uint atlasPoolIndex = (uint)atlasUv.z;
     Texture2DArray<float4> albedoAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtAlbedoAtlas)];
     Texture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
     Texture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
 
     sampleOut.albedo = albedoAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).rgb;
+#if TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG
     sampleOut.albedoPoint = albedoAtlas.SampleLevel(g_pointClamp, atlasUv, 0.0f).rgb;
+#endif
     sampleOut.normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
     sampleOut.normalWS = TerrainRvtTangentToWorldNormal(sampleOut.normalTS, normalWSBase);
     const float4 materialParams = materialAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f);
@@ -780,12 +895,13 @@ bool TerrainRvtTrySampleMaterial(
     sampleOut.residentPageTableIndex = residentAddress.pageTableIndex;
     sampleOut.physicalPageIndex = physicalPageIndex;
     sampleOut.atlasPoolIndex = atlasPoolIndex;
-    sampleOut.ownerPageTableIndex = owner.x;
     sampleOut.fallbackReason = TERRAIN_RVT_FALLBACK_NONE;
     sampleOut.pageCoord = residentAddress.pageCoord;
     sampleOut.pageUv = residentAddress.pageUv;
     sampleOut.atlasUv = atlasUv;
+#if TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG
     sampleOut.physicalTileUv = TerrainRvtPhysicalTileUv(info, residentAddress.pageUv);
+#endif
 
     if (telemetryEnabled)
     {
@@ -819,8 +935,6 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     }
 
     StructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
-    StructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
-    const TerrainRvtPageTag tag = pageTags[pageTableIndex];
     const uint currentEntry = pageTable[pageTableIndex];
     uint physicalPageIndex = 0u;
     uint currentContentMask = 0u;
@@ -831,9 +945,13 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
         currentContentMask = (currentEntry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
         if (physicalPageIndex < info.maxPhysicalPages)
         {
+#if TERRAIN_RVT_VALIDATE_SAMPLE_OWNER
             StructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
             const uint4 owner = physicalPageOwner[physicalPageIndex];
             ownerValid = (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
+#else
+            ownerValid = true;
+#endif
             if (ownerValid && (currentContentMask & contentMask) == contentMask)
             {
                 ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -865,6 +983,9 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
         return;
     }
     const uint missingMask = ownerValid ? (requestedMask & ~currentContentMask) : requestedMask;
+
+    StructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
+    const TerrainRvtPageTag tag = pageTags[pageTableIndex];
 
     if (telemetryEnabled && (missingMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
     {
