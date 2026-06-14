@@ -98,7 +98,7 @@ uint TerrainRvtWrapPageCoord(uint coord, uint origin, uint resolution)
     {
         return 0u;
     }
-    return (coord + resolution - (origin % resolution)) % resolution;
+    return coord % resolution;
 }
 
 uint TerrainRvtUnwrapLocalPageCoord(uint wrappedCoord, uint origin, uint resolution)
@@ -107,7 +107,9 @@ uint TerrainRvtUnwrapLocalPageCoord(uint wrappedCoord, uint origin, uint resolut
     {
         return 0u;
     }
-    return (wrappedCoord + (origin % resolution)) % resolution;
+    const uint originWrapped = origin % resolution;
+    const uint localOffset = (wrappedCoord + resolution - originWrapped) % resolution;
+    return origin + localOffset;
 }
 
 uint TerrainRvtClipInfoIndex(TerrainRvtInfo info, uint terrainSetIndex, uint clipLevel)
@@ -409,8 +411,6 @@ bool TerrainRvtTrySampleHeightFast(
         InterlockedMin(stats[0].heightSampleAttemptedPageMin, requestedPageTableIndex);
         InterlockedMax(stats[0].heightSampleAttemptedPageMax, requestedPageTableIndex);
     }
-    TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT);
-
     TerrainRvtAddress residentAddress;
     uint physicalPageIndex = 0u;
     if (!TerrainRvtTryFindResident(terrainSetIndex, info, terrain, positionWS, mip, TERRAIN_RVT_CONTENT_HEIGHT, residentAddress, physicalPageIndex))
@@ -718,20 +718,27 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     const TerrainRvtPageTag tag = pageTags[pageTableIndex];
     const uint currentEntry = pageTable[pageTableIndex];
     uint physicalPageIndex = 0u;
-    if (TerrainRvtUnpackPageTableEntry(currentEntry, contentMask, physicalPageIndex))
+    uint currentContentMask = 0u;
+    bool ownerValid = false;
+    if ((currentEntry & TERRAIN_RVT_PAGE_VALID) != 0u)
     {
-        StructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
-        const uint4 owner = physicalPageOwner[physicalPageIndex];
-        const bool ownerValid = (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
-        if (ownerValid)
+        physicalPageIndex = currentEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
+        currentContentMask = (currentEntry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+        if (physicalPageIndex < info.maxPhysicalPages)
         {
-            ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-            if (perFrame.terrainRvtTelemetryEnabled != 0u)
+            StructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
+            const uint4 owner = physicalPageOwner[physicalPageIndex];
+            ownerValid = (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
+            if (ownerValid && (currentContentMask & contentMask) == contentMask)
             {
-                RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
-                InterlockedAdd(stats[0].residentHits, 1u);
+                ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+                if (perFrame.terrainRvtTelemetryEnabled != 0u)
+                {
+                    RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+                    InterlockedAdd(stats[0].residentHits, 1u);
+                }
+                TerrainRvtMarkVisited(pageTableIndex);
             }
-            TerrainRvtMarkVisited(pageTableIndex);
         }
     }
 
@@ -743,18 +750,22 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
 
     uint previousMask = 0u;
     InterlockedOr(requestMasks[pageTableIndex], contentMask, previousMask);
-    if (previousMask != 0u)
+    const uint requestedMask = (previousMask | contentMask) & 0x3u;
+    const uint newlyMarkedMask = contentMask & ~previousMask;
+    const bool residentSatisfied = ownerValid && ((currentContentMask & requestedMask) == requestedMask);
+    if (newlyMarkedMask == 0u || residentSatisfied)
     {
         return;
     }
+    const uint missingMask = ownerValid ? (requestedMask & ~currentContentMask) : requestedMask;
 
-    if (telemetryEnabled && (contentMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
+    if (telemetryEnabled && (missingMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
     {
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
         InterlockedAdd(stats[0].heightRequests, 1u);
         InterlockedAdd(stats[0].heightRequestMipHistogram[TerrainRvtTelemetryMipBin(tag.clipLevel)], 1u);
     }
-    if (telemetryEnabled && (contentMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u)
+    if (telemetryEnabled && (missingMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u)
     {
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
         InterlockedAdd(stats[0].materialRequests, 1u);
@@ -776,7 +787,7 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
         request.pageTableIndex = pageTableIndex;
         request.terrainSetIndex = tag.terrainSetIndex;
         request.clipLevel = tag.clipLevel;
-        request.contentMask = contentMask;
+        request.contentMask = missingMask;
         request.pageX = tag.pageX;
         request.pageY = tag.pageY;
         request.pad0 = 0u;

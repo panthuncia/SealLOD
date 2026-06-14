@@ -384,10 +384,7 @@ public:
             .WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
-    void Setup() override
-    {
-        m_counterBuffer = m_resourceRegistryView->RequestPtr<Resource>(Builtin::Terrain::RvtCounters);
-    }
+    void Setup() override {}
 
     PassReturn Execute(PassExecutionContext& executionContext) override
     {
@@ -400,18 +397,7 @@ public:
         BindResourceDescriptorIndices(commandList, m_clearPso.GetResourceDescriptorSlots());
         const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
         const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(maxPageTableEntries, 64u);
-        commandList.Dispatch(dispatchX, dispatchY, 1u);
-
-        if (m_counterBuffer) {
-            rhi::GlobalBarrier barrier{};
-            barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-            barrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
-            barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
-            barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
-            rhi::BarrierBatch batch{};
-            batch.globals = rhi::Span<rhi::GlobalBarrier>(&barrier, 1u);
-            commandList.Barriers(batch);
-        }
+        commandList.Dispatch(1u, 1u, 1u);
 
         commandList.BindPipeline(m_resolvePso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(commandList, m_resolvePso.GetResourceDescriptorSlots());
@@ -429,15 +415,11 @@ public:
         return {};
     }
 
-    void Cleanup() override
-    {
-        m_counterBuffer = nullptr;
-    }
+    void Cleanup() override {}
 
 private:
     PipelineState m_clearPso;
     PipelineState m_resolvePso;
-    Resource* m_counterBuffer = nullptr;
 };
 
 class TerrainRvtClearFeedbackRequestsPass final : public ComputePass {
