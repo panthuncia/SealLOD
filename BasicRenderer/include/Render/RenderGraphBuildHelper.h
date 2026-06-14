@@ -668,23 +668,6 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         clearRTVs = true; // We will not run an earlier pass
     }
     if (needsVisibilityMaterialEvaluation) {
-        if (terrainRvt) {
-            graph->BuildComputePass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
-            TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
-
-            graph->BuildComputePass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
-            TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
-
-            graph->BuildComputePass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
-            TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
-
-            graph->BuildComputePass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
-            TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
-
-            graph->BuildComputePass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
-            TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
-        }
-
         // Reset material counters
         graph->BuildComputePass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
         TagPassTechnique(graph, "MaterialPixelCounterResetPass", "Primary Visibility::GBuffer Construction::Material Groups");
@@ -707,6 +690,26 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         // Build indirect command buffer for material passes
         graph->BuildComputePass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
         TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
+
+        if (terrainRvt) {
+            graph->BuildComputePass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
+            TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
+            TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
+            TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
+            TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
+        }
 
         if (terrainRegionMaterialEvaluation) {
             graph->BuildComputePass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");

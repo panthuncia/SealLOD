@@ -366,6 +366,8 @@ bool TerrainRvtTryFindResident(
     return false;
 }
 
+void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
+
 bool TerrainRvtTrySampleHeightFast(
     uint terrainSetIndex,
     float3 positionWS,
@@ -407,6 +409,7 @@ bool TerrainRvtTrySampleHeightFast(
         InterlockedMin(stats[0].heightSampleAttemptedPageMin, requestedPageTableIndex);
         InterlockedMax(stats[0].heightSampleAttemptedPageMax, requestedPageTableIndex);
     }
+    TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT);
 
     TerrainRvtAddress residentAddress;
     uint physicalPageIndex = 0u;
@@ -539,8 +542,6 @@ float3 TerrainRvtWorldToTangentNormal(float3 normalWS, float3 normalWSBase)
 {
     return normalize(mul(normalize(normalWS), transpose(TerrainRvtTerrainBasis(normalize(normalWSBase)))));
 }
-
-void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
 
 bool TerrainRvtTrySampleMaterial(
     uint terrainSetIndex,
@@ -719,14 +720,19 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     uint physicalPageIndex = 0u;
     if (TerrainRvtUnpackPageTableEntry(currentEntry, contentMask, physicalPageIndex))
     {
-        ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-        if (perFrame.terrainRvtTelemetryEnabled != 0u)
+        StructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
+        const uint4 owner = physicalPageOwner[physicalPageIndex];
+        const bool ownerValid = (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
+        if (ownerValid)
         {
-            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
-            InterlockedAdd(stats[0].residentHits, 1u);
+            ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+            if (perFrame.terrainRvtTelemetryEnabled != 0u)
+            {
+                RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+                InterlockedAdd(stats[0].residentHits, 1u);
+            }
+            TerrainRvtMarkVisited(pageTableIndex);
         }
-        TerrainRvtMarkVisited(pageTableIndex);
-        return;
     }
 
     RWStructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];

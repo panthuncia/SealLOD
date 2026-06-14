@@ -275,7 +275,8 @@ public:
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtPageTable,
-            Builtin::Terrain::RvtPageKeys)
+            Builtin::Terrain::RvtPageKeys,
+            Builtin::Terrain::RvtPhysicalPageOwner)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,
@@ -397,24 +398,23 @@ public:
 
         commandList.BindPipeline(m_clearPso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(commandList, m_clearPso.GetResourceDescriptorSlots());
-        commandList.Dispatch(1u, 1u, 1u);
+        const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
+        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(maxPageTableEntries, 64u);
+        commandList.Dispatch(dispatchX, dispatchY, 1u);
 
         if (m_counterBuffer) {
-            rhi::BufferBarrier barrier{};
-            barrier.buffer = m_counterBuffer->GetAPIResource().GetHandle();
+            rhi::GlobalBarrier barrier{};
             barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
             barrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
             barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
             barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
             rhi::BarrierBatch batch{};
-            batch.buffers = rhi::Span<rhi::BufferBarrier>(&barrier, 1u);
+            batch.globals = rhi::Span<rhi::GlobalBarrier>(&barrier, 1u);
             commandList.Barriers(batch);
         }
 
         commandList.BindPipeline(m_resolvePso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(commandList, m_resolvePso.GetResourceDescriptorSlots());
-        const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
-        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(maxPageTableEntries, 64u);
         static bool loggedDispatch = false;
         if (!loggedDispatch) {
             loggedDispatch = true;
@@ -553,7 +553,6 @@ public:
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
                 Builtin::Terrain::RvtMaterialAtlas,
-                Builtin::Terrain::RvtPhysicalPageOwner,
                 Builtin::Terrain::RvtStats,
                 Builtin::Material::TextureStreamingFeedbackBuffer)
             .WithIndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs)
@@ -583,14 +582,6 @@ public:
                 1);
         }
 
-        rhi::GlobalBarrier generationWritesVisible{};
-        generationWritesVisible.beforeSync = rhi::ResourceSyncState::ComputeShading;
-        generationWritesVisible.afterSync = rhi::ResourceSyncState::ComputeShading;
-        generationWritesVisible.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
-        generationWritesVisible.afterAccess = rhi::ResourceAccessType::ShaderResource;
-        rhi::BarrierBatch barrierBatch{};
-        barrierBatch.globals = rhi::Span<rhi::GlobalBarrier>(&generationWritesVisible, 1u);
-        commandList.Barriers(barrierBatch);
         return {};
     }
 
@@ -602,4 +593,59 @@ public:
 private:
     PipelineState m_pso;
     Resource* m_argsBuffer = nullptr;
+};
+
+class TerrainRvtFinalizeGeneratedPagesPass final : public ComputePass {
+public:
+    TerrainRvtFinalizeGeneratedPagesPass()
+    {
+        m_pso = PSOManager::GetInstance().MakeComputePipeline(
+            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+            L"shaders/TerrainRvt.hlsl",
+            L"TerrainRvtFinalizeGeneratedPagesCS",
+            {},
+            "TerrainRvt.FinalizeGeneratedPages.PSO");
+    }
+
+    void DeclareResourceUsages(ComputePassBuilder* b) override
+    {
+        b->WithShaderResource(
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtGenerationList,
+            Builtin::Terrain::RvtPageKeys)
+            .WithUnorderedAccess(
+                Builtin::Terrain::RvtPageTable,
+                Builtin::Terrain::RvtPhysicalPageOwner)
+            .WithConstantBuffer(Builtin::PerFrameBuffer);
+    }
+
+    void Setup() override {}
+
+    PassReturn Execute(PassExecutionContext& executionContext) override
+    {
+        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        auto& commandList = executionContext.commandList;
+        commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
+        commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+        commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPhysicalPages(), 64u);
+        commandList.Dispatch(dispatchX, dispatchY, 1u);
+
+        rhi::GlobalBarrier publishedPagesVisible{};
+        publishedPagesVisible.beforeSync = rhi::ResourceSyncState::ComputeShading;
+        publishedPagesVisible.afterSync = rhi::ResourceSyncState::ComputeShading;
+        publishedPagesVisible.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+        publishedPagesVisible.afterAccess = rhi::ResourceAccessType::ShaderResource;
+        rhi::BarrierBatch barrierBatch{};
+        barrierBatch.globals = rhi::Span<rhi::GlobalBarrier>(&publishedPagesVisible, 1u);
+        commandList.Barriers(barrierBatch);
+        return {};
+    }
+
+    void Cleanup() override {}
+
+private:
+    PipelineState m_pso;
 };
