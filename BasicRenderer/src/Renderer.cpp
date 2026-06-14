@@ -1565,7 +1565,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);

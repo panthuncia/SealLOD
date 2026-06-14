@@ -959,6 +959,13 @@ struct MaterialInputs
     float3 terrainRvtSampleNormal;
     float3 terrainRvtSampleMaterial;
     float terrainRvtHeightScale;
+    float terrainDebugHeight;
+    float terrainDebugHeightSlope;
+    float terrainDebugDominantWeight;
+    uint terrainDebugDominantLayer;
+    float2 terrainDebugLayerUv;
+    float terrainDebugTextureSeam;
+    float terrainDebugPaintGrid;
 };
 
 struct SkinningInstanceGPUInfo

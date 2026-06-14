@@ -462,6 +462,13 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
     materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
     materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
     materialInputs.terrainRvtHeightScale = 0.0f;
+    materialInputs.terrainDebugHeight = 0.0f;
+    materialInputs.terrainDebugHeightSlope = 0.0f;
+    materialInputs.terrainDebugDominantWeight = 0.0f;
+    materialInputs.terrainDebugDominantLayer = 0xffffffffu;
+    materialInputs.terrainDebugLayerUv = 0.0f.xx;
+    materialInputs.terrainDebugTextureSeam = 0.0f;
+    materialInputs.terrainDebugPaintGrid = 0.0f;
 }
 
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)

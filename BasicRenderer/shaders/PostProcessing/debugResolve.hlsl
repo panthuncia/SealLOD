@@ -79,6 +79,12 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_TERRAIN_RVT_SAMPLED_MATERIAL:
         case OUTPUT_TERRAIN_RVT_SAMPLED_ALBEDO_POINT:
         case OUTPUT_TERRAIN_RVT_HEIGHT_SCALE:
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT_SLOPE:
+        case OUTPUT_TERRAIN_DOMINANT_WEIGHT:
+        case OUTPUT_TERRAIN_TEXTURE_UV:
+        case OUTPUT_TERRAIN_TEXTURE_SEAM:
+        case OUTPUT_TERRAIN_PAINT_GRID:
             color = UnpackDebugFloat3(payload);
             break;
         case OUTPUT_TRANSPARENT_VBOIT_TRANSMITTANCE:
@@ -108,6 +114,7 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
         case OUTPUT_TERRAIN_RVT_FALLBACK_REASON:
         case OUTPUT_TERRAIN_RVT_OWNER_PAGE:
         case OUTPUT_TERRAIN_RVT_PAGE_DELTA:
+        case OUTPUT_TERRAIN_DOMINANT_LAYER:
             color = HashToColor(UnpackDebugUint(payload));
             break;
         case OUTPUT_LIGHT_CLUSTER_LIGHT_COUNT:

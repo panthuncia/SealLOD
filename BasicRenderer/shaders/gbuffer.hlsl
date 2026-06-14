@@ -206,6 +206,30 @@ void EvaluateGBufferOptimized(uint2 pixel)
                 payload = PackDebugFloat3(sample.materialInputs.terrainRvtHeightScale.xxx);
             }
             break;
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+            payload = PackDebugFloat3(saturate(sample.materialInputs.terrainDebugHeight).xxx);
+            break;
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT_SLOPE:
+            payload = PackDebugFloat3(saturate(sample.materialInputs.terrainDebugHeightSlope * 16.0f).xxx);
+            break;
+        case OUTPUT_TERRAIN_DOMINANT_LAYER:
+            if (sample.materialInputs.terrainDebugDominantLayer != 0xffffffffu)
+            {
+                payload = PackDebugUint(sample.materialInputs.terrainDebugDominantLayer);
+            }
+            break;
+        case OUTPUT_TERRAIN_DOMINANT_WEIGHT:
+            payload = PackDebugFloat3(saturate(sample.materialInputs.terrainDebugDominantWeight).xxx);
+            break;
+        case OUTPUT_TERRAIN_TEXTURE_UV:
+            payload = PackDebugFloat3(float3(frac(sample.materialInputs.terrainDebugLayerUv), 0.0f));
+            break;
+        case OUTPUT_TERRAIN_TEXTURE_SEAM:
+            payload = PackDebugFloat3(saturate(sample.materialInputs.terrainDebugTextureSeam).xxx);
+            break;
+        case OUTPUT_TERRAIN_PAINT_GRID:
+            payload = PackDebugFloat3(saturate(sample.materialInputs.terrainDebugPaintGrid).xxx);
+            break;
     }
     if (payload.x != DEBUG_SENTINEL) {
         WriteDebugPixel(debugVisTex, pixel, payload);

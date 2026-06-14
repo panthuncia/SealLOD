@@ -893,7 +893,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     if ((generation.contentMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
     {
         RWTexture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
-        heightAtlas[atlasTexel] = TerrainSampleGeometricHeight(terrainSetIndex, positionWS);
+        heightAtlas[atlasTexel] = TerrainSampleGeometricHeightGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
     }
 
     if ((generation.contentMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u)
