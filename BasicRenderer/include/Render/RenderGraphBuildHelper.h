@@ -370,6 +370,7 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t physicalAtlasPoolCount;
         uint32_t maxTerrainSets;
         uint32_t maxClipLevels;
+        uint32_t maxGeneratedPagesPerFrame;
     };
     struct TerrainRvtClipInfoPOD {
         uint32_t terrainSetIndex;

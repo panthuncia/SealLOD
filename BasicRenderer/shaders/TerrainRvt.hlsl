@@ -32,6 +32,7 @@ uint TerrainRvtInfoMaxTerrainSets() { return UintRootConstant10; }
 uint TerrainRvtInfoAtlasPoolCount() { return UintRootConstant11; }
 uint TerrainRvtInfoMaxClipLevels() { return UintRootConstant12; }
 uint TerrainRvtInfoMaxClipInfos() { return UintRootConstant13; }
+uint TerrainRvtInfoMaxGeneratedPagesPerFrame() { return UintRootConstant14; }
 
 float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
 {
@@ -84,6 +85,7 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     info.physicalAtlasPoolCount = max(TerrainRvtInfoAtlasPoolCount(), 1u);
     info.maxTerrainSets = max(TerrainRvtInfoMaxTerrainSets(), 1u);
     info.maxClipLevels = max(TerrainRvtInfoMaxClipLevels(), 1u);
+    info.maxGeneratedPagesPerFrame = max(TerrainRvtInfoMaxGeneratedPagesPerFrame(), 1u);
     info.mipCount = min(max(info.mipCount, 1u), info.maxClipLevels);
 
     const uint linearThreadIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
@@ -153,7 +155,27 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
 
     if (!initialized && linearThreadIndex < info.maxPhysicalPages)
     {
-        physicalPageOwner[linearThreadIndex] = uint4(0xffffffffu, 0u, 0u, 0u);
+        physicalPageOwner[linearThreadIndex] = uint4(TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE, 0u, 0u, 0u);
+    }
+    else if (initialized && linearThreadIndex < info.maxPhysicalPages)
+    {
+        const uint4 owner = physicalPageOwner[linearThreadIndex];
+        const bool ownerLocked = owner.x == TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED;
+        const bool ownerHasPage = owner.x < info.maxVirtualPageTableEntries;
+        const bool ownerResident = (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u;
+        if (ownerLocked || (ownerHasPage && !ownerResident))
+        {
+            if (ownerHasPage)
+            {
+                const uint oldEntry = pageTable[owner.x];
+                if ((oldEntry & TERRAIN_RVT_PAGE_VALID) != 0u &&
+                    ((oldEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK) == linearThreadIndex))
+                {
+                    pageTable[owner.x] = 0u;
+                }
+            }
+            physicalPageOwner[linearThreadIndex] = uint4(TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE, 0u, 0u, 0u);
+        }
     }
 
     if (linearThreadIndex < info.maxVirtualPageTableEntries)
@@ -214,7 +236,11 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
                 const uint oldPhysicalPage = oldEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
                 if (oldPhysicalPage < info.maxPhysicalPages)
                 {
-                    physicalPageOwner[oldPhysicalPage] = uint4(0xffffffffu, 0u, 0u, 0u);
+                    const uint4 oldOwner = physicalPageOwner[oldPhysicalPage];
+                    if (oldOwner.x == linearThreadIndex)
+                    {
+                        physicalPageOwner[oldPhysicalPage] = uint4(TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE, 0u, 0u, 0u);
+                    }
                 }
             }
             pageTable[linearThreadIndex] = 0u;
@@ -485,6 +511,16 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     const uint requestIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
     if (requestIndex < requestCount)
     {
+        if (requestIndex >= info.maxGeneratedPagesPerFrame)
+        {
+            if (telemetryEnabled)
+            {
+                RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+                InterlockedAdd(stats[0].requestOverflows, 1u);
+            }
+            return;
+        }
+
         const TerrainRvtPageRequest request = requestList[requestIndex];
         const uint pageTableIndex = request.pageTableIndex;
         if (pageTableIndex >= info.maxVirtualPageTableEntries)
@@ -510,7 +546,7 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
             const uint currentPhysicalPage = entry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
             const uint4 currentOwner = currentPhysicalPage < info.maxPhysicalPages
                 ? physicalPageOwner[currentPhysicalPage]
-                : uint4(0xffffffffu, 0u, 0u, 0u);
+                : uint4(TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE, 0u, 0u, 0u);
             if (currentPhysicalPage >= info.maxPhysicalPages ||
                 (currentOwner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) == 0u ||
                 currentOwner.x != pageTableIndex)
@@ -555,46 +591,6 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
                     }
 
                     const uint observedAllocatedPageCount = counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT];
-                    const uint allocatedPhysicalPages = min(observedAllocatedPageCount, info.maxPhysicalPages);
-                    if (allocatedPhysicalPages > 0u)
-                    {
-                        uint reuseTicket = 0u;
-                        InterlockedAdd(counters[TERRAIN_RVT_COUNTER_REUSE_CURSOR], 1u, reuseTicket);
-                        [loop]
-                        for (uint attempt = 0u; attempt < allocatedPhysicalPages; ++attempt)
-                        {
-                            const uint candidatePhysicalPage = (reuseTicket + attempt) % allocatedPhysicalPages;
-                            const uint4 oldOwner = physicalPageOwner[candidatePhysicalPage];
-                            const bool ownerHasPage = oldOwner.x < info.maxVirtualPageTableEntries;
-                            const bool ownerResident = (oldOwner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u;
-                            const uint oldOwnerEntry = ownerHasPage ? pageTable[oldOwner.x] : 0u;
-                            const bool ownerBackReferenceValid = ownerResident &&
-                                ownerHasPage &&
-                                (oldOwnerEntry & TERRAIN_RVT_PAGE_VALID) != 0u &&
-                                ((oldOwnerEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK) == candidatePhysicalPage);
-                            const bool ownerInProgress = ownerHasPage && !ownerResident;
-                            const bool ownerFreeOrStale = !ownerInProgress && !ownerBackReferenceValid;
-                            if (!ownerFreeOrStale)
-                            {
-                                continue;
-                            }
-
-                            uint originalOwnerX = 0u;
-                            InterlockedCompareExchange(
-                                physicalPageOwner[candidatePhysicalPage].x,
-                                oldOwner.x,
-                                pageTableIndex,
-                                originalOwnerX);
-                            if (originalOwnerX == oldOwner.x)
-                            {
-                                physicalPageIndex = candidatePhysicalPage;
-                                physicalPageOwner[candidatePhysicalPage] = uint4(pageTableIndex, perFrame.frameIndex, 0u, 0u);
-                                allocatedPage = true;
-                                break;
-                            }
-                        }
-                    }
-
                     if (!allocatedPage && observedAllocatedPageCount < info.maxPhysicalPages)
                     {
                         uint originalAllocatedPageCount = 0u;
@@ -606,8 +602,25 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
                         if (originalAllocatedPageCount == observedAllocatedPageCount)
                         {
                             physicalPageIndex = observedAllocatedPageCount;
-                            physicalPageOwner[physicalPageIndex] = uint4(pageTableIndex, perFrame.frameIndex, 0u, 0u);
-                            allocatedPage = true;
+                            uint originalOwnerX = 0u;
+                            InterlockedCompareExchange(
+                                physicalPageOwner[physicalPageIndex].x,
+                                TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE,
+                                TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED,
+                                originalOwnerX);
+                            if (originalOwnerX == TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE)
+                            {
+                                physicalPageOwner[physicalPageIndex].y = perFrame.frameIndex;
+                                physicalPageOwner[physicalPageIndex].z = 0u;
+                                physicalPageOwner[physicalPageIndex].w = 0u;
+                                uint publishOwnerX = 0u;
+                                InterlockedCompareExchange(
+                                    physicalPageOwner[physicalPageIndex].x,
+                                    TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED,
+                                    pageTableIndex,
+                                    publishOwnerX);
+                                allocatedPage = publishOwnerX == TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED;
+                            }
                         }
                     }
 
@@ -620,6 +633,7 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
                         {
                             const uint candidatePhysicalPage = (reuseTicket + attempt) % info.maxPhysicalPages;
                             const uint4 oldOwner = physicalPageOwner[candidatePhysicalPage];
+                            const bool ownerLocked = oldOwner.x == TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED;
                             const bool ownerHasPage = oldOwner.x < info.maxVirtualPageTableEntries;
                             const bool ownerResident = (oldOwner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u;
                             const uint oldOwnerEntry = ownerHasPage ? pageTable[oldOwner.x] : 0u;
@@ -628,9 +642,12 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
                                 (oldOwnerEntry & TERRAIN_RVT_PAGE_VALID) != 0u &&
                                 ((oldOwnerEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK) == candidatePhysicalPage);
                             const bool ownerInProgress = ownerHasPage && !ownerResident;
-                            const bool ownerRequestedThisFrame = ownerBackReferenceValid &&
-                                ((requestMasks[oldOwner.x] & 0x3u) != 0u);
-                            if (ownerInProgress || !ownerBackReferenceValid || ownerRequestedThisFrame)
+                            // Content bits are the feedback signal for pages sampled/requested by the last material pass.
+                            const bool ownerUsedByFeedback = ownerBackReferenceValid &&
+                                ((requestMasks[oldOwner.x] & TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK) != 0u);
+                            const bool ownerFreeOrStale = !ownerLocked && !ownerInProgress && !ownerBackReferenceValid;
+                            const bool ownerEvictable = ownerBackReferenceValid && !ownerUsedByFeedback;
+                            if (!ownerFreeOrStale && !ownerEvictable)
                             {
                                 continue;
                             }
@@ -639,18 +656,29 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
                             InterlockedCompareExchange(
                                 physicalPageOwner[candidatePhysicalPage].x,
                                 oldOwner.x,
-                                pageTableIndex,
+                                TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED,
                                 originalOwnerX);
                             if (originalOwnerX == oldOwner.x)
                             {
                                 physicalPageIndex = candidatePhysicalPage;
-                                if (oldOwner.x != pageTableIndex)
+                                if (ownerBackReferenceValid && oldOwner.x != pageTableIndex)
                                 {
                                     pageTable[oldOwner.x] = 0u;
                                 }
-                                physicalPageOwner[candidatePhysicalPage] = uint4(pageTableIndex, perFrame.frameIndex, 0u, 0u);
-                                allocatedPage = true;
-                                break;
+                                physicalPageOwner[candidatePhysicalPage].y = perFrame.frameIndex;
+                                physicalPageOwner[candidatePhysicalPage].z = 0u;
+                                physicalPageOwner[candidatePhysicalPage].w = 0u;
+                                uint publishOwnerX = 0u;
+                                InterlockedCompareExchange(
+                                    physicalPageOwner[candidatePhysicalPage].x,
+                                    TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED,
+                                    pageTableIndex,
+                                    publishOwnerX);
+                                if (publishOwnerX == TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED)
+                                {
+                                    allocatedPage = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -732,7 +760,9 @@ void TerrainRvtFinalizeGeneratedPagesCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
-    const uint generationCount = min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries);
+    const uint generationCount = min(
+        min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries),
+        info.maxGeneratedPagesPerFrame);
     const uint generationIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
     if (generationIndex >= generationCount)
     {
@@ -779,7 +809,9 @@ void TerrainRvtBuildGenerateDispatchArgsCS(uint3 tid : SV_DispatchThreadID)
     StructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     RWStructuredBuffer<DispatchIndirectArgs> argsOut = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerateDispatchArgs)];
     TerrainRvtInfo info = infoBuffer[0];
-    const uint generationCount = min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries);
+    const uint generationCount = min(
+        min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries),
+        info.maxGeneratedPagesPerFrame);
     const uint texelsPerPage = info.physicalTileTexelSide * info.physicalTileTexelSide;
     const uint totalThreadCount = generationCount * texelsPerPage;
     const uint groupCount = (totalThreadCount + 63u) / 64u;
@@ -802,7 +834,9 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     TerrainRvtInfo info = infoBuffer[0];
-    const uint generationCount = min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries);
+    const uint generationCount = min(
+        min(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], info.maxGenerationEntries),
+        info.maxGeneratedPagesPerFrame);
     const uint tileSide = max(info.physicalTileTexelSide, 1u);
     const uint texelsPerPage = tileSide * tileSide;
     const uint linearIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;

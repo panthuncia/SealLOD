@@ -267,6 +267,7 @@ struct TerrainRvtInfo
     uint physicalAtlasPoolCount;
     uint maxTerrainSets;
     uint maxClipLevels;
+    uint maxGeneratedPagesPerFrame;
 };
 
 struct TerrainRvtClipInfo

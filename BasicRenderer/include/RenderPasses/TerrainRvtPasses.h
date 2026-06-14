@@ -132,6 +132,11 @@ namespace TerrainRvt
         return AtlasPagesWide() * AtlasPagesHigh() * AtlasPoolCount();
     }
 
+    inline uint32_t MaxGeneratedPagesPerFrame()
+    {
+        return std::clamp(SettingU32("terrainRvtMaxGeneratedPagesPerFrame", 64u), 1u, MaxPhysicalPages());
+    }
+
     inline float BasePageWorldSize()
     {
         return (std::max)(SettingFloat("terrainRvtBasePageWorldSize", DefaultBasePageWorldSize), 0.125f);
@@ -156,6 +161,7 @@ namespace TerrainRvt
         rootConstants[11] = AtlasPoolCount();
         rootConstants[12] = MaxClipLevels();
         rootConstants[13] = MaxClipInfoCount();
+        rootConstants[14] = MaxGeneratedPagesPerFrame();
     }
 }
 
@@ -396,7 +402,8 @@ public:
         commandList.BindPipeline(m_clearPso.GetAPIPipelineState().GetHandle());
         BindResourceDescriptorIndices(commandList, m_clearPso.GetResourceDescriptorSlots());
         const uint32_t maxPageTableEntries = TerrainRvt::MaxPageTableEntries();
-        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(maxPageTableEntries, 64u);
+        const uint32_t maxResolvedRequests = TerrainRvt::MaxGeneratedPagesPerFrame();
+        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(maxResolvedRequests, 64u);
         commandList.Dispatch(1u, 1u, 1u);
 
         commandList.BindPipeline(m_resolvePso.GetAPIPipelineState().GetHandle());
@@ -405,8 +412,9 @@ public:
         if (!loggedDispatch) {
             loggedDispatch = true;
             spdlog::info(
-                "SARP terrain RVT dispatch: resolve max_entries={} groups={}x{} covered_threads={}",
+                "SARP terrain RVT dispatch: resolve max_entries={} max_resolved_requests={} groups={}x{} covered_threads={}",
                 maxPageTableEntries,
+                maxResolvedRequests,
                 dispatchX,
                 dispatchY,
                 static_cast<uint64_t>(dispatchX) * dispatchY * 64ull);
@@ -505,13 +513,11 @@ class TerrainRvtGeneratePagesPass final : public ComputePass {
 public:
     TerrainRvtGeneratePagesPass()
     {
-        std::vector<DxcDefine> defines;
-        defines.push_back({ L"PSO_TEXTURE_STREAMING", L"1" });
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtGeneratePagesCS",
-            std::move(defines),
+            {},
             "TerrainRvt.GeneratePages.PSO");
     }
 
@@ -528,15 +534,13 @@ public:
             Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
-            Builtin::Terrain::TextureGroup,
-            Builtin::Material::TextureStreamingMetadataBuffer)
+            Builtin::Terrain::TextureGroup)
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtHeightAtlas,
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
                 Builtin::Terrain::RvtMaterialAtlas,
-                Builtin::Terrain::RvtStats,
-                Builtin::Material::TextureStreamingFeedbackBuffer)
+                Builtin::Terrain::RvtStats)
             .WithIndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
     }

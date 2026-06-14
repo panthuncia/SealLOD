@@ -1570,7 +1570,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
     settingsManager.registerSetting<bool>("enableTerrainRvt", true);
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
-    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, true);
+    settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);
@@ -1580,6 +1580,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtClipPageTableResolution", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxTerrainSets", 8u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 24u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
@@ -2702,6 +2703,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const auto clipPageTableResolution = TerrainRvt::ClipPageTableResolution();
     const auto maxTerrainSets = TerrainRvt::MaxTerrainSets();
     const auto maxClipLevels = TerrainRvt::MaxClipLevels();
+    const auto maxGeneratedPagesPerFrame = TerrainRvt::MaxGeneratedPagesPerFrame();
     const auto mipCount = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMipCount")();
     const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<float>("terrainRvtBasePageWorldSize")();
     const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
@@ -2852,6 +2854,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          clipPageTableResolution,
          maxTerrainSets,
          maxClipLevels,
+         maxGeneratedPagesPerFrame,
          mipCount,
          forcedFallback](ReadbackCaptureResult&& result) {
             m_terrainRvtCountersReadbackPending = false;
@@ -2868,7 +2871,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
             uint32_t counters[4] = {};
             std::memcpy(counters, result.data.data(), counterBytes);
             spdlog::info(
-                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} configured_mips={} forced_fallback={})",
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} max_gen_pages={} configured_mips={} forced_fallback={})",
                 requestedFrame,
                 counters[0],
                 counters[1],
@@ -2884,6 +2887,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 clipPageTableResolution,
                 maxTerrainSets,
                 maxClipLevels,
+                maxGeneratedPagesPerFrame,
                 mipCount,
                 forcedFallback ? 1 : 0);
         },

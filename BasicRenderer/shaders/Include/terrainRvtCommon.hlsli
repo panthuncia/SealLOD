@@ -10,6 +10,10 @@ static const uint TERRAIN_RVT_COUNTER_OVERFLOW_COUNT = 3u;
 static const uint TERRAIN_RVT_COUNTER_REUSE_CURSOR = 4u;
 static const uint TERRAIN_RVT_COUNTER_COUNT = 5u;
 static const uint TERRAIN_RVT_TELEMETRY_MIP_BINS = 16u;
+static const uint TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED = 0xfffffffeu;
+static const uint TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE = 0xffffffffu;
+static const uint TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK = 0x3u;
+static const uint TERRAIN_RVT_REQUEST_MASK_APPENDED = 1u << 31;
 static const uint TERRAIN_RVT_FALLBACK_NONE = 0u;
 static const uint TERRAIN_RVT_FALLBACK_DISABLED = 1u;
 static const uint TERRAIN_RVT_FALLBACK_FORCED = 2u;
@@ -748,10 +752,12 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const bool telemetryEnabled = perFrame.terrainRvtTelemetryEnabled != 0u;
 
+    const uint contentBits = contentMask & TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK;
     uint previousMask = 0u;
-    InterlockedOr(requestMasks[pageTableIndex], contentMask, previousMask);
-    const uint requestedMask = (previousMask | contentMask) & 0x3u;
-    const uint newlyMarkedMask = contentMask & ~previousMask;
+    InterlockedOr(requestMasks[pageTableIndex], contentBits, previousMask);
+    const uint previousContentMask = previousMask & TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK;
+    const uint requestedMask = (previousContentMask | contentBits) & TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK;
+    const uint newlyMarkedMask = contentBits & ~previousContentMask;
     const bool residentSatisfied = ownerValid && ((currentContentMask & requestedMask) == requestedMask);
     if (newlyMarkedMask == 0u || residentSatisfied)
     {
@@ -777,6 +783,13 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
         InterlockedXor(stats[0].requestPageTableXor, pageTableIndex);
         InterlockedMin(stats[0].requestPageTableMin, pageTableIndex);
         InterlockedMax(stats[0].requestPageTableMax, pageTableIndex);
+    }
+
+    uint appendPreviousMask = 0u;
+    InterlockedOr(requestMasks[pageTableIndex], TERRAIN_RVT_REQUEST_MASK_APPENDED, appendPreviousMask);
+    if ((appendPreviousMask & TERRAIN_RVT_REQUEST_MASK_APPENDED) != 0u)
+    {
+        return;
     }
 
     uint requestIndex = 0u;
