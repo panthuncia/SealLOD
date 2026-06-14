@@ -635,6 +635,7 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     const uint rasterWorkCount = rasterWorkCounter[0];
     if (rasterWorkIndex >= rasterWorkCount)
@@ -755,6 +756,9 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             materialInfo,
             displacementEnabled,
             camera,
+            perFrame.clodReyesDisplacementFadeStartDistance,
+            perFrame.clodReyesDisplacementFadeEndDistance,
+            objectData.model,
             patchDepth,
             sourcePosition0,
             sourcePosition1,

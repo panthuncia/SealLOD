@@ -16,6 +16,7 @@
 #include "include/visibleClusterPacking.hlsli"
 #include "include/vertex.hlsli"
 #include "include/skinningCommon.hlsli"
+#include "include/clodReyesTransition.hlsli"
 
 #ifndef CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID
 #define CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID "CLod::WorkGraphComputePageJobDescriptors"
@@ -2467,6 +2468,7 @@ void ClusterCullBody(
     bool lodCameraIsOrtho = false;
     uint groupsBase = 0;
     uint meshBufferIndex = 0;
+    uint meshVertexFlags = 0u;
     uint activeGroupScanCount = 0;
     float ownGroupErrorOverDistance = 0.0f;
     PerObjectBuffer instanceTransform = (PerObjectBuffer)0;
@@ -2535,7 +2537,8 @@ void ClusterCullBody(
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[meshBufferIndex];
-        isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+        meshVertexFlags = perMesh.vertexFlags;
+        isSkinned = (meshVertexFlags & VERTEX_SKINNED) != 0u;
         StructuredBuffer<MaterialInfo> materialDataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
         const MaterialInfo materialInfo = materialDataBuffer[perMesh.materialDataIndex];
@@ -2583,6 +2586,8 @@ void ClusterCullBody(
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodReplayBufferState> replayState =
         ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
+    ConstantBuffer<PerFrameBuffer> perFrame =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const uint visibleClusterCapacity = CLOD_WG_VISIBLE_CLUSTERS_CAPACITY;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     RWTexture2DArray<uint> shadowPageTable = ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX];
@@ -2632,6 +2637,7 @@ void ClusterCullBody(
         float3 meshletCenterViewSpace = float3(0, 0, -1); // default: behind camera
         float3 meshletCenterWorld = 0.0f.xxx;
         float meshletRadiusWorld = 0.0f;
+        bool meshletNeedsReyesDisplacement = reyesDisplacementCandidate;
 
         if (active) {
             const uint localMeshlet = UnpackMeshletFirstIndex(b.meshletIndexAndCount) + m;
@@ -2641,19 +2647,26 @@ void ClusterCullBody(
 
                 // Load per-meshlet descriptor (5 x Load4 = 80 bytes)
                 CLodMeshletDescriptor desc = LoadMeshletDescriptor(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet);
-                BoundingSphere meshletBounds = { desc.bounds };
-                if (isSkinned)
-                {
-                    meshletBounds = ComputeSkinnedMeshletBounds(
-                        desc,
-                        pageHeader,
-                        pageSlabDesc,
-                        pageSlabOff,
-                        skinningInstanceSlot);
-                }
+                BoundingSphere meshletBounds = CLodComputeMeshletBounds(
+                    desc,
+                    pageHeader,
+                    pageSlabDesc,
+                    pageSlabOff,
+                    meshVertexFlags,
+                    skinningInstanceSlot);
                 meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, viewMatrix);
                 meshletCenterWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
                 meshletRadiusWorld = meshletBounds.sphere.w * cullUniformScale;
+                if (meshletNeedsReyesDisplacement &&
+                    CLodReyesSphereFullyBeyondCutoff(
+                        perFrame.clodReyesDisplacementFadeStartDistance,
+                        perFrame.clodReyesDisplacementFadeEndDistance,
+                        cullCam,
+                        meshletCenterWorld,
+                        meshletRadiusWorld))
+                {
+                    meshletNeedsReyesDisplacement = false;
+                }
                 survives =
                     !CLodWorkGraphFrustumCullingEnabled() ||
                     replaySource ||
@@ -3008,7 +3021,7 @@ void ClusterCullBody(
         if (contributes) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_CONTRIBUTING, 1);
         }
-        if (contributes && !reyesDisplacementCandidate && (swRasterEnabled || pageJobEnabled)) {
+        if (contributes && !meshletNeedsReyesDisplacement && (swRasterEnabled || pageJobEnabled)) {
             const float projectedDiameter = CLodProjectedDiameterPixels(
                 meshletRadiusWorld,
                 cullCam.projY,
@@ -3040,7 +3053,7 @@ void ClusterCullBody(
             } else if (isSW && contributes) {
                 WGTelemetryAdd(WG_COUNTER_CLASSIFY_PJ_REJECT_ALREADY_SW, 1);
             }
-        } else if (contributes && reyesDisplacementCandidate) {
+        } else if (contributes && meshletNeedsReyesDisplacement) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_PJ_REJECT_REYES_DISPLACEMENT, 1);
         }
 

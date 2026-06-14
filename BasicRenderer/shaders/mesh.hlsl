@@ -1427,6 +1427,8 @@ void ClusterLODReyesVirtualShadowMSMain(
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_RASTER_REYES_TELEMETRY_DESCRIPTOR_INDEX];
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
 
@@ -1527,6 +1529,13 @@ void ClusterLODReyesVirtualShadowMSMain(
             const MaterialInfo materialInfo = materials[gs_reyesShadowSetup.meshBuffer.materialDataIndex];
             const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
             const bool reverseWinding = (gs_reyesShadowSetup.objectBuffer.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u;
+            const CullingCameraInfo camera = cameras[gs_reyesShadowSetup.viewID];
+            const float4 modelViewZ = mul(gs_reyesShadowSetup.objectBuffer.model, camera.viewZ);
+            const float patchDepth = max(
+                ( -dot(float4(gs_reyesShadowSourcePositions[0u], 1.0f), modelViewZ)
+                + -dot(float4(gs_reyesShadowSourcePositions[1u], 1.0f), modelViewZ)
+                + -dot(float4(gs_reyesShadowSourcePositions[2u], 1.0f), modelViewZ)) / 3.0f,
+                max(camera.zNear, 1.0e-3f));
 
             for (uint microTriangleIndex = gs_reyesShadowMicroTriangleStart + uGroupThreadID;
                  microTriangleIndex < gs_reyesShadowMicroTriangleEnd;
@@ -1554,6 +1563,11 @@ void ClusterLODReyesVirtualShadowMSMain(
                 ReyesEvaluateDisplacedPatchTriangle(
                     materialInfo,
                     displacementEnabled,
+                    camera,
+                    perFrame.clodReyesDisplacementFadeStartDistance,
+                    perFrame.clodReyesDisplacementFadeEndDistance,
+                    gs_reyesShadowSetup.objectBuffer.model,
+                    patchDepth,
                     gs_reyesShadowSourcePositions[0u],
                     gs_reyesShadowSourcePositions[1u],
                     gs_reyesShadowSourcePositions[2u],

@@ -315,6 +315,7 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
     StructuredBuffer<PerObjectBuffer> perObjects = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     const uint rasterWorkCount = rasterWorkCounter[0];
     if (rasterWorkIndex >= rasterWorkCount)
@@ -443,6 +444,9 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
             materialInfo,
             displacementEnabled,
             camera,
+            perFrame.clodReyesDisplacementFadeStartDistance,
+            perFrame.clodReyesDisplacementFadeEndDistance,
+            objectData.model,
             patchDepth,
             sourcePosition0,
             sourcePosition1,

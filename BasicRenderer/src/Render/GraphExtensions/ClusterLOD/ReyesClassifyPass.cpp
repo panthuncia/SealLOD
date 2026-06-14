@@ -68,7 +68,11 @@ void ReyesClassifyPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::PerObjectBuffer,
-            Builtin::CullingCameraBuffer)
+            Builtin::CullingCameraBuffer,
+            Builtin::SkeletonResources::InverseBindMatrices,
+            Builtin::SkeletonResources::BoneTransforms,
+            Builtin::SkeletonResources::SkinningInstanceInfo)
+        .WithConstantBuffer(Builtin::PerFrameBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
         .WithUnorderedAccess(
             Builtin::Material::TextureStreamingFeedbackBuffer,

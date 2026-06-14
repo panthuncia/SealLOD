@@ -1612,6 +1612,12 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
     settingsManager.registerSetting<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName, CLodReyesTerrainNormalMipBiasDefault);
+    settingsManager.registerSetting<float>(
+        CLodReyesDisplacementFadeStartDistanceSettingName,
+        CLodReyesDisplacementFadeStartDistanceDefault);
+    settingsManager.registerSetting<float>(
+        CLodReyesDisplacementFadeEndDistanceSettingName,
+        CLodReyesDisplacementFadeEndDistanceDefault);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,

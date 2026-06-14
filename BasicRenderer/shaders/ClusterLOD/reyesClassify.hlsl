@@ -3,6 +3,8 @@
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/vertexFlags.hlsli"
 #include "include/visibleClusterPacking.hlsli"
+#include "include/clodPageAccess.hlsli"
+#include "include/clodReyesTransition.hlsli"
 #include "include/clodStructs.hlsli"
 #include "PerPassRootConstants/clodReyesRootConstants.h"
 
@@ -85,6 +87,36 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float displacementSpan = max(0.0f, materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin);
     const bool skinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
     const bool hasMeaningfulDisplacement = displacementEnabled && displacementSpan > 1e-5f;
+    bool fullyBeyondReyesCutoff = false;
+    if (hasMeaningfulDisplacement)
+    {
+        const uint localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
+        const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+        const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+        const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+        const CLodMeshletDescriptor meshletDesc =
+            LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, pageHeader.descriptorOffset, localMeshletIndex);
+        const BoundingSphere meshletBounds = CLodComputeMeshletBounds(
+            meshletDesc,
+            pageHeader,
+            pageSlabDescriptorIndex,
+            pageSlabByteOffset,
+            perMesh.vertexFlags,
+            meshInstance.skinningInstanceSlot);
+        const PerObjectBuffer objectData = LoadInstanceTransformForDraw(instanceID);
+        const float uniformScale = CLodMaxAxisScale_RowVector(objectData.model);
+        const float3 centerWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectData.model).xyz;
+        const float radiusWorld = meshletBounds.sphere.w * uniformScale;
+        StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+        ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        fullyBeyondReyesCutoff = CLodReyesSphereFullyBeyondCutoff(
+            perFrame.clodReyesDisplacementFadeStartDistance,
+            perFrame.clodReyesDisplacementFadeEndDistance,
+            cameras[CLodVisibleClusterViewID(packedCluster)],
+            centerWorld,
+            radiusWorld);
+    }
+    const bool hasEffectiveReyesDisplacement = hasMeaningfulDisplacement && !fullyBeyondReyesCutoff;
     const uint classifyMode = CLOD_REYES_CLASSIFY_MODE;
     uint routeKind = CLOD_REYES_ROUTE_VISIBILITY;
     bool emitOwnedCluster = false;
@@ -93,18 +125,18 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (classifyMode == REYES_CLASSIFY_MODE_DEFAULT)
     {
         routeKind = CLOD_REYES_ROUTE_VISIBILITY;
-        emitOwnedCluster = hasMeaningfulDisplacement;
+        emitOwnedCluster = hasEffectiveReyesDisplacement;
         emitFullCluster = !emitOwnedCluster;
     }
     else if (classifyMode == REYES_CLASSIFY_MODE_SHADOW_FINE_DISPLACED_ONLY)
     {
         routeKind = CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM;
-        emitOwnedCluster = hasMeaningfulDisplacement;
+        emitOwnedCluster = hasEffectiveReyesDisplacement;
     }
     else if (classifyMode == REYES_CLASSIFY_MODE_SHADOW_COARSE_LARGE_ONLY)
     {
         routeKind = CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM;
-        emitOwnedCluster = !hasMeaningfulDisplacement;
+        emitOwnedCluster = !hasEffectiveReyesDisplacement;
     }
 
     const uint commonFlags =

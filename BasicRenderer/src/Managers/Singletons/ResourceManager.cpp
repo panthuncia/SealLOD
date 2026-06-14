@@ -132,6 +132,10 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeStartDistance")();
 	perFrameCBData.terrainParallaxFadeEndDistance =
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeEndDistance")();
+	perFrameCBData.clodReyesDisplacementFadeStartDistance =
+		SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesDisplacementFadeStartDistanceSettingName)();
+	perFrameCBData.clodReyesDisplacementFadeEndDistance =
+		SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesDisplacementFadeEndDistanceSettingName)();
 	perFrameCBData.terrainRvtEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")() ? 1u : 0u;
 	perFrameCBData.terrainRvtForceDirectFallback =
