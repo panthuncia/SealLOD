@@ -119,11 +119,4 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Terrain RVT Sampled Material",
 	"Terrain RVT Sampled Albedo Point",
 	"Terrain RVT Height Scale",
-	"Terrain Geometric Height",
-	"Terrain Geometric Height Slope",
-	"Terrain Dominant Layer",
-	"Terrain Dominant Weight",
-	"Terrain Texture UV",
-	"Terrain Texture Seam",
-	"Terrain Paint Grid",
 };

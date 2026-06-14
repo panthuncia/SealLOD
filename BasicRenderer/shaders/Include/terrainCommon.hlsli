@@ -1437,17 +1437,6 @@ float3x3 TerrainBasis(float3 normalWS)
     return float3x3(tangentWS, bitangentWS, normalWS);
 }
 
-bool TerrainDebugOutputEnabled(uint outputType)
-{
-    return outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT ||
-        outputType == OUTPUT_TERRAIN_GEOMETRIC_HEIGHT_SLOPE ||
-        outputType == OUTPUT_TERRAIN_DOMINANT_LAYER ||
-        outputType == OUTPUT_TERRAIN_DOMINANT_WEIGHT ||
-        outputType == OUTPUT_TERRAIN_TEXTURE_UV ||
-        outputType == OUTPUT_TERRAIN_TEXTURE_SEAM ||
-        outputType == OUTPUT_TERRAIN_PAINT_GRID;
-}
-
 void ApplyTerrainMaterialInternal(
     uint materialFlags,
     uint terrainSetIndex,
@@ -1470,7 +1459,6 @@ void ApplyTerrainMaterialInternal(
 #endif
 
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    const bool terrainDebugOutputEnabled = TerrainDebugOutputEnabled(perFrameBuffer.outputType);
 
 #if !defined(TERRAIN_RVT_GENERATION)
     TerrainRvtMaterialSample rvtSample;
@@ -1483,8 +1471,7 @@ void ApplyTerrainMaterialInternal(
         dpdyWS,
         normalWSBase,
         rvtParallaxApplied);
-    if (!terrainDebugOutputEnabled &&
-        TerrainRvtTrySampleMaterial(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS, normalWSBase, rvtSample))
+    if (TerrainRvtTrySampleMaterial(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS, normalWSBase, rvtSample))
     {
         inputs.albedo = rvtSample.albedo * vertexColor;
         inputs.normalWS = rvtSample.normalWS;
@@ -1609,23 +1596,11 @@ void ApplyTerrainMaterialInternal(
     float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
 #endif
     float2 regionLocal = skyrimXY - regionOrigin;
-    if (terrainDebugOutputEnabled)
-    {
-        const float paintCellSize = max(terrain.regionSizeWorld * (1.0f / 16.0f), 1.0e-4f);
-        const float2 paintCellUv = frac(regionLocal / paintCellSize);
-        const float paintEdgeDistance = min(
-            min(paintCellUv.x, 1.0f - paintCellUv.x),
-            min(paintCellUv.y, 1.0f - paintCellUv.y));
-        inputs.terrainDebugPaintGrid = 1.0f - smoothstep(0.0f, 0.035f, paintEdgeDistance);
-    }
 
     float2 skyrimXYDdx = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
     float2 skyrimXYDdy = TerrainSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
     float3x3 terrainBasis = TerrainBasis(normalWSBase);
 
-    float debugHeightSum = 0.0f;
-    float debugHeightWeightSum = 0.0f;
-    float debugDominantWeight = -1.0f;
     float terrainParallaxFade = 0.0f;
     float3 terrainViewDir = 0.0f.xxx;
     if (terrainParallaxEnabled)
@@ -1672,39 +1647,6 @@ void ApplyTerrainMaterialInternal(
         {
             stochasticLayer = terrainStochasticLayers[layer.stochasticLayerIndex];
             contextScale = max(stochasticLayer.stochasticScale, 0.001f);
-        }
-        if (terrainDebugOutputEnabled)
-        {
-            if (weight > debugDominantWeight)
-            {
-                const float2 tileUv = frac(layerUv);
-                const float tileEdgeDistance = min(
-                    min(tileUv.x, 1.0f - tileUv.x),
-                    min(tileUv.y, 1.0f - tileUv.y));
-                debugDominantWeight = weight;
-                inputs.terrainDebugDominantWeight = weight;
-                inputs.terrainDebugDominantLayer = layerIndex;
-                inputs.terrainDebugLayerUv = tileUv;
-                inputs.terrainDebugTextureSeam = 1.0f - smoothstep(0.0f, 0.02f, tileEdgeDistance);
-            }
-
-            if (TerrainCanSampleHeight(layer))
-            {
-                const float debugLayerHeight = TerrainSampleLayerHeightGeometric(
-                    layer,
-                    stochasticLayer,
-                    hasStochasticLayer,
-                    terrainStochasticHeightEnabled,
-                    terrainGaussianStochasticEnabled,
-                    terrainStochasticHeightEnabled,
-                    contextScale,
-                    perFrameBuffer.terrainStochasticBlendCurve,
-                    layerUv,
-                    layerDUdx,
-                    layerDUdy);
-                debugHeightSum += debugLayerHeight * weight * max(layer.heightScale, 0.0f);
-                debugHeightWeightSum += weight;
-            }
         }
         if (terrainParallaxEnabled && weight >= TERRAIN_PARALLAX_MIN_LAYER_WEIGHT && TerrainCanSampleHeight(layer))
         {
@@ -1835,16 +1777,6 @@ void ApplyTerrainMaterialInternal(
     if (weightSum <= 1.0e-4f)
     {
         return;
-    }
-    if (terrainDebugOutputEnabled)
-    {
-        inputs.terrainDebugHeight = debugHeightWeightSum > 1.0e-4f ? debugHeightSum / debugHeightWeightSum : 0.0f;
-
-        const float3 debugDpdxWS = dot(dpdxWS, dpdxWS) > 1.0e-8f ? dpdxWS : float3(1.0f, 0.0f, 0.0f);
-        const float3 debugDpdyWS = dot(dpdyWS, dpdyWS) > 1.0e-8f ? dpdyWS : float3(0.0f, 0.0f, -1.0f);
-        const float hx = TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS + debugDpdxWS, dpdxWS, dpdyWS);
-        const float hy = TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS + debugDpdyWS, dpdxWS, dpdyWS);
-        inputs.terrainDebugHeightSlope = length(float2(hx - inputs.terrainDebugHeight, hy - inputs.terrainDebugHeight));
     }
     float invWeightSum = rcp(weightSum);
     blendedBaseColor *= invWeightSum;
