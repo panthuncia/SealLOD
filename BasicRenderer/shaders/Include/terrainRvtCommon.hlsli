@@ -23,6 +23,8 @@ static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
 #define TERRAIN_RVT_ENABLE_PAGE_STAMP_DEBUG 0
 #define TERRAIN_RVT_VALIDATE_SAMPLE_OWNER 0
 #define TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG 0
+#define TERRAIN_RVT_ENABLE_DIRECT_FALLBACK 1
+#define TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK 1
 
 #if defined(TERRAIN_RVT_TELEMETRY)
 #define TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) ((perFrame).terrainRvtTelemetryEnabled != 0u)
@@ -154,12 +156,32 @@ uint TerrainRvtPackPageTableEntry(uint physicalPageIndex, uint contentMask)
         (physicalPageIndex & TERRAIN_RVT_PAGE_PHYSICAL_MASK);
 }
 
+uint TerrainRvtPageTablePhysicalPage(uint entry)
+{
+    return entry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
+}
+
+uint TerrainRvtPageTableContentMask(uint entry)
+{
+    return (entry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+}
+
+bool TerrainRvtPageTableHasContent(uint entry, uint requiredContentMask)
+{
+    const uint requiredBits = (requiredContentMask & 0x3u) << TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+    return (entry & TERRAIN_RVT_PAGE_VALID) != 0u &&
+        (entry & requiredBits) == requiredBits;
+}
+
 bool TerrainRvtUnpackPageTableEntry(uint entry, uint requiredContentMask, out uint physicalPageIndex)
 {
-    physicalPageIndex = entry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
-    const uint contentMask = (entry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
-    return (entry & TERRAIN_RVT_PAGE_VALID) != 0u &&
-        (contentMask & requiredContentMask) == requiredContentMask;
+    if (!TerrainRvtPageTableHasContent(entry, requiredContentMask))
+    {
+        physicalPageIndex = 0u;
+        return false;
+    }
+    physicalPageIndex = TerrainRvtPageTablePhysicalPage(entry);
+    return true;
 }
 
 struct TerrainRvtAddress
@@ -384,7 +406,13 @@ bool TerrainRvtLookupResident(
     {
         return false;
     }
-    return TerrainRvtUnpackPageTableEntry(pageTable[address.pageTableIndex], requiredContentMask, physicalPageIndex);
+    const uint entry = pageTable[address.pageTableIndex];
+    if (!TerrainRvtPageTableHasContent(entry, requiredContentMask))
+    {
+        return false;
+    }
+    physicalPageIndex = TerrainRvtPageTablePhysicalPage(entry);
+    return true;
 }
 
 bool TerrainRvtLookupResidentPage(
@@ -403,7 +431,13 @@ bool TerrainRvtLookupResidentPage(
     {
         return false;
     }
-    return TerrainRvtUnpackPageTableEntry(pageTable[pageTableIndex], requiredContentMask, physicalPageIndex);
+    const uint entry = pageTable[pageTableIndex];
+    if (!TerrainRvtPageTableHasContent(entry, requiredContentMask))
+    {
+        return false;
+    }
+    physicalPageIndex = TerrainRvtPageTablePhysicalPage(entry);
+    return true;
 }
 
 void TerrainRvtMarkVisited(uint pageTableIndex)
@@ -600,8 +634,11 @@ bool TerrainRvtTrySampleHeightFast(
     residentAddress.pageUv = requestedPageUv;
     residentAddress.pageTableIndex = requestedPageTableIndex;
     uint physicalPageIndex = 0u;
-    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex) &&
-        !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_HEIGHT, residentAddress, physicalPageIndex))
+    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_HEIGHT, physicalPageIndex)
+#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
+        && !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_HEIGHT, residentAddress, physicalPageIndex)
+#endif
+        )
     {
         if (telemetryEnabled)
         {
@@ -837,8 +874,11 @@ bool TerrainRvtTrySampleMaterial(
     residentAddress.pageUv = requestedPageUv;
     residentAddress.pageTableIndex = requestedPageTableIndex;
     uint physicalPageIndex = 0u;
-    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex) &&
-        !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_MATERIAL, residentAddress, physicalPageIndex))
+    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
+#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
+        && !TerrainRvtTryFindResidentLocal(terrainSetIndex, info, local, terrainClipCount, mip + 1u, TERRAIN_RVT_CONTENT_MATERIAL, residentAddress, physicalPageIndex)
+#endif
+        )
     {
         sampleOut.fallbackReason = TERRAIN_RVT_FALLBACK_PAGE_MISS;
         if (telemetryEnabled)
@@ -941,8 +981,8 @@ void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
     bool ownerValid = false;
     if ((currentEntry & TERRAIN_RVT_PAGE_VALID) != 0u)
     {
-        physicalPageIndex = currentEntry & TERRAIN_RVT_PAGE_PHYSICAL_MASK;
-        currentContentMask = (currentEntry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+        physicalPageIndex = TerrainRvtPageTablePhysicalPage(currentEntry);
+        currentContentMask = TerrainRvtPageTableContentMask(currentEntry);
         if (physicalPageIndex < info.maxPhysicalPages)
         {
 #if TERRAIN_RVT_VALIDATE_SAMPLE_OWNER

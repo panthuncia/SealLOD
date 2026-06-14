@@ -1074,7 +1074,11 @@ float TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(uint terrainSetIndex, 
     }
 #endif
 
+#if !TERRAIN_RVT_ENABLE_DIRECT_FALLBACK
+    return 0.0f;
+#else
     return TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
+#endif
 }
 
 float3x3 TerrainBasis(float3 normalWS)
@@ -1167,6 +1171,9 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtPageStamp = rvtSample.pageStamp;
         inputs.terrainRvtExpectedPageStamp = rvtSample.expectedPageStamp;
         inputs.terrainRvtPageStampDelta = rvtSample.pageStampDelta;
+#if !TERRAIN_RVT_ENABLE_DIRECT_FALLBACK
+        return;
+#endif
     }
 #endif
 
