@@ -1194,15 +1194,20 @@ float3 TerrainRvtParallaxPosition(
     const uint numSteps = ParallaxStepCount(viewDirTS.z, maxSteps);
     const float stepSize = localHeightScale * rcp((float)numSteps);
     const float centeredHeight = localHeightScale * 0.5f;
+    const TerrainRvtSampleContext heightSampleContext = TerrainRvtLoadSampleContext(terrainSetIndex);
+    const bool terrainRvtTelemetryEnabled = TERRAIN_RVT_TELEMETRY_ENABLED(perFrameBuffer);
+    const float2 heightSkyrimXYDdx = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS);
+    const float2 heightSkyrimXYDdy = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS);
 
     float prevBound = localHeightScale;
     float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (prevBound - centeredHeight));
     float prevHeight = 0.0f;
-    TerrainRvtTrySampleHeightFast(
-        terrainSetIndex,
+    TerrainRvtTrySampleHeightContext(
+        heightSampleContext,
         float3(prevSkyrimXY.x, positionWS.y, -prevSkyrimXY.y),
-        dpdxWS,
-        dpdyWS,
+        heightSkyrimXYDdx,
+        heightSkyrimXYDdy,
+        terrainRvtTelemetryEnabled,
         prevHeight);
     float prevF = prevBound - prevHeight;
     float hitBound = 0.0f;
@@ -1218,7 +1223,13 @@ float3 TerrainRvtParallaxPosition(
         const float2 currentSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (currentBound - centeredHeight));
         const float3 currentPositionWS = float3(currentSkyrimXY.x, positionWS.y, -currentSkyrimXY.y);
         float currentHeight = 0.0f;
-        TerrainRvtTrySampleHeightFast(terrainSetIndex, currentPositionWS, dpdxWS, dpdyWS, currentHeight);
+        TerrainRvtTrySampleHeightContext(
+            heightSampleContext,
+            currentPositionWS,
+            heightSkyrimXYDdx,
+            heightSkyrimXYDdy,
+            terrainRvtTelemetryEnabled,
+            currentHeight);
         const float currentF = currentBound - currentHeight;
 
         if (currentF <= 0.0f)
@@ -1245,7 +1256,13 @@ float3 TerrainRvtParallaxPosition(
             const float2 rootSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (rootBound - centeredHeight));
             const float3 rootPositionWS = float3(rootSkyrimXY.x, positionWS.y, -rootSkyrimXY.y);
             float rootHeight = 0.0f;
-            TerrainRvtTrySampleHeightFast(terrainSetIndex, rootPositionWS, dpdxWS, dpdyWS, rootHeight);
+            TerrainRvtTrySampleHeightContext(
+                heightSampleContext,
+                rootPositionWS,
+                heightSkyrimXYDdx,
+                heightSkyrimXYDdy,
+                terrainRvtTelemetryEnabled,
+                rootHeight);
             const float rootF = rootBound - rootHeight;
             if (rootF <= 0.0f)
             {
@@ -1272,10 +1289,45 @@ float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 position
 #if !defined(TERRAIN_RVT_GENERATION)
     if (useRvt)
     {
-        float rvtHeight = 0.0f;
-        if (TerrainRvtTrySampleHeight(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtHeight))
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        const bool telemetryEnabled = TERRAIN_RVT_TELEMETRY_ENABLED(perFrameBuffer);
+        if (telemetryEnabled)
         {
-            return rvtHeight;
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            InterlockedAdd(stats[0].heightFullSampleAttempts, 1u);
+        }
+        if (perFrameBuffer.terrainRvtEnabled != 0u && perFrameBuffer.terrainRvtForceDirectFallback == 0u)
+        {
+            float rvtHeight = 0.0f;
+            const TerrainRvtSampleContext ctx = TerrainRvtLoadSampleContext(terrainSetIndex);
+            if (TerrainRvtTrySampleHeightContext(
+                ctx,
+                positionWS,
+                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+                telemetryEnabled,
+                rvtHeight))
+            {
+                if (telemetryEnabled)
+                {
+                    RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+                    InterlockedAdd(stats[0].heightFullSampleHits, 1u);
+                }
+                return rvtHeight;
+            }
+        }
+        else if (telemetryEnabled)
+        {
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            InterlockedAdd(stats[0].heightFallbacks, 1u);
+            if (perFrameBuffer.terrainRvtEnabled == 0u)
+            {
+                InterlockedAdd(stats[0].heightDisabledFallbacks, 1u);
+            }
+            else
+            {
+                InterlockedAdd(stats[0].heightForcedFallbacks, 1u);
+            }
         }
     }
 #endif
@@ -1411,7 +1463,14 @@ float TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(uint terrainSetIndex, 
     if (perFrameBuffer.terrainRvtEnabled != 0u && perFrameBuffer.terrainRvtForceDirectFallback == 0u)
     {
         float rvtHeight = 0.0f;
-        if (TerrainRvtTrySampleHeightFast(terrainSetIndex, positionWS, dpdxWS, dpdyWS, rvtHeight))
+        const TerrainRvtSampleContext ctx = TerrainRvtLoadSampleContext(terrainSetIndex);
+        if (TerrainRvtTrySampleHeightContext(
+            ctx,
+            positionWS,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
+            TERRAIN_RVT_TELEMETRY_ENABLED(perFrameBuffer),
+            rvtHeight))
         {
             return rvtHeight;
         }
@@ -1422,6 +1481,79 @@ float TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(uint terrainSetIndex, 
     return 0.0f;
 #else
     return TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
+#endif
+}
+
+void TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
+    uint terrainSetIndex,
+    float3 position0WS,
+    float3 position1WS,
+    float3 position2WS,
+    float3 dpdx0WS,
+    float3 dpdy0WS,
+    float3 dpdx1WS,
+    float3 dpdy1WS,
+    float3 dpdx2WS,
+    float3 dpdy2WS,
+    out float height0,
+    out float height1,
+    out float height2)
+{
+    height0 = 0.0f;
+    height1 = 0.0f;
+    height2 = 0.0f;
+
+#if !defined(TERRAIN_RVT_GENERATION)
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const bool rvtEnabled = perFrameBuffer.terrainRvtEnabled != 0u && perFrameBuffer.terrainRvtForceDirectFallback == 0u;
+    const bool telemetryEnabled = TERRAIN_RVT_TELEMETRY_ENABLED(perFrameBuffer);
+    bool rvtHit0 = false;
+    bool rvtHit1 = false;
+    bool rvtHit2 = false;
+    if (rvtEnabled)
+    {
+        const TerrainRvtSampleContext ctx = TerrainRvtLoadSampleContext(terrainSetIndex);
+        rvtHit0 = TerrainRvtTrySampleHeightContext(
+            ctx,
+            position0WS,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx0WS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy0WS),
+            telemetryEnabled,
+            height0);
+        rvtHit1 = TerrainRvtTrySampleHeightContext(
+            ctx,
+            position1WS,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx1WS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy1WS),
+            telemetryEnabled,
+            height1);
+        rvtHit2 = TerrainRvtTrySampleHeightContext(
+            ctx,
+            position2WS,
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx2WS),
+            TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy2WS),
+            telemetryEnabled,
+            height2);
+    }
+#else
+    const bool rvtHit0 = false;
+    const bool rvtHit1 = false;
+    const bool rvtHit2 = false;
+#endif
+
+#if TERRAIN_RVT_ENABLE_DIRECT_FALLBACK
+    if (!rvtHit0)
+    {
+        height0 = TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, position0WS, dpdx0WS, dpdy0WS);
+    }
+    if (!rvtHit1)
+    {
+        height1 = TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, position1WS, dpdx1WS, dpdy1WS);
+    }
+    if (!rvtHit2)
+    {
+        height2 = TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, position2WS, dpdx2WS, dpdy2WS);
+    }
 #endif
 }
 

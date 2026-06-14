@@ -280,9 +280,10 @@ struct TerrainRvtClipInfo
     uint2 originPage;
     uint2 terrainPageCount;
     float pageWorldSize;
+    float invPageWorldSize;
     uint valid;
+    uint terrainClipCount;
     int2 clearDelta;
-    uint2 pad0;
 };
 
 struct TerrainRvtPageTag

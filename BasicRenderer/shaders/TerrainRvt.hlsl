@@ -129,11 +129,13 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         clipInfo.tableResolution = info.pageTableResolution;
         clipInfo.tableBaseSlot = linearThreadIndex * info.pageTableResolution * info.pageTableResolution;
         clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, clipLevel);
+        clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
 
         if (terrainSetIndex < info.maxTerrainSets)
         {
             const TerrainSetInfo terrain = terrainSets[terrainSetIndex];
             const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
+            clipInfo.terrainClipCount = terrainClipCount;
             if (clipLevel < terrainClipCount &&
                 terrain.regionSizeWorld > 0.0f &&
                 terrain.regionCountX > 0u &&
@@ -198,10 +200,12 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         clipInfo.tableResolution = resolution;
         clipInfo.tableBaseSlot = clipInfoIndex * slotsPerClip;
         clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, clipLevel);
+        clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
         if (clipInfoIndex < maxClipInfos && terrainSetIndex < info.maxTerrainSets)
         {
             const TerrainSetInfo terrain = terrainSets[terrainSetIndex];
             const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
+            clipInfo.terrainClipCount = terrainClipCount;
             if (clipLevel < terrainClipCount &&
                 terrain.regionSizeWorld > 0.0f &&
                 terrain.regionCountX > 0u &&

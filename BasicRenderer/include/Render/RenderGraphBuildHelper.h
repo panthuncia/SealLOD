@@ -381,9 +381,10 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t originPage[2];
         uint32_t terrainPageCount[2];
         float pageWorldSize;
+        float invPageWorldSize;
         uint32_t valid;
+        uint32_t terrainClipCount;
         int32_t clearDelta[2];
-        uint32_t pad0[2];
     };
     struct TerrainRvtPageTagPOD {
         uint32_t terrainSetIndex;

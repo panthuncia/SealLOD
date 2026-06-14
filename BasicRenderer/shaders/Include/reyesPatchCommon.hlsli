@@ -841,24 +841,61 @@ void ReyesEvaluateDisplacedPatchTriangle(
 
     if (displacementEnabled)
     {
-        float3 terrainDpdxWS = 0.0f.xxx;
-        float3 terrainDpdyWS = 0.0f.xxx;
-        const bool useTerrainDerivatives = ReyesEstimateTerrainDerivativesFromPatch(
-            camera,
-            patchPosition0,
-            patchPosition1,
-            patchPosition2,
-            terrainDpdxWS,
-            terrainDpdyWS);
         const float3 patchNormal0 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary0));
         const float3 patchNormal1 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary1));
         const float3 patchNormal2 = normalize(ReyesInterpolateFloat3Precise(sourceNormal0, sourceNormal1, sourceNormal2, sourceBary2));
-        const float2 patchUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0);
-        const float2 patchUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1);
-        const float2 patchUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2);
-        patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchNormal0, patchUv0, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
-        patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchNormal1, patchUv1, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
-        patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchNormal2, patchUv2, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+
+        if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+        {
+            float3 terrainDpdx0WS;
+            float3 terrainDpdy0WS;
+            float3 terrainDpdx1WS;
+            float3 terrainDpdy1WS;
+            float3 terrainDpdx2WS;
+            float3 terrainDpdy2WS;
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition0, terrainDpdx0WS, terrainDpdy0WS);
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition1, terrainDpdx1WS, terrainDpdy1WS);
+            ReyesEstimateStableTerrainDerivatives(camera, patchPosition2, terrainDpdx2WS, terrainDpdy2WS);
+
+            float height0;
+            float height1;
+            float height2;
+            TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
+                materialInfo.terrainSetIndex,
+                patchPosition0,
+                patchPosition1,
+                patchPosition2,
+                terrainDpdx0WS,
+                terrainDpdy0WS,
+                terrainDpdx1WS,
+                terrainDpdy1WS,
+                terrainDpdx2WS,
+                terrainDpdy2WS,
+                height0,
+                height1,
+                height2);
+            patchPosition0 += patchNormal0 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height0));
+            patchPosition1 += patchNormal1 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height1));
+            patchPosition2 += patchNormal2 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height2));
+        }
+        else
+        {
+            float3 terrainDpdxWS = 0.0f.xxx;
+            float3 terrainDpdyWS = 0.0f.xxx;
+            const bool useTerrainDerivatives = ReyesEstimateTerrainDerivativesFromPatch(
+                camera,
+                patchPosition0,
+                patchPosition1,
+                patchPosition2,
+                terrainDpdxWS,
+                terrainDpdyWS);
+            const float2 patchUv0 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0);
+            const float2 patchUv1 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1);
+            const float2 patchUv2 = ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2);
+            patchPosition0 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition0, patchNormal0, patchUv0, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+            patchPosition1 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition1, patchNormal1, patchUv1, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+            patchPosition2 = ReyesApplyGeometricDisplacement(materialInfo, patchPosition2, patchNormal2, patchUv2, camera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS);
+        }
     }
 }
 
