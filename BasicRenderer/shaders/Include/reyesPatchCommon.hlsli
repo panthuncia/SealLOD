@@ -495,6 +495,20 @@ float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
     return REYES_DICE_RATE_PIXELS * max(depth, max(camera.zNear, 1.0e-3f)) / projectionScale;
 }
 
+float ReyesEstimatePointDepth(CullingCameraInfo camera, float3 positionWS)
+{
+    const float3 cameraToPoint = positionWS - camera.positionWorldSpace.xyz;
+    const float viewDepth = abs(dot(cameraToPoint, normalize(camera.viewForwardWorld.xyz)));
+    return max(viewDepth, max(camera.zNear, 1.0e-3f));
+}
+
+void ReyesEstimateStableTerrainDerivatives(CullingCameraInfo camera, float3 positionWS, out float3 dpdxWS, out float3 dpdyWS)
+{
+    const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, ReyesEstimatePointDepth(camera, positionWS));
+    dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
+    dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+}
+
 float2 ReyesEstimateUvDerivative(MaterialInfo materialInfo, CullingCameraInfo camera, float depth)
 {
     const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
@@ -607,9 +621,9 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
 
     if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
     {
-        const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
-        const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
-        const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        float3 dpdxWS;
+        float3 dpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, dpdxWS, dpdyWS);
         const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
@@ -634,12 +648,10 @@ float ReyesSampleDisplacementOffset(
 
     if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
     {
-        if (!useTerrainDerivatives)
-        {
-            const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
-            terrainDpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
-            terrainDpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
-        }
+        // Geometric displacement must be edge-deterministic. Per-microtriangle
+        // projected derivatives can choose different RVT clips for the same
+        // shared edge point, so terrain RVT mip selection uses the point itself.
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, terrainDpdxWS, terrainDpdyWS);
         const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
@@ -656,9 +668,9 @@ float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positi
 
     if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
     {
-        const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
-        const float3 dpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
-        const float3 dpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
+        float3 dpdxWS;
+        float3 dpdyWS;
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, dpdxWS, dpdyWS);
         const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, dpdxWS, dpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
@@ -683,12 +695,10 @@ float ReyesSampleDisplacementOffset(
 
     if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
     {
-        if (!useTerrainDerivatives)
-        {
-            const float worldUnitsPerPixel = ReyesEstimateWorldUnitsPerPixel(camera, depth);
-            terrainDpdxWS = camera.viewRightWorld.xyz * worldUnitsPerPixel;
-            terrainDpdyWS = camera.viewUpWorld.xyz * worldUnitsPerPixel;
-        }
+        // Geometric displacement must be edge-deterministic. Per-microtriangle
+        // projected derivatives can choose different RVT clips for the same
+        // shared edge point, so terrain RVT mip selection uses the point itself.
+        ReyesEstimateStableTerrainDerivatives(camera, positionOS, terrainDpdxWS, terrainDpdyWS);
         const float heightValue = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(materialInfo.terrainSetIndex, positionOS, terrainDpdxWS, terrainDpdyWS));
         return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
     }
