@@ -33,6 +33,7 @@ uint TerrainRvtInfoAtlasPoolCount() { return UintRootConstant11; }
 uint TerrainRvtInfoMaxClipLevels() { return UintRootConstant12; }
 uint TerrainRvtInfoMaxClipInfos() { return UintRootConstant13; }
 uint TerrainRvtInfoMaxGeneratedPagesPerFrame() { return UintRootConstant14; }
+float TerrainRvtInfoMipOffset() { return asfloat(UintRootConstant15); }
 
 float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
 {
@@ -45,7 +46,7 @@ float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
 uint TerrainRvtMipForFootprintWorld(TerrainRvtInfo info, float footprintWorld)
 {
     const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
-    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
+    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f)) + info.mipOffset;
     return min((uint)max(0.0f, floor(requestedMip)), max(info.mipCount, 1u) - 1u);
 }
 
@@ -85,6 +86,7 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     info.maxTerrainSets = max(TerrainRvtInfoMaxTerrainSets(), 1u);
     info.maxClipLevels = max(TerrainRvtInfoMaxClipLevels(), 1u);
     info.maxGeneratedPagesPerFrame = max(TerrainRvtInfoMaxGeneratedPagesPerFrame(), 1u);
+    info.mipOffset = TerrainRvtInfoMipOffset();
     info.mipCount = min(max(info.mipCount, 1u), info.maxClipLevels);
 
     const uint linearThreadIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;

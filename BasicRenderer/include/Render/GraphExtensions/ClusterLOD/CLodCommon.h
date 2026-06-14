@@ -17,6 +17,7 @@ inline constexpr const char* CLodStreamingCpuUploadBudgetSettingName = "clodStre
 inline constexpr const char* CLodStreamingEnableDirectStorageSettingName = "clodStreamingEnableDirectStorage";
 inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDisableReyesRasterization";
 inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
+inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
@@ -38,6 +39,11 @@ inline constexpr uint32_t CLodForceTraversalDepthRootDisabled = 0xFFFFFFFFu;
 inline constexpr const char* CLodWorkGraphComputePageJobDescriptorBufferId = "CLod::WorkGraphComputePageJobDescriptors";
 inline constexpr const char* CLodLevelInfosBufferId = "Builtin::CLod::LevelInfos";
 inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSettingName = "clodDirectionalVirtualShadowMaxBackingResolution";
+
+inline bool CLodReyesUseNormalMaps()
+{
+    return !SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesGeometricNormalSettingName)();
+}
 inline constexpr const char* CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName = "clodDirectionalVirtualShadowMaxPhysicalPages";
 inline constexpr const char* CLodDirectionalVirtualShadowLodBiasSettingName = "clodDirectionalVirtualShadowLodBias";
 inline constexpr const char* CLodDirectionalVirtualShadowAutoLodBiasSettingName = "clodDirectionalVirtualShadowAutoLodBias";

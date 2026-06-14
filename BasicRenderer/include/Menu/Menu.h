@@ -554,9 +554,9 @@ private:
     std::function<bool()> getCLodDisableReyesRasterization;
     std::function<void(bool)> setCLodDisableReyesRasterization;
 
-    bool m_clodReyesUseNormalMaps = false;
-    std::function<bool()> getCLodReyesUseNormalMaps;
-    std::function<void(bool)> setCLodReyesUseNormalMaps;
+    bool m_clodReyesGeometricNormal = true;
+    std::function<bool()> getCLodReyesGeometricNormal;
+    std::function<void(bool)> setCLodReyesGeometricNormal;
 
     bool m_clodReyesUseAabbOcclusion = false;
     std::function<bool()> getCLodReyesUseAabbOcclusion;
@@ -692,6 +692,12 @@ private:
     int m_terrainRvtDebugView = 0;
     std::function<uint32_t()> getTerrainRvtDebugView;
     std::function<void(uint32_t)> setTerrainRvtDebugView;
+    int m_terrainRvtMipCount = 14;
+    std::function<uint32_t()> getTerrainRvtMipCount;
+    std::function<void(uint32_t)> setTerrainRvtMipCount;
+    float m_terrainRvtMipOffset = 0.0f;
+    std::function<float()> getTerrainRvtMipOffset;
+    std::function<void(float)> setTerrainRvtMipOffset;
     float m_terrainRvtBasePageWorldSize = 128.0f / 24.0f;
     std::function<float()> getTerrainRvtBasePageWorldSize;
     std::function<void(float)> setTerrainRvtBasePageWorldSize;
@@ -1079,10 +1085,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_clodDisableReyesRasterization = getCLodDisableReyesRasterization();
     observerSetting(m_clodDisableReyesRasterization, CLodDisableReyesRasterizationSettingName);
 
-    getCLodReyesUseNormalMaps = settingsManager.getSettingGetter<bool>(CLodReyesUseNormalMapsSettingName);
-    setCLodReyesUseNormalMaps = settingsManager.getSettingSetter<bool>(CLodReyesUseNormalMapsSettingName);
-    m_clodReyesUseNormalMaps = getCLodReyesUseNormalMaps();
-    observerSetting(m_clodReyesUseNormalMaps, CLodReyesUseNormalMapsSettingName);
+    getCLodReyesGeometricNormal = settingsManager.getSettingGetter<bool>(CLodReyesGeometricNormalSettingName);
+    setCLodReyesGeometricNormal = settingsManager.getSettingSetter<bool>(CLodReyesGeometricNormalSettingName);
+    m_clodReyesGeometricNormal = getCLodReyesGeometricNormal();
+    observerSetting(m_clodReyesGeometricNormal, CLodReyesGeometricNormalSettingName);
 
     getCLodReyesUseAabbOcclusion = settingsManager.getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName);
     setCLodReyesUseAabbOcclusion = settingsManager.getSettingSetter<bool>(CLodReyesUseAabbOcclusionSettingName);
@@ -1251,6 +1257,22 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         "terrainRvtDebugView",
         [this](const uint32_t& newValue) {
             m_terrainRvtDebugView = static_cast<int>(newValue);
+        }));
+    setTerrainRvtMipCount = settingsManager.getSettingSetter<uint32_t>("terrainRvtMipCount");
+    getTerrainRvtMipCount = settingsManager.getSettingGetter<uint32_t>("terrainRvtMipCount");
+    m_terrainRvtMipCount = static_cast<int>(getTerrainRvtMipCount());
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<uint32_t>(
+        "terrainRvtMipCount",
+        [this](const uint32_t& newValue) {
+            m_terrainRvtMipCount = static_cast<int>(newValue);
+        }));
+    setTerrainRvtMipOffset = settingsManager.getSettingSetter<float>("terrainRvtMipOffset");
+    getTerrainRvtMipOffset = settingsManager.getSettingGetter<float>("terrainRvtMipOffset");
+    m_terrainRvtMipOffset = getTerrainRvtMipOffset();
+    m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<float>(
+        "terrainRvtMipOffset",
+        [this](const float& newValue) {
+            m_terrainRvtMipOffset = newValue;
         }));
     setTerrainRvtBasePageWorldSize = settingsManager.getSettingSetter<float>("terrainRvtBasePageWorldSize");
     getTerrainRvtBasePageWorldSize = settingsManager.getSettingGetter<float>("terrainRvtBasePageWorldSize");
@@ -1731,8 +1753,8 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Disable Reyes Tessellation / VSM Reyes Routing", &m_clodDisableReyesRasterization)) {
             setCLodDisableReyesRasterization(m_clodDisableReyesRasterization);
         }
-        if (ImGui::Checkbox("Reyes Normal Maps", &m_clodReyesUseNormalMaps)) {
-            setCLodReyesUseNormalMaps(m_clodReyesUseNormalMaps);
+        if (ImGui::Checkbox("Reyes Geometric Normal", &m_clodReyesGeometricNormal)) {
+            setCLodReyesGeometricNormal(m_clodReyesGeometricNormal);
         }
         if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
             setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);
@@ -1967,6 +1989,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::SliderInt("Terrain RVT Debug View", &m_terrainRvtDebugView, 0, 4)) {
             setTerrainRvtDebugView(static_cast<uint32_t>(std::max(0, m_terrainRvtDebugView)));
+        }
+        if (ImGui::SliderInt("Terrain RVT Clipmaps", &m_terrainRvtMipCount, 1, 24)) {
+            setTerrainRvtMipCount(static_cast<uint32_t>(std::clamp(m_terrainRvtMipCount, 1, 24)));
+        }
+        if (ImGui::SliderFloat("Terrain RVT Mip Offset", &m_terrainRvtMipOffset, -4.0f, 4.0f, "%.2f")) {
+            setTerrainRvtMipOffset(std::clamp(m_terrainRvtMipOffset, -8.0f, 8.0f));
         }
         if (ImGui::SliderFloat("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 0.125f, 256.0f, "%.3f")) {
             setTerrainRvtBasePageWorldSize(std::max(0.125f, m_terrainRvtBasePageWorldSize));

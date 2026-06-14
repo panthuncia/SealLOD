@@ -179,8 +179,7 @@ PassReturn DeepVisibilityResolvePass::Execute(PassExecutionContext& executionCon
     misc[VISBUF_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] = m_reyesTessTableTrianglesBuffer
         ? m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;
-    misc[VISBUF_REYES_USE_NORMAL_MAPS] =
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseNormalMapsSettingName)() ? 1u : 0u;
+    misc[VISBUF_REYES_USE_NORMAL_MAPS] = CLodReyesUseNormalMaps() ? 1u : 0u;
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,

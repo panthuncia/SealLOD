@@ -117,6 +117,11 @@ namespace TerrainRvt
         return std::clamp(SettingU32("terrainRvtMipCount", 14u), 1u, MaxClipLevels());
     }
 
+    inline float MipOffset()
+    {
+        return std::clamp(SettingFloat("terrainRvtMipOffset", 0.0f), -8.0f, 8.0f);
+    }
+
     inline uint32_t MaxPageTableEntries()
     {
         const uint32_t resolution = ClipPageTableResolution();
@@ -163,6 +168,7 @@ namespace TerrainRvt
         rootConstants[12] = MaxClipLevels();
         rootConstants[13] = MaxClipInfoCount();
         rootConstants[14] = MaxGeneratedPagesPerFrame();
+        rootConstants[15] = FloatBits(MipOffset());
     }
 
     inline std::vector<DxcDefine> ShaderDefines()

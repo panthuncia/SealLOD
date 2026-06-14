@@ -1564,11 +1564,19 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 24u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
+    settingsManager.registerSetting<float>("terrainRvtMipOffset", 0.0f);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
-    settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.03f);
-    settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 16u);
+    settingsManager.getSettingSetter<float>("terrainRvtMipOffset")(
+        settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement")() ? 0.0f : -1.6f);
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(
+        "enableTerrainReyesDisplacement",
+        [](const bool& reyesEnabled) {
+            SettingsManager::GetInstance().getSettingSetter<float>("terrainRvtMipOffset")(reyesEnabled ? 0.0f : -1.6f);
+        }));
+    settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.10f);
+    settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 25u);
     settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2048.0f);
     settingsManager.registerSetting<float>("terrainParallaxFadeEndDistance", 8192.0f);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
@@ -1601,6 +1609,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
     settingsManager.registerSetting<bool>(CLodReyesUseNormalMapsSettingName, false);
+    settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,

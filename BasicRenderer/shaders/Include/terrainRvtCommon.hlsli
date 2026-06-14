@@ -260,7 +260,7 @@ bool TerrainRvtTryComputePageLocal(
 {
     const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
     const float footprintWorld = max(length(skyrimXYDdx), length(skyrimXYDdy));
-    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f));
+    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f)) + info.mipOffset;
     mip = min((uint)max(0.0f, floor(requestedMip)), terrainClipCount - 1u);
 
     return TerrainRvtTryComputePageAtClipLocal(
@@ -1148,7 +1148,7 @@ uint TerrainRvtMipForWorldRect(TerrainRvtInfo info, float2 minSkyrimXY, float2 m
 {
     const float extent = max(maxSkyrimXY.x - minSkyrimXY.x, maxSkyrimXY.y - minSkyrimXY.y);
     const float targetPageWorldSize = TerrainRvtBasePageWorldSize(info) * max(targetPagesPerAxis, 1.0f);
-    const float requestedMip = log2(max(extent / max(targetPageWorldSize, 1.0e-4f), 1.0f));
+    const float requestedMip = log2(max(extent / max(targetPageWorldSize, 1.0e-4f), 1.0f)) + info.mipOffset;
     return min((uint)max(0.0f, floor(requestedMip)), max(info.mipCount, 1u) - 1u);
 }
 

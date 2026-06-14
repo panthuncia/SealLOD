@@ -268,6 +268,7 @@ struct TerrainRvtInfo
     uint maxTerrainSets;
     uint maxClipLevels;
     uint maxGeneratedPagesPerFrame;
+    float mipOffset;
 };
 
 struct TerrainRvtClipInfo
