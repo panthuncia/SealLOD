@@ -20,6 +20,7 @@
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "RenderPasses/Base/ComputePass.h"
 #include "Resources/Buffers/PagePool.h"
 #include "Resources/Resolvers/ECSResourceResolver.h"
@@ -163,6 +164,14 @@ namespace TerrainRvt
         rootConstants[13] = MaxClipInfoCount();
         rootConstants[14] = MaxGeneratedPagesPerFrame();
     }
+
+    inline std::vector<DxcDefine> ShaderDefines()
+    {
+        if (!IsTerrainRvtTelemetryDebugEnabled()) {
+            return {};
+        }
+        return { DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
+    }
 }
 
 class TerrainRvtFrameResetPass final : public ComputePass {
@@ -173,7 +182,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtFrameResetCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.FrameReset.PSO");
     }
 
@@ -240,7 +249,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtMarkVisibleClusterPagesCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.MarkVisibleClusterPages.PSO");
 
         auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
@@ -364,13 +373,13 @@ public:
             psoManager.GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtClearGenerationCounterCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.ClearGenerationCounter.PSO");
         m_resolvePso = psoManager.MakeComputePipeline(
             psoManager.GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtResolveRequestsCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.ResolveRequests.PSO");
     }
 
@@ -438,7 +447,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtClearFeedbackRequestsCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.ClearFeedbackRequests.PSO");
     }
 
@@ -479,7 +488,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtBuildGenerateDispatchArgsCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.BuildGenerateDispatchArgs.PSO");
     }
 
@@ -517,7 +526,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtGeneratePagesCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.GeneratePages.PSO");
     }
 
@@ -589,7 +598,7 @@ public:
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/TerrainRvt.hlsl",
             L"TerrainRvtFinalizeGeneratedPagesCS",
-            {},
+            TerrainRvt::ShaderDefines(),
             "TerrainRvt.FinalizeGeneratedPages.PSO");
     }
 

@@ -92,6 +92,7 @@
 #include "Mesh/MeshInstance.h"
 #include "Render/DrawWorkload.h"
 #include "Render/RasterBucketFlags.h"
+#include "Render/TerrainRvtTelemetry.h"
 
 void D3D12DebugCallback(
     D3D12_MESSAGE_CATEGORY Category,
@@ -124,7 +125,6 @@ void D3D12DebugCallback(
 namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
-constexpr const char* TerrainRvtTelemetryDebugSettingName = "terrainRvtTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
 
 struct TerrainRvtTelemetryStatsReadback {
@@ -367,22 +367,6 @@ bool IsCLodVisibilityTelemetryEnabledByEnvironment() {
 bool IsCLodVisibilityTelemetryDebugEnabled() {
 	return IsCLodVisibilityTelemetryEnabledByEnvironment() ||
 		SettingsManager::GetInstance().getSettingGetter<bool>(CLodVisibilityTelemetryDebugSettingName)();
-}
-
-bool IsTerrainRvtTelemetryEnabledByEnvironment() {
-    char* value = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&value, &len, "SARP_TERRAIN_RVT_TELEMETRY") != 0 || value == nullptr) {
-        return false;
-    }
-    const bool enabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
-    free(value);
-    return enabled;
-}
-
-bool IsTerrainRvtTelemetryDebugEnabled() {
-    return IsTerrainRvtTelemetryEnabledByEnvironment() ||
-        SettingsManager::GetInstance().getSettingGetter<bool>(TerrainRvtTelemetryDebugSettingName)();
 }
 
 bool DefaultEnableReShapeForBuild() {

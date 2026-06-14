@@ -6,6 +6,7 @@
 #include "Materials/Material.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Mesh/Mesh.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "../generated/BuiltinRenderPasses.h"
 
 inline bool IsAlphaBlendTechnique(const TechniqueDescriptor& technique) {
@@ -30,6 +31,9 @@ inline MaterialCompileFlags ComposeRuntimeMaterialEvalCompileFlags(const Mesh& m
     const auto vertexFlags = mesh.GetPerMeshCBData().vertexFlags;
     if ((vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u) {
         compileFlags |= MaterialCompileFlags::MaterialCompileClodSkinning;
+    }
+    if (IsTerrainRvtTelemetryDebugEnabled()) {
+        compileFlags |= MaterialCompileFlags::MaterialCompileTerrainRvtTelemetry;
     }
     return compileFlags;
 }

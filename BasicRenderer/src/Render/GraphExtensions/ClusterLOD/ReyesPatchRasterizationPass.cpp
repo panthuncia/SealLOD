@@ -5,6 +5,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "ShaderBuffers.h"
@@ -46,7 +47,7 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
         L"ReyesPatchRasterCS",
-        {},
+        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
         "CLod.ReyesPatchRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {

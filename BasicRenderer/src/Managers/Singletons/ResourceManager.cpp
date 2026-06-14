@@ -13,6 +13,7 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/TerrainRvtTelemetry.h"
 
 namespace
 {
@@ -58,19 +59,6 @@ namespace
 				envEnabled("SARP_TERRAIN_PARALLAX_DIAGNOSTICS");
 		}();
 		return enabled;
-	}
-
-	bool TerrainRvtTelemetryEnabled()
-	{
-		char* rawValue = nullptr;
-		std::size_t valueLength = 0;
-		bool envEnabled = false;
-		if (_dupenv_s(&rawValue, &valueLength, "SARP_TERRAIN_RVT_TELEMETRY") == 0 && rawValue != nullptr) {
-			const std::unique_ptr<char, decltype(&std::free)> valueStorage{ rawValue, &std::free };
-			const std::string_view value{ valueStorage.get() };
-			envEnabled = !(value == "0" || value == "false" || value == "FALSE" || value == "off" || value == "OFF");
-		}
-		return envEnabled || SettingsManager::GetInstance().getSettingGetter<bool>("terrainRvtTelemetryDebug")();
 	}
 
     uint32_t PackDirectionalVirtualShadowSmrtCounts(uint32_t rayCount, uint32_t samplesPerRay)
@@ -150,7 +138,7 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")() ? 1u : 0u;
 	perFrameCBData.terrainRvtDebugView =
 		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtDebugView")();
-	perFrameCBData.terrainRvtTelemetryEnabled = TerrainRvtTelemetryEnabled() ? 1u : 0u;
+	perFrameCBData.terrainRvtTelemetryEnabled = IsTerrainRvtTelemetryDebugEnabled() ? 1u : 0u;
 	if (TerrainParallaxDiagnosticsEnabled()) {
 		static std::atomic_bool logged{ false };
 		bool expected = false;

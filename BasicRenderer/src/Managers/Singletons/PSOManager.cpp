@@ -2057,6 +2057,12 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
         macro.Name = L"PSO_CLOD_SKINNING";
         defines.insert(defines.begin(), macro);
     }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileTerrainRvtTelemetry) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"TERRAIN_RVT_TELEMETRY";
+        defines.insert(defines.begin(), macro);
+    }
 
     if (psoFlags & PSOFlags::PSO_SHADOW) {
         DxcDefine macro;

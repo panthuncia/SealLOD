@@ -55,7 +55,8 @@ inline MaterialCompileFlags GetMaterialEvaluationShaderKey(MaterialCompileFlags 
 		MaterialCompileFlags::MaterialCompileTerrain |
 		MaterialCompileFlags::MaterialCompileClodReyesPatch |
 		MaterialCompileFlags::MaterialCompileClodVertexColor |
-		MaterialCompileFlags::MaterialCompileClodSkinning;
+		MaterialCompileFlags::MaterialCompileClodSkinning |
+		MaterialCompileFlags::MaterialCompileTerrainRvtTelemetry;
 	return static_cast<MaterialCompileFlags>(static_cast<std::uint64_t>(flags) & shaderAffectingFlags);
 }
 

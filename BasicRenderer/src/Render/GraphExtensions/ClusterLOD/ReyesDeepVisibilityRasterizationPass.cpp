@@ -11,6 +11,7 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
 #include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -62,7 +63,7 @@ ReyesDeepVisibilityRasterizationPass::ReyesDeepVisibilityRasterizationPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchDeepVisibilityRaster.hlsl",
         L"ReyesPatchDeepVisibilityRasterCS",
-        {},
+        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
         "CLod.ReyesPatchDeepVisibilityRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {

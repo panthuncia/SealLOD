@@ -9,6 +9,7 @@
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Render/RenderContext.h"
 #include "Render/Runtime/UploadServiceAccess.h"
+#include "Render/TerrainRvtTelemetry.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -57,7 +58,7 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchVirtualShadowRaster.hlsl",
         L"ReyesPatchVirtualShadowRasterCS",
-        {},
+        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
         "CLod.ReyesPatchVirtualShadowRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {

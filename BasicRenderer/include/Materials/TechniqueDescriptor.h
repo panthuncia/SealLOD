@@ -32,6 +32,7 @@ enum MaterialCompileFlags : uint64_t {
 	MaterialCompileClodReyesPatch = 1ull << 22,
 	MaterialCompileClodVertexColor = 1ull << 23,
 	MaterialCompileClodSkinning = 1ull << 24,
+	MaterialCompileTerrainRvtTelemetry = 1ull << 25,
 };
 
 // |= operator for MaterialCompileFlags

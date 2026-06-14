@@ -60,7 +60,6 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
     RWStructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
-    RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -101,16 +100,20 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         }
         counters[TERRAIN_RVT_COUNTER_OVERFLOW_COUNT] = 0u;
         counters[TERRAIN_RVT_COUNTER_REUSE_CURSOR] = 0u;
-        stats[0] = (TerrainRvtStats)0;
-        stats[0].materialSampleRequestedPageMin = 0xffffffffu;
-        stats[0].materialSampleResidentPageMin = 0xffffffffu;
-        stats[0].materialSamplePhysicalPageMin = 0xffffffffu;
-        stats[0].requestPageTableMin = 0xffffffffu;
-        stats[0].generationPageTableMin = 0xffffffffu;
-        stats[0].materialSampleAttemptedPageMin = 0xffffffffu;
-        stats[0].materialSamplePageMissRequestedPageMin = 0xffffffffu;
-        stats[0].heightSampleAttemptedPageMin = 0xffffffffu;
-        stats[0].heightSamplePageMissRequestedPageMin = 0xffffffffu;
+        if (TERRAIN_RVT_TELEMETRY_ENABLED(perFrame))
+        {
+            RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+            stats[0] = (TerrainRvtStats)0;
+            stats[0].materialSampleRequestedPageMin = 0xffffffffu;
+            stats[0].materialSampleResidentPageMin = 0xffffffffu;
+            stats[0].materialSamplePhysicalPageMin = 0xffffffffu;
+            stats[0].requestPageTableMin = 0xffffffffu;
+            stats[0].generationPageTableMin = 0xffffffffu;
+            stats[0].materialSampleAttemptedPageMin = 0xffffffffu;
+            stats[0].materialSamplePageMissRequestedPageMin = 0xffffffffu;
+            stats[0].heightSampleAttemptedPageMin = 0xffffffffu;
+            stats[0].heightSamplePageMissRequestedPageMin = 0xffffffffu;
+        }
     }
 
     const uint maxClipInfos = TerrainRvtInfoMaxClipInfos();
@@ -505,7 +508,7 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
     RWStructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    const bool telemetryEnabled = perFrame.terrainRvtTelemetryEnabled != 0u;
+    const bool telemetryEnabled = TERRAIN_RVT_TELEMETRY_ENABLED(perFrame);
 
     const uint requestCount = min(counters[TERRAIN_RVT_COUNTER_REQUEST_COUNT], info.maxRequests);
     const uint requestIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
@@ -862,7 +865,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         return;
     }
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-    if (perFrame.terrainRvtTelemetryEnabled != 0u && texelInPage == 0u)
+    if (TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) && texelInPage == 0u)
     {
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
         InterlockedAdd(stats[0].generationTexels, texelsPerPage);
