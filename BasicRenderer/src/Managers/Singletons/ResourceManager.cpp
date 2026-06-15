@@ -128,14 +128,10 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxHeightScale")();
 	perFrameCBData.terrainParallaxMaxSteps =
 		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainParallaxMaxSteps")();
-	perFrameCBData.terrainParallaxFadeStartDistance =
+	perFrameCBData.heightFadeStartDistance =
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeStartDistance")();
-	perFrameCBData.terrainParallaxFadeEndDistance =
+	perFrameCBData.heightFadeEndDistance =
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainParallaxFadeEndDistance")();
-	perFrameCBData.clodReyesDisplacementFadeStartDistance =
-		SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesDisplacementFadeStartDistanceSettingName)();
-	perFrameCBData.clodReyesDisplacementFadeEndDistance =
-		SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesDisplacementFadeEndDistanceSettingName)();
 	perFrameCBData.terrainRvtEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")() ? 1u : 0u;
 	perFrameCBData.terrainRvtForceDirectFallback =
@@ -148,13 +144,13 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		bool expected = false;
 		if (logged.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
 			spdlog::info(
-				"SARP terrain: per-frame parallax constants pom={} terrainPom={} heightScale={} maxSteps={} fadeStart={} fadeEnd={}",
+				"SARP terrain: per-frame height constants pom={} terrainPom={} heightScale={} maxSteps={} fadeStart={} fadeEnd={}",
 				perFrameCBData.parallaxOcclusionMappingEnabled,
 				perFrameCBData.terrainParallaxOcclusionMappingEnabled,
 				perFrameCBData.terrainParallaxHeightScale,
 				perFrameCBData.terrainParallaxMaxSteps,
-				perFrameCBData.terrainParallaxFadeStartDistance,
-				perFrameCBData.terrainParallaxFadeEndDistance);
+				perFrameCBData.heightFadeStartDistance,
+				perFrameCBData.heightFadeEndDistance);
 		}
 	}
 

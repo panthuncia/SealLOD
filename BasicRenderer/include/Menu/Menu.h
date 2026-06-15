@@ -566,14 +566,6 @@ private:
     std::function<uint32_t()> getCLodReyesTerrainNormalMipBias;
     std::function<void(uint32_t)> setCLodReyesTerrainNormalMipBias;
 
-    float m_clodReyesDisplacementFadeStartDistance = CLodReyesDisplacementFadeStartDistanceDefault;
-    std::function<float()> getCLodReyesDisplacementFadeStartDistance;
-    std::function<void(float)> setCLodReyesDisplacementFadeStartDistance;
-
-    float m_clodReyesDisplacementFadeEndDistance = CLodReyesDisplacementFadeEndDistanceDefault;
-    std::function<float()> getCLodReyesDisplacementFadeEndDistance;
-    std::function<void(float)> setCLodReyesDisplacementFadeEndDistance;
-
     bool m_clodReyesUseAabbOcclusion = false;
     std::function<bool()> getCLodReyesUseAabbOcclusion;
     std::function<void(bool)> setCLodReyesUseAabbOcclusion;
@@ -1135,20 +1127,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         [this](const uint32_t& newValue) {
             m_clodReyesTerrainNormalMipBias = static_cast<int>(newValue);
         }));
-
-    getCLodReyesDisplacementFadeStartDistance =
-        settingsManager.getSettingGetter<float>(CLodReyesDisplacementFadeStartDistanceSettingName);
-    setCLodReyesDisplacementFadeStartDistance =
-        settingsManager.getSettingSetter<float>(CLodReyesDisplacementFadeStartDistanceSettingName);
-    m_clodReyesDisplacementFadeStartDistance = getCLodReyesDisplacementFadeStartDistance();
-    observerSetting(m_clodReyesDisplacementFadeStartDistance, CLodReyesDisplacementFadeStartDistanceSettingName);
-
-    getCLodReyesDisplacementFadeEndDistance =
-        settingsManager.getSettingGetter<float>(CLodReyesDisplacementFadeEndDistanceSettingName);
-    setCLodReyesDisplacementFadeEndDistance =
-        settingsManager.getSettingSetter<float>(CLodReyesDisplacementFadeEndDistanceSettingName);
-    m_clodReyesDisplacementFadeEndDistance = getCLodReyesDisplacementFadeEndDistance();
-    observerSetting(m_clodReyesDisplacementFadeEndDistance, CLodReyesDisplacementFadeEndDistanceSettingName);
 
     getCLodReyesUseAabbOcclusion = settingsManager.getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName);
     setCLodReyesUseAabbOcclusion = settingsManager.getSettingSetter<bool>(CLodReyesUseAabbOcclusionSettingName);
@@ -1864,14 +1842,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 static_cast<int>(CLodReyesTerrainNormalMipBiasMax));
             setCLodReyesTerrainNormalMipBias(static_cast<uint32_t>(m_clodReyesTerrainNormalMipBias));
         }
-        if (ImGui::SliderFloat("Reyes Displacement Fade Start", &m_clodReyesDisplacementFadeStartDistance, 0.0f, 65536.0f, "%.0f")) {
-            m_clodReyesDisplacementFadeStartDistance = std::max(0.0f, m_clodReyesDisplacementFadeStartDistance);
-            setCLodReyesDisplacementFadeStartDistance(m_clodReyesDisplacementFadeStartDistance);
-        }
-        if (ImGui::SliderFloat("Reyes Displacement Fade End", &m_clodReyesDisplacementFadeEndDistance, 0.0f, 65536.0f, "%.0f")) {
-            m_clodReyesDisplacementFadeEndDistance = std::max(0.0f, m_clodReyesDisplacementFadeEndDistance);
-            setCLodReyesDisplacementFadeEndDistance(m_clodReyesDisplacementFadeEndDistance);
-        }
         if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
             setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);
         }
@@ -2178,16 +2148,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_terrainParallaxMaxSteps = static_cast<uint32_t>(std::clamp(terrainParallaxMaxSteps, 4, 32));
             setTerrainParallaxMaxSteps(m_terrainParallaxMaxSteps);
         }
-        if (ImGui::SliderFloat("Terrain Parallax Fade Start", &m_terrainParallaxFadeStartDistance, 0.0f, 32768.0f, "%.0f")) {
+        if (ImGui::SliderFloat("Height Fade Start", &m_terrainParallaxFadeStartDistance, 0.0f, 32768.0f, "%.0f")) {
             m_terrainParallaxFadeStartDistance = std::max(0.0f, m_terrainParallaxFadeStartDistance);
-            if (m_terrainParallaxFadeEndDistance < m_terrainParallaxFadeStartDistance) {
-                m_terrainParallaxFadeEndDistance = m_terrainParallaxFadeStartDistance;
-                setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
-            }
             setTerrainParallaxFadeStartDistance(m_terrainParallaxFadeStartDistance);
         }
-        if (ImGui::SliderFloat("Terrain Parallax Fade End", &m_terrainParallaxFadeEndDistance, 0.0f, 65536.0f, "%.0f")) {
-            m_terrainParallaxFadeEndDistance = std::max(m_terrainParallaxFadeStartDistance, m_terrainParallaxFadeEndDistance);
+        if (ImGui::SliderFloat("Height Fade End", &m_terrainParallaxFadeEndDistance, 0.0f, 65536.0f, "%.0f")) {
+            m_terrainParallaxFadeEndDistance = std::max(0.0f, m_terrainParallaxFadeEndDistance);
             setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
         }
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {

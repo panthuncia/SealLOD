@@ -110,8 +110,8 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
         ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         fullyBeyondReyesCutoff = CLodReyesSphereFullyBeyondCutoff(
-            perFrame.clodReyesDisplacementFadeStartDistance,
-            perFrame.clodReyesDisplacementFadeEndDistance,
+            perFrame.heightFadeStartDistance,
+            perFrame.heightFadeEndDistance,
             cameras[CLodVisibleClusterViewID(packedCluster)],
             centerWorld,
             radiusWorld);

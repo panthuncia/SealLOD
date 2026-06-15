@@ -100,7 +100,11 @@ float3 TerrainNormalizeWeights(float3 weights)
 float TerrainParallaxDistanceFade(float viewDistance, float fadeStart, float fadeEnd)
 {
     fadeStart = max(fadeStart, 0.0f);
-    fadeEnd = max(fadeEnd, fadeStart + 1.0f);
+    fadeEnd = max(fadeEnd, 0.0f);
+    if (fadeEnd <= fadeStart)
+    {
+        return 1.0f;
+    }
     return 1.0f - smoothstep(fadeStart, fadeEnd, viewDistance);
 }
 
@@ -1160,8 +1164,8 @@ float3 TerrainRvtParallaxPosition(
     const float terrainViewDistance = length(cameraDelta);
     const float terrainParallaxFade = TerrainParallaxDistanceFade(
         terrainViewDistance,
-        perFrameBuffer.terrainParallaxFadeStartDistance,
-        perFrameBuffer.terrainParallaxFadeEndDistance);
+        perFrameBuffer.heightFadeStartDistance,
+        perFrameBuffer.heightFadeEndDistance);
     if (terrainParallaxFade <= TERRAIN_PARALLAX_MIN_FADE)
     {
         return positionWS;
@@ -1744,8 +1748,8 @@ void ApplyTerrainMaterialInternal(
         terrainViewDir = cameraDelta * rcp(max(terrainViewDistance, 1.0e-5f));
         terrainParallaxFade = TerrainParallaxDistanceFade(
             terrainViewDistance,
-            perFrameBuffer.terrainParallaxFadeStartDistance,
-            perFrameBuffer.terrainParallaxFadeEndDistance);
+            perFrameBuffer.heightFadeStartDistance,
+            perFrameBuffer.heightFadeEndDistance);
         terrainParallaxEnabled = terrainParallaxFade > TERRAIN_PARALLAX_MIN_FADE;
         terrainParallaxMaxSteps = max(4u, (uint)ceil((float)terrainParallaxMaxSteps * terrainParallaxFade));
     }

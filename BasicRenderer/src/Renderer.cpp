@@ -1564,7 +1564,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 24u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
-    settingsManager.registerSetting<float>("terrainRvtMipOffset", 0.0f);
+    settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 32.0f);
@@ -1577,8 +1577,8 @@ void Renderer::SetSettings() {
         }));
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.10f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 25u);
-    settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2048.0f);
-    settingsManager.registerSetting<float>("terrainParallaxFadeEndDistance", 8192.0f);
+    settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2000.0f);
+    settingsManager.registerSetting<float>("terrainParallaxFadeEndDistance", 3000.0f);
     settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);
@@ -1612,12 +1612,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
     settingsManager.registerSetting<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName, CLodReyesTerrainNormalMipBiasDefault);
-    settingsManager.registerSetting<float>(
-        CLodReyesDisplacementFadeStartDistanceSettingName,
-        CLodReyesDisplacementFadeStartDistanceDefault);
-    settingsManager.registerSetting<float>(
-        CLodReyesDisplacementFadeEndDistanceSettingName,
-        CLodReyesDisplacementFadeEndDistanceDefault);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,

@@ -1764,9 +1764,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             const float3 patchPos0WS = mul(float4(patchPos0, 1.0f), obj.model).xyz;
             const float3 patchPos1WS = mul(float4(patchPos1, 1.0f), obj.model).xyz;
             const float3 patchPos2WS = mul(float4(patchPos2, 1.0f), obj.model).xyz;
-            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchPos0WS, patchNormal0, patchUv0, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.clodReyesDisplacementFadeStartDistance, perFrame.clodReyesDisplacementFadeEndDistance);
-            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchPos1WS, patchNormal1, patchUv1, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.clodReyesDisplacementFadeStartDistance, perFrame.clodReyesDisplacementFadeEndDistance);
-            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchPos2WS, patchNormal2, patchUv2, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.clodReyesDisplacementFadeStartDistance, perFrame.clodReyesDisplacementFadeEndDistance);
+            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchPos0WS, patchNormal0, patchUv0, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchPos1WS, patchNormal1, patchUv1, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchPos2WS, patchNormal2, patchUv2, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
         }
 
         evalPos0 = patchPos0;

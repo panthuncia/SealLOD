@@ -2659,8 +2659,8 @@ void ClusterCullBody(
                 meshletRadiusWorld = meshletBounds.sphere.w * cullUniformScale;
                 if (meshletNeedsReyesDisplacement &&
                     CLodReyesSphereFullyBeyondCutoff(
-                        perFrame.clodReyesDisplacementFadeStartDistance,
-                        perFrame.clodReyesDisplacementFadeEndDistance,
+                        perFrame.heightFadeStartDistance,
+                        perFrame.heightFadeEndDistance,
                         cullCam,
                         meshletCenterWorld,
                         meshletRadiusWorld))

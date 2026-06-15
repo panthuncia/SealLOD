@@ -231,10 +231,8 @@ struct PerFrameBuffer {
     uint terrainParallaxOcclusionMappingEnabled;
     float terrainParallaxHeightScale;
     uint terrainParallaxMaxSteps;
-    float terrainParallaxFadeStartDistance;
-    float terrainParallaxFadeEndDistance;
-    float clodReyesDisplacementFadeStartDistance;
-    float clodReyesDisplacementFadeEndDistance;
+    float heightFadeStartDistance;
+    float heightFadeEndDistance;
     uint terrainRvtEnabled;
     uint terrainRvtForceDirectFallback;
     uint terrainRvtDebugView;

@@ -20,8 +20,6 @@ inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNo
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
 inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodReyesTerrainNormalMipBias";
-inline constexpr const char* CLodReyesDisplacementFadeStartDistanceSettingName = "clodReyesDisplacementFadeStartDistance";
-inline constexpr const char* CLodReyesDisplacementFadeEndDistanceSettingName = "clodReyesDisplacementFadeEndDistance";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
@@ -50,8 +48,6 @@ inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSet
 inline constexpr float CLodReyesTerrainNormalBlendDefault = 0.35f;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasDefault = 2u;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasMax = 8u;
-inline constexpr float CLodReyesDisplacementFadeStartDistanceDefault = 2048.0f;
-inline constexpr float CLodReyesDisplacementFadeEndDistanceDefault = 8192.0f;
 
 inline bool CLodReyesUseNormalMaps()
 {
