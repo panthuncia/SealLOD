@@ -1603,7 +1603,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableIndirectDraws", meshShaderSupported);
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
-    settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
+    settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::WorkGraph);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
