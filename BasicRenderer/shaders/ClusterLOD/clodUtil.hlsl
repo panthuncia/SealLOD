@@ -2707,6 +2707,8 @@ void CreateRasterBucketsHistogramCommandCSMain()
 
         const uint nodeReplayCount = min(replayState.nodeWriteCount, CLOD_NODE_REPLAY_CAPACITY);
         const uint meshletReplayCount = min(replayState.meshletWriteCount, CLOD_MESHLET_REPLAY_CAPACITY);
+        const uint reyesSplitReplayCount = min(replayState.reyesSplitWriteCount, CLOD_REYES_SPLIT_REPLAY_CAPACITY);
+        const uint reyesDiceReplayCount = min(replayState.reyesDiceWriteCount, CLOD_REYES_DICE_REPLAY_CAPACITY);
 
         // Slot 0 is CLodMultiNodeGpuInput (CPU initialized); slot 1+ are CLodNodeGpuInput records.
         // Entry point 1 = TraverseNodes (node replay region, 12-byte stride).
@@ -2716,6 +2718,10 @@ void CreateRasterBucketsHistogramCommandCSMain()
         nodeInputs[1].recordStride = CLOD_NODE_REPLAY_STRIDE_BYTES;
         nodeInputs[2].numRecords = meshletReplayCount;
         nodeInputs[2].recordStride = CLOD_MESHLET_REPLAY_STRIDE_BYTES;
+        nodeInputs[3].numRecords = reyesSplitReplayCount;
+        nodeInputs[3].recordStride = CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES;
+        nodeInputs[4].numRecords = reyesDiceReplayCount;
+        nodeInputs[4].recordStride = CLOD_REYES_DICE_REPLAY_STRIDE_BYTES;
     }
 }
 

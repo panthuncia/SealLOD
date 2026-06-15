@@ -680,9 +680,10 @@ struct CLodReplayBufferState {
     uint32_t nodeDropped = 0;
     uint32_t meshletDropped = 0;
     uint32_t visibleClusterCombinedCount = 0;
-    uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
+    uint32_t reyesSplitWriteCount = 0;
+    uint32_t reyesDiceWriteCount = 0;
+    uint32_t reyesSplitDropped = 0;
+    uint32_t reyesDiceDropped = 0;
 };
 
 struct CLodViewDepthSRVIndex {

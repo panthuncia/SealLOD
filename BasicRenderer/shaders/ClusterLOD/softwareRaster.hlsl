@@ -28,6 +28,8 @@
 
 // Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
 
+#ifndef CLOD_READ_PACKED_BITS32_DEFINED
+#define CLOD_READ_PACKED_BITS32_DEFINED 1
 uint ReadPackedBits32(ByteAddressBuffer buf, uint startBit, uint bitCount)
 {
     if (bitCount == 0u) return 0u;
@@ -42,6 +44,7 @@ uint ReadPackedBits32(ByteAddressBuffer buf, uint startBit, uint bitCount)
     uint mask = (bitCount >= 32u) ? 0xffffffffu : ((1u << bitCount) - 1u);
     return packed & mask;
 }
+#endif
 
 float3 SWDecodeCompressedPosition(
     uint meshletLocalVertex,

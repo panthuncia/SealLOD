@@ -167,6 +167,46 @@ float Overload(int value)
             "expected Overload in discovered definitions");
         }, failureCount);
 
+    RunTest("catalog handles dxc line marker between work graph signature and body", []() {
+        const std::string source = R"(
+struct TraverseNodeRecord
+{
+    uint nodeIdPacked;
+};
+
+template<typename T>
+struct GroupNodeInputRecords
+{
+};
+
+template<typename T>
+struct NodeOutput
+{
+};
+
+[Shader("node")]
+[NodeID("TraverseNodes")]
+[NodeLaunch("coalescing")]
+[NumThreads(32, 1, 1)]
+void WG_TraverseNodes(
+    [MaxRecords(32)] GroupNodeInputRecords<TraverseNodeRecord> inRecs,
+    uint GI : SV_GroupIndex,
+    [MaxRecords(128)] NodeOutput<TraverseNodeRecord> TraverseNodes,
+    [NodeID("LeafNodes")] [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<TraverseNodeRecord> LeafNodes)
+#line 2204 "hlsl.hlsl"
+{
+}
+)";
+
+        ShaderPreprocessDiagnostics diagnostics =
+            AnalyzeShaderSourceCatalog(source.c_str(), source.size());
+
+        Require(diagnostics.parseSucceeded, "tree-sitter failed to produce a root for work graph signature");
+        Require(diagnostics.safeToPrune, "work graph signature with dxc line marker should be safe to prune");
+        Require(Contains(JoinStrings(diagnostics.discoveredFunctionDefinitions, ","), "WG_TraverseNodes"),
+            "expected WG_TraverseNodes in discovered definitions");
+        }, failureCount);
+
     RunTest("per-view depth copy drops unreachable helper chain", []() {
         const std::string source = R"(
 float UsedHelper()

@@ -151,10 +151,19 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture) {
+    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<Buffer> reyesDiceQueueBuffer,
+    std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer,
+    std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer,
+    std::shared_ptr<Buffer> reyesTessTableConfigsBuffer,
+    std::shared_ptr<Buffer> reyesTessTableVerticesBuffer,
+    std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer,
+    std::shared_ptr<Buffer> reyesTelemetryBuffer,
+    uint32_t reyesDiceQueueCapacity) {
     m_workGraphMode = inputs.workGraphMode;
     m_rasterOutputKind = inputs.rasterOutputKind;
     m_isFirstPass = inputs.isFirstPass;
+    m_workGraphReyesVisibility = inputs.workGraphReyesVisibility;
     m_workGraphComputePageJobDescriptorResourceId =
         std::string(CLodWorkGraphComputePageJobDescriptorBufferId) + "." + std::move(stablePassIdentifier);
     m_voxelRasterQueueDescriptorResourceId =
@@ -218,6 +227,14 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     m_shadowDirtyHierarchyTexture = std::move(shadowDirtyHierarchyTexture);
     m_shadowPageTableTexture = std::move(shadowPageTableTexture);
     m_shadowPhysicalPagesTexture = std::move(shadowPhysicalPagesTexture);
+    m_reyesDiceQueueBuffer = std::move(reyesDiceQueueBuffer);
+    m_reyesDiceQueueCounterBuffer = std::move(reyesDiceQueueCounterBuffer);
+    m_reyesDiceQueueOverflowBuffer = std::move(reyesDiceQueueOverflowBuffer);
+    m_reyesTessTableConfigsBuffer = std::move(reyesTessTableConfigsBuffer);
+    m_reyesTessTableVerticesBuffer = std::move(reyesTessTableVerticesBuffer);
+    m_reyesTessTableTrianglesBuffer = std::move(reyesTessTableTrianglesBuffer);
+    m_reyesTelemetryBuffer = std::move(reyesTelemetryBuffer);
+    m_reyesDiceQueueCapacity = reyesDiceQueueCapacity;
     m_slabResourceGroup = std::move(slabResourceGroup);
     m_phase1VisibleClustersCounterBuffer = std::move(phase1VisibleClustersCounterBuffer);
     m_swWriteBaseCounterBuffer = std::move(swWriteBaseCounterBuffer);
@@ -332,6 +349,39 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
     if (UsesWorkGraphSWRaster(m_workGraphMode) && UsesVirtualShadowOutput(m_rasterOutputKind)) {
         builder->WithUnorderedAccess(Builtin::Shadows::CLodPhysicalPages);
     }
+    if (m_workGraphReyesVisibility) {
+        builder->WithUnorderedAccess(
+                m_reyesDiceQueueBuffer,
+                m_reyesDiceQueueCounterBuffer,
+                m_reyesDiceQueueOverflowBuffer,
+                m_reyesTelemetryBuffer)
+            .WithShaderResource(
+                m_reyesTessTableConfigsBuffer,
+                m_reyesTessTableVerticesBuffer,
+                m_reyesTessTableTrianglesBuffer,
+                Builtin::PerMaterialOpenPBRDataBuffer,
+                Builtin::Terrain::Sets,
+                Builtin::Terrain::Layers,
+                Builtin::Terrain::StochasticLayers,
+                Builtin::Terrain::LayerRefs,
+                Builtin::Terrain::Regions,
+                Builtin::Terrain::WeightBlocks,
+                Builtin::Terrain::TextureGroup,
+                Builtin::Terrain::RvtInfo,
+                Builtin::Terrain::RvtClipInfos,
+                Builtin::Terrain::RvtPageTable,
+                Builtin::Terrain::RvtPageKeys,
+                Builtin::Terrain::RvtPhysicalPageOwner,
+                Builtin::Terrain::RvtHeightAtlas,
+                Builtin::Terrain::RvtAlbedoAtlas,
+                Builtin::Terrain::RvtNormalAtlas,
+                Builtin::Terrain::RvtMaterialAtlas)
+            .WithUnorderedAccess(
+                Builtin::Terrain::RvtRequestMasks,
+                Builtin::Terrain::RvtRequestList,
+                Builtin::Terrain::RvtCounters,
+                Builtin::Terrain::RvtStats);
+    }
 
     // Phase 2 reads Phase 1's HW counter to offset writes in the visible clusters buffer.
     if (m_phase1VisibleClustersCounterBuffer) {
@@ -433,6 +483,43 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         commandList.Barriers(clearBarrierBatch);
     }
 
+    if (m_workGraphReyesVisibility && m_isFirstPass) {
+        BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_clearPipelineState.GetAPIPipelineState().GetHandle());
+
+        auto clearUintBuffer = [&](const std::shared_ptr<Buffer>& buffer) {
+            uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
+            clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
+                buffer->GetUAVShaderVisibleInfo(0).slot.index;
+            clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
+            clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = 1u;
+            commandList.PushConstants(
+                rhi::ShaderStage::Compute,
+                0,
+                MiscUintRootSignatureIndex,
+                0,
+                NumMiscUintRootConstants,
+                clearRootConstants);
+            commandList.Dispatch(1u, 1u, 1u);
+        };
+
+        clearUintBuffer(m_reyesDiceQueueCounterBuffer);
+        clearUintBuffer(m_reyesDiceQueueOverflowBuffer);
+
+        std::array<rhi::BufferBarrier, 2> reyesCounterBarriers{};
+        reyesCounterBarriers[0].buffer = m_reyesDiceQueueCounterBuffer->GetAPIResource().GetHandle();
+        reyesCounterBarriers[1].buffer = m_reyesDiceQueueOverflowBuffer->GetAPIResource().GetHandle();
+        for (auto& barrier : reyesCounterBarriers) {
+            barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+            barrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
+            barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
+            barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
+        }
+        rhi::BarrierBatch clearBarrierBatch{};
+        clearBarrierBatch.buffers = rhi::Span<rhi::BufferBarrier>(reyesCounterBarriers.data(), static_cast<uint32_t>(reyesCounterBarriers.size()));
+        commandList.Barriers(clearBarrierBatch);
+    }
+
     uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
     uintRootConstants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -503,6 +590,22 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     if (m_shadowPhysicalPagesTexture) {
         uintRootConstants[CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX] =
             m_shadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    }
+    if (m_workGraphReyesVisibility) {
+        uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] =
+            m_reyesDiceQueueBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] =
+            m_reyesDiceQueueCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX] =
+            m_reyesDiceQueueOverflowBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] =
+            m_reyesTessTableConfigsBuffer->GetSRVInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX] =
+            m_reyesTessTableVerticesBuffer->GetSRVInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX] =
+            m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX] =
+            m_reyesTelemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     }
     uintRootConstants[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX] = m_occlusionReplayBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = m_occlusionReplayStateBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -931,6 +1034,10 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
         replayState.nodeDropped = 0;
         replayState.meshletDropped = 0;
         replayState.visibleClusterCombinedCount = 0;
+        replayState.reyesSplitWriteCount = 0;
+        replayState.reyesDiceWriteCount = 0;
+        replayState.reyesSplitDropped = 0;
+        replayState.reyesDiceDropped = 0;
         BUFFER_UPLOAD(
             &replayState,
             sizeof(CLodReplayBufferState),
@@ -940,9 +1047,9 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
 
     {
         ZoneScopedN("HierarchicalCullingPass::UpdateReplayNodeInputs");
-        CLodNodeGpuInput nodeGpuInputs[3] = {};
+        CLodNodeGpuInput nodeGpuInputs[5] = {};
         CLodMultiNodeGpuInput multiNodeGpuInput{};
-        multiNodeGpuInput.numNodeInputs = 2;
+        multiNodeGpuInput.numNodeInputs = m_workGraphReyesVisibility ? 4u : 2u;
         multiNodeGpuInput.pad0 = 0;
         multiNodeGpuInput.nodeInputStride = sizeof(CLodNodeGpuInput);
 
@@ -972,6 +1079,20 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
         nodeGpuInputs[2].numRecords = 0; // patched by GPU in CreateRasterBucketsHistogramCommandCSMain
         nodeGpuInputs[2].recordsAddress = replayAddress + CLodReplayMeshletRegionOffset;
         nodeGpuInputs[2].recordStride = CLodMeshletReplayStrideBytes;
+
+        if (m_workGraphReyesVisibility) {
+            // Entry point 3 = ReyesSplitReplay — split replay region.
+            nodeGpuInputs[3].entrypointIndex = 3;
+            nodeGpuInputs[3].numRecords = 0;
+            nodeGpuInputs[3].recordsAddress = replayAddress + CLodReplayReyesSplitRegionOffset;
+            nodeGpuInputs[3].recordStride = CLodReyesSplitReplayStrideBytes;
+
+            // Entry point 4 = ReyesDiceReplay — dice replay region.
+            nodeGpuInputs[4].entrypointIndex = 4;
+            nodeGpuInputs[4].numRecords = 0;
+            nodeGpuInputs[4].recordsAddress = replayAddress + CLodReplayReyesDiceRegionOffset;
+            nodeGpuInputs[4].recordStride = CLodReyesDiceReplayStrideBytes;
+        }
         }
 
         static_assert(sizeof(CLodMultiNodeGpuInput) == sizeof(CLodNodeGpuInput));
@@ -1003,6 +1124,14 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             static_cast<uint32_t>(m_zeroTelemetryScratch.size() * sizeof(uint32_t)),
             rg::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
             0);
+    }
+
+    if (m_workGraphReyesVisibility && m_reyesTelemetryBuffer) {
+        ZoneScopedN("HierarchicalCullingPass::UploadReyesTelemetryReset");
+        CLodReyesTelemetry telemetry{};
+        telemetry.phaseIndex = m_isFirstPass ? 1u : 2u;
+        telemetry.configuredMaxSplitPassCount = CLodReyesMaxSplitPassCount;
+        BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), rg::runtime::UploadTarget::FromShared(m_reyesTelemetryBuffer), 0);
     }
 }
 
@@ -1057,6 +1186,7 @@ void HierarchicalCullingPass::CreatePipelines(
     std::vector<DxcDefine> defines = {
         { L"CLOD_WG_ENABLE_SW_CLASSIFICATION", UsesSWClassification(m_workGraphMode) ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", UsesWorkGraphSWRaster(m_workGraphMode) ? L"1" : L"0" },
+        { L"CLOD_WG_ENABLE_REYES_VISIBILITY", m_workGraphReyesVisibility ? L"1" : L"0" },
         { L"CLOD_WG_SPLIT_LEAF_NODE", splitLeafTraversalNode ? L"1" : L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER", enableComputePageJobDescriptorBuffer ? L"1" : L"0" },
@@ -1093,16 +1223,31 @@ void HierarchicalCullingPass::CreatePipelines(
             exports.push_back({ "WG_PageJobRasterPage", nullptr });
         }
     }
+    if (m_workGraphReyesVisibility) {
+        exports.push_back({ "WG_ReyesSeed", nullptr });
+        exports.push_back({ "WG_ReyesSplit1", nullptr });
+        exports.push_back({ "WG_ReyesSplit2", nullptr });
+        exports.push_back({ "WG_ReyesSplit3", nullptr });
+        exports.push_back({ "WG_ReyesSplit4", nullptr });
+        exports.push_back({ "WG_ReyesDice", nullptr });
+        exports.push_back({ "WG_ReyesRaster", nullptr });
+        exports.push_back({ "WG_ReyesSplitReplay", nullptr });
+        exports.push_back({ "WG_ReyesDiceReplay", nullptr });
+    }
 
     rhi::ShaderLibraryDesc library{};
     library.dxil = libDxil;
     library.exports = rhi::Span<rhi::ShaderExportDesc>(exports.data(), static_cast<uint32_t>(exports.size()));
 
-    std::array<rhi::NodeIDDesc, 3> entrypoints = {{
+    std::vector<rhi::NodeIDDesc> entrypoints = {
         { "ObjectCull", 0 },
         { "TraverseNodes", 0 },
         { "ClusterCull1", 0 }
-    }};
+    };
+    if (m_workGraphReyesVisibility) {
+        entrypoints.push_back({ "ReyesSplitReplay", 0 });
+        entrypoints.push_back({ "ReyesDiceReplay", 0 });
+    }
 
     rhi::WorkGraphDesc wg{};
     wg.programName = "HierarchicalCulling";

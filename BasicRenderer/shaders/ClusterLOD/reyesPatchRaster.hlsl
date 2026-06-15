@@ -27,6 +27,8 @@ static const float REYES_PATCH_RASTER_TINY_TRIANGLE_AREA_EPSILON = 1e-8f;
 static const float REYES_PATCH_RASTER_TINY_TRIANGLE_MAX_EXTENT = 1.5f;
 #endif
 
+#ifndef CLOD_READ_PACKED_BITS32_DEFINED
+#define CLOD_READ_PACKED_BITS32_DEFINED 1
 uint ReadPackedBits32(ByteAddressBuffer buf, uint startBit, uint bitCount)
 {
     if (bitCount == 0u) return 0u;
@@ -42,6 +44,7 @@ uint ReadPackedBits32(ByteAddressBuffer buf, uint startBit, uint bitCount)
     uint mask = (bitCount >= 32u) ? 0xffffffffu : ((1u << bitCount) - 1u);
     return packed & mask;
 }
+#endif
 
 float3 DecodeCompressedPosition(
     uint meshletLocalVertex,
@@ -617,6 +620,7 @@ void ReyesRasterizeMicroTriangle(
 #endif
 }
 
+#ifndef CLOD_REYES_PATCH_RASTER_HELPERS_ONLY
 [shader("compute")]
 [numthreads(REYES_PATCH_RASTER_GROUP_SIZE, 1, 1)]
 void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -805,3 +809,4 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             microTriangleIndex);
     }
 }
+#endif

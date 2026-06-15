@@ -39,12 +39,13 @@ struct HierarchicalCullingPassInputs {
     unsigned int maxVisibleClusters;
     HierarchicalCullingBackend backend = HierarchicalCullingBackend::WorkGraph;
     HierarchicalCullingWorkGraphMode workGraphMode = HierarchicalCullingWorkGraphMode::SoftwareRasterWorkGraph;
+    bool workGraphReyesVisibility = false;
     RenderPhase renderPhase;
     bool clodOnlyWorkloads = false;
     bool useShadowCascadeViews = false;
     CLodRasterOutputKind rasterOutputKind = CLodRasterOutputKind::VisibilityBuffer;
 
-    RG_DEFINE_PASS_INPUTS(HierarchicalCullingPassInputs, &HierarchicalCullingPassInputs::isFirstPass, &HierarchicalCullingPassInputs::maxVisibleClusters, &HierarchicalCullingPassInputs::backend, &HierarchicalCullingPassInputs::workGraphMode, &HierarchicalCullingPassInputs::renderPhase, &HierarchicalCullingPassInputs::clodOnlyWorkloads, &HierarchicalCullingPassInputs::useShadowCascadeViews, &HierarchicalCullingPassInputs::rasterOutputKind);
+    RG_DEFINE_PASS_INPUTS(HierarchicalCullingPassInputs, &HierarchicalCullingPassInputs::isFirstPass, &HierarchicalCullingPassInputs::maxVisibleClusters, &HierarchicalCullingPassInputs::backend, &HierarchicalCullingPassInputs::workGraphMode, &HierarchicalCullingPassInputs::workGraphReyesVisibility, &HierarchicalCullingPassInputs::renderPhase, &HierarchicalCullingPassInputs::clodOnlyWorkloads, &HierarchicalCullingPassInputs::useShadowCascadeViews, &HierarchicalCullingPassInputs::rasterOutputKind);
 };
 
 class HierarchicalCullingPass : public ComputePass, public IDynamicDeclaredResources {
@@ -75,7 +76,15 @@ public:
         std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer = nullptr,
         std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
-        std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr);
+        std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
+        std::shared_ptr<Buffer> reyesDiceQueueBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesTessTableConfigsBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesTessTableVerticesBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesTessTableTrianglesBuffer = nullptr,
+        std::shared_ptr<Buffer> reyesTelemetryBuffer = nullptr,
+        uint32_t reyesDiceQueueCapacity = 0u);
     ~HierarchicalCullingPass();
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -136,6 +145,13 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
+    std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
+    std::shared_ptr<Buffer> m_reyesDiceQueueCounterBuffer;
+    std::shared_ptr<Buffer> m_reyesDiceQueueOverflowBuffer;
+    std::shared_ptr<Buffer> m_reyesTessTableConfigsBuffer;
+    std::shared_ptr<Buffer> m_reyesTessTableVerticesBuffer;
+    std::shared_ptr<Buffer> m_reyesTessTableTrianglesBuffer;
+    std::shared_ptr<Buffer> m_reyesTelemetryBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<Buffer> m_phase1VisibleClustersCounterBuffer; // Phase 2 only: Phase 1's HW counter for write offset
     std::shared_ptr<Buffer> m_swWriteBaseCounterBuffer; // Phase 2 only: Phase 1's SW counter for top-down write offset
@@ -145,7 +161,7 @@ private:
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo;
     std::vector<CLodViewDepthSRVIndex> m_cachedViewDepthSrvIndices;
     std::vector<uint32_t> m_zeroTelemetryScratch;
-    std::array<CLodNodeGpuInput, 3> m_cachedNodeGpuInputs{};
+    std::array<CLodNodeGpuInput, 5> m_cachedNodeGpuInputs{};
     CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
     CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
     uint64_t m_lastDrawSetDeclarationRevision = 0u;
@@ -157,9 +173,11 @@ private:
     bool m_isFirstPass = true;
     bool m_declaredResourcesChanged = true;
     unsigned int m_maxVisibleClusters = 0u;
+    uint32_t m_reyesDiceQueueCapacity = 0u;
     HierarchicalCullingWorkGraphMode m_workGraphMode = HierarchicalCullingWorkGraphMode::SoftwareRasterWorkGraph;
     CLodRasterOutputKind m_rasterOutputKind = CLodRasterOutputKind::VisibilityBuffer;
     RenderPhase m_renderPhase;
     bool m_clodOnlyWorkloads = false;
     bool m_useShadowCascadeViews = false;
+    bool m_workGraphReyesVisibility = false;
 };

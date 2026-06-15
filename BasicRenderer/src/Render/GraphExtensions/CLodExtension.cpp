@@ -139,6 +139,7 @@ struct StructuralSchedulingPolicy {
     bool useShadowPageJob;
     bool useShadowReyesRouting;
     bool useReyesForThisVariant;
+    bool useWorkGraphReyesVisibility;
     HierarchicalCullingWorkGraphMode workGraphMode;
     HierarchicalCullingBackend cullingBackend;
     RenderPhase renderPhase;
@@ -172,6 +173,13 @@ StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(const CLodVariantTrai
         ? HierarchicalCullingWorkGraphMode::HardwareOnly
         : GetCullingWorkGraphMode(softwareRasterMode);
     const HierarchicalCullingBackend cullingBackend = GetHierarchicalCullingBackend(cullingBackendMode);
+    const bool useWorkGraphReyesVisibility =
+        useReyesForThisVariant &&
+        traits.type == CLodExtensionType::VisiblityBuffer &&
+        traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer &&
+        cullingBackend == HierarchicalCullingBackend::WorkGraph &&
+        workGraphMode == HierarchicalCullingWorkGraphMode::SoftwareRasterWorkGraph &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodWorkGraphReyesVisibilitySettingName)();
 
     return StructuralSchedulingPolicy{
         .transparencyMode = transparencyMode,
@@ -180,6 +188,7 @@ StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(const CLodVariantTrai
         .useShadowPageJob = useShadowPageJob,
         .useShadowReyesRouting = useShadowReyesRouting,
         .useReyesForThisVariant = useReyesForThisVariant,
+        .useWorkGraphReyesVisibility = useWorkGraphReyesVisibility,
         .workGraphMode = workGraphMode,
         .cullingBackend = cullingBackend,
         .renderPhase = RenderPhase(traits.renderPhaseName.data()),
@@ -382,6 +391,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     uint32_t phaseIndex,
     bool uploadTessellationTable,
     bool preserveDiceCountForPhase2Replay,
+    bool workGraphReyesVisibility,
     std::vector<RenderGraph::ExternalPassDesc>& outPasses,
     std::string& shadowClearDirtyBitsAfterPassName)
 {
@@ -405,6 +415,10 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     m_reyesTessTableConfigsBuffer,
                     m_reyesTessTableVerticesBuffer,
                     m_reyesTessTableTrianglesBuffer)));
+    }
+
+    if (workGraphReyesVisibility) {
+        return;
     }
 
     outPasses.push_back(
@@ -770,7 +784,7 @@ void CLodExtension::InitializeCoreResources()
     m_occlusionReplayStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReplayBufferState), true, false, false, false);
     m_occlusionReplayStateBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Replay State Buffer"));
 
-    m_occlusionNodeGpuInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(3, sizeof(CLodNodeGpuInput), true, false, false, false);
+    m_occlusionNodeGpuInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(5, sizeof(CLodNodeGpuInput), true, false, false, false);
     m_occlusionNodeGpuInputsBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Node GPU Inputs Buffer"));
 
     m_viewDepthSrvIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(CLodMaxViewDepthIndices, sizeof(CLodViewDepthSRVIndex), true, false, false, false);
@@ -1583,6 +1597,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
     const bool useShadowPageJob = schedulingPolicy.useShadowPageJob;
     const bool useShadowReyesRouting = schedulingPolicy.useShadowReyesRouting;
     const bool useReyesForThisVariant = schedulingPolicy.useReyesForThisVariant;
+    const bool useWorkGraphReyesVisibility = schedulingPolicy.useWorkGraphReyesVisibility;
     const auto workGraphMode = schedulingPolicy.workGraphMode;
     const auto cullingBackend = schedulingPolicy.cullingBackend;
     const auto renderPhase = schedulingPolicy.renderPhase;
@@ -1605,6 +1620,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
         cullPassInputs.maxVisibleClusters = m_visibleClusterCapacity;
         cullPassInputs.backend = cullingBackend;
         cullPassInputs.workGraphMode = workGraphMode;
+        cullPassInputs.workGraphReyesVisibility = useWorkGraphReyesVisibility;
         cullPassInputs.renderPhase = renderPhase;
         cullPassInputs.clodOnlyWorkloads = true;
         cullPassInputs.useShadowCascadeViews = (traits.type == CLodExtensionType::Shadow);
@@ -1686,7 +1702,17 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidateCountBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
-                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr));
+                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesDiceQueueBuffer : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesDiceQueueCounterBuffer : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesDiceQueueOverflowBuffer : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesTessTableConfigsBuffer : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesTessTableVerticesBuffer : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesTessTableTrianglesBuffer : nullptr,
+                    useWorkGraphReyesVisibility
+                        ? (isPhase1 ? m_reyesTelemetryBufferPhase1 : m_reyesTelemetryBufferPhase2)
+                        : nullptr,
+                    useWorkGraphReyesVisibility ? m_reyesDiceQueueCapacity : 0u));
 
         auto cullPassDesc = RenderGraph::ExternalPassDesc::Compute(cullPassName, cullPass);
         cullPassDesc.At(RenderGraph::ExternalInsertPoint::After(afterPassName));
@@ -2117,7 +2143,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
     const auto appendReplayPhase = [&]() {
         appendHierarchicalCullingPass(2u, MakeVariantPassName(traits, "LinearDepthDownsamplePass1"));
 
-        if (useReyesForThisVariant) {
+        if (useReyesForThisVariant && !useWorkGraphReyesVisibility) {
             AppendPhaseReyesStructuralPasses(
                 traits,
                 slabGroup,
@@ -2126,6 +2152,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                 reyesDiceQueueCapacity,
                 reyesRasterWorkCapacity,
                 2u,
+                false,
                 false,
                 false,
                 outPasses,
@@ -2151,9 +2178,27 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
             phase1CullAfterPassName = "CLod::StreamingBeginFramePass";
         }
     }
+    if (useWorkGraphReyesVisibility &&
+        traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly &&
+        useReyesForThisVariant) {
+        AppendPhaseReyesStructuralPasses(
+            traits,
+            slabGroup,
+            reyesOwnershipBitsetBuffer,
+            reyesSplitQueueCapacity,
+            reyesDiceQueueCapacity,
+            reyesRasterWorkCapacity,
+            1u,
+            true,
+            false,
+            true,
+            outPasses,
+            shadowClearDirtyBitsAfterPassName);
+    }
+
     appendHierarchicalCullingPass(1u, phase1CullAfterPassName);
 
-    if (traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly && useReyesForThisVariant) {
+    if (traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly && useReyesForThisVariant && !useWorkGraphReyesVisibility) {
         AppendPhaseReyesStructuralPasses(
             traits,
             slabGroup,
@@ -2164,6 +2209,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
             1u,
             true,
             enablePhase2OcclusionReplay,
+            false,
             outPasses,
             shadowClearDirtyBitsAfterPassName);
     }

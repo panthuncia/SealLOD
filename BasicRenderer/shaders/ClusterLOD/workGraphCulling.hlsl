@@ -17,6 +17,7 @@
 #include "include/vertex.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/clodReyesTransition.hlsli"
+#include "include/reyesPatchCommon.hlsli"
 
 #ifndef CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID
 #define CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID "CLod::WorkGraphComputePageJobDescriptors"
@@ -44,6 +45,10 @@
 
 #ifndef CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER
 #define CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER 0
+#endif
+
+#ifndef CLOD_WG_ENABLE_REYES_VISIBILITY
+#define CLOD_WG_ENABLE_REYES_VISIBILITY 0
 #endif
 
 // Set to 1 to enable occlusion culling for VSM / shadow cameras (ortho).
@@ -1344,6 +1349,96 @@ bool ReplayTryAppendMeshlet(uint instanceIndex, uint viewId, uint groupId, uint 
     return true;
 }
 
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+void ReplayStoreReyesSplitEntry(RWByteAddressBuffer replayBuffer, uint byteOffset, CLodReyesSplitQueueEntry entry)
+{
+    replayBuffer.Store4(byteOffset + 0u, uint4(
+        entry.visibleClusterIndex,
+        entry.instanceID,
+        entry.localMeshletIndex,
+        entry.materialIndex));
+    replayBuffer.Store4(byteOffset + 16u, uint4(
+        entry.viewID,
+        entry.splitLevel,
+        entry.quantizedTessFactor,
+        entry.flags));
+    replayBuffer.Store4(byteOffset + 32u, uint4(
+        entry.sourcePrimitiveAndSplitConfig,
+        asuint(entry.domainVertex0UV.x),
+        asuint(entry.domainVertex0UV.y),
+        asuint(entry.domainVertex1UV.x)));
+    replayBuffer.Store3(byteOffset + 48u, uint3(
+        asuint(entry.domainVertex1UV.y),
+        asuint(entry.domainVertex2UV.x),
+        asuint(entry.domainVertex2UV.y)));
+}
+
+void ReplayStoreReyesDiceEntry(RWByteAddressBuffer replayBuffer, uint byteOffset, CLodReyesDiceQueueEntry entry)
+{
+    replayBuffer.Store4(byteOffset + 0u, uint4(
+        entry.visibleClusterIndex,
+        entry.instanceID,
+        entry.localMeshletIndex,
+        entry.materialIndex));
+    replayBuffer.Store4(byteOffset + 16u, uint4(
+        entry.viewID,
+        entry.splitLevel,
+        entry.quantizedTessFactor,
+        entry.flags));
+    replayBuffer.Store4(byteOffset + 32u, uint4(
+        entry.sourcePrimitiveAndSplitConfig,
+        asuint(entry.domainVertex0UV.x),
+        asuint(entry.domainVertex0UV.y),
+        asuint(entry.domainVertex1UV.x)));
+    replayBuffer.Store4(byteOffset + 48u, uint4(
+        asuint(entry.domainVertex1UV.y),
+        asuint(entry.domainVertex2UV.x),
+        asuint(entry.domainVertex2UV.y),
+        entry.tessTableConfigIndex));
+    replayBuffer.Store(byteOffset + 64u, entry.reserved);
+}
+
+bool ReplayTryAppendReyesSplit(CLodReyesSplitQueueEntry entry)
+{
+    RWByteAddressBuffer replayBuffer = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+
+    uint slot = 0u;
+    InterlockedAdd(replayState[0].reyesSplitWriteCount, 1u, slot);
+    if (slot >= CLOD_REYES_SPLIT_REPLAY_CAPACITY) {
+        InterlockedAdd(replayState[0].reyesSplitDropped, 1u);
+        InterlockedAdd(telemetryBuffer[0].replaySplitQueueOverflowCount, 1u);
+        return false;
+    }
+
+    const uint byteOffset = CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET + slot * CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES;
+    ReplayStoreReyesSplitEntry(replayBuffer, byteOffset, entry);
+    InterlockedAdd(telemetryBuffer[0].splitOcclusionDeferCount, 1u);
+    return true;
+}
+
+bool ReplayTryAppendReyesDice(CLodReyesDiceQueueEntry entry)
+{
+    RWByteAddressBuffer replayBuffer = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+
+    uint slot = 0u;
+    InterlockedAdd(replayState[0].reyesDiceWriteCount, 1u, slot);
+    if (slot >= CLOD_REYES_DICE_REPLAY_CAPACITY) {
+        InterlockedAdd(replayState[0].reyesDiceDropped, 1u);
+        InterlockedAdd(telemetryBuffer[0].replayDiceQueueOverflowCount, 1u);
+        return false;
+    }
+
+    const uint byteOffset = CLOD_REPLAY_REYES_DICE_REGION_OFFSET + slot * CLOD_REYES_DICE_REPLAY_STRIDE_BYTES;
+    ReplayStoreReyesDiceEntry(replayBuffer, byteOffset, entry);
+    InterlockedAdd(telemetryBuffer[0].diceOcclusionDeferCount, 1u);
+    return true;
+}
+#endif
+
 // Records
 struct ObjectCullRecord
 {
@@ -2090,7 +2185,7 @@ void WG_ObjectCull(
 [NodeLaunch("coalescing")]
 [NodeIsProgramEntry]
 [NumThreads(TRAVERSE_THREADS_PER_GROUP, 1, 1)]
-[NodeMaxRecursionDepth(25)]
+[NodeMaxRecursionDepth(21)] // Could be higher when Reyes is in pure-compute mode
 void WG_TraverseNodes(
     [MaxRecords(TRAVERSE_RECORDS_PER_GROUP)] GroupNodeInputRecords<TraverseNodeRecord> inRecs,
     uint GI : SV_GroupIndex,
@@ -2704,6 +2799,29 @@ groupshared uint gs_swBatchIndices[SW_BATCH_ACCUM_CAPACITY];
 groupshared uint gs_pageJobBatchIndices[PAGEJOB_BATCH_ACCUM_CAPACITY];
 #endif
 
+#define REYES_SEED_BATCH_MAX_CLUSTERS 8
+#define REYES_SEED_BATCH_ACCUM_CAPACITY SW_BATCH_ACCUM_CAPACITY
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+groupshared uint gs_reyesSeedBatchIndices[REYES_SEED_BATCH_ACCUM_CAPACITY];
+#endif
+
+struct ReyesSeedBatchRecord
+{
+    uint3 dispatchGrid : SV_DispatchGrid;
+    uint numClusters;
+    uint clusterIndices[REYES_SEED_BATCH_MAX_CLUSTERS];
+};
+
+struct ReyesRasterBatchRecord
+{
+    uint3 dispatchGrid : SV_DispatchGrid;
+    CLodReyesDiceQueueEntry diceEntry;
+    uint diceQueueIndex;
+    uint microTriangleOffset;
+    uint microTriangleCount;
+    uint pad0;
+};
+
 // Shared cluster-cull implementation called by each bucket-size variant.
 // FIXED_LOOP_COUNT is the bucket size (1, 2, 4, 8, 16, 32, or 64) - all active lanes
 // in a variant wave process the same number of iterations, minimizing WaveActiveMax divergence.
@@ -2715,7 +2833,8 @@ void ClusterCullBody(
     uint inputCount,
     uint FIXED_LOOP_COUNT,
     out uint swPendingOut,
-    out uint pageJobPendingOut)
+    out uint pageJobPendingOut,
+    out uint reyesPendingOut)
 {
     // Telemetry (coalesced launch level)
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1);
@@ -2927,6 +3046,7 @@ void ClusterCullBody(
     uint totalSurvivors = 0;
     uint swPending = 0; // SW batch accumulator count (wave-uniform)
     uint pageJobPending = 0; // Page-job batch accumulator count (wave-uniform)
+    uint reyesPending = 0; // WG Reyes seed batch accumulator count (wave-uniform)
 
     for (uint m = 0; m < FIXED_LOOP_COUNT; m++) {
         const bool active = (m < meshletCount) && pageValid;
@@ -3319,6 +3439,13 @@ void ClusterCullBody(
         if (contributes) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_CONTRIBUTING, 1);
         }
+        const bool outputReyes =
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+            contributes && meshletNeedsReyesDisplacement;
+#else
+            false;
+#endif
+
         if (contributes && !meshletNeedsReyesDisplacement && (swRasterEnabled || pageJobEnabled)) {
             const float projectedDiameter = CLodProjectedDiameterPixels(
                 meshletRadiusWorld,
@@ -3351,11 +3478,11 @@ void ClusterCullBody(
             } else if (isSW && contributes) {
                 WGTelemetryAdd(WG_COUNTER_CLASSIFY_PJ_REJECT_ALREADY_SW, 1);
             }
-        } else if (contributes && meshletNeedsReyesDisplacement) {
+        } else if (contributes && meshletNeedsReyesDisplacement && !outputReyes) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_PJ_REJECT_REYES_DISPLACEMENT, 1);
         }
 
-        const bool isHW = contributes && !isSW && !isPageJob;
+        const bool isHW = contributes && !isSW && !isPageJob && !outputReyes;
         const bool outputSW = contributes && isSW;
         const bool outputPageJob = contributes && isPageJob;
 
@@ -3473,6 +3600,60 @@ void ClusterCullBody(
                 }
             }
         }
+
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+        // WG Reyes path: write visible clusters into the top-down SW-owned region so the
+        // later HW raster compaction never sees them as regular hardware clusters.
+        {
+            const uint4 reyesMask = WaveActiveBallot(outputReyes);
+            const uint reyesIterCount = CountBits128(reyesMask);
+            totalSurvivors += reyesIterCount;
+            uint reyesAvail = 0u;
+
+            if (reyesIterCount > 0u) {
+                const uint reyesLeader = WaveFirstLaneFromMask(reyesMask);
+                const uint reyesRank = GetLaneRankInGroup(reyesMask, WaveGetLaneIndex());
+
+                uint reyesBase = 0u;
+                uint reyesCombinedBase = 0u;
+                if (WaveGetLaneIndex() == reyesLeader) {
+                    InterlockedAdd(replayState[0].visibleClusterCombinedCount, reyesIterCount, reyesCombinedBase);
+                }
+                reyesCombinedBase = WaveReadLaneAt(reyesCombinedBase, reyesLeader);
+
+                reyesAvail =
+                    (reyesCombinedBase < swVisibleClusterWriteCapacity)
+                        ? min(reyesIterCount, swVisibleClusterWriteCapacity - reyesCombinedBase)
+                        : 0u;
+
+                if (WaveGetLaneIndex() == reyesLeader) {
+                    InterlockedAdd(swVisibleClusterCounter[0], reyesAvail, reyesBase);
+                }
+                reyesBase = WaveReadLaneAt(reyesBase, reyesLeader);
+
+                if (WaveGetLaneIndex() == reyesLeader && (reyesCombinedBase + reyesIterCount > swVisibleClusterWriteCapacity)) {
+                    InterlockedMin(replayState[0].visibleClusterCombinedCount, swVisibleClusterWriteCapacity);
+                }
+
+                if (outputReyes && (reyesRank < reyesAvail)) {
+                    const uint reyesIndex = visibleClusterCapacity - 1u - (swWriteBase + reyesBase + reyesRank);
+                    CLodStoreVisibleClusterGloballyCoherent(
+                        visibleClusters,
+                        reyesIndex,
+                        b.viewId,
+                        b.instanceIndex,
+                        localMeshletIndex,
+                        visibleGroupId,
+                        b.pageSlabDescriptorIndex,
+                        b.pageSlabByteOffset,
+                        shadowClipmapIndex);
+                    gs_reyesSeedBatchIndices[reyesPending + reyesRank] = reyesIndex;
+                }
+            }
+
+            reyesPending += reyesAvail;
+        }
+#endif
 
         // SW path: wave-cooperative top-down write + batch accumulate
         {
@@ -3633,7 +3814,7 @@ void ClusterCullBody(
 
     }
 
-#if CLOD_WG_ENABLE_SW_NODE_OUTPUT
+#if CLOD_WG_ENABLE_SW_NODE_OUTPUT || CLOD_WG_ENABLE_REYES_VISIBILITY
     // SWRaster re-reads visibleClusters through UAV indirection in the same work graph.
     // The Work Graphs spec requires globallycoherent accesses plus a device-scope
     // barrier before the node invocation request for this producer-consumer pattern.
@@ -3642,6 +3823,7 @@ void ClusterCullBody(
 
     swPendingOut = swPending;
     pageJobPendingOut = pageJobPending;
+    reyesPendingOut = reyesPending;
 
     if (isWaveLeader) {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SURVIVING_LANES, totalSurvivors);
@@ -3701,6 +3883,31 @@ void ClusterCullBody(
 #define CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE()
 #endif
 
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+#define CLOD_CLUSTER_CULL_REYES_PARAM(MAX_RECORDS) \
+    [NodeID("ReyesSeed")] [MaxRecordsSharedWith(swRasterOutput)] NodeOutput<ReyesSeedBatchRecord> reyesSeedOutput,
+
+#define CLOD_CLUSTER_CULL_REYES_EPILOGUE() \
+    GroupMemoryBarrierWithGroupSync(); \
+    const uint reyesNumBatches = (reyesPending + REYES_SEED_BATCH_MAX_CLUSTERS - 1) / REYES_SEED_BATCH_MAX_CLUSTERS; \
+    GroupNodeOutputRecords<ReyesSeedBatchRecord> reyesBatchOut = \
+        reyesSeedOutput.GetGroupNodeOutputRecords(reyesNumBatches); \
+    if (GI == 0) { \
+        for (uint reyesBatch = 0; reyesBatch < reyesNumBatches; reyesBatch++) { \
+            const uint reyesBatchStart = reyesBatch * REYES_SEED_BATCH_MAX_CLUSTERS; \
+            const uint reyesBatchSize = min(REYES_SEED_BATCH_MAX_CLUSTERS, reyesPending - reyesBatchStart); \
+            reyesBatchOut[reyesBatch].dispatchGrid = uint3(reyesBatchSize, 1, 1); \
+            reyesBatchOut[reyesBatch].numClusters = reyesBatchSize; \
+            for (uint ri = 0; ri < reyesBatchSize; ri++) \
+                reyesBatchOut[reyesBatch].clusterIndices[ri] = gs_reyesSeedBatchIndices[reyesBatchStart + ri]; \
+        } \
+    } \
+    reyesBatchOut.OutputComplete()
+#else
+#define CLOD_CLUSTER_CULL_REYES_PARAM(MAX_RECORDS)
+#define CLOD_CLUSTER_CULL_REYES_EPILOGUE()
+#endif
+
 // ClusterCull variant entry points - one per bucket size.
 // Each variant processes a fixed number of meshlets per lane, eliminating wave divergence.
 
@@ -3714,6 +3921,7 @@ void WG_ClusterCull1(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3722,9 +3930,11 @@ void WG_ClusterCull1(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 1, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 1, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3735,6 +3945,7 @@ void WG_ClusterCull2(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3743,9 +3954,11 @@ void WG_ClusterCull2(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 2, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 2, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3756,6 +3969,7 @@ void WG_ClusterCull4(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3764,9 +3978,11 @@ void WG_ClusterCull4(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 4, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 4, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3777,6 +3993,7 @@ void WG_ClusterCull8(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3785,9 +4002,11 @@ void WG_ClusterCull8(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 8, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 8, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3798,6 +4017,7 @@ void WG_ClusterCull16(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3806,9 +4026,11 @@ void WG_ClusterCull16(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 16, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 16, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3819,6 +4041,7 @@ void WG_ClusterCull32(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3827,9 +4050,11 @@ void WG_ClusterCull32(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 32, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 32, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
 
 [Shader("node")]
@@ -3840,6 +4065,7 @@ void WG_ClusterCull64(
     [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / PAGEJOB_BUILD_MAX_CLUSTERS)
+    CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / REYES_SEED_BATCH_MAX_CLUSTERS)
     uint GI : SV_GroupIndex)
 {
     const uint inputCount = inRecs.Count();
@@ -3848,10 +4074,758 @@ void WG_ClusterCull64(
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
-    ClusterCullBody(b, hasBucket, true, GI, inputCount, 64, swPending, pageJobPending);
+    uint reyesPending = 0;
+    ClusterCullBody(b, hasBucket, true, GI, inputCount, 64, swPending, pageJobPending, reyesPending);
     CLOD_CLUSTER_CULL_SW_EPILOGUE();
     CLOD_CLUSTER_CULL_PAGEJOB_EPILOGUE();
+    CLOD_CLUSTER_CULL_REYES_EPILOGUE();
 }
+
+#if CLOD_WG_ENABLE_REYES_VISIBILITY
+#define CLOD_REYES_PATCH_RASTER_HELPERS_ONLY 1
+#include "ClusterLOD/reyesPatchRaster.hlsl"
+#undef CLOD_REYES_PATCH_RASTER_HELPERS_ONLY
+
+static const uint REYES_WG_SEED_THREADS = 64u;
+static const uint REYES_WG_SPLIT_THREADS = 64u;
+static const uint REYES_WG_DICE_THREADS = 8u;
+static const uint REYES_WG_RASTER_THREADS = 16u;
+static const uint REYES_WG_MAX_SOURCE_TRIANGLES_PER_CLUSTER = 128u;
+static const uint REYES_WG_MAX_RASTER_WORK_ITEMS_PER_PATCH =
+    (CLodReyesMaxVisibilityMicroTrianglesPerPatch + CLodReyesRasterBatchMicroTriangleCount - 1u) / CLodReyesRasterBatchMicroTriangleCount;
+
+float3 WGReyesInterpolateTriangle(float3 p0, float3 p1, float3 p2, float3 barycentrics)
+{
+    precise float3 result = p0 * barycentrics.x + p1 * barycentrics.y + p2 * barycentrics.z;
+    return result;
+}
+
+float3 WGReyesComputeEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
+{
+    const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
+    const float distance12 = max(camera.zNear, min(length(worldPosition1 - camera.positionWorldSpace.xyz), length(worldPosition2 - camera.positionWorldSpace.xyz)));
+    const float distance20 = max(camera.zNear, min(length(worldPosition2 - camera.positionWorldSpace.xyz), length(worldPosition0 - camera.positionWorldSpace.xyz)));
+    const float edge01 = length(worldPosition0 - worldPosition1);
+    const float edge12 = length(worldPosition1 - worldPosition2);
+    const float edge20 = length(worldPosition2 - worldPosition0);
+    const float scale = camera.projY * REYES_SCREEN_SCALE_REFERENCE * REYES_PROJECTED_PIXEL_TO_TESS_FACTOR_SCALE;
+    return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
+}
+
+uint3 WGReyesComputeSplitFactors(float3 edgeFactors)
+{
+    return clamp(
+        uint3(ceil(edgeFactors / float(REYES_TESS_TABLE_MAX_SEGMENTS))),
+        uint3(1u, 1u, 1u),
+        uint3(REYES_TESS_TABLE_MAX_SEGMENTS, REYES_TESS_TABLE_MAX_SEGMENTS, REYES_TESS_TABLE_MAX_SEGMENTS));
+}
+
+CLodReyesDiceQueueEntry WGReyesMakeDiceEntry(CLodReyesSplitQueueEntry splitEntry, uint nextSplitLevel, uint quantizedTessFactor, uint tessTableConfigIndex)
+{
+    CLodReyesDiceQueueEntry diceEntry;
+    diceEntry.visibleClusterIndex = splitEntry.visibleClusterIndex;
+    diceEntry.instanceID = splitEntry.instanceID;
+    diceEntry.localMeshletIndex = splitEntry.localMeshletIndex;
+    diceEntry.materialIndex = splitEntry.materialIndex;
+    diceEntry.viewID = splitEntry.viewID;
+    diceEntry.splitLevel = nextSplitLevel;
+    diceEntry.quantizedTessFactor = quantizedTessFactor;
+    diceEntry.flags = splitEntry.flags;
+    diceEntry.sourcePrimitiveAndSplitConfig = (splitEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu) | ((tessTableConfigIndex & 0xFFFFu) << 16u);
+    diceEntry.domainVertex0UV = splitEntry.domainVertex0UV;
+    diceEntry.domainVertex1UV = splitEntry.domainVertex1UV;
+    diceEntry.domainVertex2UV = splitEntry.domainVertex2UV;
+    diceEntry.tessTableConfigIndex = tessTableConfigIndex;
+    diceEntry.reserved = 0u;
+    return diceEntry;
+}
+
+bool WGReyesPatchHZBOccluded(
+    float3 objectPosition0,
+    float3 objectPosition1,
+    float3 objectPosition2,
+    float displacementMagnitude,
+    PerObjectBuffer objectData,
+    Camera camera,
+    uint viewID,
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
+    bool diceStage)
+{
+    if (!CLodWorkGraphOcclusionEnabled() || camera.isOrtho) {
+        return false;
+    }
+
+    StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
+        ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+    const uint depthMapDescriptorIndex = viewDepthSRVIndices[viewID].linearDepthSRVIndex;
+    if (depthMapDescriptorIndex == 0u) {
+        return false;
+    }
+
+    const float3 objectCenter = (objectPosition0 + objectPosition1 + objectPosition2) * (1.0f / 3.0f);
+    float objectRadius = max(
+        length(objectPosition0 - objectCenter),
+        max(length(objectPosition1 - objectCenter), length(objectPosition2 - objectCenter)));
+    objectRadius += abs(displacementMagnitude);
+    if (!all(isfinite(objectCenter)) || !isfinite(objectRadius) || objectRadius <= 0.0f) {
+        return false;
+    }
+
+    const bool phase2 = CLodWorkGraphIsPhase2();
+    const row_major matrix modelMatrix = phase2 ? objectData.model : objectData.prevModel;
+    const row_major matrix viewMatrix = phase2 ? camera.view : camera.prevView;
+    const row_major matrix projectionMatrix = phase2 ? camera.projection : camera.prevUnjitteredProjection;
+    const float scaledRadius = objectRadius * MaxAxisScale_RowVector(modelMatrix);
+    const float3 viewSpaceCenter = mul(mul(float4(objectCenter, 1.0f), modelMatrix), viewMatrix).xyz;
+    const float boundingSphereDepth = -viewSpaceCenter.z;
+    if (!all(isfinite(viewSpaceCenter)) || !isfinite(scaledRadius) || boundingSphereDepth <= scaledRadius) {
+        return false;
+    }
+
+    bool occluded = false;
+    if (diceStage) {
+        InterlockedAdd(telemetryBuffer[0].diceOcclusionTestCount, 1u);
+    } else {
+        InterlockedAdd(telemetryBuffer[0].splitOcclusionTestCount, 1u);
+    }
+    OcclusionCullingPerspectiveTexture2D(
+        occluded,
+        camera,
+        viewSpaceCenter,
+        boundingSphereDepth,
+        scaledRadius,
+        depthMapDescriptorIndex,
+        projectionMatrix);
+    return occluded;
+}
+
+bool WGReyesDiceHZBOccluded(
+    CLodReyesDiceQueueEntry diceEntry,
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer)
+{
+    globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, diceEntry.visibleClusterIndex);
+    const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+    const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+    const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, diceEntry.localMeshletIndex);
+    const uint sourceTriangleIndex = diceEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
+    if (sourceTriangleIndex >= CLodDescTriangleCount(meshletDesc)) {
+        return false;
+    }
+
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
+    const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
+    const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
+    const float3 sourcePosition0OS = DecodeCompressedPosition(
+        sourceTriangle.x, positionBitstreamBase, meshletDesc.positionBitOffset,
+        CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+        hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+    const float3 sourcePosition1OS = DecodeCompressedPosition(
+        sourceTriangle.y, positionBitstreamBase, meshletDesc.positionBitOffset,
+        CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+        hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+    const float3 sourcePosition2OS = DecodeCompressedPosition(
+        sourceTriangle.z, positionBitstreamBase, meshletDesc.positionBitOffset,
+        CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+        hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+    const float3 bary0 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex0UV);
+    const float3 bary1 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex1UV);
+    const float3 bary2 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex2UV);
+    if (!ReyesPatchDomainHasValidSimplex(bary0, bary1, bary2)) {
+        return false;
+    }
+
+    const float3 patchPosition0OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary0);
+    const float3 patchPosition1OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary1);
+    const float3 patchPosition2OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary2);
+    StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    const MaterialInfo materialInfo = materials[diceEntry.materialIndex];
+    const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    const Camera camera = cameras[diceEntry.viewID];
+    return WGReyesPatchHZBOccluded(
+        patchPosition0OS,
+        patchPosition1OS,
+        patchPosition2OS,
+        displacementMagnitude,
+        objectData,
+        camera,
+        diceEntry.viewID,
+        telemetryBuffer,
+        true);
+}
+
+[Shader("node")]
+[NodeID("ReyesSeed")]
+[NodeLaunch("broadcasting")]
+[NodeMaxDispatchGrid(REYES_SEED_BATCH_MAX_CLUSTERS, 1, 1)]
+[NumThreads(REYES_WG_SEED_THREADS, 1, 1)]
+void WG_ReyesSeed(
+    DispatchNodeInputRecord<ReyesSeedBatchRecord> inputRecord,
+    [NodeID("ReyesSplit1")] [MaxRecords(CLodReyesMaxVisibilityMicroTrianglesPerPatch)] NodeOutput<CLodReyesSplitQueueEntry> splitOutput,
+    uint GI : SV_GroupIndex,
+    uint3 groupId : SV_GroupID)
+{
+    ReyesSeedBatchRecord batch = inputRecord.Get();
+    const uint clusterSlot = groupId.x;
+    uint triangleCount = 0u;
+    uint visibleClusterIndex = 0u;
+    uint instanceID = 0u;
+    uint localMeshletIndex = 0u;
+    uint materialIndex = 0u;
+    uint viewID = 0u;
+    uint flags = CLOD_REYES_ROUTE_VISIBILITY << CLOD_REYES_FLAG_ROUTE_SHIFT;
+
+    if (clusterSlot < batch.numClusters) {
+        visibleClusterIndex = batch.clusterIndices[clusterSlot];
+        globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+        const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, visibleClusterIndex);
+        instanceID = CLodVisibleClusterInstanceID(packedCluster);
+        localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
+        viewID = CLodVisibleClusterViewID(packedCluster);
+        const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+        const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+        const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+        const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, localMeshletIndex);
+        triangleCount = min(CLodDescTriangleCount(meshletDesc), REYES_WG_MAX_SOURCE_TRIANGLES_PER_CLUSTER);
+
+        const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceID);
+        StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+        const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
+        materialIndex = perMesh.materialDataIndex;
+        if ((perMesh.vertexFlags & VERTEX_SKINNED) != 0u) {
+            flags |= CLOD_REYES_FLAG_SKINNED;
+        }
+        flags |= CLOD_REYES_FLAG_DISPLACEMENT_ENABLED;
+    }
+
+    GroupNodeOutputRecords<CLodReyesSplitQueueEntry> splitOut = splitOutput.GetGroupNodeOutputRecords(triangleCount);
+    for (uint triangleIndex = GI; triangleIndex < triangleCount; triangleIndex += REYES_WG_SEED_THREADS) {
+        CLodReyesSplitQueueEntry splitEntry;
+        splitEntry.visibleClusterIndex = visibleClusterIndex;
+        splitEntry.instanceID = instanceID;
+        splitEntry.localMeshletIndex = localMeshletIndex;
+        splitEntry.materialIndex = materialIndex;
+        splitEntry.viewID = viewID;
+        splitEntry.splitLevel = 0u;
+        splitEntry.quantizedTessFactor = 0u;
+        splitEntry.flags = flags;
+        splitEntry.sourcePrimitiveAndSplitConfig = triangleIndex & 0xFFFFu;
+        splitEntry.domainVertex0UV = float2(0.0f, 0.0f);
+        splitEntry.domainVertex1UV = float2(1.0f, 0.0f);
+        splitEntry.domainVertex2UV = float2(0.0f, 1.0f);
+        splitOut[triangleIndex] = splitEntry;
+    }
+    splitOut.OutputComplete();
+}
+
+void WGReyesSplitCommon(
+    CLodReyesSplitQueueEntry splitEntry,
+    uint stageIndex,
+    bool forceDice,
+    NodeOutput<CLodReyesSplitQueueEntry> nextSplitOutput,
+    NodeOutput<CLodReyesDiceQueueEntry> diceOutput,
+    uint GI)
+{
+    StructuredBuffer<CLodReyesTessTableConfigEntry> tessTableConfigs = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> tessTableVertices = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> tessTableTriangles = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+    globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, splitEntry.visibleClusterIndex);
+    const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+    const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+    const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, splitEntry.localMeshletIndex);
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
+    const uint sourceTriangleIndex = splitEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
+    bool valid = sourceTriangleIndex < CLodDescTriangleCount(meshletDesc);
+
+    uint childCount = 0u;
+    bool routeToDice = true;
+    bool deferredSplitReplay = false;
+    CLodReyesDiceQueueEntry diceEntry = (CLodReyesDiceQueueEntry)0;
+    float2 childDomain0UV[CLodReyesMaxVisibilityMicroTrianglesPerPatch];
+    float2 childDomain1UV[CLodReyesMaxVisibilityMicroTrianglesPerPatch];
+    float2 childDomain2UV[CLodReyesMaxVisibilityMicroTrianglesPerPatch];
+
+    if (valid) {
+        const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
+        const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
+        const float3 sourcePosition0OS = DecodeCompressedPosition(
+            sourceTriangle.x, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 sourcePosition1OS = DecodeCompressedPosition(
+            sourceTriangle.y, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 sourcePosition2OS = DecodeCompressedPosition(
+            sourceTriangle.z, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 bary0 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex0UV);
+        const float3 bary1 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex1UV);
+        const float3 bary2 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex2UV);
+        valid = ReyesPatchDomainHasValidSimplex(bary0, bary1, bary2);
+
+        if (valid) {
+            const float3 currentPosition0OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary0);
+            const float3 currentPosition1OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary1);
+            const float3 currentPosition2OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary2);
+            const PerObjectBuffer objectData = LoadInstanceTransformForDraw(splitEntry.instanceID);
+            const float3 currentPosition0WS = mul(float4(currentPosition0OS, 1.0f), objectData.model).xyz;
+            const float3 currentPosition1WS = mul(float4(currentPosition1OS, 1.0f), objectData.model).xyz;
+            const float3 currentPosition2WS = mul(float4(currentPosition2OS, 1.0f), objectData.model).xyz;
+            StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+            const CullingCameraInfo cullingCamera = cameras[splitEntry.viewID];
+            StructuredBuffer<Camera> sceneCameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+            const Camera sceneCamera = sceneCameras[splitEntry.viewID];
+            StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+            const MaterialInfo materialInfo = materials[splitEntry.materialIndex];
+            const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+            if (!CLodWorkGraphIsPhase2() &&
+                WGReyesPatchHZBOccluded(
+                    currentPosition0OS,
+                    currentPosition1OS,
+                    currentPosition2OS,
+                    displacementMagnitude,
+                    objectData,
+                    sceneCamera,
+                    splitEntry.viewID,
+                    telemetryBuffer,
+                    false))
+            {
+                deferredSplitReplay = true;
+                valid = false;
+            }
+            if (valid) {
+                const float3 edgeFactors = WGReyesComputeEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, cullingCamera);
+                const float maxEdgeFactor = max(edgeFactors.x, max(edgeFactors.y, edgeFactors.z));
+                const uint nextSplitLevel = splitEntry.splitLevel + 1u;
+                const uint nextQuantizedTessFactor = (uint)min(65535.0f, ceil(maxEdgeFactor * 256.0f));
+
+                float2 diceDomain0UV = splitEntry.domainVertex0UV;
+                float2 diceDomain1UV = splitEntry.domainVertex1UV;
+                float2 diceDomain2UV = splitEntry.domainVertex2UV;
+                uint diceTessConfigIndex = ReyesEncodeCanonicalTessTableConfig(edgeFactors, diceDomain0UV, diceDomain1UV, diceDomain2UV);
+                CLodReyesSplitQueueEntry diceSplitEntry = splitEntry;
+                diceSplitEntry.domainVertex0UV = diceDomain0UV;
+                diceSplitEntry.domainVertex1UV = diceDomain1UV;
+                diceSplitEntry.domainVertex2UV = diceDomain2UV;
+                routeToDice = forceDice || maxEdgeFactor <= float(REYES_TESS_TABLE_MAX_SEGMENTS);
+                diceEntry = WGReyesMakeDiceEntry(diceSplitEntry, nextSplitLevel, nextQuantizedTessFactor, diceTessConfigIndex);
+
+                if (!routeToDice) {
+                    const uint3 splitFactors = WGReyesComputeSplitFactors(edgeFactors);
+                    float2 splitDomain0UV = splitEntry.domainVertex0UV;
+                    float2 splitDomain1UV = splitEntry.domainVertex1UV;
+                    float2 splitDomain2UV = splitEntry.domainVertex2UV;
+                    const uint splitConfigIndex = ReyesEncodeCanonicalTessTableConfig(float3(splitFactors), splitDomain0UV, splitDomain1UV, splitDomain2UV);
+                    const CLodReyesTessTableConfigEntry splitConfig = ReyesGetTessTableConfigEntry(tessTableConfigs, splitConfigIndex);
+                    childCount = min(splitConfig.numTriangles, CLodReyesMaxVisibilityMicroTrianglesPerPatch);
+                    const float3 parentDomain0 = ReyesPatchDomainUVToBarycentrics(splitDomain0UV);
+                    const float3 parentDomain1 = ReyesPatchDomainUVToBarycentrics(splitDomain1UV);
+                    const float3 parentDomain2 = ReyesPatchDomainUVToBarycentrics(splitDomain2UV);
+                    for (uint childIndex = 0u; childIndex < childCount; ++childIndex) {
+                        const uint3 triIndices = ReyesGetTessTableConfigTriangleVertexIndices(tessTableConfigs, tessTableTriangles, splitConfigIndex, childIndex);
+                        const float3 microBary0 = ReyesGetTessTableConfigVertexBarycentrics(tessTableConfigs, tessTableVertices, splitConfigIndex, triIndices.x);
+                        const float3 microBary1 = ReyesGetTessTableConfigVertexBarycentrics(tessTableConfigs, tessTableVertices, splitConfigIndex, triIndices.y);
+                        const float3 microBary2 = ReyesGetTessTableConfigVertexBarycentrics(tessTableConfigs, tessTableVertices, splitConfigIndex, triIndices.z);
+                        precise float3 childDomain0 = parentDomain0 * microBary0.x + parentDomain1 * microBary0.y + parentDomain2 * microBary0.z;
+                        precise float3 childDomain1 = parentDomain0 * microBary1.x + parentDomain1 * microBary1.y + parentDomain2 * microBary1.z;
+                        precise float3 childDomain2 = parentDomain0 * microBary2.x + parentDomain1 * microBary2.y + parentDomain2 * microBary2.z;
+                        childDomain0UV[childIndex] = ReyesPatchBarycentricsToUV(childDomain0);
+                        childDomain1UV[childIndex] = ReyesPatchBarycentricsToUV(childDomain1);
+                        childDomain2UV[childIndex] = ReyesPatchBarycentricsToUV(childDomain2);
+                    }
+                    InterlockedAdd(telemetryBuffer[0].splitChildOutputCounts[min(stageIndex, 3u)], childCount);
+                }
+            }
+        }
+    }
+
+    const uint diceCount = (valid && routeToDice) ? 1u : 0u;
+    const uint splitCount = (valid && !routeToDice) ? childCount : 0u;
+    GroupNodeOutputRecords<CLodReyesDiceQueueEntry> diceOut = diceOutput.GetGroupNodeOutputRecords(diceCount);
+    GroupNodeOutputRecords<CLodReyesSplitQueueEntry> splitOut = nextSplitOutput.GetGroupNodeOutputRecords(splitCount);
+    if (GI == 0u) {
+        if (deferredSplitReplay) {
+            ReplayTryAppendReyesSplit(splitEntry);
+        }
+        if (diceCount != 0u) {
+            diceOut[0] = diceEntry;
+            InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[min(stageIndex, 3u)], 1u);
+            InterlockedAdd(telemetryBuffer[0].finalDiceQueueEntryCount, 1u);
+        }
+        for (uint childIndex = 0u; childIndex < splitCount; ++childIndex) {
+            CLodReyesSplitQueueEntry childEntry = splitEntry;
+            childEntry.splitLevel = splitEntry.splitLevel + 1u;
+            childEntry.domainVertex0UV = childDomain0UV[childIndex];
+            childEntry.domainVertex1UV = childDomain1UV[childIndex];
+            childEntry.domainVertex2UV = childDomain2UV[childIndex];
+            splitOut[childIndex] = childEntry;
+        }
+    }
+    diceOut.OutputComplete();
+    splitOut.OutputComplete();
+}
+
+#define DECLARE_REYES_SPLIT_NODE(FUNC, NODE_ID, NEXT_ID, STAGE, FORCE_DICE) \
+[Shader("node")] \
+[NodeID(NODE_ID)] \
+[NodeLaunch("broadcasting")] \
+[NodeDispatchGrid(1, 1, 1)] \
+[NumThreads(REYES_WG_SPLIT_THREADS, 1, 1)] \
+void FUNC( \
+    DispatchNodeInputRecord<CLodReyesSplitQueueEntry> inputRecord, \
+    [NodeID(NEXT_ID)] [MaxRecords(CLodReyesMaxVisibilityMicroTrianglesPerPatch)] NodeOutput<CLodReyesSplitQueueEntry> nextSplitOutput, \
+    [NodeID("ReyesDice")] [MaxRecordsSharedWith(nextSplitOutput)] NodeOutput<CLodReyesDiceQueueEntry> diceOutput, \
+    uint GI : SV_GroupIndex) \
+{ \
+    WGReyesSplitCommon(inputRecord.Get(), STAGE, FORCE_DICE, nextSplitOutput, diceOutput, GI); \
+}
+
+DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit1, "ReyesSplit1", "ReyesSplit2", 0u, false)
+DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit2, "ReyesSplit2", "ReyesSplit3", 1u, false)
+DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit3, "ReyesSplit3", "ReyesSplit4", 2u, false)
+
+[Shader("node")]
+[NodeID("ReyesSplit4")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NumThreads(REYES_WG_SPLIT_THREADS, 1, 1)]
+void WG_ReyesSplit4(
+    DispatchNodeInputRecord<CLodReyesSplitQueueEntry> inputRecord,
+    [NodeID("ReyesDice")] [MaxRecords(1)] NodeOutput<CLodReyesDiceQueueEntry> diceOutput,
+    uint GI : SV_GroupIndex)
+{
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+    globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+
+    CLodReyesSplitQueueEntry splitEntry = inputRecord.Get();
+    const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, splitEntry.visibleClusterIndex);
+    const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+    const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+    const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, splitEntry.localMeshletIndex);
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
+    const uint sourceTriangleIndex = splitEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
+    bool valid = sourceTriangleIndex < CLodDescTriangleCount(meshletDesc);
+    CLodReyesDiceQueueEntry diceEntry = (CLodReyesDiceQueueEntry)0;
+
+    if (valid) {
+        const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
+        const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
+        const float3 sourcePosition0OS = DecodeCompressedPosition(
+            sourceTriangle.x, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 sourcePosition1OS = DecodeCompressedPosition(
+            sourceTriangle.y, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 sourcePosition2OS = DecodeCompressedPosition(
+            sourceTriangle.z, positionBitstreamBase, meshletDesc.positionBitOffset,
+            CLodDescBitsX(meshletDesc), CLodDescBitsY(meshletDesc), CLodDescBitsZ(meshletDesc),
+            hdr.compressedPositionQuantExp, int3(meshletDesc.minQx, meshletDesc.minQy, meshletDesc.minQz), pageSlabDescriptorIndex);
+        const float3 bary0 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex0UV);
+        const float3 bary1 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex1UV);
+        const float3 bary2 = ReyesPatchDomainUVToBarycentrics(splitEntry.domainVertex2UV);
+        valid = ReyesPatchDomainHasValidSimplex(bary0, bary1, bary2);
+
+        if (valid) {
+            const float3 currentPosition0OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary0);
+            const float3 currentPosition1OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary1);
+            const float3 currentPosition2OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary2);
+            const PerObjectBuffer objectData = LoadInstanceTransformForDraw(splitEntry.instanceID);
+            const float3 currentPosition0WS = mul(float4(currentPosition0OS, 1.0f), objectData.model).xyz;
+            const float3 currentPosition1WS = mul(float4(currentPosition1OS, 1.0f), objectData.model).xyz;
+            const float3 currentPosition2WS = mul(float4(currentPosition2OS, 1.0f), objectData.model).xyz;
+            StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+            const CullingCameraInfo camera = cameras[splitEntry.viewID];
+            const float3 edgeFactors = WGReyesComputeEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
+            const float maxEdgeFactor = max(edgeFactors.x, max(edgeFactors.y, edgeFactors.z));
+            const uint nextSplitLevel = splitEntry.splitLevel + 1u;
+            const uint nextQuantizedTessFactor = (uint)min(65535.0f, ceil(maxEdgeFactor * 256.0f));
+            float2 diceDomain0UV = splitEntry.domainVertex0UV;
+            float2 diceDomain1UV = splitEntry.domainVertex1UV;
+            float2 diceDomain2UV = splitEntry.domainVertex2UV;
+            const uint diceTessConfigIndex = ReyesEncodeCanonicalTessTableConfig(edgeFactors, diceDomain0UV, diceDomain1UV, diceDomain2UV);
+            CLodReyesSplitQueueEntry diceSplitEntry = splitEntry;
+            diceSplitEntry.domainVertex0UV = diceDomain0UV;
+            diceSplitEntry.domainVertex1UV = diceDomain1UV;
+            diceSplitEntry.domainVertex2UV = diceDomain2UV;
+            diceEntry = WGReyesMakeDiceEntry(diceSplitEntry, nextSplitLevel, nextQuantizedTessFactor, diceTessConfigIndex);
+        }
+    }
+
+    GroupNodeOutputRecords<CLodReyesDiceQueueEntry> diceOut = diceOutput.GetGroupNodeOutputRecords(valid ? 1u : 0u);
+    if (GI == 0u && valid) {
+        diceOut[0] = diceEntry;
+        InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[3], 1u);
+        InterlockedAdd(telemetryBuffer[0].finalDiceQueueEntryCount, 1u);
+    }
+    diceOut.OutputComplete();
+}
+
+[Shader("node")]
+[NodeID("ReyesDice")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NumThreads(REYES_WG_DICE_THREADS, 1, 1)]
+void WG_ReyesDice(
+    DispatchNodeInputRecord<CLodReyesDiceQueueEntry> inputRecord,
+    [NodeID("ReyesRaster")] [MaxRecords(REYES_WG_MAX_RASTER_WORK_ITEMS_PER_PATCH)] NodeOutput<ReyesRasterBatchRecord> rasterOutput,
+    uint GI : SV_GroupIndex)
+{
+    CLodReyesDiceQueueEntry diceEntry = inputRecord.Get();
+    StructuredBuffer<CLodReyesTessTableConfigEntry> tessTableConfigs = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesDiceQueueEntry> diceQueue = ResourceDescriptorHeap[CLOD_WG_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> diceQueueCounter = ResourceDescriptorHeap[CLOD_WG_REYES_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> diceQueueOverflow = ResourceDescriptorHeap[CLOD_WG_REYES_DICE_QUEUE_OVERFLOW_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+
+    const bool deferForReplay =
+        !CLodWorkGraphIsPhase2() &&
+        WGReyesDiceHZBOccluded(diceEntry, telemetryBuffer);
+    if (deferForReplay) {
+        GroupNodeOutputRecords<ReyesRasterBatchRecord> rasterOut = rasterOutput.GetGroupNodeOutputRecords(0u);
+        if (GI == 0u) {
+            ReplayTryAppendReyesDice(diceEntry);
+        }
+        rasterOut.OutputComplete();
+        return;
+    }
+
+    const uint microTriangleCount = ReyesGetDicePatchMicroTriangleCount(tessTableConfigs, diceEntry);
+    const uint rasterBatchCount = (microTriangleCount + CLodReyesRasterBatchMicroTriangleCount - 1u) / CLodReyesRasterBatchMicroTriangleCount;
+    uint diceQueueIndex = 0u;
+    if (GI == 0u) {
+        InterlockedAdd(diceQueueCounter[0], 1u, diceQueueIndex);
+        if (diceQueueIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+            diceQueue[diceQueueIndex] = diceEntry;
+        } else {
+            InterlockedAdd(diceQueueOverflow[0], 1u);
+        }
+    }
+    diceQueueIndex = WaveReadLaneFirst(diceQueueIndex);
+    const bool validDice = diceQueueIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY && microTriangleCount != 0u;
+    GroupNodeOutputRecords<ReyesRasterBatchRecord> rasterOut =
+        rasterOutput.GetGroupNodeOutputRecords(validDice ? rasterBatchCount : 0u);
+    for (uint batchIndex = GI; batchIndex < rasterBatchCount && validDice; batchIndex += REYES_WG_DICE_THREADS) {
+        ReyesRasterBatchRecord rec;
+        rec.dispatchGrid = uint3(1, 1, 1);
+        rec.diceEntry = diceEntry;
+        rec.diceQueueIndex = diceQueueIndex;
+        rec.microTriangleOffset = batchIndex * CLodReyesRasterBatchMicroTriangleCount;
+        rec.microTriangleCount = min(CLodReyesRasterBatchMicroTriangleCount, microTriangleCount - rec.microTriangleOffset);
+        rec.pad0 = 0u;
+        rasterOut[batchIndex] = rec;
+    }
+    if (GI == 0u && validDice) {
+        InterlockedAdd(telemetryBuffer[0].patchRasterizedPatchCount, 1u);
+        InterlockedAdd(telemetryBuffer[0].rasterWorkEntryCount, rasterBatchCount);
+    }
+    rasterOut.OutputComplete();
+}
+
+[Shader("node")]
+[NodeID("ReyesRaster")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NumThreads(REYES_WG_RASTER_THREADS, 1, 1)]
+void WG_ReyesRaster(
+    DispatchNodeInputRecord<ReyesRasterBatchRecord> inputRecord,
+    uint GI : SV_GroupIndex)
+{
+    ReyesRasterBatchRecord rec = inputRecord.Get();
+    if (GI >= rec.microTriangleCount) {
+        return;
+    }
+
+    StructuredBuffer<CLodReyesTessTableConfigEntry> tessTableConfigs = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> tessTableVertices = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_VERTICES_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> tessTableTriangles = ResourceDescriptorHeap[CLOD_WG_REYES_TESS_TABLE_TRIANGLES_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer = ResourceDescriptorHeap[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX];
+    StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
+    globallycoherent RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+    StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+
+    CLodReyesDiceQueueEntry diceEntry = rec.diceEntry;
+    uint viewRasterInfoCount = 0u;
+    uint viewRasterInfoStride = 0u;
+    viewRasterInfoBuffer.GetDimensions(viewRasterInfoCount, viewRasterInfoStride);
+    if (diceEntry.viewID >= viewRasterInfoCount) {
+        return;
+    }
+    const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[diceEntry.viewID];
+    if (viewRasterInfo.visibilityUAVDescriptorIndex == 0xFFFFFFFFu) {
+        return;
+    }
+
+    const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, diceEntry.visibleClusterIndex);
+    const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
+    const CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+    const CLodMeshletDescriptor meshletDesc = LoadMeshletDescriptor(pageSlabDescriptorIndex, pageSlabByteOffset, hdr.descriptorOffset, diceEntry.localMeshletIndex);
+    const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
+    const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
+    const CullingCameraInfo camera = cameras[diceEntry.viewID];
+    const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
+    const uint sourceTriangleIndex = diceEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
+    if (sourceTriangleIndex >= CLodDescTriangleCount(meshletDesc)) {
+        return;
+    }
+
+    const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
+    const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
+    float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
+    float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);
+    float2 sourceUv0 = float2(0.0f, 0.0f);
+    float2 sourceUv1 = float2(0.0f, 0.0f);
+    float2 sourceUv2 = float2(0.0f, 0.0f);
+    if (displacementEnabled) {
+        sourceNormal0 = DecodeSkinnedNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal1 = DecodeSkinnedNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal2 = DecodeSkinnedNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, diceEntry.localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+        sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, diceEntry.localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+        sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, diceEntry.localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+    }
+
+    const float3 domain0 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex0UV);
+    const float3 domain1 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex1UV);
+    const float3 domain2 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex2UV);
+    const uint microTriangleIndex = rec.microTriangleOffset + GI;
+    const uint microTriangleCount = ReyesGetDicePatchMicroTriangleCount(tessTableConfigs, diceEntry);
+    if (microTriangleIndex >= microTriangleCount) {
+        return;
+    }
+
+    row_major matrix modelViewProjection = mul(objectData.model, camera.viewProjection);
+    float4 modelViewZ = mul(objectData.model, camera.viewZ);
+    const float patchDepth = max(
+        (-dot(float4(sourcePosition0, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition1, 1.0f), modelViewZ)
+        + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
+        max(camera.zNear, 1.0e-3f));
+
+    float3 patchBary0;
+    float3 patchBary1;
+    float3 patchBary2;
+    ReyesDecodeMicroTrianglePatchDomain(tessTableConfigs, tessTableVertices, tessTableTriangles, microTriangleIndex, diceEntry, patchBary0, patchBary1, patchBary2);
+
+    float3 sourceBary0;
+    float3 sourceBary1;
+    float3 sourceBary2;
+    float3 patchPosition0;
+    float3 patchPosition1;
+    float3 patchPosition2;
+    ReyesEvaluateDisplacedPatchTriangle(
+        materialInfo,
+        displacementEnabled,
+        camera,
+        perFrame.heightFadeStartDistance,
+        perFrame.heightFadeEndDistance,
+        objectData.model,
+        patchDepth,
+        sourcePosition0,
+        sourcePosition1,
+        sourcePosition2,
+        sourceNormal0,
+        sourceNormal1,
+        sourceNormal2,
+        sourceUv0,
+        sourceUv1,
+        sourceUv2,
+        domain0,
+        domain1,
+        domain2,
+        patchBary0,
+        patchBary1,
+        patchBary2,
+        sourceBary0,
+        sourceBary1,
+        sourceBary2,
+        patchPosition0,
+        patchPosition1,
+        patchPosition2);
+
+    const float4 clip0 = mul(float4(patchPosition0, 1.0f), modelViewProjection);
+    const float4 clip1 = mul(float4(patchPosition1, 1.0f), modelViewProjection);
+    const float4 clip2 = mul(float4(patchPosition2, 1.0f), modelViewProjection);
+    const float depth0 = -dot(float4(patchPosition0, 1.0f), modelViewZ);
+    const float depth1 = -dot(float4(patchPosition1, 1.0f), modelViewZ);
+    const float depth2 = -dot(float4(patchPosition2, 1.0f), modelViewZ);
+    const uint patchVisibilityIndex = CLOD_WG_VISIBLE_CLUSTERS_CAPACITY + rec.diceQueueIndex;
+    RWTexture2D<uint64_t> visBuffer = ResourceDescriptorHeap[NonUniformResourceIndex(viewRasterInfo.visibilityUAVDescriptorIndex)];
+    uint2 visDims;
+    visBuffer.GetDimensions(visDims.x, visDims.y);
+    ReyesRasterizeMicroTriangle(
+        visBuffer,
+        visDims,
+        telemetryBuffer,
+        viewRasterInfo,
+        clip0,
+        clip1,
+        clip2,
+        depth0,
+        depth1,
+        depth2,
+        camera.zNear,
+        patchVisibilityIndex,
+        microTriangleIndex);
+    InterlockedAdd(telemetryBuffer[0].patchRasterizedMicroTriangleCount, 1u);
+}
+
+[Shader("node")]
+[NodeID("ReyesSplitReplay")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NodeIsProgramEntry]
+[NumThreads(REYES_WG_SPLIT_THREADS, 1, 1)]
+void WG_ReyesSplitReplay(
+    DispatchNodeInputRecord<CLodReyesSplitQueueEntry> inputRecord,
+    [NodeID("ReyesSplit1")] [MaxRecords(1)] NodeOutput<CLodReyesSplitQueueEntry> splitOutput,
+    uint GI : SV_GroupIndex)
+{
+    GroupNodeOutputRecords<CLodReyesSplitQueueEntry> splitOut = splitOutput.GetGroupNodeOutputRecords(1u);
+    if (GI == 0u) {
+        splitOut[0] = inputRecord.Get();
+    }
+    splitOut.OutputComplete();
+}
+
+[Shader("node")]
+[NodeID("ReyesDiceReplay")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NodeIsProgramEntry]
+[NumThreads(REYES_WG_DICE_THREADS, 1, 1)]
+void WG_ReyesDiceReplay(
+    DispatchNodeInputRecord<CLodReyesDiceQueueEntry> inputRecord,
+    [NodeID("ReyesDice")] [MaxRecords(1)] NodeOutput<CLodReyesDiceQueueEntry> diceOutput,
+    uint GI : SV_GroupIndex)
+{
+    GroupNodeOutputRecords<CLodReyesDiceQueueEntry> diceOut = diceOutput.GetGroupNodeOutputRecords(1u);
+    if (GI == 0u) {
+        diceOut[0] = inputRecord.Get();
+    }
+    diceOut.OutputComplete();
+}
+#endif
 
 #endif
 

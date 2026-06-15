@@ -1604,7 +1604,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::WorkGraph);
-    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
+    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::WorkGraph);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
@@ -1613,6 +1613,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
     settingsManager.registerSetting<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName, CLodReyesTerrainNormalMipBiasDefault);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
+    settingsManager.registerSetting<bool>(CLodWorkGraphReyesVisibilitySettingName, true);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,
         CLodReyesShadowCoarseTargetPagesPerTriangleDefault);
@@ -1843,6 +1844,10 @@ void Renderer::SetSettings() {
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodVisibleClusterCapacitySettingName, [this](const uint32_t& newValue) {
+        (void)newValue;
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodWorkGraphReyesVisibilitySettingName, [this](const bool& newValue) {
         (void)newValue;
         rebuildRenderGraph = true;
         }));

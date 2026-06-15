@@ -21,6 +21,7 @@ inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeo
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
 inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodReyesTerrainNormalMipBias";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
+inline constexpr const char* CLodWorkGraphReyesVisibilitySettingName = "clodWorkGraphReyesVisibility";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
 inline constexpr const char* CLodEnablePageJobVSMSettingName = "clodEnablePageJobVSM";
@@ -1194,11 +1195,15 @@ struct CLodReyesTelemetry
     uint32_t replayDiceMergeCount = 0u;
 };
 
-inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u; // 200 MB physical, GPU uses first 100 MB
+inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u;
 inline constexpr uint32_t CLodReplayNodeRegionSizeBytes = 50u * 1024u * 1024u;    // must match HLSL CLOD_REPLAY_NODE_REGION_SIZE_BYTES
 inline constexpr uint32_t CLodReplayMeshletRegionOffset = CLodReplayNodeRegionSizeBytes;
+inline constexpr uint32_t CLodReplayReyesSplitRegionOffset = 2u * CLodReplayNodeRegionSizeBytes;
+inline constexpr uint32_t CLodReplayReyesDiceRegionOffset = 3u * CLodReplayNodeRegionSizeBytes;
 inline constexpr uint32_t CLodNodeReplayStrideBytes = 12u;   // sizeof(TraverseNodeRecord): 3 uints
 inline constexpr uint32_t CLodMeshletReplayStrideBytes = 24u; // sizeof(MeshletBucketRecord): 6 uints
+inline constexpr uint32_t CLodReyesSplitReplayStrideBytes = sizeof(CLodReyesSplitQueueEntry);
+inline constexpr uint32_t CLodReyesDiceReplayStrideBytes = sizeof(CLodReyesDiceQueueEntry);
 inline constexpr uint32_t CLodVoxelRasterThreadsPerGroup = 64u;
 inline constexpr uint32_t CLodReplayBufferNumUints = CLodReplayBufferSizeBytes / sizeof(uint32_t);
 inline constexpr uint32_t CLodMaxViewDepthIndices = 512u;

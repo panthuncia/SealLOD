@@ -639,18 +639,26 @@ CLodVoxelAttributeSample CLodLoadVoxelAttributeSampleFromPage(GroupPageMapEntry 
     return sample;
 }
 
-// Replay buffer: single physical buffer split into two regions.
-// Node region stores TraverseNodeRecord (12 bytes), meshlet region stores MeshletBucketRecord (24 bytes).
-static const uint CLOD_REPLAY_BUFFER_SIZE_BYTES       = 100u * 1024u * 1024u;
-static const uint CLOD_REPLAY_NODE_REGION_SIZE_BYTES   = CLOD_REPLAY_BUFFER_SIZE_BYTES / 2;
-static const uint CLOD_REPLAY_MESHLET_REGION_OFFSET    = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES = CLOD_REPLAY_BUFFER_SIZE_BYTES - CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+// Replay buffer: single physical buffer split into four 50 MB regions.
+// Node/meshlet replay are always present; Reyes split/dice replay are consumed by the WG Reyes experiment.
+static const uint CLOD_REPLAY_BUFFER_SIZE_BYTES          = 200u * 1024u * 1024u;
+static const uint CLOD_REPLAY_NODE_REGION_SIZE_BYTES     = 50u * 1024u * 1024u;
+static const uint CLOD_REPLAY_MESHLET_REGION_OFFSET      = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET  = 2u * CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_DICE_REGION_OFFSET   = 3u * CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
 
 static const uint CLOD_NODE_REPLAY_STRIDE_BYTES    = 12u;  // 3 uints (TraverseNodeRecord)
 static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = 24u;  // 6 uints (MeshletBucketRecord)
+static const uint CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES = 60u; // sizeof(CLodReyesSplitQueueEntry)
+static const uint CLOD_REYES_DICE_REPLAY_STRIDE_BYTES  = 68u; // sizeof(CLodReyesDiceQueueEntry)
 
 static const uint CLOD_NODE_REPLAY_CAPACITY    = CLOD_REPLAY_NODE_REGION_SIZE_BYTES / CLOD_NODE_REPLAY_STRIDE_BYTES;
 static const uint CLOD_MESHLET_REPLAY_CAPACITY = CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES / CLOD_MESHLET_REPLAY_STRIDE_BYTES;
+static const uint CLOD_REYES_SPLIT_REPLAY_CAPACITY = CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES / CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES;
+static const uint CLOD_REYES_DICE_REPLAY_CAPACITY  = CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES / CLOD_REYES_DICE_REPLAY_STRIDE_BYTES;
 
 struct CLodReplayBufferState
 {
@@ -659,9 +667,10 @@ struct CLodReplayBufferState
     uint nodeDropped;
     uint meshletDropped;
     uint visibleClusterCombinedCount;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint reyesSplitWriteCount;
+    uint reyesDiceWriteCount;
+    uint reyesSplitDropped;
+    uint reyesDiceDropped;
 };
 
 struct CLodViewDepthSRVIndex

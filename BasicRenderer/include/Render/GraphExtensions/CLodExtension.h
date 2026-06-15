@@ -63,6 +63,7 @@ private:
         uint32_t phaseIndex,
         bool uploadTessellationTable,
         bool preserveDiceCountForPhase2Replay,
+        bool workGraphReyesVisibility,
         std::vector<RenderGraph::ExternalPassDesc>& outPasses,
         std::string& shadowClearDirtyBitsAfterPassName);
 
