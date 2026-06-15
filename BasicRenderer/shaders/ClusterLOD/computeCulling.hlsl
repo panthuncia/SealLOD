@@ -546,9 +546,10 @@ void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThre
 
     uint swPending = 0u;
     uint pageJobPending = 0u;
+    uint reyesPending = 0u;
     // ClusterCullBody uses wave ops inside its meshlet loop, so all lanes in the wave
     // must execute the same iteration count even when bucket sizes differ.
-    ClusterCullBody(bucket, hasBucket, true, GI, activeCount, 64u, swPending, pageJobPending);
+    ClusterCullBody(bucket, hasBucket, true, GI, activeCount, 64u, swPending, pageJobPending, reyesPending);
 }
 
 groupshared MeshletBucketRecord gs_phase2Records[64];
@@ -617,5 +618,6 @@ void PureComputeDenseClusterWorkCS(
 
     uint swPending = 0u;
     uint pageJobPending = 0u;
-    ClusterCullBody(bucket, true, false, GI, gs_phase2ActiveClusterCount, 1u, swPending, pageJobPending);
+    uint reyesPending = 0u;
+    ClusterCullBody(bucket, true, false, GI, gs_phase2ActiveClusterCount, 1u, swPending, pageJobPending, reyesPending);
 }

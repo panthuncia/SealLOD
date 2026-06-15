@@ -1603,8 +1603,8 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableIndirectDraws", meshShaderSupported);
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
-    settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::WorkGraph);
-    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::WorkGraph);
+    settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
+    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
@@ -1613,7 +1613,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
     settingsManager.registerSetting<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName, CLodReyesTerrainNormalMipBiasDefault);
     settingsManager.registerSetting<bool>(CLodReyesUseAabbOcclusionSettingName, false);
-    settingsManager.registerSetting<bool>(CLodWorkGraphReyesVisibilitySettingName, true);
+    settingsManager.registerSetting<bool>(CLodWorkGraphReyesVisibilitySettingName, false);
     settingsManager.registerSetting<float>(
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,
         CLodReyesShadowCoarseTargetPagesPerTriangleDefault);
