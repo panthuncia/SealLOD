@@ -493,6 +493,9 @@ struct MaterialInfo {
     uint opacityStreamingTextureID;
     float2 reyesUvDensity;
     uint2 padReyesUvDensity;
+    float4 glintParameters;
+    uint glintEnabled;
+    uint3 padGlint;
 };
 
 struct MaterialEvalInfo {
@@ -561,6 +564,9 @@ struct MaterialEvalInfo {
     uint opacityStreamingTextureID;
     float2 reyesUvDensity;
     uint2 padReyesUvDensity;
+    float4 glintParameters;
+    uint glintEnabled;
+    uint3 padGlint;
 };
 
 struct TerrainLayerInfo {
@@ -570,17 +576,21 @@ struct TerrainLayerInfo {
     uint normalSamplerIndex;
     uint heightTextureIndex;
     uint heightSamplerIndex;
+    uint rmaosTextureIndex;
+    uint rmaosSamplerIndex;
     uint diffuseStreamingTextureID;
     uint normalStreamingTextureID;
     uint heightStreamingTextureID;
-    uint pad0;
+    uint rmaosStreamingTextureID;
     uint3 normalChannels;
     uint flags;
     float4 fallbackColor;
     float uvScale;
     uint stochasticLayerIndex;
     float heightScale;
-    float pad1;
+    float roughnessScale;
+    float specularLevel;
+    float4 glintParameters;
 };
 
 struct TerrainStochasticLayerInfo {
@@ -899,6 +909,8 @@ struct FragmentInfo {
     uint selectedMaterialMipLevel;
     uint selectedMaterialMipMaxLevel;
     uint parallaxApplied;
+    uint glintEnabled;
+    float4 glintParameters;
 };
 
 struct EnvironmentInfo {
@@ -961,6 +973,8 @@ struct MaterialInputs
     float3 terrainRvtSampleNormal;
     float3 terrainRvtSampleMaterial;
     float terrainRvtHeightScale;
+    uint glintEnabled;
+    float4 glintParameters;
 };
 
 struct SkinningInstanceGPUInfo

@@ -462,6 +462,20 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
     materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
     materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
     materialInputs.terrainRvtHeightScale = 0.0f;
+    materialInputs.glintEnabled = 0u;
+    materialInputs.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
+}
+
+void ApplyMaterialGlintInfo(in MaterialInfo materialInfo, inout MaterialInputs materialInputs)
+{
+    materialInputs.glintEnabled = materialInfo.glintEnabled;
+    materialInputs.glintParameters = materialInfo.glintParameters;
+}
+
+void ApplyMaterialGlintInfo(in MaterialEvalInfo materialInfo, inout MaterialInputs materialInputs)
+{
+    materialInputs.glintEnabled = materialInfo.glintEnabled;
+    materialInputs.glintParameters = materialInfo.glintParameters;
 }
 
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)
@@ -2003,6 +2017,7 @@ void SampleMaterialFromUvCache(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
 void SampleMaterialEvalFromUvCache(
@@ -2251,6 +2266,7 @@ void SampleMaterialEvalFromUvCache(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
 void SampleMaterialFromUvCacheWithVertexTangent(
@@ -2524,6 +2540,7 @@ void SampleMaterialFromUvCacheRuntime(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
 void SampleMaterialCorePrecompiled(
@@ -2656,6 +2673,7 @@ void SampleMaterialCorePrecompiled(
         LoadOpenPBRMaterialInfo(materialInfo),
         openPBRSurface);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ApplyMaterialGlintInfo(materialInfo, ret);
 #endif
 }
 
@@ -2898,6 +2916,8 @@ void GetFragmentInfoScreenSpace(in uint2 pixelCoordinates, in float3 viewWS, in 
     ret.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
     ret.selectedMaterialMipMaxLevel = 0u;
     ret.parallaxApplied = 0u;
+    ret.glintEnabled = 0u;
+    ret.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
     
     // Gather textures
     Texture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
@@ -2970,6 +2990,8 @@ void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialIn
     ret.selectedMaterialMipLevel = materialInfo.selectedMaterialMipLevel;
     ret.selectedMaterialMipMaxLevel = materialInfo.selectedMaterialMipMaxLevel;
     ret.parallaxApplied = materialInfo.parallaxApplied;
+    ret.glintEnabled = materialInfo.glintEnabled;
+    ret.glintParameters = materialInfo.glintParameters;
     float perceptualRoughness = materialInfo.roughness;
     ret.perceptualRoughnessUnclamped = perceptualRoughness;
     // Clamp the roughness to a minimum value to avoid divisions by 0 during lighting

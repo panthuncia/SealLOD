@@ -252,6 +252,8 @@ public:
             desc.brniflyModelSpaceNormals
         );
         material->m_materialModel = desc.materialModel;
+        material->m_materialData.glintEnabled = desc.glintEnabled ? 1u : 0u;
+        material->m_materialData.glintParameters = desc.glintParameters;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }

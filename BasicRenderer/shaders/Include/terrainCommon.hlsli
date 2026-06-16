@@ -13,6 +13,8 @@ static const float TERRAIN_DEFAULT_STOCHASTIC_SCALE = 3.4641016f;
 static const uint TERRAIN_INVALID_DESCRIPTOR = 0xffffffffu;
 static const uint TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 static const uint TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA = 1u << 1;
+static const uint TERRAIN_LAYER_FLAG_PBR = 1u << 2;
+static const uint TERRAIN_LAYER_FLAG_GLINT = 1u << 3;
 static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 static const uint TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 static const uint TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
@@ -1134,6 +1136,83 @@ float TerrainSampleBlendedHeightScale(uint terrainSetIndex, float3 positionWS)
     return weightSum > 1.0e-4f ? heightScaleSum / weightSum : 0.0f;
 }
 
+struct TerrainGlintSample
+{
+    uint enabled;
+    float4 parameters;
+};
+
+TerrainGlintSample TerrainSampleDominantGlint(uint terrainSetIndex, float3 positionWS)
+{
+    TerrainGlintSample result;
+    result.enabled = 0u;
+    result.parameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
+
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
+    StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
+    StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
+    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+
+    TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    if (terrain.regionSizeWorld <= 0.0f ||
+        terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
+    {
+        return result;
+    }
+
+    float2 skyrimXY = TerrainSkyrimXYFromRendererPosition(positionWS);
+    int2 regionCoord = int2(floor(skyrimXY / terrain.regionSizeWorld));
+    uint2 localRegion;
+    localRegion.x = (uint)(regionCoord.x - terrain.minRegionX);
+    localRegion.y = (uint)(regionCoord.y - terrain.minRegionY);
+    if (regionCoord.x < terrain.minRegionX || regionCoord.y < terrain.minRegionY ||
+        localRegion.x >= terrain.regionCountX || localRegion.y >= terrain.regionCountY)
+    {
+        return result;
+    }
+
+    uint regionIndex = terrain.regionBase + localRegion.y * terrain.regionCountX + localRegion.x;
+    if (regionIndex >= terrain.regionBase + terrain.regionCount)
+    {
+        return result;
+    }
+
+    TerrainRegionInfo region = terrainRegions[regionIndex];
+    if (region.layerRefCount == 0u || region.weightSampleSide < 2u)
+    {
+        return result;
+    }
+
+    float2 regionOrigin = float2(regionCoord) * terrain.regionSizeWorld;
+    float2 regionLocal = skyrimXY - regionOrigin;
+    float bestWeight = 0.0f;
+    [loop]
+    for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
+    {
+        const float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
+        if (weight <= bestWeight)
+        {
+            continue;
+        }
+        const uint layerRefIndex = terrain.layerRefBase + region.layerRefStart + localLayer;
+        if (layerRefIndex >= terrain.layerRefBase + terrain.layerRefCount)
+        {
+            continue;
+        }
+        const uint layerIndex = min(terrain.layerBase + terrainLayerRefs[layerRefIndex].layerIndex, terrain.layerBase + terrain.layerCount - 1u);
+        TerrainLayerInfo layer = terrainLayers[layerIndex];
+        if ((layer.flags & TERRAIN_LAYER_FLAG_GLINT) == 0u)
+        {
+            continue;
+        }
+        bestWeight = weight;
+        result.enabled = 1u;
+        result.parameters = layer.glintParameters;
+    }
+    return result;
+}
+
 float3x3 TerrainBasis(float3 normalWS);
 
 float3 TerrainRvtParallaxPosition(
@@ -1616,6 +1695,9 @@ void ApplyTerrainMaterialInternal(
         inputs.ambientOcclusion = rvtSample.ambientOcclusion;
         inputs.opacity = 1.0f;
         inputs.emissive = 0.0f.xxx;
+        TerrainGlintSample rvtGlint = TerrainSampleDominantGlint(terrainSetIndex, rvtSamplePositionWS);
+        inputs.glintEnabled = rvtGlint.enabled;
+        inputs.glintParameters = rvtGlint.parameters;
         inputs.terrainRvtDebugFlags = 0x3u;
         inputs.terrainRvtRequestedMip = rvtSample.requestedMip;
         inputs.terrainRvtResidentMip = rvtSample.residentMip;
@@ -1756,6 +1838,12 @@ void ApplyTerrainMaterialInternal(
 
     float3 blendedBaseColor = 0.0f.xxx;
     float2 blendedNormalDerivative = 0.0f.xx;
+    float blendedRoughness = 0.0f;
+    float blendedMetallic = 0.0f;
+    float blendedAmbientOcclusion = 0.0f;
+    float bestGlintWeight = 0.0f;
+    uint glintEnabled = 0u;
+    float4 glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
     float weightSum = 0.0f;
     for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
@@ -1873,6 +1961,30 @@ void ApplyTerrainMaterialInternal(
         }
         blendedBaseColor += layerBaseColor * weight;
 
+        float layerRoughness = 0.9f;
+        float layerMetallic = 0.0f;
+        float layerAmbientOcclusion = 1.0f;
+        if ((layer.flags & TERRAIN_LAYER_FLAG_PBR) != 0u &&
+            layer.rmaosTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
+            layer.rmaosSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
+        {
+            Texture2D<float4> rmaosTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.rmaosTextureIndex)];
+            SamplerState rmaosSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.rmaosSamplerIndex)];
+            float4 rmaos = SampleMaterialTexture2DGrad(rmaosTex, rmaosSampler, layer.rmaosStreamingTextureID, layerUv, layerDUdx, layerDUdy, inputs);
+            layerRoughness = clamp(rmaos.r * max(layer.roughnessScale, 0.0f), 0.04f, 1.0f);
+            layerMetallic = saturate(rmaos.g);
+            layerAmbientOcclusion = saturate(rmaos.b);
+        }
+        blendedRoughness += layerRoughness * weight;
+        blendedMetallic += layerMetallic * weight;
+        blendedAmbientOcclusion += layerAmbientOcclusion * weight;
+        if ((layer.flags & TERRAIN_LAYER_FLAG_GLINT) != 0u && weight > bestGlintWeight)
+        {
+            bestGlintWeight = weight;
+            glintEnabled = 1u;
+            glintParameters = layer.glintParameters;
+        }
+
         float3 layerNormalTS = float3(0.0f, 0.0f, 1.0f);
         if (terrainStochasticDerivativeNormalsEnabled &&
             hasStochasticContext &&
@@ -1917,14 +2029,19 @@ void ApplyTerrainMaterialInternal(
     float invWeightSum = rcp(weightSum);
     blendedBaseColor *= invWeightSum;
     blendedNormalDerivative *= invWeightSum;
+    blendedRoughness *= invWeightSum;
+    blendedMetallic *= invWeightSum;
+    blendedAmbientOcclusion *= invWeightSum;
 
     inputs.albedo = blendedBaseColor * vertexColor;
     inputs.normalWS = normalize(mul(TerrainDerivativeToNormal(blendedNormalDerivative), terrainBasis));
-    inputs.metallic = 0.0f;
-    inputs.roughness = 0.9f;
-    inputs.ambientOcclusion = 1.0f;
+    inputs.metallic = saturate(blendedMetallic);
+    inputs.roughness = clamp(blendedRoughness, 0.04f, 1.0f);
+    inputs.ambientOcclusion = saturate(blendedAmbientOcclusion);
     inputs.opacity = 1.0f;
     inputs.emissive = 0.0f.xxx;
+    inputs.glintEnabled = glintEnabled;
+    inputs.glintParameters = glintParameters;
 }
 
 void ApplyTerrainMaterial(

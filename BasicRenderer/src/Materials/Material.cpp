@@ -53,6 +53,27 @@ namespace {
     bool RequestsRgbNormalChannels(const std::vector<uint32_t>& channels) {
         return channels.size() >= 3u && channels[0] == 0u && channels[1] == 1u && channels[2] == 2u;
     }
+
+    uint32_t FirstChannelOrDefault(const std::vector<uint32_t>& channels, uint32_t fallback) {
+        return channels.empty() ? fallback : channels[0];
+    }
+
+    DirectX::XMUINT3 RgbChannelsOrDefault(const std::vector<uint32_t>& channels) {
+        return DirectX::XMUINT3{
+            channels.size() > 0u ? channels[0] : 0u,
+            channels.size() > 1u ? channels[1] : 1u,
+            channels.size() > 2u ? channels[2] : 2u
+        };
+    }
+
+    DirectX::XMUINT4 RgbaChannelsOrDefault(const std::vector<uint32_t>& channels) {
+        return DirectX::XMUINT4{
+            channels.size() > 0u ? channels[0] : 0u,
+            channels.size() > 1u ? channels[1] : 1u,
+            channels.size() > 2u ? channels[2] : 2u,
+            channels.size() > 3u ? channels[3] : 3u
+        };
+    }
 }
 
 Material::Material(const std::string& name,
@@ -266,6 +287,8 @@ MaterialDescription Material::ToCacheDescription() const
     desc.opacity.sourcePath = sourcePathFor(m_opacitySourcePath, m_opacityTexture);
     desc.openPBR = m_openPBRMaterial;
     desc.openPBRTextures = m_openPBRTextures;
+    desc.glintEnabled = m_materialData.glintEnabled != 0u;
+    desc.glintParameters = m_materialData.glintParameters;
     desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
     desc.brniflyZBufferWrite = m_brniflyZBufferWrite;
     desc.brniflyDecal = m_brniflyDecal;
@@ -453,7 +476,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.baseColorTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.baseColorSamplerIndex = m_baseColorTexture->SamplerDescriptorIndex();
             m_materialData.baseColorStreamingTextureID = textureStreamingEnabled ? m_baseColorTexture->GetStreamingTextureID() : 0u;
-            m_materialData.baseColorChannels = { m_baseColorChannels[0], m_baseColorChannels[1], m_baseColorChannels[2], m_baseColorChannels[3] };
+            m_materialData.baseColorChannels = RgbaChannelsOrDefault(m_baseColorChannels);
             m_materialData.baseColorUvSetIndex = m_baseColorUvSetIndex;
             annotateMaterialTexture(m_baseColorTexture, "BaseColorTexture");
         }
@@ -485,7 +508,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.normalTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.normalSamplerIndex = m_normalTexture->SamplerDescriptorIndex();
             m_materialData.normalStreamingTextureID = textureStreamingEnabled ? m_normalTexture->GetStreamingTextureID() : 0u;
-            m_materialData.normalChannels = { m_normalChannels[0], m_normalChannels[1], m_normalChannels[2] };
+            m_materialData.normalChannels = RgbChannelsOrDefault(m_normalChannels);
             m_materialData.normalUvSetIndex = m_normalUvSetIndex;
             annotateMaterialTexture(m_normalTexture, "NormalTexture");
         }
@@ -496,7 +519,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.aoMapIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.aoSamplerIndex = m_aoMap->SamplerDescriptorIndex();
             m_materialData.aoStreamingTextureID = textureStreamingEnabled ? m_aoMap->GetStreamingTextureID() : 0u;
-            m_materialData.aoChannel = m_aoChannel[0];
+            m_materialData.aoChannel = FirstChannelOrDefault(m_aoChannel, 0u);
             m_materialData.aoUvSetIndex = m_aoUvSetIndex;
             annotateMaterialTexture(m_aoMap, "AOMap");
         }
@@ -507,7 +530,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.heightMapIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.heightSamplerIndex = m_heightMap->SamplerDescriptorIndex();
             m_materialData.heightStreamingTextureID = textureStreamingEnabled ? m_heightMap->GetStreamingTextureID() : 0u;
-            m_materialData.heightChannel = m_heightChannel[0];
+            m_materialData.heightChannel = FirstChannelOrDefault(m_heightChannel, 0u);
             m_materialData.heightUvSetIndex = m_heightUvSetIndex;
             annotateMaterialTexture(m_heightMap, "HeightMap");
         }
@@ -518,7 +541,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.metallicTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.metallicSamplerIndex = m_metallicTexture->SamplerDescriptorIndex();
             m_materialData.metallicStreamingTextureID = textureStreamingEnabled ? m_metallicTexture->GetStreamingTextureID() : 0u;
-            m_materialData.metallicChannel = m_metallicChannel[0];
+            m_materialData.metallicChannel = FirstChannelOrDefault(m_metallicChannel, 0u);
             m_materialData.metallicUvSetIndex = m_metallicUvSetIndex;
             annotateMaterialTexture(m_metallicTexture, "MetallicTexture");
         }
@@ -529,7 +552,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.roughnessTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.roughnessSamplerIndex = m_roughnessTexture->SamplerDescriptorIndex();
             m_materialData.roughnessStreamingTextureID = textureStreamingEnabled ? m_roughnessTexture->GetStreamingTextureID() : 0u;
-            m_materialData.roughnessChannel = m_roughnessChannel[0];
+            m_materialData.roughnessChannel = FirstChannelOrDefault(m_roughnessChannel, 0u);
             m_materialData.roughnessUvSetIndex = m_roughnessUvSetIndex;
             annotateMaterialTexture(m_roughnessTexture, "RoughnessTexture");
         }
@@ -546,7 +569,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
             m_materialData.emissiveTextureIndex = image->GetSRVInfo(0).slot.index;
             m_materialData.emissiveSamplerIndex = m_emissiveTexture->SamplerDescriptorIndex();
             m_materialData.emissiveStreamingTextureID = textureStreamingEnabled ? m_emissiveTexture->GetStreamingTextureID() : 0u;
-            m_materialData.emissiveChannels = { m_emissiveChannels[0], m_emissiveChannels[1], m_emissiveChannels[2] };
+            m_materialData.emissiveChannels = RgbChannelsOrDefault(m_emissiveChannels);
             m_materialData.emissiveUvSetIndex = m_emissiveUvSetIndex;
             annotateMaterialTexture(m_emissiveTexture, "EmissiveTexture");
         }

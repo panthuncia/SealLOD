@@ -191,7 +191,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 19u;
+constexpr std::uint32_t kPayloadCacheVersion = 20u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -312,6 +312,8 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashBinding(hash, desc.heightMap);
     HashBinding(hash, desc.normal);
     HashOpenPBR(hash, desc.openPBR);
+    HashPod(hash, desc.glintEnabled);
+    HashPod(hash, desc.glintParameters);
     HashBinding(hash, desc.openPBRTextures.coatColor);
     HashBinding(hash, desc.openPBRTextures.coatWeight);
     HashBinding(hash, desc.openPBRTextures.coatRoughness);
@@ -934,6 +936,8 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     WriteTextureBinding(writer, desc.heightMap, TextureSemantic::Height, false);
     WriteTextureBinding(writer, desc.normal, TextureSemantic::Normal, false, NormalMapConvention::OpenGL);
     writer.Pod(desc.openPBR);
+    writer.Pod(desc.glintEnabled);
+    writer.Pod(desc.glintParameters);
     WriteTextureBinding(writer, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true);
     WriteTextureBinding(writer, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false);
     WriteTextureBinding(writer, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false);
@@ -982,6 +986,8 @@ bool ReadMaterialDescription(
         ReadTextureBinding(reader, desc.heightMap, TextureSemantic::Height, false, textureSearchRoots) &&
         ReadTextureBinding(reader, desc.normal, TextureSemantic::Normal, false, textureSearchRoots) &&
         reader.Pod(desc.openPBR) &&
+        reader.Pod(desc.glintEnabled) &&
+        reader.Pod(desc.glintParameters) &&
         ReadTextureBinding(reader, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots) &&
         ReadTextureBinding(reader, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots) &&
         ReadTextureBinding(reader, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false, textureSearchRoots) &&

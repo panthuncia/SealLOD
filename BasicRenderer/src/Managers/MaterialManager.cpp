@@ -239,6 +239,8 @@ namespace {
 		result.heightStreamingTextureID = base.heightStreamingTextureID;
 		result.opacityStreamingTextureID = base.opacityStreamingTextureID;
 		result.reyesUvDensity = base.reyesUvDensity;
+		result.glintParameters = base.glintParameters;
+		result.glintEnabled = base.glintEnabled;
 		return result;
 	}
 

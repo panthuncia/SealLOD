@@ -23,6 +23,8 @@ inline constexpr float kDefaultTerrainRegionSizeWorld = 2048.0f;
 inline constexpr float kDefaultTerrainStochasticScale = 3.4641016f;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_SNOW = 1u << 0;
 inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA = 1u << 1;
+inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_PBR = 1u << 2;
+inline constexpr std::uint32_t TERRAIN_LAYER_FLAG_GLINT = 1u << 3;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE = 1u << 0;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_NORMAL = 1u << 1;
 inline constexpr std::uint32_t TERRAIN_STOCHASTIC_FLAG_DIFFUSE_COLOR_SPACE = 1u << 2;
@@ -53,9 +55,13 @@ struct TerrainLayerDesc
     std::shared_ptr<TextureAsset> diffuse;
     std::shared_ptr<TextureAsset> normal;
     std::shared_ptr<TextureAsset> height;
+    std::shared_ptr<TextureAsset> rmaos;
     TerrainLayerStochasticDesc stochastic;
     DirectX::XMFLOAT4 fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
     float uvScale = kDefaultTerrainLayerUvScale;
+    float roughnessScale = 1.0f;
+    float specularLevel = 0.04f;
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     // Close landscape layer flags copied from Skyrim LTEX metadata. Distant land LOD overlays are not terrain layers.
     std::uint32_t flags = 0u;
 };
@@ -102,7 +108,8 @@ private:
     enum class TerrainTextureSlot : std::uint8_t {
         Diffuse,
         Normal,
-        Height
+        Height,
+        RMAOS
     };
     void RefreshTerrainLayerTextureBinding(
         std::uint32_t layerIndex,

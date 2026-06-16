@@ -139,11 +139,16 @@ namespace {
         result.normalSamplerIndex = kInvalidDescriptor;
         result.heightTextureIndex = kInvalidDescriptor;
         result.heightSamplerIndex = kInvalidDescriptor;
+        result.rmaosTextureIndex = kInvalidDescriptor;
+        result.rmaosSamplerIndex = kInvalidDescriptor;
         result.stochasticLayerIndex = kInvalidDescriptor;
         result.normalChannels = { 0u, 1u, 2u };
         result.fallbackColor = { 0.45f, 0.42f, 0.36f, 1.0f };
         result.uvScale = kDefaultTerrainLayerUvScale;
         result.heightScale = 1.0f;
+        result.roughnessScale = 1.0f;
+        result.specularLevel = 0.04f;
+        result.glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
         return result;
     }
 
@@ -414,6 +419,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     std::uint32_t uploadedNormalLayerCount = 0;
     std::uint32_t sourceHeightLayerCount = 0;
     std::uint32_t uploadedHeightLayerCount = 0;
+    std::uint32_t sourceRmaosLayerCount = 0;
+    std::uint32_t uploadedRmaosLayerCount = 0;
     std::uint32_t diffuseAlphaHeightLayerCount = 0;
     const auto layersBegin = std::chrono::steady_clock::now();
     for (std::uint32_t i = 0; i < layerCount; ++i) {
@@ -423,6 +430,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             layer.fallbackColor = source.fallbackColor;
             layer.uvScale = source.uvScale;
             layer.flags = source.flags;
+            layer.roughnessScale = source.roughnessScale;
+            layer.specularLevel = source.specularLevel;
+            layer.glintParameters = source.glintParameters;
             if ((source.flags & TERRAIN_LAYER_FLAG_SNOW) != 0u) {
                 ++snowLayerCount;
             }
@@ -504,6 +514,31 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 layer.heightSamplerIndex);
             if (source.height) {
                 pendingTextureBindings.push_back({ i, TerrainTextureSlot::Height, source.height });
+            }
+            if (source.rmaos) {
+                ++sourceRmaosLayerCount;
+            }
+            if (UploadTerrainTexture(
+                source.rmaos,
+                textureFactory,
+                nullptr,
+                m_textureGroup,
+                m_layerTextures,
+                true,
+                layer.rmaosTextureIndex,
+                layer.rmaosSamplerIndex)) {
+                ++uploadedRmaosLayerCount;
+            }
+            layer.rmaosStreamingTextureID = TerrainStreamingTextureID(source.rmaos);
+            LogTerrainTextureState(
+                "initial-layer-upload",
+                i,
+                static_cast<std::uint32_t>(TerrainTextureSlot::RMAOS),
+                source.rmaos,
+                layer.rmaosTextureIndex,
+                layer.rmaosSamplerIndex);
+            if (source.rmaos) {
+                pendingTextureBindings.push_back({ i, TerrainTextureSlot::RMAOS, source.rmaos });
             }
 
             TerrainStochasticLayerGPU stochastic = MakeFallbackStochasticLayer();
@@ -727,6 +762,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     std::uint32_t boundDiffuseLayerCount = 0;
     std::uint32_t boundNormalLayerCount = 0;
     std::uint32_t boundHeightLayerCount = 0;
+    std::uint32_t boundRmaosLayerCount = 0;
     std::uint32_t heightCapableLayerCount = 0;
     for (const auto& layer : m_layerData) {
         if (layer.diffuseTextureIndex != kInvalidDescriptor && layer.diffuseSamplerIndex != kInvalidDescriptor) {
@@ -739,6 +775,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             ++boundHeightLayerCount;
             ++heightCapableLayerCount;
         }
+        if (layer.rmaosTextureIndex != kInvalidDescriptor && layer.rmaosSamplerIndex != kInvalidDescriptor) {
+            ++boundRmaosLayerCount;
+        }
         else if ((layer.flags & TERRAIN_LAYER_FLAG_HEIGHT_FROM_DIFFUSE_ALPHA) != 0u &&
             layer.diffuseTextureIndex != kInvalidDescriptor &&
             layer.diffuseSamplerIndex != kInvalidDescriptor) {
@@ -749,7 +788,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
     };
     spdlog::info(
-        "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} boundDiffuse={} immediateDiffuse={}/{} boundNormal={} immediateNormal={}/{} boundHeight={} immediateHeight={}/{} heightCapableLayers={} diffuseAlphaHeightLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
+        "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} boundDiffuse={} immediateDiffuse={}/{} boundNormal={} immediateNormal={}/{} boundHeight={} immediateHeight={}/{} boundRMAOS={} immediateRMAOS={}/{} heightCapableLayers={} diffuseAlphaHeightLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
         layerCount,
         snowLayerCount,
         stochasticLayerCount,
@@ -762,6 +801,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         boundHeightLayerCount,
         uploadedHeightLayerCount,
         sourceHeightLayerCount,
+        boundRmaosLayerCount,
+        uploadedRmaosLayerCount,
+        sourceRmaosLayerCount,
         heightCapableLayerCount,
         diffuseAlphaHeightLayerCount,
         regionCount,
@@ -843,6 +885,11 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
         layer.heightTextureIndex = textureIndex;
         layer.heightSamplerIndex = samplerIndex;
         layer.heightStreamingTextureID = streamingTextureID;
+        break;
+    case TerrainTextureSlot::RMAOS:
+        layer.rmaosTextureIndex = textureIndex;
+        layer.rmaosSamplerIndex = samplerIndex;
+        layer.rmaosStreamingTextureID = streamingTextureID;
         break;
     }
 

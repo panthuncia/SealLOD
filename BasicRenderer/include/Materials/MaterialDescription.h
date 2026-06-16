@@ -121,6 +121,8 @@ struct MaterialDescription {
     TextureAndConstant	normal = {};
     OpenPBRMaterialParameters openPBR = {};
     OpenPBRTextureBindings openPBRTextures = {};
+    bool glintEnabled = false;
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
 };
 
 inline OpenPBRMaterialParameters TranslateLegacyMaterialDescriptionToOpenPBR(const MaterialDescription& desc) {

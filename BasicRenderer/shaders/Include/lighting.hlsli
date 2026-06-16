@@ -51,7 +51,41 @@ struct LightingParameters {
     float3 fuzzColor;
     float fuzzWeight;
     float fuzzRoughness;
+    uint glintEnabled;
+    float4 glintParameters;
 };
+
+float GlintHash(float3 p)
+{
+    p = frac(p * 0.1031f);
+    p += dot(p, p.yzx + 33.33f);
+    return frac((p.x + p.y) * p.z);
+}
+
+float3 EvaluateGlintContribution(LightFragmentData light, LightingParameters lightingParameters)
+{
+    if (lightingParameters.glintEnabled == 0u)
+    {
+        return 0.0f.xxx;
+    }
+
+    const float screenSpaceScale = max(lightingParameters.glintParameters.x, 0.001f);
+    const float logDensity = clamp(40.0f - lightingParameters.glintParameters.y, 0.0f, 64.0f);
+    const float microfacetRoughness = clamp(lightingParameters.glintParameters.z, 0.001f, 0.25f);
+    const float densityRandomization = max(lightingParameters.glintParameters.w, 0.0f);
+    const float3 halfVector = normalize(light.lightToFrag + lightingParameters.viewDir);
+    const float ndotl = saturate(dot(lightingParameters.normal, light.lightToFrag));
+    const float ndoth = saturate(dot(lightingParameters.normal, halfVector));
+    const float sparkleDensity = exp2(clamp(logDensity - 36.0f, -12.0f, 12.0f));
+    const float3 cell = floor(lightingParameters.fragPos * screenSpaceScale * sparkleDensity);
+    const float noise = GlintHash(cell + floor(halfVector * 127.0f));
+    const float randomThreshold = saturate(0.985f - 0.01f * densityRandomization);
+    const float microMask = smoothstep(randomThreshold, 1.0f, noise);
+    const float exponent = max(2.0f, 2.0f / max(microfacetRoughness * microfacetRoughness, 1.0e-4f));
+    const float glintLobe = pow(ndoth, exponent) * microMask * ndotl;
+    const float3 glintF0 = saturate(lerp(lightingParameters.dielectricSpecularF0, lightingParameters.weightedBaseColor, lightingParameters.metallic));
+    return glintLobe * glintF0 * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation;
+}
 
 struct LightingOutput { // Lighting + debug info
     float3 lighting;
@@ -160,7 +194,8 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
     float3 baseAttenuation = fuzzLayerScale.xxx * baseLayerScale;
     float3 BRDF = (baseEvaluation.diffuse + baseEvaluation.specular) * baseAttenuation + coatFr * fuzzLayerScale.xxx + fuzzFr;
     
-    return BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+    return BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight +
+        EvaluateGlintContribution(light, lightingParameters);
 }
 
 uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
@@ -264,6 +299,8 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
         lightingParameters.fuzzColor = fragmentInfo.fuzzColor;
         lightingParameters.fuzzWeight = fragmentInfo.fuzzWeight;
         lightingParameters.fuzzRoughness = fragmentInfo.fuzzRoughness;
+        lightingParameters.glintEnabled = fragmentInfo.glintEnabled;
+        lightingParameters.glintParameters = fragmentInfo.glintParameters;
 
         StructuredBuffer<unsigned int> pointShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PointLightCubemapBuffer)];
         StructuredBuffer<unsigned int> spotShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::SpotLightMatrixBuffer)];
@@ -472,6 +509,8 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
         lightingParameters.fuzzColor = fragmentInfo.fuzzColor;
         lightingParameters.fuzzWeight = fragmentInfo.fuzzWeight;
         lightingParameters.fuzzRoughness = fragmentInfo.fuzzRoughness;
+        lightingParameters.glintEnabled = fragmentInfo.glintEnabled;
+        lightingParameters.glintParameters = fragmentInfo.glintParameters;
         
         // TODO: Parallax shadows will require a forward pass
         //parallaxShadowParameters parallaxShadowParams;

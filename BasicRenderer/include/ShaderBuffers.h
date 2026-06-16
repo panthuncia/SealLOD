@@ -249,6 +249,9 @@ struct PerMaterialCB {
     unsigned int opacityStreamingTextureID;
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     DirectX::XMUINT2 padReyesUvDensity = {};
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+    unsigned int glintEnabled = 0u;
+    DirectX::XMUINT3 padGlint = {};
 };
 
 struct PerMaterialEvalCB {
@@ -316,13 +319,18 @@ struct PerMaterialEvalCB {
     unsigned int opacityStreamingTextureID;
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     DirectX::XMUINT2 padReyesUvDensity = {};
+    DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+    unsigned int glintEnabled = 0u;
+    DirectX::XMUINT3 padGlint = {};
 };
 
-static_assert(sizeof(PerMaterialEvalCB) == 272, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
+static_assert(sizeof(PerMaterialEvalCB) == 304, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
 static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, reyesUvDensity) == 256, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, glintParameters) == 272, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, glintEnabled) == 288, "PerMaterialEvalCB layout mismatch.");
 
 struct TerrainLayerGPU {
     unsigned int diffuseTextureIndex;
@@ -331,17 +339,21 @@ struct TerrainLayerGPU {
     unsigned int normalSamplerIndex;
     unsigned int heightTextureIndex;
     unsigned int heightSamplerIndex;
+    unsigned int rmaosTextureIndex;
+    unsigned int rmaosSamplerIndex;
     unsigned int diffuseStreamingTextureID;
     unsigned int normalStreamingTextureID;
     unsigned int heightStreamingTextureID;
-    unsigned int pad0;
+    unsigned int rmaosStreamingTextureID;
     DirectX::XMUINT3 normalChannels;
     unsigned int flags;
     DirectX::XMFLOAT4 fallbackColor;
     float uvScale;
     unsigned int stochasticLayerIndex;
     float heightScale;
-    float pad1;
+    float roughnessScale;
+    float specularLevel;
+    DirectX::XMFLOAT4 glintParameters;
 };
 
 struct TerrainStochasticLayerGPU {
