@@ -246,6 +246,11 @@ void DeviceManager::CheckGPUFeatures() {
     MeshShaderFeatureInfo meshShaderFeatures{};
     if (rhi::IsOk(m_device->QueryFeatureInfo(&meshShaderFeatures.header))) {
         m_meshShadersSupported = meshShaderFeatures.meshShader;
+        spdlog::info(
+            "DeviceManager mesh shader caps meshShader={} taskShader={} derivatives={}",
+            meshShaderFeatures.meshShader,
+            meshShaderFeatures.taskShader,
+            meshShaderFeatures.derivatives);
     }
 
     RayTracingFeatureInfo rayTracingFeatures{};
