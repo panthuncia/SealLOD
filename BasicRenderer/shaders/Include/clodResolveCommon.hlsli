@@ -1862,21 +1862,24 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             const float2 patchUv0 = heightUv0 * sourcePatchBary0.x + heightUv1 * sourcePatchBary0.y + heightUv2 * sourcePatchBary0.z;
             const float2 patchUv1 = heightUv0 * sourcePatchBary1.x + heightUv1 * sourcePatchBary1.y + heightUv2 * sourcePatchBary1.z;
             const float2 patchUv2 = heightUv0 * sourcePatchBary2.x + heightUv1 * sourcePatchBary2.y + heightUv2 * sourcePatchBary2.z;
-            float3 terrainDpdxWS = 0.0f.xxx;
-            float3 terrainDpdyWS = 0.0f.xxx;
-            const bool useTerrainDerivatives = ReyesEstimateTerrainDerivativesFromPatch(
-                reyesCamera,
-                mul(float4(patchPos0, 1.0f), obj.model).xyz,
-                mul(float4(patchPos1, 1.0f), obj.model).xyz,
-                mul(float4(patchPos2, 1.0f), obj.model).xyz,
-                terrainDpdxWS,
-                terrainDpdyWS);
             const float3 patchPos0WS = mul(float4(patchPos0, 1.0f), obj.model).xyz;
             const float3 patchPos1WS = mul(float4(patchPos1, 1.0f), obj.model).xyz;
             const float3 patchPos2WS = mul(float4(patchPos2, 1.0f), obj.model).xyz;
-            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchPos0WS, patchNormal0, patchUv0, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
-            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchPos1WS, patchNormal1, patchUv1, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
-            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchPos2WS, patchNormal2, patchUv2, reyesCamera, patchDepth, useTerrainDerivatives, terrainDpdxWS, terrainDpdyWS, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            float2 dUVdx = 0.0f.xx;
+            float2 dUVdy = 0.0f.xx;
+            const bool useUvDerivatives = ReyesEstimateUvDerivativesFromPatch(
+                reyesCamera,
+                patchPos0WS,
+                patchPos1WS,
+                patchPos2WS,
+                patchUv0,
+                patchUv1,
+                patchUv2,
+                dUVdx,
+                dUVdy);
+            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchPos0WS, patchNormal0, patchUv0, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchPos1WS, patchNormal1, patchUv1, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchPos2WS, patchNormal2, patchUv2, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
         }
 
         evalPos0 = patchPos0;
