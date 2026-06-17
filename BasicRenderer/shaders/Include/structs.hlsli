@@ -185,7 +185,9 @@ struct CullingCameraInfo
     float zNear;
     float errorOverDistanceThreshold; // Threshold for (error * scale) / distance metric
     uint isOrtho;
-    float3 pad;
+    float viewportWidth;
+    float viewportHeight;
+    float reyesDiceRatePixels;
     float4 viewRightWorld;
     float4 viewUpWorld;
     float4 viewForwardWorld;

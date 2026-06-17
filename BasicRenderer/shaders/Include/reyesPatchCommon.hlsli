@@ -20,6 +20,16 @@ static const uint CLodReyesHardwareRasterPackedEntryCount = 5u;
 static const uint CLodReyesHardwareRasterMaxPackedMicroTriangles =
     CLodReyesHardwareRasterPackedEntryCount * CLodReyesRasterBatchMicroTriangleCount;
 
+float ReyesViewportHeightPixels(CullingCameraInfo camera)
+{
+    return camera.viewportHeight > 0.0f ? camera.viewportHeight : REYES_SCREEN_SCALE_REFERENCE;
+}
+
+float ReyesDiceRatePixels(CullingCameraInfo camera)
+{
+    return camera.reyesDiceRatePixels > 0.0f ? camera.reyesDiceRatePixels : REYES_DICE_RATE_PIXELS;
+}
+
 float3 ReyesComputeVisibilityEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
 {
     const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
@@ -30,7 +40,7 @@ float3 ReyesComputeVisibilityEdgeTessFactors(float3 worldPosition0, float3 world
     const float edge12 = length(worldPosition1 - worldPosition2);
     const float edge20 = length(worldPosition2 - worldPosition0);
 
-    const float scale = camera.projY * REYES_SCREEN_SCALE_REFERENCE * REYES_PROJECTED_PIXEL_TO_TESS_FACTOR_SCALE;
+    const float scale = camera.projY * ReyesViewportHeightPixels(camera) * (0.5f / ReyesDiceRatePixels(camera));
     return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
 }
 
@@ -573,13 +583,13 @@ float ReyesGeometricDisplacementMagnitude(MaterialEvalInfo materialInfo)
 
 float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
 {
-    const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * REYES_SCREEN_SCALE_REFERENCE);
+    const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * ReyesViewportHeightPixels(camera));
     if (camera.isOrtho != 0u)
     {
-        return REYES_DICE_RATE_PIXELS / max(projectionScale, 1.0e-5f);
+        return ReyesDiceRatePixels(camera) / max(projectionScale, 1.0e-5f);
     }
 
-    return REYES_DICE_RATE_PIXELS * max(depth, max(camera.zNear, 1.0e-3f)) / projectionScale;
+    return ReyesDiceRatePixels(camera) * max(depth, max(camera.zNear, 1.0e-3f)) / projectionScale;
 }
 
 float ReyesEstimatePointDepth(CullingCameraInfo camera, float3 positionWS)
@@ -614,9 +624,10 @@ float2 ReyesProjectToReferencePixel(CullingCameraInfo camera, float3 positionWS,
     valid = abs(clip.w) > 1.0e-5f;
     const float2 ndc = valid ? clip.xy / clip.w : 0.0f.xx;
     const float aspect = max(abs(camera.projY / max(camera.projX, 1.0e-5f)), 1.0e-5f);
+    const float viewportHeight = ReyesViewportHeightPixels(camera);
     return float2(
-        (ndc.x * 0.5f + 0.5f) * REYES_SCREEN_SCALE_REFERENCE * aspect,
-        (0.5f - ndc.y * 0.5f) * REYES_SCREEN_SCALE_REFERENCE);
+        (ndc.x * 0.5f + 0.5f) * viewportHeight * aspect,
+        (0.5f - ndc.y * 0.5f) * viewportHeight);
 }
 
 bool ReyesEstimateFloat2DerivativesFromPatch(

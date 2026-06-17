@@ -1843,6 +1843,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             reyesCamera.projY = cam.projection._22;
             reyesCamera.zNear = cam.zNear;
             reyesCamera.isOrtho = cam.isOrtho ? 1u : 0u;
+            reyesCamera.viewportWidth = float(cam.depthResX);
+            reyesCamera.viewportHeight = float(cam.depthResY);
+            reyesCamera.reyesDiceRatePixels = 1.0f;
             reyesCamera.viewRightWorld = float4(cam.viewInverse._11, cam.viewInverse._12, cam.viewInverse._13, 0.0f);
             reyesCamera.viewUpWorld = float4(cam.viewInverse._21, cam.viewInverse._22, cam.viewInverse._23, 0.0f);
             reyesCamera.viewForwardWorld = float4(cam.viewInverse._31, cam.viewInverse._32, cam.viewInverse._33, 0.0f);

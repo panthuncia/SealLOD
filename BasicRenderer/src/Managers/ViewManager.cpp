@@ -13,6 +13,7 @@
 #include "../../generated/BuiltinResources.h"
 #include "Resources/DynamicResource.h"
 #include "Resources/MemoryStatisticsComponents.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 
 namespace
 {
@@ -62,6 +63,9 @@ namespace
         cullInfo.zNear = cameraInfo.zNear;
         cullInfo.errorOverDistanceThreshold = ComputeErrorOverDistanceThreshold(cameraInfo, kClusterLodErrorPixels);
         cullInfo.isOrtho = cameraInfo.isOrtho;
+        cullInfo.viewportWidth = static_cast<float>(cameraInfo.depthResX);
+        cullInfo.viewportHeight = static_cast<float>(cameraInfo.depthResY);
+        cullInfo.reyesDiceRatePixels = CLodReyesDiceRatePixels();
         DirectX::XMStoreFloat4(&cullInfo.viewRightWorld, DirectX::XMVectorSetW(cameraInfo.viewInverse.r[0], 0.0f));
         DirectX::XMStoreFloat4(&cullInfo.viewUpWorld, DirectX::XMVectorSetW(cameraInfo.viewInverse.r[1], 0.0f));
         DirectX::XMStoreFloat4(&cullInfo.viewForwardWorld, DirectX::XMVectorSetW(DirectX::XMVectorNegate(cameraInfo.viewInverse.r[2]), 0.0f));

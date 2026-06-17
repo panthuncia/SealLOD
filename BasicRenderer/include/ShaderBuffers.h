@@ -49,7 +49,9 @@ struct CullingCameraInfo {
     float zNear = 0.0f;
     float errorOverDistanceThreshold = 0.0f; // Threshold for (error * scale) / distance metric
     unsigned int isOrtho = 0;
-    float pad[3] = {};
+    float viewportWidth = 0.0f;
+    float viewportHeight = 0.0f;
+    float reyesDiceRatePixels = 1.0f;
     DirectX::XMFLOAT4 viewRightWorld;
     DirectX::XMFLOAT4 viewUpWorld;
     DirectX::XMFLOAT4 viewForwardWorld;

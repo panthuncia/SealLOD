@@ -20,6 +20,7 @@ inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNo
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
 inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodReyesTerrainNormalMipBias";
+inline constexpr const char* CLodReyesDiceRatePixelsSettingName = "clodReyesDiceRatePixels";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodWorkGraphReyesVisibilitySettingName = "clodWorkGraphReyesVisibility";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
@@ -49,6 +50,9 @@ inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSet
 inline constexpr float CLodReyesTerrainNormalBlendDefault = 0.35f;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasDefault = 2u;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasMax = 8u;
+inline constexpr float CLodReyesDiceRatePixelsDefault = 1.0f;
+inline constexpr float CLodReyesDiceRatePixelsMin = 0.125f;
+inline constexpr float CLodReyesDiceRatePixelsMax = 8.0f;
 
 inline bool CLodReyesUseNormalMaps()
 {
@@ -68,6 +72,14 @@ inline uint32_t CLodReyesTerrainNormalMipBias()
     return std::min(
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodReyesTerrainNormalMipBiasSettingName)(),
         CLodReyesTerrainNormalMipBiasMax);
+}
+
+inline float CLodReyesDiceRatePixels()
+{
+    return std::clamp(
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesDiceRatePixelsSettingName)(),
+        CLodReyesDiceRatePixelsMin,
+        CLodReyesDiceRatePixelsMax);
 }
 inline constexpr const char* CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName = "clodDirectionalVirtualShadowMaxPhysicalPages";
 inline constexpr const char* CLodDirectionalVirtualShadowLodBiasSettingName = "clodDirectionalVirtualShadowLodBias";
