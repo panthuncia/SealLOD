@@ -139,6 +139,10 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 	perFrameCBData.terrainRvtDebugView =
 		SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtDebugView")();
 	perFrameCBData.terrainRvtTelemetryEnabled = IsTerrainRvtTelemetryDebugEnabled() ? 1u : 0u;
+	perFrameCBData.terrainReyesDisplacementScale =
+		SettingsManager::GetInstance().getSettingGetter<float>("terrainReyesDisplacementGlobalScale")();
+	perFrameCBData.objectReyesDisplacementScale =
+		SettingsManager::GetInstance().getSettingGetter<float>("objectReyesDisplacementScale")();
 	if (TerrainParallaxDiagnosticsEnabled()) {
 		static std::atomic_bool logged{ false };
 		bool expected = false;

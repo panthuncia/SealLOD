@@ -1715,6 +1715,7 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
         inputs.terrainRvtHeightScale = rvtSample.heightScale;
+        inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS));
         inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
     }
@@ -2042,6 +2043,7 @@ void ApplyTerrainMaterialInternal(
     inputs.emissive = 0.0f.xxx;
     inputs.glintEnabled = glintEnabled;
     inputs.glintParameters = glintParameters;
+    inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS));
 }
 
 void ApplyTerrainMaterial(

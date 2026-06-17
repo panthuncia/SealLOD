@@ -462,6 +462,7 @@ void InitializeMaterialSelectedMipDebug(inout MaterialInputs materialInputs)
     materialInputs.terrainRvtSampleNormal = 0.0f.xxx;
     materialInputs.terrainRvtSampleMaterial = 0.0f.xxx;
     materialInputs.terrainRvtHeightScale = 0.0f;
+    materialInputs.geometricHeightDebug = 0.0f;
     materialInputs.glintEnabled = 0u;
     materialInputs.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
 }
@@ -1121,7 +1122,7 @@ bool MaterialSlotEnabled(MaterialInfo materialInfo, uint materialFlags, Material
     case MATERIAL_TEXTURE_SLOT_EMISSIVE:
         return (materialFlags & MATERIAL_EMISSIVE_TEXTURE) != 0u;
     case MATERIAL_TEXTURE_SLOT_HEIGHT:
-        return (materialFlags & MATERIAL_PARALLAX) != 0u &&
+        return (materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u &&
             (((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u) || ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u));
     default:
         return false;
@@ -1359,7 +1360,7 @@ MaterialUvBindings BuildMaterialUvBindings(MaterialInfo materialInfo, uint mater
         bindings.hasTbnSource = bindings.tbnCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
-    if ((materialFlags & MATERIAL_PARALLAX) != 0u)
+    if ((materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u)
     {
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
@@ -1441,6 +1442,106 @@ void AppendOpenPBRForwardUvSamples(
     inout MaterialUvCache cache,
     in VisBufferPSInput input,
     in OpenPBRMaterialInfo openPBRMaterialInfo);
+
+float SampleMaterialGeometricHeightDebug(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    bool hasParallaxResolvedUv,
+    float2 parallaxUv,
+    float2 parallaxDUdx,
+    float2 parallaxDUdy,
+    inout MaterialInputs materialInputs)
+{
+    if (!uvBindings.hasHeightSource)
+    {
+        return 0.0f;
+    }
+
+    MaterialUvSample heightUv = ResolveMaterialUvSample(
+        uvCache,
+        uvBindings,
+        MATERIAL_TEXTURE_SLOT_HEIGHT,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+    {
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.baseColorStreamingTextureID,
+            heightUv.uv,
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).a);
+    }
+
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    return saturate(DynamicSwizzle(SampleMaterialTexture2DGrad(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        heightUv.uv,
+        heightUv.dUVdx,
+        heightUv.dUVdy,
+        materialInputs), materialInfo.heightChannel));
+}
+
+float SampleMaterialGeometricHeightDebug(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in MaterialEvalInfo materialInfo,
+    in uint materialFlags,
+    bool hasParallaxResolvedUv,
+    float2 parallaxUv,
+    float2 parallaxDUdx,
+    float2 parallaxDUdy,
+    inout MaterialInputs materialInputs)
+{
+    if (!uvBindings.hasHeightSource)
+    {
+        return 0.0f;
+    }
+
+    MaterialUvSample heightUv = ResolveMaterialUvSample(
+        uvCache,
+        uvBindings,
+        MATERIAL_TEXTURE_SLOT_HEIGHT,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy);
+    if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
+    {
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorTextureIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.baseColorStreamingTextureID,
+            heightUv.uv,
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).a);
+    }
+
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    return saturate(DynamicSwizzle(SampleMaterialTexture2DGrad(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        heightUv.uv,
+        heightUv.dUVdx,
+        heightUv.dUVdy,
+        materialInputs), materialInfo.heightChannel));
+}
 
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
 void BuildForwardTransparentMaterialUvData(
@@ -1643,7 +1744,7 @@ void BuildForwardTransparentMaterialUvData(
         bindings.hasTbnSource = bindings.tbnCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
-    if ((materialFlags & MATERIAL_PARALLAX) != 0u)
+    if ((materialFlags & (MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT)) != 0u)
     {
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
@@ -2017,6 +2118,16 @@ void SampleMaterialFromUvCache(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
@@ -2266,6 +2377,16 @@ void SampleMaterialEvalFromUvCache(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
@@ -2540,6 +2661,16 @@ void SampleMaterialFromUvCacheRuntime(
         openPBRSurface,
         ret);
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+    ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
+        uvCache,
+        uvBindings,
+        materialInfo,
+        materialFlags,
+        hasParallaxResolvedUv,
+        parallaxUv,
+        parallaxDUdx,
+        parallaxDUdy,
+        ret);
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
@@ -2992,6 +3123,7 @@ void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialIn
     ret.parallaxApplied = materialInfo.parallaxApplied;
     ret.glintEnabled = materialInfo.glintEnabled;
     ret.glintParameters = materialInfo.glintParameters;
+    ret.geometricHeightDebug = materialInfo.geometricHeightDebug;
     float perceptualRoughness = materialInfo.roughness;
     ret.perceptualRoughnessUnclamped = perceptualRoughness;
     // Clamp the roughness to a minimum value to avoid divisions by 0 during lighting

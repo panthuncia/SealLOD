@@ -112,6 +112,9 @@ struct PerFrameCB {
     unsigned int terrainRvtForceDirectFallback = 0u;
     unsigned int terrainRvtDebugView = 0u;
     unsigned int terrainRvtTelemetryEnabled = 0u;
+    float terrainReyesDisplacementScale = 8.0f;
+    float objectReyesDisplacementScale = 1.0f;
+    uint32_t reyesDisplacementScalePad = 0u;
 };
 
 static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 124, "PerFrameCB layout mismatch.");
@@ -126,6 +129,8 @@ static_assert(offsetof(PerFrameCB, terrainRvtEnabled) == 164, "PerFrameCB layout
 static_assert(offsetof(PerFrameCB, terrainRvtForceDirectFallback) == 168, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainRvtDebugView) == 172, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 176, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 180, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 184, "PerFrameCB layout mismatch.");
 static_assert(sizeof(PerFrameCB) == 192, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)

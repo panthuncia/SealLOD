@@ -756,9 +756,12 @@ private:
     bool m_terrainReyesDisplacementEnabled = true;
     std::function<bool()> getTerrainReyesDisplacementEnabled;
     std::function<void(bool)> setTerrainReyesDisplacementEnabled;
-    float m_terrainReyesDisplacementScale = 32.0f;
+    float m_terrainReyesDisplacementScale = 1.0f;
     std::function<float()> getTerrainReyesDisplacementScale;
     std::function<void(float)> setTerrainReyesDisplacementScale;
+    float m_objectReyesDisplacementScale = 1.0f;
+    std::function<float()> getObjectReyesDisplacementScale;
+    std::function<void(float)> setObjectReyesDisplacementScale;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1402,10 +1405,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainReyesDisplacementEnabled = settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement");
     m_terrainReyesDisplacementEnabled = getTerrainReyesDisplacementEnabled();
     observerSetting(m_terrainReyesDisplacementEnabled, "enableTerrainReyesDisplacement");
-    setTerrainReyesDisplacementScale = settingsManager.getSettingSetter<float>("terrainReyesDisplacementScale");
-    getTerrainReyesDisplacementScale = settingsManager.getSettingGetter<float>("terrainReyesDisplacementScale");
+    setTerrainReyesDisplacementScale = settingsManager.getSettingSetter<float>("terrainReyesDisplacementGlobalScale");
+    getTerrainReyesDisplacementScale = settingsManager.getSettingGetter<float>("terrainReyesDisplacementGlobalScale");
     m_terrainReyesDisplacementScale = getTerrainReyesDisplacementScale();
-    observerSetting(m_terrainReyesDisplacementScale, "terrainReyesDisplacementScale");
+    observerSetting(m_terrainReyesDisplacementScale, "terrainReyesDisplacementGlobalScale");
+    setObjectReyesDisplacementScale = settingsManager.getSettingSetter<float>("objectReyesDisplacementScale");
+    getObjectReyesDisplacementScale = settingsManager.getSettingGetter<float>("objectReyesDisplacementScale");
+    m_objectReyesDisplacementScale = getObjectReyesDisplacementScale();
+    observerSetting(m_objectReyesDisplacementScale, "objectReyesDisplacementScale");
     setTerrainParallaxHeightScale = settingsManager.getSettingSetter<float>("terrainParallaxHeightScale");
     getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
     m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
@@ -2136,9 +2143,13 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Terrain Reyes Displacement", &m_terrainReyesDisplacementEnabled)) {
             setTerrainReyesDisplacementEnabled(m_terrainReyesDisplacementEnabled);
         }
-        if (ImGui::SliderFloat("Terrain Reyes Displacement Scale", &m_terrainReyesDisplacementScale, 0.0f, 256.0f, "%.1f")) {
+        if (ImGui::SliderFloat("Terrain Reyes Displacement Global Scale", &m_terrainReyesDisplacementScale, 0.0f, 16.0f, "%.2f")) {
             m_terrainReyesDisplacementScale = std::max(0.0f, m_terrainReyesDisplacementScale);
             setTerrainReyesDisplacementScale(m_terrainReyesDisplacementScale);
+        }
+        if (ImGui::SliderFloat("Object Reyes Displacement Global Scale", &m_objectReyesDisplacementScale, 0.0f, 16.0f, "%.2f")) {
+            m_objectReyesDisplacementScale = std::max(0.0f, m_objectReyesDisplacementScale);
+            setObjectReyesDisplacementScale(m_objectReyesDisplacementScale);
         }
         if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
             setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);

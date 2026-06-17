@@ -1568,6 +1568,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
+    settingsManager.registerSetting<float>("terrainReyesDisplacementGlobalScale", 1.0f);
+    settingsManager.registerSetting<float>("objectReyesDisplacementScale", 1.0f);
     settingsManager.getSettingSetter<float>("terrainRvtMipOffset")(
         settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement")() ? 0.0f : -1.6f);
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(

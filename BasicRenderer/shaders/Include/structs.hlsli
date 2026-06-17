@@ -237,6 +237,9 @@ struct PerFrameBuffer {
     uint terrainRvtForceDirectFallback;
     uint terrainRvtDebugView;
     uint terrainRvtTelemetryEnabled;
+    float terrainReyesDisplacementScale;
+    float objectReyesDisplacementScale;
+    uint reyesDisplacementScalePad;
 };
 
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
@@ -910,6 +913,7 @@ struct FragmentInfo {
     uint selectedMaterialMipMaxLevel;
     uint parallaxApplied;
     uint glintEnabled;
+    float geometricHeightDebug;
     float4 glintParameters;
 };
 
@@ -973,6 +977,7 @@ struct MaterialInputs
     float3 terrainRvtSampleNormal;
     float3 terrainRvtSampleMaterial;
     float terrainRvtHeightScale;
+    float geometricHeightDebug;
     uint glintEnabled;
     float4 glintParameters;
 };

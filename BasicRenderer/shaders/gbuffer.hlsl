@@ -81,6 +81,9 @@ void EvaluateGBufferOptimized(uint2 pixel)
         case OUTPUT_AO:
             payload = PackDebugFloat3(sample.materialInputs.ambientOcclusion.xxx);
             break;
+        case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+            payload = PackDebugFloat3(sample.materialInputs.geometricHeightDebug.xxx);
+            break;
         case OUTPUT_MESHLETS:
             payload = PackDebugUint(sample.meshletIndex);
             break;

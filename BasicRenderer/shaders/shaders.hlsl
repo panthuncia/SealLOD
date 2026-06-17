@@ -254,6 +254,9 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
             case OUTPUT_AO:
                 payload = PackDebugFloat3(fragmentInfo.diffuseAmbientOcclusion.xxx);
                 break;
+            case OUTPUT_TERRAIN_GEOMETRIC_HEIGHT:
+                payload = PackDebugFloat3(fragmentInfo.geometricHeightDebug.xxx);
+                break;
             case OUTPUT_DEPTH: {
                 float depth = abs(input.positionViewSpace.z) * 0.1;
                 payload = PackDebugFloat3(depth.xxx);

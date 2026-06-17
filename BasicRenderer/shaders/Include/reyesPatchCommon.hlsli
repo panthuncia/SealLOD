@@ -485,6 +485,24 @@ float2 ReyesInterpolateFloat2Precise(float2 value0, float2 value1, float2 value2
     return result;
 }
 
+float ReyesGeometricDisplacementGlobalScale(uint materialFlags)
+{
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    return (materialFlags & MATERIAL_TERRAIN) != 0u
+        ? max(perFrameBuffer.terrainReyesDisplacementScale, 0.0f)
+        : max(perFrameBuffer.objectReyesDisplacementScale, 0.0f);
+}
+
+float ReyesGeometricDisplacementGlobalScale(MaterialInfo materialInfo)
+{
+    return ReyesGeometricDisplacementGlobalScale(materialInfo.materialFlags);
+}
+
+float ReyesGeometricDisplacementGlobalScale(MaterialEvalInfo materialInfo)
+{
+    return ReyesGeometricDisplacementGlobalScale(materialInfo.materialFlags);
+}
+
 float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
 {
     const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * REYES_SCREEN_SCALE_REFERENCE);
@@ -709,7 +727,9 @@ float ReyesSampleDisplacementOffset(
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    const float displacementOffset =
+        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -725,6 +745,7 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeEndDistance)
 {
     const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
@@ -751,7 +772,9 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useTerrainDerivatives,
         terrainDpdxWS,
-        terrainDpdyWS) * CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+        terrainDpdyWS) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -774,13 +797,16 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useTerrainDerivatives,
         terrainDpdxWS,
-        terrainDpdyWS);
+        terrainDpdyWS) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
 float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
+    const float displacementOffset =
+        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -796,6 +822,7 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeEndDistance)
 {
     const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
@@ -822,7 +849,9 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useTerrainDerivatives,
         terrainDpdxWS,
-        terrainDpdyWS) * CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
+        terrainDpdyWS) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo) *
+        CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -845,7 +874,8 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useTerrainDerivatives,
         terrainDpdxWS,
-        terrainDpdyWS);
+        terrainDpdyWS) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -885,7 +915,9 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
+    const float displacementOffset =
+        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
@@ -966,10 +998,13 @@ void ReyesEvaluateDisplacedPatchTriangle(
             const float3 patchPosition1WS = mul(float4(patchPosition1, 1.0f), objectModelMatrix).xyz;
             const float3 patchPosition2WS = mul(float4(patchPosition2, 1.0f), objectModelMatrix).xyz;
             patchPosition0 += patchNormal0 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height0)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
                 CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition0WS);
             patchPosition1 += patchNormal1 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height1)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
                 CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition1WS);
             patchPosition2 += patchNormal2 * lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, saturate(height2)) *
+                ReyesGeometricDisplacementGlobalScale(materialInfo) *
                 CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, patchPosition2WS);
         }
         else
