@@ -774,56 +774,29 @@ bool TerrainRvtTryResolveHeightResident(
     residentAddress.pageTableIndex = requestedPageTableIndex;
     physicalPageIndex = 0u;
 
-    bool residentHit = false;
-    if (requestedPageTableIndex < ctx.info.maxVirtualPageTableEntries)
-    {
-        StructuredBuffer<TerrainRvtHeightResidentCacheEntry> heightResidentCache =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightResidentCache)];
-        const TerrainRvtHeightResidentCacheEntry cachedResident = heightResidentCache[requestedPageTableIndex];
-        const bool cacheMatchesRequest =
-            cachedResident.requestedTerrainSetIndex == ctx.terrainSetIndex &&
-            cachedResident.requestedClipLevel == mip &&
-            cachedResident.requestedPageX == requestedPageCoord.x &&
-            cachedResident.requestedPageY == requestedPageCoord.y;
-        if (cacheMatchesRequest)
-        {
-            if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_MISSING)
-            {
-                TerrainRvtRecordHeightPageMiss(requestedPageTableIndex, telemetryEnabled);
-                return false;
-            }
-            if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT ||
-                cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_COARSER)
-            {
-                residentAddress.terrainSetIndex = ctx.terrainSetIndex;
-                residentAddress.clipLevel = cachedResident.residentClipLevel;
-                residentAddress.pageCoord = uint2(cachedResident.residentPageX, cachedResident.residentPageY);
-                residentAddress.pageTableIndex = cachedResident.residentPageTableIndex;
-                physicalPageIndex = cachedResident.physicalPageIndex;
-
-                if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT)
-                {
-                    residentAddress.pageUv = requestedPageUv;
-                    residentHit = true;
-                }
-                else
-                {
-                    residentAddress.pageUv = TerrainRvtCoarserPageUv(
-                        mip,
-                        cachedResident.residentClipLevel,
-                        requestedPageCoord,
-                        requestedPageUv);
-                    residentHit = true;
-                }
-            }
-        }
-    }
-
-    if (!residentHit)
+    if (requestedPageTableIndex >= ctx.info.maxVirtualPageTableEntries)
     {
         TerrainRvtRecordHeightPageMiss(requestedPageTableIndex, telemetryEnabled);
         return false;
     }
+
+    StructuredBuffer<TerrainRvtHeightResidentCacheEntry> heightResidentCache =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightResidentCache)];
+    const TerrainRvtHeightResidentCacheEntry cachedResident = heightResidentCache[requestedPageTableIndex];
+    if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_MISSING)
+    {
+        TerrainRvtRecordHeightPageMiss(requestedPageTableIndex, telemetryEnabled);
+        return false;
+    }
+
+    const bool directResident = cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT;
+    residentAddress.clipLevel = cachedResident.residentClipLevel;
+    residentAddress.pageCoord = uint2(cachedResident.residentPageX, cachedResident.residentPageY);
+    residentAddress.pageTableIndex = cachedResident.residentPageTableIndex;
+    residentAddress.pageUv = directResident
+        ? requestedPageUv
+        : TerrainRvtCoarserPageUv(mip, cachedResident.residentClipLevel, requestedPageCoord, requestedPageUv);
+    physicalPageIndex = cachedResident.physicalPageIndex;
 #if TERRAIN_RVT_VALIDATE_SAMPLE_OWNER
     if (!TerrainRvtValidatePhysicalOwner(physicalPageIndex, residentAddress.pageTableIndex))
     {

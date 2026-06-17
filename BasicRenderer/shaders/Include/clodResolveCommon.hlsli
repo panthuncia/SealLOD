@@ -1880,9 +1880,27 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
                 patchUv2,
                 dUVdx,
                 dUVdy);
-            patchPos0 = ReyesApplyGeometricDisplacement(materialInfo, patchPos0, patchPos0WS, patchNormal0, patchUv0, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
-            patchPos1 = ReyesApplyGeometricDisplacement(materialInfo, patchPos1, patchPos1WS, patchNormal1, patchUv1, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
-            patchPos2 = ReyesApplyGeometricDisplacement(materialInfo, patchPos2, patchPos2WS, patchNormal2, patchUv2, reyesCamera, patchDepth, useUvDerivatives, dUVdx, dUVdy, perFrame.heightFadeStartDistance, perFrame.heightFadeEndDistance);
+            ReyesApplyGeometricDisplacement3(
+                materialInfo,
+                patchPos0,
+                patchPos1,
+                patchPos2,
+                patchPos0WS,
+                patchPos1WS,
+                patchPos2WS,
+                patchNormal0,
+                patchNormal1,
+                patchNormal2,
+                patchUv0,
+                patchUv1,
+                patchUv2,
+                reyesCamera,
+                patchDepth,
+                useUvDerivatives,
+                dUVdx,
+                dUVdy,
+                perFrame.heightFadeStartDistance,
+                perFrame.heightFadeEndDistance);
         }
 
         evalPos0 = patchPos0;
