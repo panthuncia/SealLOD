@@ -393,29 +393,6 @@ void TerrainRvtComputePageInClipInfoLocalUnchecked(
     pageTableIndex = TerrainRvtPageTableSlot(clipInfo, pageCoord);
 }
 
-bool TerrainRvtTryValidateComputedPageInClip(
-    TerrainRvtInfo info,
-    TerrainRvtClipInfo clipInfo,
-    uint2 pageCoord,
-    out uint pageTableIndex)
-{
-    pageTableIndex = 0xffffffffu;
-    if (clipInfo.valid == 0u || clipInfo.tableResolution == 0u)
-    {
-        return false;
-    }
-    if (any(pageCoord >= clipInfo.terrainPageCount) ||
-        any(pageCoord < clipInfo.originPage) ||
-        pageCoord.x >= clipInfo.originPage.x + clipInfo.tableResolution ||
-        pageCoord.y >= clipInfo.originPage.y + clipInfo.tableResolution)
-    {
-        return false;
-    }
-
-    pageTableIndex = TerrainRvtPageTableSlot(clipInfo, pageCoord);
-    return pageTableIndex < info.maxVirtualPageTableEntries;
-}
-
 bool TerrainRvtTryComputePageLocal(
     uint terrainSetIndex,
     TerrainRvtInfo info,
@@ -635,6 +612,13 @@ void TerrainRvtPhysicalPageUv(
     TerrainRvtPhysicalPageAtlasUv(atlasContext, pageUv, atlasUv);
 }
 
+float2 TerrainRvtCoarserPageUv(uint requestedMip, uint residentMip, uint2 requestedPageCoord, float2 requestedPageUv)
+{
+    const uint mipDelta = min(residentMip - requestedMip, 31u);
+    const float2 residentPageFloat = ((float2)requestedPageCoord + requestedPageUv) / exp2((float)mipDelta);
+    return residentPageFloat - floor(residentPageFloat);
+}
+
 float2 TerrainRvtPhysicalTileUv(TerrainRvtInfo info, float2 pageUv)
 {
     return ((float)info.borderTexels + pageUv * (float)max(info.pageSize, 1u)) /
@@ -648,17 +632,7 @@ bool TerrainRvtValidatePhysicalOwner(uint physicalPageIndex, uint pageTableIndex
     return (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
 }
 
-bool TerrainRvtTryFindCoarserResidentFromLocal(
-    uint terrainSetIndex,
-    TerrainRvtInfo info,
-    uint terrainClipCount,
-    uint requestedMip,
-    float2 local,
-    uint requiredContentMask,
-    out TerrainRvtAddress residentAddress,
-    out uint physicalPageIndex);
-
-bool TerrainRvtTryFindCoarserResidentFromPageLocal(
+bool TerrainRvtTryResolveCoarserResidentPage(
     uint terrainSetIndex,
     TerrainRvtInfo info,
     uint terrainClipCount,
@@ -674,53 +648,17 @@ bool TerrainRvtTryFindCoarserResidentFromPageLocal(
     physicalPageIndex = 0u;
 
     StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
-    const TerrainRvtClipInfo requestedClipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, requestedMip)];
-    if (requestedClipInfo.valid == 0u || requestedClipInfo.pageWorldSize <= 0.0f)
-    {
-        return false;
-    }
-
-    const float2 local = ((float2)requestedPageCoord + requestedPageUv) * requestedClipInfo.pageWorldSize;
-    return TerrainRvtTryFindCoarserResidentFromLocal(
-        terrainSetIndex,
-        info,
-        terrainClipCount,
-        requestedMip,
-        local,
-        requiredContentMask,
-        residentAddress,
-        physicalPageIndex);
-}
-
-bool TerrainRvtTryFindCoarserResidentFromLocal(
-    uint terrainSetIndex,
-    TerrainRvtInfo info,
-    uint terrainClipCount,
-    uint requestedMip,
-    float2 local,
-    uint requiredContentMask,
-    out TerrainRvtAddress residentAddress,
-    out uint physicalPageIndex)
-{
-    residentAddress = (TerrainRvtAddress)0;
-    residentAddress.pageTableIndex = 0xffffffffu;
-    physicalPageIndex = 0u;
-
-    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
     [loop]
     for (uint sampleMip = requestedMip + 1u; sampleMip < terrainClipCount; ++sampleMip)
     {
-        uint2 pageCoord;
-        float2 pageUv;
-        uint pageTableIndex;
+        const uint mipDelta = min(sampleMip - requestedMip, 31u);
+        const float scale = exp2((float)mipDelta);
+        const float2 pageFloat = ((float2)requestedPageCoord + requestedPageUv) / scale;
+        const uint2 pageCoord = (uint2)pageFloat;
+        const float2 pageUv = pageFloat - (float2)pageCoord;
         const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, sampleMip)];
-        if (!TerrainRvtTryComputePageInClipInfoLocal(
-            info,
-            clipInfo,
-            local,
-            pageCoord,
-            pageUv,
-            pageTableIndex))
+        const uint pageTableIndex = TerrainRvtPageTableSlot(clipInfo, pageCoord);
+        if (pageTableIndex >= info.maxVirtualPageTableEntries)
         {
             continue;
         }
@@ -737,9 +675,56 @@ bool TerrainRvtTryFindCoarserResidentFromLocal(
     return false;
 }
 
+bool TerrainRvtTryResolveResidentPage(
+    uint terrainSetIndex,
+    TerrainRvtInfo info,
+    uint terrainClipCount,
+    uint requestedMip,
+    uint2 requestedPageCoord,
+    float2 requestedPageUv,
+    uint requestedPageTableIndex,
+    uint requiredContentMask,
+    out TerrainRvtAddress residentAddress,
+    out uint physicalPageIndex)
+{
+    residentAddress = (TerrainRvtAddress)0;
+    residentAddress.terrainSetIndex = terrainSetIndex;
+    residentAddress.clipLevel = requestedMip;
+    residentAddress.pageCoord = requestedPageCoord;
+    residentAddress.pageUv = requestedPageUv;
+    residentAddress.pageTableIndex = requestedPageTableIndex;
+    physicalPageIndex = 0u;
+
+    if (TerrainRvtLookupResidentPage(
+            terrainSetIndex,
+            requestedMip,
+            requestedPageCoord,
+            requestedPageTableIndex,
+            requiredContentMask,
+            physicalPageIndex))
+    {
+        return true;
+    }
+
+#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
+    return TerrainRvtTryResolveCoarserResidentPage(
+        terrainSetIndex,
+        info,
+        terrainClipCount,
+        requestedMip,
+        requestedPageCoord,
+        requestedPageUv,
+        requiredContentMask,
+        residentAddress,
+        physicalPageIndex);
+#else
+    return false;
+#endif
+}
+
 void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask);
 
-void TerrainRvtRecordHeightComputedPageTelemetry(
+void TerrainRvtRecordHeightPageTelemetry(
     uint mip,
     uint requestedPageTableIndex,
     bool telemetryEnabled)
@@ -775,14 +760,11 @@ bool TerrainRvtTryResolveHeightResident(
     uint2 requestedPageCoord,
     float2 requestedPageUv,
     uint requestedPageTableIndex,
-    bool skipDirectLookup,
-    bool hasLocal,
-    float2 local,
     bool telemetryEnabled,
     out TerrainRvtAddress residentAddress,
     out uint physicalPageIndex)
 {
-    TerrainRvtRecordHeightComputedPageTelemetry(mip, requestedPageTableIndex, telemetryEnabled);
+    TerrainRvtRecordHeightPageTelemetry(mip, requestedPageTableIndex, telemetryEnabled);
 
     residentAddress = (TerrainRvtAddress)0;
     residentAddress.terrainSetIndex = ctx.terrainSetIndex;
@@ -793,7 +775,6 @@ bool TerrainRvtTryResolveHeightResident(
     physicalPageIndex = 0u;
 
     bool residentHit = false;
-    bool cacheMatchedRequest = false;
     if (requestedPageTableIndex < ctx.info.maxVirtualPageTableEntries)
     {
         StructuredBuffer<TerrainRvtHeightResidentCacheEntry> heightResidentCache =
@@ -806,7 +787,6 @@ bool TerrainRvtTryResolveHeightResident(
             cachedResident.requestedPageY == requestedPageCoord.y;
         if (cacheMatchesRequest)
         {
-            cacheMatchedRequest = true;
             if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_MISSING)
             {
                 TerrainRvtRecordHeightPageMiss(requestedPageTableIndex, telemetryEnabled);
@@ -828,70 +808,16 @@ bool TerrainRvtTryResolveHeightResident(
                 }
                 else
                 {
-                    StructuredBuffer<TerrainRvtClipInfo> clipInfos =
-                        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
-                    const TerrainRvtClipInfo requestedClipInfo =
-                        clipInfos[TerrainRvtClipInfoIndex(ctx.info, ctx.terrainSetIndex, mip)];
-                    const TerrainRvtClipInfo residentClipInfo =
-                        clipInfos[TerrainRvtClipInfoIndex(ctx.info, ctx.terrainSetIndex, cachedResident.residentClipLevel)];
-                    const float2 residentLocal = hasLocal
-                        ? local
-                        : ((float2)requestedPageCoord + requestedPageUv) * requestedClipInfo.pageWorldSize;
-                    uint2 cachedPageCoord;
-                    float2 cachedPageUv;
-                    uint cachedPageTableIndex;
-                    if (TerrainRvtTryComputePageInClipInfoLocal(
-                            ctx.info,
-                            residentClipInfo,
-                            residentLocal,
-                            cachedPageCoord,
-                            cachedPageUv,
-                            cachedPageTableIndex) &&
-                        cachedPageTableIndex == cachedResident.residentPageTableIndex &&
-                        all(cachedPageCoord == residentAddress.pageCoord))
-                    {
-                        residentAddress.pageUv = cachedPageUv;
-                        residentHit = true;
-                    }
+                    residentAddress.pageUv = TerrainRvtCoarserPageUv(
+                        mip,
+                        cachedResident.residentClipLevel,
+                        requestedPageCoord,
+                        requestedPageUv);
+                    residentHit = true;
                 }
             }
         }
     }
-    if (!residentHit && !cacheMatchedRequest && !skipDirectLookup)
-    {
-        residentHit = TerrainRvtLookupResidentPage(
-            ctx.terrainSetIndex,
-            mip,
-            requestedPageCoord,
-            requestedPageTableIndex,
-            TERRAIN_RVT_CONTENT_HEIGHT,
-            physicalPageIndex);
-    }
-#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
-    if (!residentHit && !cacheMatchedRequest)
-    {
-        residentHit = hasLocal
-            ? TerrainRvtTryFindCoarserResidentFromLocal(
-                ctx.terrainSetIndex,
-                ctx.info,
-                ctx.terrainClipCount,
-                mip,
-                local,
-                TERRAIN_RVT_CONTENT_HEIGHT,
-                residentAddress,
-                physicalPageIndex)
-            : TerrainRvtTryFindCoarserResidentFromPageLocal(
-                ctx.terrainSetIndex,
-                ctx.info,
-                ctx.terrainClipCount,
-                mip,
-                requestedPageCoord,
-                requestedPageUv,
-                TERRAIN_RVT_CONTENT_HEIGHT,
-                residentAddress,
-                physicalPageIndex);
-    }
-#endif
 
     if (!residentHit)
     {
@@ -936,40 +862,7 @@ bool TerrainRvtTrySampleHeightResident(
     return true;
 }
 
-bool TerrainRvtTrySampleHeightContextComputedPageLocal(
-    TerrainRvtSampleContext ctx,
-    uint mip,
-    uint2 requestedPageCoord,
-    float2 requestedPageUv,
-    uint requestedPageTableIndex,
-    float2 local,
-    bool skipDirectLookup,
-    bool telemetryEnabled,
-    out float heightValue)
-{
-    TerrainRvtAddress residentAddress;
-    uint physicalPageIndex;
-    if (!TerrainRvtTryResolveHeightResident(
-        ctx,
-        mip,
-        requestedPageCoord,
-        requestedPageUv,
-        requestedPageTableIndex,
-        skipDirectLookup,
-        true,
-        local,
-        telemetryEnabled,
-        residentAddress,
-        physicalPageIndex))
-    {
-        heightValue = 0.0f;
-        return false;
-    }
-
-    return TerrainRvtTrySampleHeightResident(ctx, residentAddress, physicalPageIndex, telemetryEnabled, heightValue);
-}
-
-bool TerrainRvtTrySampleHeightContextComputedPage(
+bool TerrainRvtTrySampleHeightPage(
     TerrainRvtSampleContext ctx,
     uint mip,
     uint2 requestedPageCoord,
@@ -986,9 +879,6 @@ bool TerrainRvtTrySampleHeightContextComputedPage(
         requestedPageCoord,
         requestedPageUv,
         requestedPageTableIndex,
-        false,
-        false,
-        0.0f.xx,
         telemetryEnabled,
         residentAddress,
         physicalPageIndex))
@@ -1000,7 +890,7 @@ bool TerrainRvtTrySampleHeightContextComputedPage(
     return TerrainRvtTrySampleHeightResident(ctx, residentAddress, physicalPageIndex, telemetryEnabled, heightValue);
 }
 
-void TerrainRvtRecordSharedHeightComputedPageTelemetry(
+void TerrainRvtRecordSharedHeightPageTelemetry(
     uint mip,
     uint pageTableIndex,
     bool telemetryEnabled)
@@ -1147,7 +1037,7 @@ void TerrainRvtTrySampleHeightContextAtClipInfo3(
         const TerrainRvtHeightResidentCacheEntry cachedResident = heightResidentCache[requestedPageTableIndex0];
         if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT)
         {
-            TerrainRvtRecordSharedHeightComputedPageTelemetry(mip, requestedPageTableIndex0, telemetryEnabled);
+            TerrainRvtRecordSharedHeightPageTelemetry(mip, requestedPageTableIndex0, telemetryEnabled);
             TerrainRvtMarkVisited(cachedResident.residentPageTableIndex);
             TerrainRvtSampleHeightResident3(
                 ctx.info,
@@ -1171,37 +1061,23 @@ void TerrainRvtTrySampleHeightContextAtClipInfo3(
         }
         if (cachedResident.status == TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_COARSER)
         {
-            StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
-            const TerrainRvtClipInfo residentClipInfo = clipInfos[TerrainRvtClipInfoIndex(ctx.info, ctx.terrainSetIndex, cachedResident.residentClipLevel)];
-            uint2 residentPageCoord0;
-            uint2 residentPageCoord1;
-            uint2 residentPageCoord2;
-            float2 residentPageUv0;
-            float2 residentPageUv1;
-            float2 residentPageUv2;
-            uint residentPageTableIndex0;
-            uint residentPageTableIndex1;
-            uint residentPageTableIndex2;
-            TerrainRvtComputePageInClipInfoLocalUnchecked(
-                residentClipInfo,
-                local0,
-                residentPageCoord0,
-                residentPageUv0,
-                residentPageTableIndex0);
-            TerrainRvtComputePageInClipInfoLocalUnchecked(
-                residentClipInfo,
-                local1,
-                residentPageCoord1,
-                residentPageUv1,
-                residentPageTableIndex1);
-            TerrainRvtComputePageInClipInfoLocalUnchecked(
-                residentClipInfo,
-                local2,
-                residentPageCoord2,
-                residentPageUv2,
-                residentPageTableIndex2);
+            const float2 residentPageUv0 = TerrainRvtCoarserPageUv(
+                mip,
+                cachedResident.residentClipLevel,
+                requestedPageCoord0,
+                requestedPageUv0);
+            const float2 residentPageUv1 = TerrainRvtCoarserPageUv(
+                mip,
+                cachedResident.residentClipLevel,
+                requestedPageCoord1,
+                requestedPageUv1);
+            const float2 residentPageUv2 = TerrainRvtCoarserPageUv(
+                mip,
+                cachedResident.residentClipLevel,
+                requestedPageCoord2,
+                requestedPageUv2);
 
-            TerrainRvtRecordSharedHeightComputedPageTelemetry(mip, requestedPageTableIndex0, telemetryEnabled);
+            TerrainRvtRecordSharedHeightPageTelemetry(mip, requestedPageTableIndex0, telemetryEnabled);
             TerrainRvtMarkVisited(cachedResident.residentPageTableIndex);
             TerrainRvtSampleHeightResident3(
                 ctx.info,
@@ -1227,40 +1103,34 @@ void TerrainRvtTrySampleHeightContextAtClipInfo3(
 
     if (computed0 && !hit0)
     {
-        hit0 = TerrainRvtTrySampleHeightContextComputedPageLocal(
+        hit0 = TerrainRvtTrySampleHeightPage(
             ctx,
             mip,
             requestedPageCoord0,
             requestedPageUv0,
             requestedPageTableIndex0,
-            local0,
-            false,
             telemetryEnabled,
             height0);
     }
     if (computed1 && !hit1)
     {
-        hit1 = TerrainRvtTrySampleHeightContextComputedPageLocal(
+        hit1 = TerrainRvtTrySampleHeightPage(
             ctx,
             mip,
             requestedPageCoord1,
             requestedPageUv1,
             requestedPageTableIndex1,
-            local1,
-            false,
             telemetryEnabled,
             height1);
     }
     if (computed2 && !hit2)
     {
-        hit2 = TerrainRvtTrySampleHeightContextComputedPageLocal(
+        hit2 = TerrainRvtTrySampleHeightPage(
             ctx,
             mip,
             requestedPageCoord2,
             requestedPageUv2,
             requestedPageTableIndex2,
-            local2,
-            false,
             telemetryEnabled,
             height2);
     }
@@ -1312,7 +1182,7 @@ bool TerrainRvtTrySampleHeightContext(
         return false;
     }
 
-    return TerrainRvtTrySampleHeightContextComputedPage(
+    return TerrainRvtTrySampleHeightPage(
         ctx,
         mip,
         requestedPageCoord,
@@ -1367,20 +1237,17 @@ bool TerrainRvtTrySampleHeightScaleFast(
     residentAddress.pageTableIndex = requestedPageTableIndex;
 
     uint physicalPageIndex = 0u;
-    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
-#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
-        && !TerrainRvtTryFindCoarserResidentFromPageLocal(
+    if (!TerrainRvtTryResolveResidentPage(
             terrainSetIndex,
             info,
             terrainClipCount,
             mip,
             requestedPageCoord,
             requestedPageUv,
+            requestedPageTableIndex,
             TERRAIN_RVT_CONTENT_MATERIAL,
             residentAddress,
-            physicalPageIndex)
-#endif
-        )
+            physicalPageIndex))
     {
         return false;
     }
@@ -1544,20 +1411,17 @@ bool TerrainRvtTrySampleMaterial(
     residentAddress.pageUv = requestedPageUv;
     residentAddress.pageTableIndex = requestedPageTableIndex;
     uint physicalPageIndex = 0u;
-    if (!TerrainRvtLookupResidentPage(terrainSetIndex, mip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
-#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
-        && !TerrainRvtTryFindCoarserResidentFromPageLocal(
+    if (!TerrainRvtTryResolveResidentPage(
             terrainSetIndex,
             info,
             terrainClipCount,
             mip,
             requestedPageCoord,
             requestedPageUv,
+            requestedPageTableIndex,
             TERRAIN_RVT_CONTENT_MATERIAL,
             residentAddress,
-            physicalPageIndex)
-#endif
-        )
+            physicalPageIndex))
     {
         sampleOut.fallbackReason = TERRAIN_RVT_FALLBACK_PAGE_MISS;
         if (telemetryEnabled)
@@ -1724,20 +1588,17 @@ bool TerrainRvtTrySampleNormalBiased(
     residentAddress.pageTableIndex = requestedPageTableIndex;
 
     uint physicalPageIndex = 0u;
-    if (!TerrainRvtLookupResidentPage(terrainSetIndex, biasedMip, requestedPageCoord, requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL, physicalPageIndex)
-#if TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK
-        && !TerrainRvtTryFindCoarserResidentFromPageLocal(
+    if (!TerrainRvtTryResolveResidentPage(
             terrainSetIndex,
             info,
             terrainClipCount,
             biasedMip,
             requestedPageCoord,
             requestedPageUv,
+            requestedPageTableIndex,
             TERRAIN_RVT_CONTENT_MATERIAL,
             residentAddress,
-            physicalPageIndex)
-#endif
-        )
+            physicalPageIndex))
     {
         return false;
     }
