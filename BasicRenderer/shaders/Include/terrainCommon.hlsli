@@ -341,33 +341,12 @@ float TerrainSampleStochasticDiffuseAlpha(Texture2D<float4> diffuseTex, SamplerS
     return saturate(a0 * ctx.weights.x + a1 * ctx.weights.y + a2 * ctx.weights.z);
 }
 
-float TerrainSampleStochasticDiffuseAlphaGeometric(Texture2D<float4> diffuseTex, SamplerState diffuseSampler, uint streamingTextureID, TerrainStochasticContext ctx)
-{
-    float a0 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).a;
-    float a1 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a;
-    float a2 = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a;
-    return saturate(a0 * ctx.weights.x + a1 * ctx.weights.y + a2 * ctx.weights.z);
-}
-
 float TerrainSampleMikkelsenHeight(Texture2D<float4> heightTex, SamplerState heightSampler, uint streamingTextureID, TerrainStochasticContext ctx)
 {
     float h0 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
     float h1 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
     float h2 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
     return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
-}
-
-float TerrainSampleMikkelsenHeightGeometric(Texture2D<float4> heightTex, SamplerState heightSampler, uint streamingTextureID, TerrainStochasticContext ctx)
-{
-    float h0 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r;
-    float h1 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r;
-    float h2 = SampleMaterialTexture2DGrad(heightTex, heightSampler, streamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r;
-    return saturate(h0 * ctx.weights.x + h1 * ctx.weights.y + h2 * ctx.weights.z);
-}
-
-float TerrainSampleStochasticHeightGeometric(TerrainStochasticLayerInfo stochastic, TerrainStochasticContext ctx, SamplerState textureSampler)
-{
-    return TerrainSampleStochasticHeight(stochastic, ctx, textureSampler);
 }
 
 float TerrainSampleMikkelsenHeightRaw(Texture2D<float4> heightTex, SamplerState heightSampler, TerrainStochasticContext ctx)
@@ -409,31 +388,6 @@ bool TerrainCanSampleHeight(TerrainLayerInfo layer)
 }
 
 float3 TerrainSampleLayerHeightTriplet(TerrainLayerInfo layer, TerrainStochasticContext ctx)
-{
-    if (TerrainLayerUsesDiffuseAlphaHeight(layer))
-    {
-        Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
-        SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-        return float3(
-            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).a,
-            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).a,
-            SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).a);
-    }
-
-    if (TerrainLayerUsesExplicitHeight(layer))
-    {
-        Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
-        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
-        return float3(
-            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets0, ctx.duDx, ctx.duDy).r,
-            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets1, ctx.duDx, ctx.duDy).r,
-            SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, ctx.uv + ctx.offsets2, ctx.duDx, ctx.duDy).r);
-    }
-
-    return 0.5f.xxx;
-}
-
-float3 TerrainSampleLayerHeightTripletGeometric(TerrainLayerInfo layer, TerrainStochasticContext ctx)
 {
     if (TerrainLayerUsesDiffuseAlphaHeight(layer))
     {
@@ -573,7 +527,9 @@ float TerrainSampleLayerHeight(
     return 1.0f;
 }
 
-float TerrainSampleLayerHeightGeometric(
+bool TerrainCanSampleGaussianStochasticHeight(TerrainStochasticLayerInfo stochasticLayer, bool hasStochasticLayer);
+
+bool TerrainTrySampleLayerHeightFromMaterialContext(
     TerrainLayerInfo layer,
     TerrainStochasticLayerInfo stochasticLayer,
     bool hasStochasticLayer,
@@ -584,71 +540,63 @@ float TerrainSampleLayerHeightGeometric(
     float blendCurve,
     float2 uv,
     float2 duDx,
-    float2 duDy)
+    float2 duDy,
+    inout bool hasStochasticContext,
+    inout TerrainStochasticContext stochasticContext,
+    out float layerHeight)
 {
+    layerHeight = 1.0f;
+    if (!TerrainCanSampleHeight(layer))
+    {
+        return false;
+    }
+
+    if (terrainStochasticHeightEnabled && useStochasticContext)
+    {
+        if (!hasStochasticContext)
+        {
+            hasStochasticContext = TerrainTryBuildLayerStochasticContext(
+                layer,
+                uv,
+                duDx,
+                duDy,
+                stochasticScale,
+                blendCurve,
+                stochasticContext);
+        }
+
+        if (hasStochasticContext)
+        {
+            const float3 heightSamples = TerrainSampleLayerHeightTriplet(layer, stochasticContext);
+            stochasticContext.weights = TerrainHeightBlendWeights(stochasticContext.weights, heightSamples, blendCurve);
+
+            if (TerrainLayerUsesDiffuseAlphaHeight(layer) ||
+                !terrainGaussianStochasticEnabled ||
+                !TerrainCanSampleGaussianStochasticHeight(stochasticLayer, hasStochasticLayer))
+            {
+                layerHeight = saturate(dot(heightSamples, stochasticContext.weights));
+                return true;
+            }
+
+            Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+            SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+            layerHeight = TerrainSampleStochasticHeight(stochasticLayer, stochasticContext, heightSampler);
+            return true;
+        }
+    }
+
     if (TerrainLayerUsesDiffuseAlphaHeight(layer))
     {
         Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
         SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-        if (terrainStochasticHeightEnabled && useStochasticContext)
-        {
-            TerrainStochasticContext ctx = TerrainBuildStochasticContext(
-                diffuseTex,
-                diffuseSampler,
-                uv,
-                duDx,
-                duDy,
-                stochasticScale,
-                blendCurve);
-            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTripletGeometric(layer, ctx), blendCurve);
-            return TerrainSampleStochasticDiffuseAlphaGeometric(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, ctx);
-        }
-        return SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy).a;
+        layerHeight = SampleMaterialTexture2DGrad(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy).a;
+        return true;
     }
 
-    if (TerrainLayerUsesExplicitHeight(layer))
-    {
-        Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
-        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
-        if (terrainStochasticHeightEnabled &&
-            useStochasticContext &&
-            !terrainGaussianStochasticEnabled)
-        {
-            TerrainStochasticContext ctx = TerrainBuildStochasticContext(
-                heightTex,
-                heightSampler,
-                uv,
-                duDx,
-                duDy,
-                stochasticScale,
-                blendCurve);
-            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTripletGeometric(layer, ctx), blendCurve);
-            return TerrainSampleMikkelsenHeightGeometric(heightTex, heightSampler, layer.heightStreamingTextureID, ctx);
-        }
-        if (terrainStochasticHeightEnabled &&
-            terrainGaussianStochasticEnabled &&
-            useStochasticContext &&
-            hasStochasticLayer &&
-            (stochasticLayer.heightFlags & TERRAIN_STOCHASTIC_FLAG_HEIGHT) != 0u &&
-            stochasticLayer.heightGaussianTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-            stochasticLayer.heightInverseLutTextureIndex != TERRAIN_INVALID_DESCRIPTOR &&
-            stochasticLayer.heightInverseLutSamplerIndex != TERRAIN_INVALID_DESCRIPTOR)
-        {
-            TerrainStochasticContext ctx = TerrainBuildStochasticContext(
-                heightTex,
-                heightSampler,
-                uv,
-                duDx,
-                duDy,
-                stochasticScale,
-                blendCurve);
-            ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTripletGeometric(layer, ctx), blendCurve);
-            return TerrainSampleStochasticHeightGeometric(stochasticLayer, ctx, heightSampler);
-        }
-        return SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy).r;
-    }
-
-    return 1.0f;
+    Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
+    layerHeight = SampleMaterialTexture2DGrad(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy).r;
+    return true;
 }
 
 bool TerrainCanSampleGaussianStochasticHeight(
@@ -1500,7 +1448,10 @@ float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 position
             contextScale = max(stochasticLayer.stochasticScale, 0.001f);
         }
 
-        float layerHeight = TerrainSampleLayerHeightGeometric(
+        bool hasStochasticContext = false;
+        TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
+        float layerHeight = 1.0f;
+        TerrainTrySampleLayerHeightFromMaterialContext(
             layer,
             stochasticLayer,
             hasStochasticLayer,
@@ -1511,7 +1462,10 @@ float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 position
             perFrameBuffer.terrainStochasticBlendCurve,
             layerUv,
             layerUvDdx,
-            layerUvDdy);
+            layerUvDdy,
+            hasStochasticContext,
+            stochasticContext,
+            layerHeight);
         heightSum += layerHeight * weight * max(layer.heightScale, 0.0f);
         weightSum += weight;
     }
@@ -1858,6 +1812,9 @@ void ApplyTerrainMaterialInternal(
     uint glintEnabled = 0u;
     float4 glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
     float weightSum = 0.0f;
+    float heightSum = 0.0f;
+    float heightScaleSum = 0.0f;
+    float heightWeightSum = 0.0f;
     for (uint localLayer = 0u; localLayer < region.layerRefCount; ++localLayer)
     {
         float weight = TerrainInterpolateLayerWeight(terrainWeightBlocks, terrain, region, localLayer, regionLocal);
@@ -1916,10 +1873,12 @@ void ApplyTerrainMaterialInternal(
             terrainGaussianStochasticEnabled &&
             (terrainStochasticDiffuseEnabled || terrainStochasticNormalEnabled) &&
             hasStochasticLayer;
+        bool wantsHeightContext = terrainStochasticHeightEnabled && TerrainCanSampleHeight(layer);
         bool wantsStochasticContext =
             wantsDirectDiffuseContext ||
             wantsGaussianStochasticContext ||
-            wantsDerivativeNormalContext;
+            wantsDerivativeNormalContext ||
+            wantsHeightContext;
         bool hasStochasticContext = false;
         TerrainStochasticContext stochasticContext = (TerrainStochasticContext)0;
         if (wantsStochasticContext)
@@ -1932,14 +1891,28 @@ void ApplyTerrainMaterialInternal(
                 contextScale,
                 perFrameBuffer.terrainStochasticBlendCurve,
                 stochasticContext);
-            if (hasStochasticContext && TerrainCanSampleHeight(layer))
-            {
-                const float3 heightSamples = TerrainSampleLayerHeightTriplet(layer, stochasticContext);
-                stochasticContext.weights = TerrainHeightBlendWeights(
-                    stochasticContext.weights,
-                    heightSamples,
-                    perFrameBuffer.terrainStochasticBlendCurve);
-            }
+        }
+
+        float layerHeight = 1.0f;
+        if (TerrainTrySampleLayerHeightFromMaterialContext(
+            layer,
+            stochasticLayer,
+            hasStochasticLayer,
+            terrainStochasticHeightEnabled,
+            terrainGaussianStochasticEnabled,
+            terrainStochasticHeightEnabled,
+            contextScale,
+            perFrameBuffer.terrainStochasticBlendCurve,
+            layerUv,
+            layerDUdx,
+            layerDUdy,
+            hasStochasticContext,
+            stochasticContext,
+            layerHeight))
+        {
+            heightSum += layerHeight * weight * max(layer.heightScale, 0.0f);
+            heightScaleSum += weight * max(layer.heightScale, 0.0f);
+            heightWeightSum += weight;
         }
 
         float3 layerBaseColor = layer.fallbackColor.rgb;
@@ -2055,7 +2028,8 @@ void ApplyTerrainMaterialInternal(
     inputs.emissive = 0.0f.xxx;
     inputs.glintEnabled = glintEnabled;
     inputs.glintParameters = glintParameters;
-    inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightDirectGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS));
+    inputs.terrainRvtHeightScale = heightWeightSum > 1.0e-4f ? heightScaleSum / heightWeightSum : 0.0f;
+    inputs.geometricHeightDebug = heightWeightSum > 1.0e-4f ? heightSum / heightWeightSum : 0.0f;
 }
 
 void ApplyTerrainMaterial(

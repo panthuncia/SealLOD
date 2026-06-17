@@ -1043,15 +1043,11 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         localPhysicalPageIndex / max(info.physicalAtlasPagesWide, 1u));
     const uint3 atlasTexel = uint3(physicalPage * tileSide + tileTexel, atlasPoolIndex);
 
-    if ((generation.contentMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u)
+    const bool generateHeight = (generation.contentMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u;
+    const bool generateMaterial = (generation.contentMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u;
+    MaterialInputs inputs = (MaterialInputs)0;
+    if (generateMaterial)
     {
-        RWTexture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
-        heightAtlas[atlasTexel] = TerrainSampleGeometricHeightGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
-    }
-
-    if ((generation.contentMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u)
-    {
-        MaterialInputs inputs = (MaterialInputs)0;
         ApplyTerrainMaterialInternal(
             MATERIAL_TERRAIN | MATERIAL_GEOMETRIC_DISPLACEMENT,
             terrainSetIndex,
@@ -1061,18 +1057,28 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
             float3(0.0f, 1.0f, 0.0f),
             1.0f.xxx,
             inputs);
+    }
 
+    if (generateHeight)
+    {
+        RWTexture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
+        heightAtlas[atlasTexel] = generateMaterial
+            ? inputs.geometricHeightDebug
+            : TerrainSampleGeometricHeightGrad(terrainSetIndex, positionWS, dpdxWS, dpdyWS);
+    }
+
+    if (generateMaterial)
+    {
         RWTexture2DArray<float4> albedoAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtAlbedoAtlas)];
         RWTexture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
         RWTexture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
         const float3 normalTS = TerrainRvtWorldToTangentNormal(inputs.normalWS, float3(0.0f, 1.0f, 0.0f));
-        const float heightScale = TerrainSampleBlendedHeightScale(terrainSetIndex, positionWS);
         albedoAtlas[atlasTexel] = float4(saturate(inputs.albedo), 1.0f);
         normalAtlas[atlasTexel] = float4(saturate(normalTS * 0.5f + 0.5f), 1.0f);
         materialAtlas[atlasTexel] = float4(
             saturate(inputs.roughness),
             saturate(inputs.metallic),
             saturate(inputs.ambientOcclusion),
-            saturate(heightScale));
+            saturate(inputs.terrainRvtHeightScale));
     }
 }
