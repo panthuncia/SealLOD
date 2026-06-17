@@ -19,7 +19,7 @@ void EvaluateTerrainRegionMaterialGroupCS(
 
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
-    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    StructuredBuffer<float> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
     TerrainLoadRegionWeightBlocksToShared(terrainSets, terrainRegions, terrainWeightBlocks, terrainSetIndex, regionIndex, groupIndex);
 
     uint idx = dispatchThreadId.y * dispatchXDimension + dispatchThreadId.x;

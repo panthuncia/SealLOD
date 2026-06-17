@@ -400,7 +400,7 @@ struct TerrainRegionGPU {
     unsigned int layerRefCount;
     unsigned int weightBlockStart;
     unsigned int weightSampleSide;
-    unsigned int pad0;
+    unsigned int weightSamplesPerLayer;
     unsigned int pad1;
 };
 

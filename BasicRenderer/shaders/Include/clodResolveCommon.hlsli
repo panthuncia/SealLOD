@@ -2032,11 +2032,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         {
             float3 lowFrequencyTerrainNormalTS;
             float3 lowFrequencyTerrainNormalWS;
-            if (TerrainRvtTrySampleNormalBiased(
+            TerrainRvtMaterialSample rvtBaseSample = (TerrainRvtMaterialSample)0;
+            rvtBaseSample.fallbackReason = materialInputs.terrainRvtFallbackReason;
+            rvtBaseSample.requestedMip = materialInputs.terrainRvtRequestedMip;
+            rvtBaseSample.local = materialInputs.terrainRvtLocal;
+            rvtBaseSample.terrainClipCount = materialInputs.terrainRvtTerrainClipCount;
+            if (TerrainRvtTrySampleNormalBiasedFromMaterialSample(
                 materialInfo.terrainSetIndex,
-                worldPosition,
-                dpdx,
-                dpdy,
+                rvtBaseSample,
                 interpolatedWorldNormal,
                 VISBUF_REYES_TERRAIN_NORMAL_MIP_BIAS,
                 lowFrequencyTerrainNormalTS,

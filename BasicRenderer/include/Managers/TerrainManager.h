@@ -121,7 +121,7 @@ private:
     std::shared_ptr<DynamicStructuredBuffer<TerrainStochasticLayerGPU>> m_stochasticLayers;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerRefGPU>> m_layerRefs;
     std::shared_ptr<DynamicStructuredBuffer<TerrainRegionGPU>> m_regions;
-    std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> m_weightBlocks;
+    std::shared_ptr<DynamicStructuredBuffer<float>> m_weightBlocks;
     std::shared_ptr<ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
     std::vector<TerrainLayerGPU> m_layerData;

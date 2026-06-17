@@ -23,10 +23,10 @@ static const float TERRAIN_PARALLAX_MIN_LAYER_WEIGHT = 0.02f;
 static const float TERRAIN_PARALLAX_MIN_FADE = 0.01f;
 static const float TERRAIN_DEFAULT_LAYER_UV_SCALE = 24.0f / 4096.0f;
 #if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
-static const uint TERRAIN_SHARED_WEIGHT_WORD_CAPACITY = 2048u;
-groupshared uint g_terrainSharedWeightWords[TERRAIN_SHARED_WEIGHT_WORD_CAPACITY];
-groupshared uint g_terrainSharedWeightWordCount;
-groupshared uint g_terrainSharedWeightBaseWord;
+static const uint TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY = 8192u;
+groupshared float g_terrainSharedWeightSamples[TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY];
+groupshared uint g_terrainSharedWeightSampleCount;
+groupshared uint g_terrainSharedWeightBaseSample;
 groupshared uint g_terrainSharedRegionWeightBlockStart;
 groupshared uint g_terrainSharedRegionLayerRefStart;
 groupshared int g_terrainSharedRegionX;
@@ -897,13 +897,43 @@ float TerrainCubicBSpline(float p0, float p1, float p2, float p3, float t)
     return p0 * w0 + p1 * w1 + p2 * w2 + p3 * w3;
 }
 
-float TerrainUnpackWeightByte(uint packed, uint sampleIndex)
+float TerrainLoadWeightSampleIndex(
+    StructuredBuffer<float> weightBlocks,
+    TerrainSetInfo terrain,
+    TerrainRegionInfo region,
+    uint weightIndex)
 {
-    return ((packed >> ((sampleIndex & 3u) * 8u)) & 0xFFu) * (1.0f / 255.0f);
+    if (weightIndex >= terrain.weightBlockBase + terrain.weightBlockCount)
+    {
+        return 0.0f;
+    }
+#if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
+#if defined(TERRAIN_REGION_KNOWN_REGION)
+    uint sharedSampleIndex = weightIndex - g_terrainSharedWeightBaseSample;
+    if (sharedSampleIndex < g_terrainSharedWeightSampleCount)
+    {
+        return g_terrainSharedWeightSamples[sharedSampleIndex];
+    }
+#else
+    if (region.weightBlockStart == g_terrainSharedRegionWeightBlockStart &&
+        region.layerRefStart == g_terrainSharedRegionLayerRefStart &&
+        region.regionX == g_terrainSharedRegionX &&
+        region.regionY == g_terrainSharedRegionY &&
+        weightIndex >= g_terrainSharedWeightBaseSample)
+    {
+        uint sharedSampleIndex = weightIndex - g_terrainSharedWeightBaseSample;
+        if (sharedSampleIndex < g_terrainSharedWeightSampleCount)
+        {
+            return g_terrainSharedWeightSamples[sharedSampleIndex];
+        }
+    }
+#endif
+#endif
+    return weightBlocks[weightIndex];
 }
 
 float TerrainLoadWeightSample(
-    StructuredBuffer<uint> weightBlocks,
+    StructuredBuffer<float> weightBlocks,
     TerrainSetInfo terrain,
     TerrainRegionInfo region,
     uint localLayer,
@@ -913,34 +943,15 @@ float TerrainLoadWeightSample(
     int2 clampedSample = clamp(sample, -1, maxSample);
     uint2 packedSample = (uint2)(clampedSample + 1);
     uint sampleIndex = packedSample.y * region.weightSampleSide + packedSample.x;
-    uint packedWordsPerLayer = (region.weightSampleSide * region.weightSampleSide + 3u) / 4u;
-    uint wordIndex = terrain.weightBlockBase + region.weightBlockStart + localLayer * packedWordsPerLayer + sampleIndex / 4u;
-    if (wordIndex >= terrain.weightBlockBase + terrain.weightBlockCount)
-    {
-        return 0.0f;
-    }
-#if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
-    if (region.weightBlockStart == g_terrainSharedRegionWeightBlockStart &&
-        region.layerRefStart == g_terrainSharedRegionLayerRefStart &&
-        region.regionX == g_terrainSharedRegionX &&
-        region.regionY == g_terrainSharedRegionY &&
-        wordIndex >= g_terrainSharedWeightBaseWord)
-    {
-        uint sharedWordIndex = wordIndex - g_terrainSharedWeightBaseWord;
-        if (sharedWordIndex < g_terrainSharedWeightWordCount)
-        {
-            return TerrainUnpackWeightByte(g_terrainSharedWeightWords[sharedWordIndex], sampleIndex);
-        }
-    }
-#endif
-    return TerrainUnpackWeightByte(weightBlocks[wordIndex], sampleIndex);
+    uint weightIndex = terrain.weightBlockBase + region.weightBlockStart + localLayer * region.weightSamplesPerLayer + sampleIndex;
+    return TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, weightIndex);
 }
 
 #if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
 void TerrainLoadRegionWeightBlocksToShared(
     StructuredBuffer<TerrainSetInfo> terrainSets,
     StructuredBuffer<TerrainRegionInfo> terrainRegions,
-    StructuredBuffer<uint> terrainWeightBlocks,
+    StructuredBuffer<float> terrainWeightBlocks,
     uint terrainSetIndex,
     uint regionIndex,
     uint groupIndex)
@@ -949,10 +960,9 @@ void TerrainLoadRegionWeightBlocksToShared(
     {
         TerrainSetInfo terrain = terrainSets[terrainSetIndex];
         TerrainRegionInfo region = terrainRegions[regionIndex];
-        uint packedWordsPerLayer = (region.weightSampleSide * region.weightSampleSide + 3u) / 4u;
-        uint requestedWords = packedWordsPerLayer * region.layerRefCount;
-        g_terrainSharedWeightWordCount = min(requestedWords, TERRAIN_SHARED_WEIGHT_WORD_CAPACITY);
-        g_terrainSharedWeightBaseWord = terrain.weightBlockBase + region.weightBlockStart;
+        uint requestedSamples = region.weightSamplesPerLayer * region.layerRefCount;
+        g_terrainSharedWeightSampleCount = min(requestedSamples, TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY);
+        g_terrainSharedWeightBaseSample = terrain.weightBlockBase + region.weightBlockStart;
         g_terrainSharedRegionWeightBlockStart = region.weightBlockStart;
         g_terrainSharedRegionLayerRefStart = region.layerRefStart;
         g_terrainSharedRegionX = region.regionX;
@@ -960,20 +970,20 @@ void TerrainLoadRegionWeightBlocksToShared(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    for (uint i = groupIndex; i < g_terrainSharedWeightWordCount; i += MATERIAL_EXECUTION_GROUP_SIZE)
+    for (uint i = groupIndex; i < g_terrainSharedWeightSampleCount; i += MATERIAL_EXECUTION_GROUP_SIZE)
     {
-        uint globalWord = g_terrainSharedWeightBaseWord + i;
+        uint globalSample = g_terrainSharedWeightBaseSample + i;
         TerrainSetInfo terrain = terrainSets[terrainSetIndex];
-        g_terrainSharedWeightWords[i] = globalWord < terrain.weightBlockBase + terrain.weightBlockCount
-            ? terrainWeightBlocks[globalWord]
-            : 0u;
+        g_terrainSharedWeightSamples[i] = globalSample < terrain.weightBlockBase + terrain.weightBlockCount
+            ? terrainWeightBlocks[globalSample]
+            : 0.0f;
     }
     GroupMemoryBarrierWithGroupSync();
 }
 #endif
 
 float TerrainLoadWeightRowCubic(
-    StructuredBuffer<uint> weightBlocks,
+    StructuredBuffer<float> weightBlocks,
     TerrainSetInfo terrain,
     TerrainRegionInfo region,
     uint localLayer,
@@ -988,7 +998,7 @@ float TerrainLoadWeightRowCubic(
 }
 
 float TerrainInterpolateLayerWeight(
-    StructuredBuffer<uint> weightBlocks,
+    StructuredBuffer<float> weightBlocks,
     TerrainSetInfo terrain,
     TerrainRegionInfo region,
     uint localLayer,
@@ -1005,10 +1015,48 @@ float TerrainInterpolateLayerWeight(
     int2 baseSample = (int2)floor(grid);
     float2 f = grid - (float2)baseSample;
 
-    float r0 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, -1), f.x);
-    float r1 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 0), f.x);
-    float r2 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 1), f.x);
-    float r3 = TerrainLoadWeightRowCubic(weightBlocks, terrain, region, localLayer, baseSample + int2(0, 2), f.x);
+    int maxSample = (int)region.weightSampleSide - 2;
+    uint4 sampleX = (uint4)(clamp(
+        int4(baseSample.x - 1, baseSample.x, baseSample.x + 1, baseSample.x + 2),
+        -1,
+        maxSample) + 1);
+    uint4 sampleY = (uint4)(clamp(
+        int4(baseSample.y - 1, baseSample.y, baseSample.y + 1, baseSample.y + 2),
+        -1,
+        maxSample) + 1);
+
+    const uint sampleSide = region.weightSampleSide;
+    const uint layerWeightBase =
+        terrain.weightBlockBase + region.weightBlockStart + localLayer * region.weightSamplesPerLayer;
+    const uint row0 = layerWeightBase + sampleY.x * sampleSide;
+    const uint row1 = layerWeightBase + sampleY.y * sampleSide;
+    const uint row2 = layerWeightBase + sampleY.z * sampleSide;
+    const uint row3 = layerWeightBase + sampleY.w * sampleSide;
+
+    float r0 = TerrainCubicBSpline(
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row0 + sampleX.x),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row0 + sampleX.y),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row0 + sampleX.z),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row0 + sampleX.w),
+        f.x);
+    float r1 = TerrainCubicBSpline(
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row1 + sampleX.x),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row1 + sampleX.y),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row1 + sampleX.z),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row1 + sampleX.w),
+        f.x);
+    float r2 = TerrainCubicBSpline(
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row2 + sampleX.x),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row2 + sampleX.y),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row2 + sampleX.z),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row2 + sampleX.w),
+        f.x);
+    float r3 = TerrainCubicBSpline(
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row3 + sampleX.x),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row3 + sampleX.y),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row3 + sampleX.z),
+        TerrainLoadWeightSampleIndex(weightBlocks, terrain, region, row3 + sampleX.w),
+        f.x);
 
     return saturate(TerrainCubicBSpline(r0, r1, r2, r3, f.y));
 }
@@ -1019,7 +1067,7 @@ float TerrainSampleBlendedHeightScale(uint terrainSetIndex, float3 positionWS)
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
     StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
-    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    StructuredBuffer<float> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     if (terrain.regionSizeWorld <= 0.0f ||
@@ -1100,7 +1148,7 @@ TerrainGlintSample TerrainSampleDominantGlint(uint terrainSetIndex, float3 posit
     StructuredBuffer<TerrainLayerInfo> terrainLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Layers)];
     StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
-    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    StructuredBuffer<float> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     if (terrain.regionSizeWorld <= 0.0f ||
@@ -1368,7 +1416,7 @@ float TerrainSampleGeometricHeightInternal(uint terrainSetIndex, float3 position
     StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
     StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
-    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    StructuredBuffer<float> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
@@ -1681,6 +1729,8 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
         inputs.terrainRvtHeightScale = rvtSample.heightScale;
+        inputs.terrainRvtLocal = rvtSample.local;
+        inputs.terrainRvtTerrainClipCount = rvtSample.terrainClipCount;
         inputs.geometricHeightDebug = saturate(TerrainSampleGeometricHeightRvtOnlyOrDirectFallback(terrainSetIndex, rvtSamplePositionWS, dpdxWS, dpdyWS));
         inputs.parallaxApplied = rvtParallaxApplied ? 1u : inputs.parallaxApplied;
         return;
@@ -1707,6 +1757,8 @@ void ApplyTerrainMaterialInternal(
         inputs.terrainRvtSampleNormal = rvtSample.normalTS;
         inputs.terrainRvtSampleMaterial = float3(rvtSample.roughness, rvtSample.metallic, rvtSample.ambientOcclusion);
         inputs.terrainRvtHeightScale = rvtSample.heightScale;
+        inputs.terrainRvtLocal = rvtSample.local;
+        inputs.terrainRvtTerrainClipCount = rvtSample.terrainClipCount;
 #if !TERRAIN_RVT_ENABLE_DIRECT_FALLBACK
         return;
 #endif
@@ -1718,7 +1770,7 @@ void ApplyTerrainMaterialInternal(
     StructuredBuffer<TerrainStochasticLayerInfo> terrainStochasticLayers = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::StochasticLayers)];
     StructuredBuffer<TerrainLayerRefInfo> terrainLayerRefs = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::LayerRefs)];
     StructuredBuffer<TerrainRegionInfo> terrainRegions = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Regions)];
-    StructuredBuffer<uint> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
+    StructuredBuffer<float> terrainWeightBlocks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::WeightBlocks)];
 
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     bool terrainStochasticSamplingEnabled = perFrameBuffer.terrainStochasticSamplingEnabled != 0u;

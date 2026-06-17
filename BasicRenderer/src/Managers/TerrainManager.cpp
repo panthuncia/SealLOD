@@ -117,6 +117,7 @@ namespace {
     {
         TerrainRegionGPU result{};
         result.weightSampleSide = 19;
+        result.weightSamplesPerLayer = result.weightSampleSide * result.weightSampleSide;
         return result;
     }
 
@@ -125,9 +126,9 @@ namespace {
         return TerrainLayerRefGPU{};
     }
 
-    std::uint32_t MakeFallbackWeightBlock()
+    float MakeFallbackWeightBlock()
     {
-        return 0u;
+        return 0.0f;
     }
 
     TerrainLayerGPU MakeFallbackLayer()
@@ -223,9 +224,62 @@ namespace {
             out.layerRefCount = region.layerRefCount;
             out.weightBlockStart = region.weightBlockStart;
             out.weightSampleSide = region.weightSampleSide;
+            out.weightSamplesPerLayer = region.weightSampleSide * region.weightSampleSide;
         }
 
         return dense;
+    }
+
+    std::uint32_t UnpackTerrainWeightByte(const std::vector<std::uint32_t>& packedBlocks, std::size_t layerWordBase, std::size_t sampleIndex)
+    {
+        const std::size_t wordIndex = layerWordBase + sampleIndex / 4u;
+        if (wordIndex >= packedBlocks.size()) {
+            return 0u;
+        }
+
+        const std::uint32_t packed = packedBlocks[wordIndex];
+        return (packed >> ((sampleIndex & 3u) * 8u)) & 0xFFu;
+    }
+
+    std::vector<float> ExpandTerrainWeightBlocks(
+        const std::vector<std::uint32_t>& packedBlocks,
+        std::vector<TerrainRegionGPU>& regions)
+    {
+        if (packedBlocks.empty()) {
+            return std::vector<float>{ MakeFallbackWeightBlock() };
+        }
+
+        std::vector<float> expanded;
+        expanded.reserve(packedBlocks.size() * 4u);
+
+        for (auto& region : regions) {
+            const std::uint32_t sampleSide = region.weightSampleSide;
+            const std::uint32_t samplesPerLayer = sampleSide * sampleSide;
+            region.weightSamplesPerLayer = samplesPerLayer;
+            if (region.layerRefCount == 0u || samplesPerLayer == 0u) {
+                region.weightBlockStart = 0u;
+                continue;
+            }
+
+            const std::size_t packedWordsPerLayer = (static_cast<std::size_t>(samplesPerLayer) + 3u) / 4u;
+            const std::size_t packedRegionBase = region.weightBlockStart;
+            region.weightBlockStart = static_cast<std::uint32_t>(expanded.size());
+            expanded.resize(expanded.size() + static_cast<std::size_t>(region.layerRefCount) * samplesPerLayer, 0u);
+
+            for (std::uint32_t localLayer = 0; localLayer < region.layerRefCount; ++localLayer) {
+                const std::size_t srcLayerBase = packedRegionBase + static_cast<std::size_t>(localLayer) * packedWordsPerLayer;
+                const std::size_t dstLayerBase = static_cast<std::size_t>(region.weightBlockStart) + static_cast<std::size_t>(localLayer) * samplesPerLayer;
+                for (std::uint32_t sampleIndex = 0; sampleIndex < samplesPerLayer; ++sampleIndex) {
+                    expanded[dstLayerBase + sampleIndex] =
+                        static_cast<float>(UnpackTerrainWeightByte(packedBlocks, srcLayerBase, sampleIndex)) * (1.0f / 255.0f);
+                }
+            }
+        }
+
+        if (expanded.empty()) {
+            expanded.push_back(MakeFallbackWeightBlock());
+        }
+        return expanded;
     }
 
     DirectX::XMUINT3 NormalChannelsForTexture(const std::shared_ptr<TextureAsset>& texture)
@@ -366,7 +420,7 @@ TerrainManager::TerrainManager()
     m_stochasticLayers = DynamicStructuredBuffer<TerrainStochasticLayerGPU>::CreateShared(1, "Builtin::Terrain::StochasticLayers", true);
     m_layerRefs = DynamicStructuredBuffer<TerrainLayerRefGPU>::CreateShared(1, "Builtin::Terrain::LayerRefs", true);
     m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
-    m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
+    m_weightBlocks = DynamicStructuredBuffer<float>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
     m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
     rg::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
@@ -730,13 +784,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     m_layerRefs->ReplaceData(std::move(layerRefs));
     const auto layerRefsEnd = std::chrono::steady_clock::now();
 
-    const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(desc.weightBlocks.size()));
-    if (desc.weightBlocks.empty()) {
-        m_weightBlocks->ReplaceData(std::vector<std::uint32_t>{ MakeFallbackWeightBlock() });
-    }
-    else {
-        m_weightBlocks->ReplaceData(desc.weightBlocks);
-    }
+    std::vector<float> expandedWeightBlocks = ExpandTerrainWeightBlocks(desc.weightBlocks, denseRegions);
+    const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(expandedWeightBlocks.size()));
+    m_weightBlocks->ReplaceData(std::move(expandedWeightBlocks));
     const auto weightBlocksEnd = std::chrono::steady_clock::now();
 
     const auto regionCount = static_cast<std::uint32_t>(denseRegions.size());
@@ -788,7 +838,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
         return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
     };
     spdlog::info(
-        "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} boundDiffuse={} immediateDiffuse={}/{} boundNormal={} immediateNormal={}/{} boundHeight={} immediateHeight={}/{} boundRMAOS={} immediateRMAOS={}/{} heightCapableLayers={} diffuseAlphaHeightLayers={} regions={} layerRefs={} weightWords={} regionSize={} lodLandBlend=disabled",
+        "Terrain close-landscape material active: layers={} snowLayers={} stochasticLayers={} boundDiffuse={} immediateDiffuse={}/{} boundNormal={} immediateNormal={}/{} boundHeight={} immediateHeight={}/{} boundRMAOS={} immediateRMAOS={}/{} heightCapableLayers={} diffuseAlphaHeightLayers={} regions={} layerRefs={} weightSamples={} regionSize={} lodLandBlend=disabled",
         layerCount,
         snowLayerCount,
         stochasticLayerCount,

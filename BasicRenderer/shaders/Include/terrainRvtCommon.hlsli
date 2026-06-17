@@ -1255,6 +1255,8 @@ struct TerrainRvtMaterialSample
     float3 atlasUv;
     float2 physicalTileUv;
     float heightScale;
+    float2 local;
+    uint terrainClipCount;
 };
 
 float3x3 TerrainRvtTerrainBasis(float3 normalWS)
@@ -1367,6 +1369,8 @@ bool TerrainRvtTrySampleMaterial(
 
     sampleOut.requestedMip = mip;
     sampleOut.requestedPageTableIndex = requestedPageTableIndex;
+    sampleOut.local = local;
+    sampleOut.terrainClipCount = terrainClipCount;
     TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL | TERRAIN_RVT_CONTENT_HEIGHT);
     if (telemetryEnabled)
     {
@@ -1479,6 +1483,81 @@ bool TerrainRvtTrySampleMaterial(
         }
         InterlockedOr(stats[0].materialSampleAtlasPoolMask, 1u << min(sampleOut.atlasPoolIndex, 31u));
     }
+    return true;
+}
+
+bool TerrainRvtTrySampleNormalBiasedFromMaterialSample(
+    uint terrainSetIndex,
+    TerrainRvtMaterialSample baseSample,
+    float3 normalWSBase,
+    uint mipBias,
+    out float3 normalTS,
+    out float3 normalWS)
+{
+    normalTS = float3(0.0f, 0.0f, 1.0f);
+    normalWS = normalize(normalWSBase);
+
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if (perFrame.terrainRvtEnabled == 0u ||
+        perFrame.terrainRvtForceDirectFallback != 0u ||
+        baseSample.fallbackReason != TERRAIN_RVT_FALLBACK_NONE ||
+        baseSample.terrainClipCount == 0u ||
+        baseSample.requestedMip == MATERIAL_DEBUG_INVALID_MIP_LEVEL)
+    {
+        return false;
+    }
+
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    const TerrainRvtInfo info = infoBuffer[0];
+    const uint biasedMip = min(baseSample.requestedMip + mipBias, baseSample.terrainClipCount - 1u);
+
+    uint2 requestedPageCoord;
+    float2 requestedPageUv;
+    uint requestedPageTableIndex;
+    if (!TerrainRvtTryComputePageAtClipLocal(
+        terrainSetIndex,
+        info,
+        baseSample.local,
+        biasedMip,
+        baseSample.terrainClipCount,
+        requestedPageCoord,
+        requestedPageUv,
+        requestedPageTableIndex))
+    {
+        return false;
+    }
+
+    TerrainRvtMarkPageTableIndex(requestedPageTableIndex, TERRAIN_RVT_CONTENT_MATERIAL);
+
+    TerrainRvtAddress residentAddress = (TerrainRvtAddress)0;
+    residentAddress.terrainSetIndex = terrainSetIndex;
+    residentAddress.clipLevel = biasedMip;
+    residentAddress.pageCoord = requestedPageCoord;
+    residentAddress.pageUv = requestedPageUv;
+    residentAddress.pageTableIndex = requestedPageTableIndex;
+
+    uint physicalPageIndex = 0u;
+    if (!TerrainRvtTryResolveResidentPage(
+            terrainSetIndex,
+            info,
+            baseSample.terrainClipCount,
+            biasedMip,
+            requestedPageCoord,
+            requestedPageUv,
+            requestedPageTableIndex,
+            TERRAIN_RVT_CONTENT_MATERIAL,
+            residentAddress,
+            physicalPageIndex))
+    {
+        return false;
+    }
+
+    TerrainRvtMarkVisited(residentAddress.pageTableIndex);
+    float3 atlasUv;
+    TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
+    Texture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
+    normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    normalWS = TerrainRvtTangentToWorldNormal(normalTS, normalWSBase);
     return true;
 }
 

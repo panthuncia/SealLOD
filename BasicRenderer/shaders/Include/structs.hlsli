@@ -659,7 +659,7 @@ struct TerrainRegionInfo {
     uint layerRefCount;
     uint weightBlockStart;
     uint weightSampleSide;
-    uint pad0;
+    uint weightSamplesPerLayer;
     uint pad1;
 };
 
@@ -1003,6 +1003,8 @@ struct MaterialInputs
     float3 terrainRvtSampleNormal;
     float3 terrainRvtSampleMaterial;
     float terrainRvtHeightScale;
+    float2 terrainRvtLocal;
+    uint terrainRvtTerrainClipCount;
     float geometricHeightDebug;
     uint glintEnabled;
     float4 glintParameters;
