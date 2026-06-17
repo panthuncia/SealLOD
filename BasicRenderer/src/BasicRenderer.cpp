@@ -522,9 +522,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 // Window callback procedure
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 
-	if (Menu::GetInstance().HandleInput(hWnd, message, wParam, lParam)) {
-		return true;
-    }
+	Menu::GetInstance().HandleInput(hWnd, message, wParam, lParam);
 
     bool isMouseOverAnyWindow = false;
 	bool isMouseCaptured = false;

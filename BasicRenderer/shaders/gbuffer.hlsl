@@ -93,6 +93,34 @@ void EvaluateGBufferOptimized(uint2 pixel)
         case OUTPUT_MOTION_VECTORS:
             payload = PackDebugFloat3(float3(sample.motionVector * 0.5 + 0.5, 0.5));
             break;
+        case OUTPUT_MATERIAL_UV:
+            payload = PackDebugFloat3(float3(frac(sample.materialDebugUv), sample.materialDebugUvValid));
+            break;
+        case OUTPUT_MATERIAL_UV_DERIVATIVE:
+        {
+            const float2 derivativeDebug = saturate(log2(sample.materialDebugUvDerivative * 4096.0f + 1.0f) / 12.0f);
+            payload = PackDebugFloat3(float3(derivativeDebug, sample.materialDebugUvValid));
+            break;
+        }
+        case OUTPUT_REYES_SOURCE_BARYCENTRICS:
+            payload = PackDebugFloat3(saturate(sample.reyesDebugSourceBarycentrics));
+            break;
+        case OUTPUT_MATERIAL_EVAL_FEATURES:
+        {
+            const float runtimeBaseColorTexture = (sample.materialDebugFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u ? 1.0f : 0.0f;
+#if defined(PSO_BASE_COLOR_TEXTURE)
+            const float compiledBaseColorTexture = 1.0f;
+#else
+            const float compiledBaseColorTexture = 0.0f;
+#endif
+#if defined(PSO_CLOD_REYES_PATCH)
+            const float reyesPatchVariant = 1.0f;
+#else
+            const float reyesPatchVariant = 0.0f;
+#endif
+            payload = PackDebugFloat3(float3(runtimeBaseColorTexture, compiledBaseColorTexture, reyesPatchVariant));
+            break;
+        }
         case OUTPUT_REYES_GEOMETRY_PATH:
             payload = PackDebugFloat3(isReyesPatch ? float3(0.10, 0.95, 0.20) : float3(0.95, 0.15, 0.15));
             break;

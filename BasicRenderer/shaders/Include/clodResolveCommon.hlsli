@@ -68,6 +68,11 @@ struct ClodGBufferDebugSample
     uint geometryGroupIndex;
     bool isVoxelPath;
     float3 normalOS;
+    float2 materialDebugUv;
+    float materialDebugUvValid;
+    float2 materialDebugUvDerivative;
+    float3 reyesDebugSourceBarycentrics;
+    uint materialDebugFlags;
     float2 motionVector;
     MaterialInputs materialInputs;
 };
@@ -78,6 +83,11 @@ struct ClodResolvedGBufferSample
     uint geometryGroupIndex;
     bool isVoxelPath;
     float3 normalOS;
+    float2 materialDebugUv;
+    float materialDebugUvValid;
+    float2 materialDebugUvDerivative;
+    float3 reyesDebugSourceBarycentrics;
+    uint materialDebugFlags;
     float2 motionVector;
     MaterialInputs materialInputs;
 };
@@ -95,6 +105,10 @@ struct ClodResolvedCommonSample
     float3 normalWSBase;
     float3 normalOS;
     float3 vertexColor;
+    float2 materialDebugUv;
+    float materialDebugUvValid;
+    float2 materialDebugUvDerivative;
+    float3 reyesDebugSourceBarycentrics;
     float3 dpdxWS;
     float3 dpdyWS;
     float2 motionVector;
@@ -571,7 +585,55 @@ void BuildClodMaterialUvData(
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
     {
         const MaterialTextureSlot textureSlot = (MaterialTextureSlot)slot;
-        if (!MaterialSlotEnabled(materialInfo, materialFlags, textureSlot))
+        bool slotEnabled = MaterialSlotEnabled(materialInfo, materialFlags, textureSlot);
+        switch (textureSlot)
+        {
+        case MATERIAL_TEXTURE_SLOT_BASE_COLOR:
+#if defined(PSO_BASE_COLOR_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_OPACITY:
+#if defined(PSO_OPACITY_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_METALLIC:
+#if defined(PSO_METALLIC_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_ROUGHNESS:
+#if defined(PSO_ROUGHNESS_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_NORMAL:
+#if defined(PSO_NORMAL_MAP)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_AO:
+#if defined(PSO_AO_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_EMISSIVE:
+#if defined(PSO_EMISSIVE_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_HEIGHT:
+#if defined(PSO_PARALLAX)
+            slotEnabled =
+                (((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u) ||
+                 ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u));
+#endif
+            break;
+        default:
+            break;
+        }
+        if (!slotEnabled)
         {
             continue;
         }
@@ -672,7 +734,55 @@ void BuildClodMaterialUvData(
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
     {
         const MaterialTextureSlot textureSlot = (MaterialTextureSlot)slot;
-        if (!MaterialSlotEnabled(materialInfo, materialFlags, textureSlot))
+        bool slotEnabled = MaterialSlotEnabled(materialInfo, materialFlags, textureSlot);
+        switch (textureSlot)
+        {
+        case MATERIAL_TEXTURE_SLOT_BASE_COLOR:
+#if defined(PSO_BASE_COLOR_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_OPACITY:
+#if defined(PSO_OPACITY_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_METALLIC:
+#if defined(PSO_METALLIC_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_ROUGHNESS:
+#if defined(PSO_ROUGHNESS_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_NORMAL:
+#if defined(PSO_NORMAL_MAP)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_AO:
+#if defined(PSO_AO_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_EMISSIVE:
+#if defined(PSO_EMISSIVE_TEXTURE)
+            slotEnabled = true;
+#endif
+            break;
+        case MATERIAL_TEXTURE_SLOT_HEIGHT:
+#if defined(PSO_PARALLAX)
+            slotEnabled =
+                (((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u) ||
+                 ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u));
+#endif
+            break;
+        default:
+            break;
+        }
+        if (!slotEnabled)
         {
             continue;
         }
@@ -1775,6 +1885,12 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         clip0 = mul(float4(evalPos0, 1.0f), objectToClip);
         clip1 = mul(float4(evalPos1, 1.0f), objectToClip);
         clip2 = mul(float4(evalPos2, 1.0f), objectToClip);
+
+        if (materialInfo.geometricDisplacementEnabled != 0u)
+        {
+            materialFlags &= ~MATERIAL_PARALLAX;
+            materialInfo.materialFlags = materialFlags;
+        }
     }
 
     float2 winSize = float2(perFrame.screenResX, perFrame.screenResY);
@@ -1866,6 +1982,10 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 
     MaterialInputs materialInputs;
+    float2 materialDebugUv = 0.0f.xx;
+    float materialDebugUvValid = 0.0f;
+    float2 materialDebugUvDerivative = 0.0f.xx;
+    float3 reyesDebugSourceBarycentrics = bary.m_lambda;
 #if defined(PSO_TERRAIN)
     if (!isReyesPatch)
     {
@@ -1910,6 +2030,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     MaterialUvCache uvCache;
     MaterialUvBindings uvBindings;
     BuildClodMaterialUvData(materialInfo, materialFlags, md, triIdx, bary, uvCache, uvBindings);
+    if (uvCache.count > 0u)
+    {
+        materialDebugUv = uvCache.samples[0].uv;
+        materialDebugUvValid = 1.0f;
+        materialDebugUvDerivative = float2(
+            length(uvCache.samples[0].dUVdx),
+            length(uvCache.samples[0].dUVdy));
+    }
 #if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL)
     SampleMaterialEvalFromUvCache(
         uvCache,
@@ -1950,6 +2078,10 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     sample.normalWSBase = worldNormal;
     sample.normalOS = normalOS;
     sample.vertexColor = vertexColor;
+    sample.materialDebugUv = materialDebugUv;
+    sample.materialDebugUvValid = materialDebugUvValid;
+    sample.materialDebugUvDerivative = materialDebugUvDerivative;
+    sample.reyesDebugSourceBarycentrics = reyesDebugSourceBarycentrics;
     sample.dpdxWS = dpdx;
     sample.dpdyWS = dpdy;
     sample.motionVector = ComputeClodMotionVector(
@@ -2019,6 +2151,11 @@ bool ResolveClodGBufferSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool 
     sample.geometryGroupIndex = resolvedSample.geometryGroupIndex;
     sample.isVoxelPath = resolvedSample.isVoxelPath;
     sample.normalOS = resolvedSample.normalOS;
+    sample.materialDebugUv = resolvedSample.materialDebugUv;
+    sample.materialDebugUvValid = resolvedSample.materialDebugUvValid;
+    sample.materialDebugUvDerivative = resolvedSample.materialDebugUvDerivative;
+    sample.reyesDebugSourceBarycentrics = resolvedSample.reyesDebugSourceBarycentrics;
+    sample.materialDebugFlags = resolvedSample.materialFlags;
     sample.motionVector = resolvedSample.motionVector;
     sample.materialInputs = resolvedSample.materialInputs;
     return true;
@@ -2078,6 +2215,11 @@ bool ResolveClodGBufferDebugSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, 
     sample.geometryGroupIndex = resolvedSample.geometryGroupIndex;
     sample.isVoxelPath = resolvedSample.isVoxelPath;
     sample.normalOS = resolvedSample.normalOS;
+    sample.materialDebugUv = resolvedSample.materialDebugUv;
+    sample.materialDebugUvValid = resolvedSample.materialDebugUvValid;
+    sample.materialDebugUvDerivative = resolvedSample.materialDebugUvDerivative;
+    sample.reyesDebugSourceBarycentrics = resolvedSample.reyesDebugSourceBarycentrics;
+    sample.materialDebugFlags = resolvedSample.materialDebugFlags;
     sample.motionVector = resolvedSample.motionVector;
     sample.materialInputs = resolvedSample.materialInputs;
     return true;

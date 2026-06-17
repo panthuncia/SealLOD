@@ -2598,8 +2598,13 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 	if (shouldProcessTexture) {
 		ZoneScopedN("TextureAsset::EnsureUploaded::ShouldProcessTextureInitial");
 		if (!sourceData && (m_reloadHandle || reloadFailedThisFrame)) {
-			ensureProcessingPlaceholder("async source-data build pending; placeholder texture uploaded");
-			return makeResult();
+			if (allowBlockingFallback && m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && m_reloadHandle) {
+				m_reloadHandle.reset();
+			}
+			else {
+				ensureProcessingPlaceholder("async source-data build pending; placeholder texture uploaded");
+				return makeResult();
+			}
 		}
 		if (!sourceData && !allowBlockingFallback) {
 			requestAsyncSourceDataIfNeeded(
@@ -2616,6 +2621,14 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		if (!m_processingHandle && !TextureProcessingManager::GetInstance().NeedsProcessing(*sourceData, m_meta)) {
 			ZoneScopedN("TextureAsset::EnsureUploaded::ShouldProcessTextureInitial::NoProcessingNeeded");
 			const uint32_t residentMipCount = CalcMipCountFromDescription(sourceData->desc);
+			if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !HasUsableImage()) {
+				if (uploadSourceDataThroughFactory(
+						sourceData,
+						TextureUploadPathTelemetry::CpuImmediateUpload,
+						"texture data uploaded through TextureFactory as bootstrap before asynchronous residency")) {
+					return makeResult();
+				}
+			}
 			if (needsStreamingReload) {
 				if (tryAdvanceAsyncDirectStorageReload("texture residency reloaded asynchronously from file-backed DDS through DirectStorage GPU queue")) {
 					return makeResult();

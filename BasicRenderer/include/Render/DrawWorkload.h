@@ -40,9 +40,7 @@ inline MaterialCompileFlags ComposeRuntimeMaterialEvalCompileFlags(const Mesh& m
 
 inline MaterialCompileFlags ComposeRuntimeReyesMaterialEvalCompileFlags(const Mesh& mesh, const Material& material) {
     auto compileFlags = ComposeRuntimeMaterialEvalCompileFlags(mesh, material);
-    if ((compileFlags & MaterialCompileFlags::MaterialCompileGeometricDisplacement) != 0u) {
-        compileFlags |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
-    }
+    compileFlags |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
     return compileFlags;
 }
 

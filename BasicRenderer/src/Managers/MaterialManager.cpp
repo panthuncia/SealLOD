@@ -546,6 +546,35 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			!BytewiseEqual(signature.openPBRData, openPBRData);
 	}
 	if (dataChanged) {
+		if (materialData.geometricDisplacementEnabled != 0u &&
+			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
+			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
+			const auto logIndex = loggedGeometricMaterials.fetch_add(1, std::memory_order_relaxed);
+			if (logIndex < 128u) {
+				const auto desc = material.ToCacheDescription();
+				const auto* heightTexture = desc.heightMap.texture.get();
+				spdlog::info(
+					"SARP material upload: non-terrain geometric material id={} name='{}' base='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} heightIndex={} heightSampler={} heightUv={} heightChannel={} heightScale={} geomMin={} geomMax={} fallbackHeight={} usableHeight={} reyesUvDensity=({}, {})",
+					material.GetMaterialID(),
+					desc.name,
+					desc.baseColor.sourcePath,
+					desc.heightMap.sourcePath,
+					materialData.materialFlags,
+					static_cast<std::uint64_t>(material.Technique().compileFlags),
+					static_cast<std::uint32_t>(material.Technique().rasterFlags),
+					materialData.heightMapIndex,
+					materialData.heightSamplerIndex,
+					materialData.heightUvSetIndex,
+					materialData.heightChannel,
+					materialData.heightMapScale,
+					materialData.geometricDisplacementMin,
+					materialData.geometricDisplacementMax,
+					heightTexture ? heightTexture->IsUsingFallbackImage() : false,
+					heightTexture ? heightTexture->HasUsableImage() : false,
+					materialData.reyesUvDensity.x,
+					materialData.reyesUvDensity.y);
+			}
+		}
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs");
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");

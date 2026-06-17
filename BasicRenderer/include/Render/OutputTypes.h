@@ -62,6 +62,10 @@ enum OutputType {
 	TERRAIN_TEXTURE_UV = 58,
 	TERRAIN_TEXTURE_SEAM = 59,
 	TERRAIN_PAINT_GRID = 60,
+	MATERIAL_UV = 61,
+	MATERIAL_UV_DERIVATIVE = 62,
+	REYES_SOURCE_BARYCENTRICS = 63,
+	MATERIAL_EVAL_FEATURES = 64,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -119,4 +123,15 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Terrain RVT Sampled Material",
 	"Terrain RVT Sampled Albedo Point",
 	"Terrain RVT Height Scale",
+	"Terrain Geometric Height",
+	"Terrain Geometric Height Slope",
+	"Terrain Dominant Layer",
+	"Terrain Dominant Weight",
+	"Terrain Texture UV",
+	"Terrain Texture Seam",
+	"Terrain Paint Grid",
+	"Material UV",
+	"Material UV Derivative",
+	"Reyes Source Barycentrics",
+	"Material Eval Features",
 };

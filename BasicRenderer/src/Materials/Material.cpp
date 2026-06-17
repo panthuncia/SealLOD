@@ -423,7 +423,11 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
     }
     if (m_heightMap) {
         m_heightMap->SetGenerateMipmaps(true);
-        m_heightMap->EnsureUploaded(factory, mode);
+        const auto heightUploadMode =
+            (mode == TextureUploadAdvanceMode::NonBlocking && m_materialData.geometricDisplacementEnabled != 0u)
+            ? TextureUploadAdvanceMode::AllowBlockingFallback
+            : mode;
+        m_heightMap->EnsureUploaded(factory, heightUploadMode);
     }
     if (m_metallicTexture) {
         m_metallicTexture->SetGenerateMipmaps(true);

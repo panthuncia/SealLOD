@@ -481,7 +481,7 @@ void ApplyMaterialGlintInfo(in MaterialEvalInfo materialInfo, inout MaterialInpu
 void AccumulateMaterialSelectedMipDebug(inout MaterialInputs materialInputs, uint selectedMipLevel, uint selectedMipMaxLevel)
 {
     if (materialInputs.selectedMaterialMipLevel == MATERIAL_DEBUG_INVALID_MIP_LEVEL ||
-        selectedMipLevel < materialInputs.selectedMaterialMipLevel)
+        selectedMipLevel > materialInputs.selectedMaterialMipLevel)
     {
         materialInputs.selectedMaterialMipLevel = selectedMipLevel;
         materialInputs.selectedMaterialMipMaxLevel = selectedMipMaxLevel;
