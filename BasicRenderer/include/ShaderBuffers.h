@@ -847,6 +847,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     UintRootConstant25,
     UintRootConstant26,
     UintRootConstant27,
+    UintRootConstant28,
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
@@ -855,7 +856,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscEnableShadows = UintRootConstant24,
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
-	NumMiscUintRootConstants = UintRootConstant27 + 1
+	NumMiscUintRootConstants = UintRootConstant28 + 1
 };
 
 enum ResourceDescriptorIndicesRootConstants { // Auto-assigned, do not set manually

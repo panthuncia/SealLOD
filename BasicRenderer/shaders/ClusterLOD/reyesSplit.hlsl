@@ -10,7 +10,7 @@
 #include "PerPassRootConstants/clodReyesSplitRootConstants.h"
 
 static const uint REYES_SPLIT_GROUP_SIZE = 64u;
-static const uint REYES_SPLIT_TELEMETRY_PASS_COUNT = 4u;
+static const uint REYES_SPLIT_TELEMETRY_PASS_COUNT = 5u;
 static const float REYES_SHADOW_FINE_TARGET_TEXELS_PER_MICRO_TRIANGLE = 1.0f;
 static const float REYES_SHADOW_COARSE_TARGET_PAGES_PER_TRIANGLE_DEFAULT = 10.0f;
 
@@ -48,12 +48,7 @@ float ReyesMaxAxisScale_RowVector(row_major matrix m)
 
 float ReyesPatchMaxDisplacementMagnitude(MaterialInfo materialInfo)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
-    {
-        return 0.0f;
-    }
-
-    return max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+    return ReyesGeometricDisplacementMagnitude(materialInfo);
 }
 
 void ReyesPatchBuildConservativeSphere(
@@ -539,20 +534,6 @@ float3 ReyesInterpolateTriangle(float3 p0, float3 p1, float3 p2, float3 barycent
     return result;
 }
 
-float3 ComputeReyesEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
-{
-    const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
-    const float distance12 = max(camera.zNear, min(length(worldPosition1 - camera.positionWorldSpace.xyz), length(worldPosition2 - camera.positionWorldSpace.xyz)));
-    const float distance20 = max(camera.zNear, min(length(worldPosition2 - camera.positionWorldSpace.xyz), length(worldPosition0 - camera.positionWorldSpace.xyz)));
-
-    const float edge01 = length(worldPosition0 - worldPosition1);
-    const float edge12 = length(worldPosition1 - worldPosition2);
-    const float edge20 = length(worldPosition2 - worldPosition0);
-
-    const float scale = camera.projY * REYES_SCREEN_SCALE_REFERENCE * REYES_PROJECTED_PIXEL_TO_TESS_FACTOR_SCALE;
-    return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
-}
-
 float3 ComputeReyesShadowEdgeTessFactors(
     float3 worldPosition0,
     float3 worldPosition1,
@@ -651,7 +632,8 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const CullingCameraInfo camera = cameras[splitEntry.viewID];
     const Camera sceneCamera = sceneCameras[splitEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
-    const float displacementMagnitude = ReyesPatchMaxDisplacementMagnitude(materialInfo);
+    const float displacementMagnitudeOS = ReyesPatchMaxDisplacementMagnitude(materialInfo);
+    const float displacementMagnitudeWS = displacementMagnitudeOS * ReyesMaxAxisScale_RowVector(objectData.model);
     const uint clipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
     const uint3 sourceTriangle = DecodeTriangleCompact(min(sourceTriangleIndex, max(0u, md.triangleCount - 1u)), md);
@@ -687,7 +669,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             currentPosition0WS,
             currentPosition1WS,
             currentPosition2WS,
-            displacementMagnitude,
+            displacementMagnitudeWS,
             coarseCenterWorld,
             coarseRadiusWorld);
 
@@ -711,7 +693,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             currentPosition0WS,
             currentPosition1WS,
             currentPosition2WS,
-            displacementMagnitude,
+            displacementMagnitudeWS,
             sceneCamera,
             routeKind,
             clipmapIndex,
@@ -726,7 +708,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             currentPosition0OS,
             currentPosition1OS,
             currentPosition2OS,
-            displacementMagnitude,
+            displacementMagnitudeOS,
             objectData,
             sceneCamera,
             splitEntry.viewID,
@@ -773,7 +755,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    float3 edgeFactors = ComputeReyesEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
+    float3 edgeFactors = ReyesComputeVisibilityEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
     if (routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM || routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM)
     {
         if (CLOD_REYES_SPLIT_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX != 0xFFFFFFFFu &&
@@ -908,7 +890,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             childPosition0WS,
             childPosition1WS,
             childPosition2WS,
-            displacementMagnitude,
+            displacementMagnitudeWS,
             sceneCamera,
             routeKind,
             clipmapIndex,
@@ -937,7 +919,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
                 childPosition0OS,
                 childPosition1OS,
                 childPosition2OS,
-                displacementMagnitude,
+                displacementMagnitudeOS,
                 objectData,
                 sceneCamera,
                 splitEntry.viewID,

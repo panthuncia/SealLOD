@@ -53,36 +53,77 @@ float TerrainRvtBasePageWorldSize(TerrainRvtInfo info)
     return max(info.basePageWorldSize, 0.125f);
 }
 
-float TerrainRvtPageWorldSize(TerrainRvtInfo info, uint clipLevel)
+float TerrainRvtTerrainExtentWorld(TerrainSetInfo terrain)
 {
-    return TerrainRvtBasePageWorldSize(info) * (float)(1u << min(clipLevel, 31u));
-}
-
-uint2 TerrainRvtBasePageCount(TerrainRvtInfo info, TerrainSetInfo terrain)
-{
-    const float basePageWorldSize = TerrainRvtBasePageWorldSize(info);
-    const float2 terrainSize = float2(terrain.regionCountX, terrain.regionCountY) * terrain.regionSizeWorld;
-    return max(uint2(1u, 1u), (uint2)ceil(terrainSize / basePageWorldSize));
-}
-
-uint2 TerrainRvtClipPageCount(TerrainRvtInfo info, TerrainSetInfo terrain, uint clipLevel)
-{
-    const uint scale = 1u << min(clipLevel, 31u);
-    return max(uint2(1u, 1u), (TerrainRvtBasePageCount(info, terrain) + scale - 1u) >> min(clipLevel, 31u));
-}
-
-uint TerrainRvtRequiredClipCount(TerrainRvtInfo info, TerrainSetInfo terrain)
-{
-    const float terrainExtent = max((float)terrain.regionCountX, (float)terrain.regionCountY) * terrain.regionSizeWorld;
-    const float clipCoverage0 = (float)max(info.pageTableResolution, 1u) * TerrainRvtBasePageWorldSize(info);
-    const float extraLevels = ceil(log2(max(terrainExtent / max(clipCoverage0, 1.0e-4f), 1.0f)));
-    return min(info.maxClipLevels, 1u + (uint)max(extraLevels, 0.0f));
+    return max((float)terrain.regionCountX, (float)terrain.regionCountY) * terrain.regionSizeWorld;
 }
 
 uint TerrainRvtTerrainClipCount(TerrainRvtInfo info, TerrainSetInfo terrain)
 {
-    const uint configuredClipCount = min(max(info.mipCount, 1u), max(info.maxClipLevels, 1u));
-    return min(max(configuredClipCount, TerrainRvtRequiredClipCount(info, terrain)), max(info.maxClipLevels, 1u));
+    return min(max(info.mipCount, 1u), max(info.maxClipLevels, 1u));
+}
+
+float TerrainRvtFarPageWorldSize(TerrainRvtInfo info, TerrainSetInfo terrain)
+{
+    const float terrainExtent = TerrainRvtTerrainExtentWorld(terrain);
+    // The clip page table is centered on the camera. If its full width is only
+    // one terrain extent, the usable camera-to-edge coverage is roughly half
+    // that. Size the final clip as a coverage diameter so the active ladder can
+    // reach the full loaded-terrain distance.
+    const float farCoverageDiameter = terrainExtent * 2.0f;
+    const float farPageWorldSize = farCoverageDiameter / max((float)info.pageTableResolution, 1.0f);
+    return max(TerrainRvtBasePageWorldSize(info), farPageWorldSize);
+}
+
+float TerrainRvtClipRatio(TerrainRvtInfo info, TerrainSetInfo terrain)
+{
+    const uint clipCount = TerrainRvtTerrainClipCount(info, terrain);
+    if (clipCount <= 1u)
+    {
+        return 1.0f;
+    }
+
+    const float basePageWorldSize = TerrainRvtBasePageWorldSize(info);
+    const float farPageWorldSize = TerrainRvtFarPageWorldSize(info, terrain);
+    return max(1.0f, pow(farPageWorldSize / max(basePageWorldSize, 1.0e-4f), rcp((float)(clipCount - 1u))));
+}
+
+float TerrainRvtPageWorldSize(TerrainRvtInfo info, TerrainSetInfo terrain, uint clipLevel)
+{
+    const uint clipCount = TerrainRvtTerrainClipCount(info, terrain);
+    const uint resolvedClipLevel = min(clipLevel, max(clipCount, 1u) - 1u);
+    return TerrainRvtBasePageWorldSize(info) * pow(TerrainRvtClipRatio(info, terrain), (float)resolvedClipLevel);
+}
+
+float TerrainRvtClipTexelWorldSize(TerrainRvtInfo info, TerrainSetInfo terrain, uint clipLevel)
+{
+    return TerrainRvtPageWorldSize(info, terrain, clipLevel) / max((float)info.pageSize, 1.0f);
+}
+
+uint2 TerrainRvtClipPageCount(TerrainRvtInfo info, TerrainSetInfo terrain, uint clipLevel)
+{
+    const float pageWorldSize = TerrainRvtPageWorldSize(info, terrain, clipLevel);
+    const float2 terrainSize = float2(terrain.regionCountX, terrain.regionCountY) * terrain.regionSizeWorld;
+    return max(uint2(1u, 1u), (uint2)ceil(terrainSize / max(pageWorldSize, 0.125f)));
+}
+
+uint TerrainRvtSelectClipForFootprintWorld(TerrainRvtInfo info, TerrainSetInfo terrain, uint terrainClipCount, float footprintWorld)
+{
+    const uint clipCount = min(max(terrainClipCount, 1u), max(info.maxClipLevels, 1u));
+    const float targetTexelWorldSize = max(footprintWorld, 1.0e-4f);
+    uint selectedClip = 0u;
+
+    [loop]
+    for (uint clipLevel = 1u; clipLevel < clipCount; ++clipLevel)
+    {
+        if (TerrainRvtClipTexelWorldSize(info, terrain, clipLevel) <= targetTexelWorldSize)
+        {
+            selectedClip = clipLevel;
+        }
+    }
+
+    const float biasedClip = (float)selectedClip + info.mipOffset;
+    return min((uint)max(0.0f, floor(biasedClip)), clipCount - 1u);
 }
 
 uint TerrainRvtWrapPageCoord(uint coord, uint origin, uint resolution)
@@ -340,6 +381,7 @@ bool TerrainRvtTryValidateComputedPageInClip(
 bool TerrainRvtTryComputePageLocal(
     uint terrainSetIndex,
     TerrainRvtInfo info,
+    TerrainSetInfo terrain,
     float2 local,
     float2 skyrimXYDdx,
     float2 skyrimXYDdy,
@@ -349,11 +391,8 @@ bool TerrainRvtTryComputePageLocal(
     out float2 pageUv,
     out uint pageTableIndex)
 {
-    const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
     const float footprintWorldSq = max(dot(skyrimXYDdx, skyrimXYDdx), dot(skyrimXYDdy, skyrimXYDdy));
-    const float footprintTexelSq = max(footprintWorldSq * rcp(texelWorldSize0 * texelWorldSize0), 1.0e-8f);
-    const float requestedMip = 0.5f + 0.5f * log2(footprintTexelSq) + info.mipOffset;
-    mip = min((uint)max(0.0f, floor(requestedMip)), terrainClipCount - 1u);
+    mip = TerrainRvtSelectClipForFootprintWorld(info, terrain, terrainClipCount, sqrt(max(footprintWorldSq, 1.0e-8f)));
 
     return TerrainRvtTryComputePageAtClipLocal(
         terrainSetIndex,
@@ -423,6 +462,7 @@ bool TerrainRvtTryComputePage(
     return TerrainRvtTryComputePageLocal(
         terrainSetIndex,
         info,
+        terrain,
         local,
         skyrimXYDdx,
         skyrimXYDdy,
@@ -558,12 +598,6 @@ bool TerrainRvtValidatePhysicalOwner(uint physicalPageIndex, uint pageTableIndex
     return (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) != 0u && owner.x == pageTableIndex;
 }
 
-void TerrainRvtMoveToParentPage(inout uint2 pageCoord, inout float2 pageUv)
-{
-    pageUv = (pageUv + (float2)(pageCoord & uint2(1u, 1u))) * 0.5f;
-    pageCoord = pageCoord >> uint2(1u, 1u);
-}
-
 bool TerrainRvtTryFindCoarserResidentFromPageLocal(
     uint terrainSetIndex,
     TerrainRvtInfo info,
@@ -579,18 +613,30 @@ bool TerrainRvtTryFindCoarserResidentFromPageLocal(
     residentAddress.pageTableIndex = 0xffffffffu;
     physicalPageIndex = 0u;
 
-    uint2 pageCoord = requestedPageCoord;
-    float2 pageUv = requestedPageUv;
     StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
+    const TerrainRvtClipInfo requestedClipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, requestedMip)];
+    if (requestedClipInfo.valid == 0u || requestedClipInfo.pageWorldSize <= 0.0f)
+    {
+        return false;
+    }
+
+    const float2 local = ((float2)requestedPageCoord + requestedPageUv) * requestedClipInfo.pageWorldSize;
 
     [loop]
     for (uint sampleMip = requestedMip + 1u; sampleMip < terrainClipCount; ++sampleMip)
     {
-        TerrainRvtMoveToParentPage(pageCoord, pageUv);
-
+        uint2 pageCoord;
+        float2 pageUv;
         uint pageTableIndex;
-        const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, sampleMip)];
-        if (!TerrainRvtTryValidateComputedPageInClip(info, clipInfo, pageCoord, pageTableIndex))
+        if (!TerrainRvtTryComputePageAtClipLocal(
+            terrainSetIndex,
+            info,
+            local,
+            sampleMip,
+            terrainClipCount,
+            pageCoord,
+            pageUv,
+            pageTableIndex))
         {
             continue;
         }
@@ -636,6 +682,7 @@ bool TerrainRvtTrySampleHeightContext(
         !TerrainRvtTryComputePageLocal(
             ctx.terrainSetIndex,
             ctx.info,
+            ctx.terrain,
             local,
             skyrimXYDdx,
             skyrimXYDdy,
@@ -745,6 +792,7 @@ bool TerrainRvtTrySampleHeightScaleFast(
         !TerrainRvtTryComputePageLocal(
             terrainSetIndex,
             info,
+            terrain,
             local,
             TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
             TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
@@ -903,6 +951,7 @@ bool TerrainRvtTrySampleMaterial(
         !TerrainRvtTryComputePageLocal(
             terrainSetIndex,
             info,
+            terrain,
             local,
             TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
             TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
@@ -1081,6 +1130,7 @@ bool TerrainRvtTrySampleNormalBiased(
     if (!TerrainRvtTryComputePageLocal(
         terrainSetIndex,
         info,
+        terrain,
         local,
         TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdxWS),
         TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdyWS),
@@ -1289,12 +1339,15 @@ bool TerrainRvtMarkPosition(
     return true;
 }
 
-uint TerrainRvtMipForWorldRect(TerrainRvtInfo info, float2 minSkyrimXY, float2 maxSkyrimXY, float targetPagesPerAxis)
+uint TerrainRvtMipForWorldRect(TerrainRvtInfo info, TerrainSetInfo terrain, float2 minSkyrimXY, float2 maxSkyrimXY, float targetPagesPerAxis)
 {
     const float extent = max(maxSkyrimXY.x - minSkyrimXY.x, maxSkyrimXY.y - minSkyrimXY.y);
-    const float targetPageWorldSize = TerrainRvtBasePageWorldSize(info) * max(targetPagesPerAxis, 1.0f);
-    const float requestedMip = log2(max(extent / max(targetPageWorldSize, 1.0e-4f), 1.0f)) + info.mipOffset;
-    return min((uint)max(0.0f, floor(requestedMip)), max(info.mipCount, 1u) - 1u);
+    const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
+    return TerrainRvtSelectClipForFootprintWorld(
+        info,
+        terrain,
+        terrainClipCount,
+        extent / max(targetPagesPerAxis * (float)info.pageSize, 1.0f));
 }
 
 void TerrainRvtMarkWorldRect(
@@ -1323,11 +1376,18 @@ void TerrainRvtMarkWorldRect(
 
     const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
     mip = min(mip, terrainClipCount - 1u);
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
+    const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, mip)];
+    if (clipInfo.valid == 0u)
+    {
+        return;
+    }
+
     const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;
-    const float pageWorldSize = TerrainRvtPageWorldSize(info, mip);
+    const float pageWorldSize = clipInfo.pageWorldSize;
     int2 minPage = (int2)floor((minSkyrimXY - terrainOrigin) / pageWorldSize);
     int2 maxPage = (int2)floor((maxSkyrimXY - terrainOrigin) / pageWorldSize);
-    const uint2 terrainPageCount = TerrainRvtClipPageCount(info, terrain, mip);
+    const uint2 terrainPageCount = clipInfo.terrainPageCount;
     const int2 maxValidPage = int2(terrainPageCount - 1u);
     minPage = clamp(minPage, int2(0, 0), maxValidPage);
     maxPage = clamp(maxPage, int2(0, 0), maxValidPage);

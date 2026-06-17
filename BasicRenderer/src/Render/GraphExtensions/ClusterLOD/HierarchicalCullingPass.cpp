@@ -606,6 +606,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
             m_reyesTessTableTrianglesBuffer->GetSRVInfo(0).slot.index;
         uintRootConstants[CLOD_WG_REYES_TELEMETRY_DESCRIPTOR_INDEX] =
             m_reyesTelemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_CAPACITY] = m_reyesDiceQueueCapacity;
     }
     uintRootConstants[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX] = m_occlusionReplayBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = m_occlusionReplayStateBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -1229,6 +1230,7 @@ void HierarchicalCullingPass::CreatePipelines(
         exports.push_back({ "WG_ReyesSplit2", nullptr });
         exports.push_back({ "WG_ReyesSplit3", nullptr });
         exports.push_back({ "WG_ReyesSplit4", nullptr });
+        exports.push_back({ "WG_ReyesSplit5", nullptr });
         exports.push_back({ "WG_ReyesDice", nullptr });
         exports.push_back({ "WG_ReyesRaster", nullptr });
         exports.push_back({ "WG_ReyesSplitReplay", nullptr });

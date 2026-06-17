@@ -41,6 +41,13 @@ inline bool PickDescriptionDoubleSided(const MaterialDescription& d) {
         d.opacity.factor.Get() < 1.0f;
 }
 
+inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& d) {
+    return d.enableGeometricDisplacement &&
+        d.heightMap.texture &&
+        !d.heightMapFromBaseColorAlpha &&
+        (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
+}
+
 inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO: The alpha-test/double-sided logic is wrong here
     TechniqueDescriptor tech{};
     const auto transparency = PickTransparency(d);
@@ -88,7 +95,7 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
         if (d.heightMapFromBaseColorAlpha && d.baseColor.texture) {
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
         }
-        if (d.enableGeometricDisplacement) {
+        if (SupportsObjectReyesGeometricDisplacement(d)) {
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileGeometricDisplacement;
             tech.rasterFlags |= MaterialRasterFlags::MaterialRasterFlagsGeometricDisplacement;
         }
@@ -164,6 +171,9 @@ public:
         }
         if (desc.normal.texture) {
             materialFlags |= MaterialFlags::MATERIAL_NORMAL_MAP | MaterialFlags::MATERIAL_TEXTURED;
+            if (desc.brniflyModelSpaceNormals) {
+                materialFlags |= MaterialFlags::MATERIAL_OBJECT_SPACE_NORMAL_MAP;
+            }
         }
         if (desc.heightMapFromBaseColorAlpha && desc.baseColor.texture) {
             materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED | MaterialFlags::MATERIAL_HEIGHT_FROM_BASE_ALPHA;
@@ -171,7 +181,7 @@ public:
         if (desc.heightMap.texture) {
             materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED;
         }
-        if (desc.enableGeometricDisplacement && (desc.heightMap.texture || (desc.heightMapFromBaseColorAlpha && desc.baseColor.texture))) {
+        if (SupportsObjectReyesGeometricDisplacement(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         }
         auto diffuseColor = desc.diffuseColor;

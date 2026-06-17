@@ -6,6 +6,7 @@
 #include "include/clodPageAccess.hlsli"
 #include "include/clodReyesTransition.hlsli"
 #include "include/clodStructs.hlsli"
+#include "include/materialFlags.hlsli"
 #include "PerPassRootConstants/clodReyesRootConstants.h"
 
 static const uint REYES_CLASSIFY_GROUP_SIZE = 64u;
@@ -83,7 +84,11 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint materialIndex = perMesh.materialDataIndex;
     const MaterialInfo materialInfo = materialDataBuffer[materialIndex];
 
-    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    const bool displacementEnabled =
+        materialInfo.geometricDisplacementEnabled != 0u &&
+        (((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u) ||
+         (((materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u) &&
+          ((materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)));
     const float displacementSpan = max(0.0f, materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin);
     const bool skinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
     const bool hasMeaningfulDisplacement = displacementEnabled && displacementSpan > 1e-5f;

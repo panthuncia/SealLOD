@@ -176,6 +176,81 @@ static std::vector<float> ComputeFacetedNormals(
 	return normals;
 }
 
+static std::vector<float> ComputeSmoothControlPointNormals(
+	const std::vector<float>& ctrlPos,
+	const VtArray<int>& faceVertCounts,
+	const VtArray<int>& faceVertIndices,
+	const std::vector<uint8_t>& useFace,
+	const std::vector<uint8_t>& holedFaces,
+	bool hasSubset,
+	bool reverseMeshWinding)
+{
+	const size_t controlPointCount = ctrlPos.size() / 3u;
+	std::vector<float> normals(controlPointCount * 3u, 0.0f);
+
+	size_t fvOffset = 0;
+	for (size_t faceIndex = 0; faceIndex < faceVertCounts.size(); ++faceIndex) {
+		const int fvCount = faceVertCounts[faceIndex];
+		if ((hasSubset && !useFace[faceIndex]) || holedFaces[faceIndex] || fvCount < 3) {
+			fvOffset += fvCount;
+			continue;
+		}
+
+		for (int i = 1; i + 1 < fvCount; ++i) {
+			const size_t fv0 = fvOffset;
+			const size_t fv1 = fvOffset + static_cast<size_t>(reverseMeshWinding ? (i + 1) : i);
+			const size_t fv2 = fvOffset + static_cast<size_t>(reverseMeshWinding ? i : (i + 1));
+			if (fv2 >= faceVertIndices.size()) {
+				continue;
+			}
+
+			const uint32_t i0 = static_cast<uint32_t>(faceVertIndices[fv0]);
+			const uint32_t i1 = static_cast<uint32_t>(faceVertIndices[fv1]);
+			const uint32_t i2 = static_cast<uint32_t>(faceVertIndices[fv2]);
+			if (i0 >= controlPointCount || i1 >= controlPointCount || i2 >= controlPointCount) {
+				continue;
+			}
+
+			const GfVec3f p0(ctrlPos[i0 * 3u + 0u], ctrlPos[i0 * 3u + 1u], ctrlPos[i0 * 3u + 2u]);
+			const GfVec3f p1(ctrlPos[i1 * 3u + 0u], ctrlPos[i1 * 3u + 1u], ctrlPos[i1 * 3u + 2u]);
+			const GfVec3f p2(ctrlPos[i2 * 3u + 0u], ctrlPos[i2 * 3u + 1u], ctrlPos[i2 * 3u + 2u]);
+			const GfVec3f faceNormal = GfCross(p1 - p0, p2 - p0);
+			const float len2 = GfDot(faceNormal, faceNormal);
+			if (len2 <= 1e-20f) {
+				continue;
+			}
+
+			normals[i0 * 3u + 0u] += faceNormal[0];
+			normals[i0 * 3u + 1u] += faceNormal[1];
+			normals[i0 * 3u + 2u] += faceNormal[2];
+			normals[i1 * 3u + 0u] += faceNormal[0];
+			normals[i1 * 3u + 1u] += faceNormal[1];
+			normals[i1 * 3u + 2u] += faceNormal[2];
+			normals[i2 * 3u + 0u] += faceNormal[0];
+			normals[i2 * 3u + 1u] += faceNormal[1];
+			normals[i2 * 3u + 2u] += faceNormal[2];
+		}
+
+		fvOffset += fvCount;
+	}
+
+	for (size_t index = 0; index < controlPointCount; ++index) {
+		GfVec3f n(normals[index * 3u + 0u], normals[index * 3u + 1u], normals[index * 3u + 2u]);
+		const float len2 = GfDot(n, n);
+		if (len2 > 1e-20f) {
+			n *= (1.0f / std::sqrt(len2));
+			normals[index * 3u + 0u] = n[0];
+			normals[index * 3u + 1u] = n[1];
+			normals[index * 3u + 2u] = n[2];
+		}
+		else {
+			normals[index * 3u + 1u] = 1.0f;
+		}
+	}
+
+	return normals;
+}
+
 static UsdTimeCode GetUsdGeometrySampleTime(const UsdStageRefPtr& stage)
 {
 	if (stage && stage->HasAuthoredTimeCodeRange()) {
@@ -766,6 +841,35 @@ static void LoadGeom(
 			}
 			else {
 				spdlog::info("Generated faceted normals for polygon mesh '{}' because no normals attribute was authored.", primName);
+			}
+		}
+	}
+
+	if (isPolygonalMesh || previewSubdiv || previewTopology) {
+		if (options.brniflyModelSpaceNormals) {
+			rawNormals = ComputeFacetedNormals(ctrlPos, faceVertCounts, faceVertIndices, reverseMeshWinding);
+			if (!rawNormals.empty()) {
+				gotNormals = true;
+				normInterp = InterpolationType::Uniform;
+				vertexFlags |= VertexFlags::VERTEX_NORMALS;
+				spdlog::info("Using faceted CLod source normals for model-space normal map mesh '{}'.", primName);
+			}
+		}
+		else {
+			auto smoothNormals = ComputeSmoothControlPointNormals(
+				ctrlPos,
+				faceVertCounts,
+				faceVertIndices,
+				useFace,
+				holedFaces,
+				subset.has_value(),
+				reverseMeshWinding);
+			if (!smoothNormals.empty()) {
+				rawNormals = std::move(smoothNormals);
+				gotNormals = true;
+				normInterp = InterpolationType::Vertex;
+				vertexFlags |= VertexFlags::VERTEX_NORMALS;
+				spdlog::info("Using calculated smooth CLod source normals for mesh '{}'.", primName);
 			}
 		}
 	}
@@ -1368,6 +1472,9 @@ MeshPreprocessResult ExtractSubMesh(
 	}
 	if (options.brniflyDynamicDecal) {
 		cacheIdentity.sourceIdentifier += "#brnifly_dynamic_decal=1";
+	}
+	if (options.brniflyModelSpaceNormals) {
+		cacheIdentity.sourceIdentifier += "#brnifly_model_space_normals=1";
 	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",

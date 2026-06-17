@@ -2069,6 +2069,28 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     #endif
 #endif
 
+#if !defined(PSO_TERRAIN)
+    if ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP)) ==
+        (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP))
+    {
+#if defined(PSO_NORMAL_MAP)
+        const MaterialUvSample objectNormalUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
+        Texture2D<float4> objectNormalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
+        SamplerState objectNormalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
+        const float4 objectNormalSample = SampleMaterialTexture2DGrad(
+            objectNormalTexture,
+            objectNormalSamplerState,
+            materialInfo.normalStreamingTextureID,
+            objectNormalUv.uv,
+            objectNormalUv.dUVdx,
+            objectNormalUv.dUVdy,
+            materialInputs);
+        const float3 objectNormalOS = DecodeMaterialNormalSample(objectNormalSample, materialInfo.normalChannels, materialFlags);
+        materialInputs.normalWS = normalize(mul(objectNormalOS, normalMatrix));
+#endif
+    }
+#endif
+
     float3 positionVS = mul(float4(worldPosition, 1.0f), cam.view).xyz;
 
     sample.linearDepth = depth;

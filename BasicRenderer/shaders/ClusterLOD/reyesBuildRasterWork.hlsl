@@ -353,7 +353,7 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             const float3 sourcePosition2 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
             StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
             const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
-            const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+            const float displacementMagnitude = ReyesGeometricDisplacementMagnitude(materialInfo);
             const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
 
             if (CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u)

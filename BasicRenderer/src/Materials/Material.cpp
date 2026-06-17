@@ -243,7 +243,8 @@ MaterialDescription Material::ToCacheDescription() const
     desc.heightMapScale = m_materialData.heightMapScale;
     desc.geometricDisplacementMin = m_materialData.geometricDisplacementMin;
     desc.geometricDisplacementMax = m_materialData.geometricDisplacementMax;
-    desc.enableGeometricDisplacement = m_materialData.geometricDisplacementEnabled != 0u;
+    desc.enableGeometricDisplacement =
+        (m_materialData.materialFlags & MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
     desc.forceDoubleSided = (m_materialData.materialFlags & MaterialFlags::MATERIAL_DOUBLE_SIDED) != 0u;
     desc.negateNormals = (m_materialData.materialFlags & MaterialFlags::MATERIAL_NEGATE_NORMALS) != 0u;
     desc.invertNormalGreen = (m_materialData.materialFlags & MaterialFlags::MATERIAL_INVERT_NORMAL_GREEN) != 0u;

@@ -1556,8 +1556,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 32u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 32u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 64u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 64u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPoolCount", 1u);
     settingsManager.registerSetting<uint32_t>("terrainRvtClipPageTableResolution", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxTerrainSets", 8u);
@@ -1565,6 +1565,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
+    settingsManager.registerSetting<float>("terrainRvtSourceTexelsPerWorld", 24.0f);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
@@ -1698,7 +1699,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName, CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayLengthScaleDirectional);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName, CLodVirtualShadowDefaultSmrtMaxTraceDistanceWorld);
-	settingsManager.registerSetting<uint32_t>(CLodReyesResourceBudgetBytesSettingName, 512u*1024u*1024u*2u); // 2GB for reyes
+	settingsManager.registerSetting<uint32_t>(CLodReyesResourceBudgetBytesSettingName, 512u*1024u*1024u*4u); // 1GB for reyes
 	settingsManager.registerSetting<uint32_t>("usdPointInstancerMaxInstances", 10000u);
     getShadowResolution = settingsManager.getSettingGetter<uint16_t>("shadowResolution");
     setCameraSpeed = settingsManager.getSettingSetter<float>("cameraSpeed");
@@ -2746,7 +2747,8 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     const auto maxClipLevels = TerrainRvt::MaxClipLevels();
     const auto maxGeneratedPagesPerFrame = TerrainRvt::MaxGeneratedPagesPerFrame();
     const auto mipCount = SettingsManager::GetInstance().getSettingGetter<uint32_t>("terrainRvtMipCount")();
-    const auto basePageWorldSize = SettingsManager::GetInstance().getSettingGetter<float>("terrainRvtBasePageWorldSize")();
+    const auto sourceTexelsPerWorld = TerrainRvt::SourceTexelsPerWorld();
+    const auto basePageWorldSize = TerrainRvt::BasePageWorldSize();
     const float mip0TexelWorldSize = basePageWorldSize / static_cast<float>((std::max)(pageSize, 1u));
     const auto forcedFallback = SettingsManager::GetInstance().getSettingGetter<bool>("forceDirectTerrainRvtFallback")();
 
@@ -2885,6 +2887,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          requestedFrame,
          pageSize,
          borderTexels,
+         sourceTexelsPerWorld,
          basePageWorldSize,
          mip0TexelWorldSize,
          atlasPagesWide,
@@ -2910,7 +2913,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
             uint32_t counters[4] = {};
             std::memcpy(counters, result.data.data(), counterBytes);
             spdlog::info(
-                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} base_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} max_gen_pages={} configured_mips={} forced_fallback={})",
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} source_texels_per_world={:.3f} clip0_page_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} max_gen_pages={} configured_mips={} forced_fallback={})",
                 requestedFrame,
                 counters[0],
                 counters[1],
@@ -2918,6 +2921,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 counters[3],
                 pageSize,
                 borderTexels,
+                sourceTexelsPerWorld,
                 basePageWorldSize,
                 mip0TexelWorldSize,
                 atlasPagesWide,

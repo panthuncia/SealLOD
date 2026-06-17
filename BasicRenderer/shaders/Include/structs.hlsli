@@ -1141,11 +1141,11 @@ struct CLodReyesTelemetry
     uint hardwareRasterMicroTriangleCount;
     uint hardwareRasterRequestedMicroTriangleCount;
     uint hardwareRasterPackedWorkEntryCount;
-    uint splitInputCounts[4];
-    uint splitChildOutputCounts[4];
-    uint splitDiceOutputCounts[4];
-    uint splitQueueOverflowCounts[4];
-    uint diceQueueOverflowCounts[4];
+    uint splitInputCounts[5];
+    uint splitChildOutputCounts[5];
+    uint splitDiceOutputCounts[5];
+    uint splitQueueOverflowCounts[5];
+    uint diceQueueOverflowCounts[5];
     uint invalidSplitPatchDomainCount;
     uint invalidDicePatchDomainCount;
     uint splitCollapseFallbackDiceCount;

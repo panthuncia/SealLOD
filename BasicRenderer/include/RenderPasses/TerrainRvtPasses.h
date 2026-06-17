@@ -127,6 +127,11 @@ namespace TerrainRvt
         return std::clamp(SettingFloat("terrainRvtMipOffset", 0.0f), -8.0f, 8.0f);
     }
 
+    inline float SourceTexelsPerWorld()
+    {
+        return (std::max)(SettingFloat("terrainRvtSourceTexelsPerWorld", DefaultSourceTexelsPerWorld), 0.001f);
+    }
+
     inline uint32_t MaxPageTableEntries()
     {
         const uint32_t resolution = ClipPageTableResolution();
@@ -150,7 +155,7 @@ namespace TerrainRvt
 
     inline float BasePageWorldSize()
     {
-        return (std::max)(SettingFloat("terrainRvtBasePageWorldSize", DefaultBasePageWorldSize), 0.125f);
+        return (std::max)(static_cast<float>(PageSize()) / SourceTexelsPerWorld(), 0.125f);
     }
 
     inline void FillInfoRootConstants(uint32_t* rootConstants)
@@ -232,11 +237,12 @@ public:
         if (!loggedDispatch) {
             loggedDispatch = true;
             spdlog::info(
-                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} base_world={} clip_table={} max_sets={} max_clips={} addressing=direct_clipmaps",
+                "SARP terrain RVT dispatch: reset max_entries={} groups={}x{} covered_threads={} source_texels_per_world={} clip0_page_world={} clip_table={} max_sets={} max_clips={} addressing=stretched_clipmaps",
                 maxPageTableEntries,
                 dispatchX,
                 dispatchY,
                 static_cast<uint64_t>(dispatchX) * dispatchY * 64ull,
+                TerrainRvt::SourceTexelsPerWorld(),
                 TerrainRvt::BasePageWorldSize(),
                 TerrainRvt::ClipPageTableResolution(),
                 TerrainRvt::MaxTerrainSets(),
@@ -546,6 +552,7 @@ public:
         b->WithShaderResource(
             Builtin::CameraBuffer,
             Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtCounters,
             Builtin::Terrain::RvtGenerationList,
             Builtin::Terrain::Sets,

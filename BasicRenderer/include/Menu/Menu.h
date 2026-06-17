@@ -716,9 +716,9 @@ private:
     float m_terrainRvtMipOffset = 0.0f;
     std::function<float()> getTerrainRvtMipOffset;
     std::function<void(float)> setTerrainRvtMipOffset;
-    float m_terrainRvtBasePageWorldSize = 128.0f / 24.0f;
-    std::function<float()> getTerrainRvtBasePageWorldSize;
-    std::function<void(float)> setTerrainRvtBasePageWorldSize;
+    float m_terrainRvtSourceTexelsPerWorld = 24.0f;
+    std::function<float()> getTerrainRvtSourceTexelsPerWorld;
+    std::function<void(float)> setTerrainRvtSourceTexelsPerWorld;
     int m_terrainRvtPhysicalAtlasPagesWide = 32;
     std::function<uint32_t()> getTerrainRvtPhysicalAtlasPagesWide;
     std::function<void(uint32_t)> setTerrainRvtPhysicalAtlasPagesWide;
@@ -1336,13 +1336,13 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         [this](const float& newValue) {
             m_terrainRvtMipOffset = newValue;
         }));
-    setTerrainRvtBasePageWorldSize = settingsManager.getSettingSetter<float>("terrainRvtBasePageWorldSize");
-    getTerrainRvtBasePageWorldSize = settingsManager.getSettingGetter<float>("terrainRvtBasePageWorldSize");
-    m_terrainRvtBasePageWorldSize = getTerrainRvtBasePageWorldSize();
+    setTerrainRvtSourceTexelsPerWorld = settingsManager.getSettingSetter<float>("terrainRvtSourceTexelsPerWorld");
+    getTerrainRvtSourceTexelsPerWorld = settingsManager.getSettingGetter<float>("terrainRvtSourceTexelsPerWorld");
+    m_terrainRvtSourceTexelsPerWorld = getTerrainRvtSourceTexelsPerWorld();
     m_settingSubscriptions.push_back(SettingsManager::GetInstance().addObserver<float>(
-        "terrainRvtBasePageWorldSize",
+        "terrainRvtSourceTexelsPerWorld",
         [this](const float& newValue) {
-            m_terrainRvtBasePageWorldSize = newValue;
+            m_terrainRvtSourceTexelsPerWorld = newValue;
         }));
     setTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingSetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
     getTerrainRvtPhysicalAtlasPagesWide = settingsManager.getSettingGetter<uint32_t>("terrainRvtPhysicalAtlasPagesWide");
@@ -2104,8 +2104,8 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::SliderFloat("Terrain RVT Mip Offset", &m_terrainRvtMipOffset, -4.0f, 4.0f, "%.2f")) {
             setTerrainRvtMipOffset(std::clamp(m_terrainRvtMipOffset, -8.0f, 8.0f));
         }
-        if (ImGui::SliderFloat("Terrain RVT Base Page World Size", &m_terrainRvtBasePageWorldSize, 0.125f, 256.0f, "%.3f")) {
-            setTerrainRvtBasePageWorldSize(std::max(0.125f, m_terrainRvtBasePageWorldSize));
+        if (ImGui::SliderFloat("Terrain RVT Source Texels/World", &m_terrainRvtSourceTexelsPerWorld, 1.0f, 128.0f, "%.2f")) {
+            setTerrainRvtSourceTexelsPerWorld(std::max(0.001f, m_terrainRvtSourceTexelsPerWorld));
         }
         if (ImGui::SliderInt("Terrain RVT Physical Atlas Pages Wide", &m_terrainRvtPhysicalAtlasPagesWide, 1, 128)) {
             setTerrainRvtPhysicalAtlasPagesWide(static_cast<uint32_t>(std::clamp(m_terrainRvtPhysicalAtlasPagesWide, 1, 128)));

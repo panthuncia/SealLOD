@@ -1969,6 +1969,7 @@ namespace USDLoader {
 		options.brniflyZBufferWrite = desc.brniflyZBufferWrite;
 		options.brniflyDecal = desc.brniflyDecal;
 		options.brniflyDynamicDecal = desc.brniflyDynamicDecal;
+		options.brniflyModelSpaceNormals = desc.brniflyModelSpaceNormals;
 		const bool temporaryBlockedOverlay = desc.brniflyDecal || desc.brniflyDynamicDecal;
 		if (desc.brniflyVertexAlpha && desc.blendState == BlendState::BLEND_STATE_MASK && temporaryBlockedOverlay) {
 			options.vertexAlphaCutoff = std::clamp(desc.alphaCutoff, 0.0f, 1.0f);

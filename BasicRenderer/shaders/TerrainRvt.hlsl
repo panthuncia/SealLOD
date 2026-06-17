@@ -43,11 +43,13 @@ float TerrainRvtMaxAxisScale_RowVector(row_major matrix m)
     return sqrt(max(dot(row0, row0), max(dot(row1, row1), dot(row2, row2))));
 }
 
-uint TerrainRvtMipForFootprintWorld(TerrainRvtInfo info, float footprintWorld)
+uint TerrainRvtMipForFootprintWorld(TerrainRvtInfo info, TerrainSetInfo terrain, float footprintWorld)
 {
-    const float texelWorldSize0 = max(TerrainRvtBasePageWorldSize(info) / max((float)info.pageSize, 1.0f), 1.0e-4f);
-    const float requestedMip = 0.5f + log2(max(footprintWorld / texelWorldSize0, 1.0e-4f)) + info.mipOffset;
-    return min((uint)max(0.0f, floor(requestedMip)), max(info.mipCount, 1u) - 1u);
+    return TerrainRvtSelectClipForFootprintWorld(
+        info,
+        terrain,
+        TerrainRvtTerrainClipCount(info, terrain),
+        footprintWorld);
 }
 
 [shader("compute")]
@@ -128,7 +130,7 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         clipInfo.clipLevel = clipLevel;
         clipInfo.tableResolution = info.pageTableResolution;
         clipInfo.tableBaseSlot = linearThreadIndex * info.pageTableResolution * info.pageTableResolution;
-        clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, clipLevel);
+        clipInfo.pageWorldSize = TerrainRvtBasePageWorldSize(info);
         clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
 
         if (terrainSetIndex < info.maxTerrainSets)
@@ -136,6 +138,8 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
             const TerrainSetInfo terrain = terrainSets[terrainSetIndex];
             const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
             clipInfo.terrainClipCount = terrainClipCount;
+            clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, terrain, clipLevel);
+            clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
             if (clipLevel < terrainClipCount &&
                 terrain.regionSizeWorld > 0.0f &&
                 terrain.regionCountX > 0u &&
@@ -199,13 +203,15 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         clipInfo.clipLevel = clipLevel;
         clipInfo.tableResolution = resolution;
         clipInfo.tableBaseSlot = clipInfoIndex * slotsPerClip;
-        clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, clipLevel);
+        clipInfo.pageWorldSize = TerrainRvtBasePageWorldSize(info);
         clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
         if (clipInfoIndex < maxClipInfos && terrainSetIndex < info.maxTerrainSets)
         {
             const TerrainSetInfo terrain = terrainSets[terrainSetIndex];
             const uint terrainClipCount = TerrainRvtTerrainClipCount(info, terrain);
             clipInfo.terrainClipCount = terrainClipCount;
+            clipInfo.pageWorldSize = TerrainRvtPageWorldSize(info, terrain, clipLevel);
+            clipInfo.invPageWorldSize = rcp(max(clipInfo.pageWorldSize, 0.125f));
             if (clipLevel < terrainClipCount &&
                 terrain.regionSizeWorld > 0.0f &&
                 terrain.regionCountX > 0u &&
@@ -476,7 +482,9 @@ void TerrainRvtMarkVisibleClusterPagesCS(uint3 dtid : SV_DispatchThreadID)
     const float projectedRadiusNdc = radiusWS * max(abs(camera.projection._11), abs(camera.projection._22)) / depth;
     const float projectedDiameterPixels = max(projectedRadiusNdc * max((float)perFrame.screenResX, (float)perFrame.screenResY), 1.0f);
     const float terrainExtentWorld = max(rvtMaxXY.x - rvtMinXY.x, rvtMaxXY.y - rvtMinXY.y);
-    const uint mip = TerrainRvtMipForFootprintWorld(terrainRvtInfo, terrainExtentWorld / projectedDiameterPixels);
+    StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
+    const TerrainSetInfo terrain = terrainSets[materialInfo.terrainSetIndex];
+    const uint mip = TerrainRvtMipForFootprintWorld(terrainRvtInfo, terrain, terrainExtentWorld / projectedDiameterPixels);
 
     TerrainRvtMarkWorldRect(
         materialInfo.terrainSetIndex,
@@ -836,6 +844,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     StructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     StructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
 
@@ -868,13 +877,18 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
         return;
     }
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
+    const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, mip)];
+    if (clipInfo.valid == 0u)
+    {
+        return;
+    }
     if (TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) && texelInPage == 0u)
     {
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
         InterlockedAdd(stats[0].generationTexels, texelsPerPage);
     }
 
-    const float pageWorldSize = TerrainRvtPageWorldSize(info, mip);
+    const float pageWorldSize = clipInfo.pageWorldSize;
     const float texelWorldSize = pageWorldSize / (float)max(info.pageSize, 1u);
     const float2 terrainOrigin = float2(terrain.minRegionX, terrain.minRegionY) * terrain.regionSizeWorld;
     const float2 unclampedPageTexel = (float2)tileTexel - (float)info.borderTexels + 0.5f.xx;

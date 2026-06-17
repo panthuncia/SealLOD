@@ -2185,7 +2185,7 @@ void WG_ObjectCull(
 [NodeLaunch("coalescing")]
 [NodeIsProgramEntry]
 [NumThreads(TRAVERSE_THREADS_PER_GROUP, 1, 1)]
-[NodeMaxRecursionDepth(21)] // Could be higher when Reyes is in pure-compute mode
+[NodeMaxRecursionDepth(19)] // Could be higher when Reyes is in pure-compute mode
 void WG_TraverseNodes(
     [MaxRecords(TRAVERSE_RECORDS_PER_GROUP)] GroupNodeInputRecords<TraverseNodeRecord> inRecs,
     uint GI : SV_GroupIndex,
@@ -2960,7 +2960,7 @@ void ClusterCullBody(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
         const MaterialInfo materialInfo = materialDataBuffer[perMesh.materialDataIndex];
         isAlphaTestedMaterial = (materialInfo.materialFlags & MATERIAL_ALPHA_TEST) != 0u;
-        const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+        const bool displacementEnabled = ReyesGeometricDisplacementEnabled(materialInfo);
         const float displacementSpan = max(0.0f, materialInfo.geometricDisplacementMax - materialInfo.geometricDisplacementMin);
         reyesDisplacementCandidate = displacementEnabled && displacementSpan > 1e-5f;
         StructuredBuffer<CullingCameraInfo> cameraInfos =
@@ -4100,18 +4100,6 @@ float3 WGReyesInterpolateTriangle(float3 p0, float3 p1, float3 p2, float3 baryce
     return result;
 }
 
-float3 WGReyesComputeEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
-{
-    const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
-    const float distance12 = max(camera.zNear, min(length(worldPosition1 - camera.positionWorldSpace.xyz), length(worldPosition2 - camera.positionWorldSpace.xyz)));
-    const float distance20 = max(camera.zNear, min(length(worldPosition2 - camera.positionWorldSpace.xyz), length(worldPosition0 - camera.positionWorldSpace.xyz)));
-    const float edge01 = length(worldPosition0 - worldPosition1);
-    const float edge12 = length(worldPosition1 - worldPosition2);
-    const float edge20 = length(worldPosition2 - worldPosition0);
-    const float scale = camera.projY * REYES_SCREEN_SCALE_REFERENCE * REYES_PROJECTED_PIXEL_TO_TESS_FACTOR_SCALE;
-    return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
-}
-
 uint3 WGReyesComputeSplitFactors(float3 edgeFactors)
 {
     return clamp(
@@ -4241,7 +4229,7 @@ bool WGReyesDiceHZBOccluded(
     const float3 patchPosition2OS = WGReyesInterpolateTriangle(sourcePosition0OS, sourcePosition1OS, sourcePosition2OS, bary2);
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     const MaterialInfo materialInfo = materials[diceEntry.materialIndex];
-    const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+    const float displacementMagnitude = ReyesGeometricDisplacementMagnitude(materialInfo);
     const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     const Camera camera = cameras[diceEntry.viewID];
@@ -4385,7 +4373,7 @@ void WGReyesSplitCommon(
             const Camera sceneCamera = sceneCameras[splitEntry.viewID];
             StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
             const MaterialInfo materialInfo = materials[splitEntry.materialIndex];
-            const float displacementMagnitude = max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax));
+            const float displacementMagnitude = ReyesGeometricDisplacementMagnitude(materialInfo);
             if (!CLodWorkGraphIsPhase2() &&
                 WGReyesPatchHZBOccluded(
                     currentPosition0OS,
@@ -4402,7 +4390,7 @@ void WGReyesSplitCommon(
                 valid = false;
             }
             if (valid) {
-                const float3 edgeFactors = WGReyesComputeEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, cullingCamera);
+                const float3 edgeFactors = ReyesComputeVisibilityEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, cullingCamera);
                 const float maxEdgeFactor = max(edgeFactors.x, max(edgeFactors.y, edgeFactors.z));
                 const uint nextSplitLevel = splitEntry.splitLevel + 1u;
                 const uint nextQuantizedTessFactor = (uint)min(65535.0f, ceil(maxEdgeFactor * 256.0f));
@@ -4441,7 +4429,7 @@ void WGReyesSplitCommon(
                         childDomain1UV[childIndex] = ReyesPatchBarycentricsToUV(childDomain1);
                         childDomain2UV[childIndex] = ReyesPatchBarycentricsToUV(childDomain2);
                     }
-                    InterlockedAdd(telemetryBuffer[0].splitChildOutputCounts[min(stageIndex, 3u)], childCount);
+                    InterlockedAdd(telemetryBuffer[0].splitChildOutputCounts[min(stageIndex, 4u)], childCount);
                 }
             }
         }
@@ -4457,7 +4445,7 @@ void WGReyesSplitCommon(
         }
         if (diceCount != 0u) {
             diceOut[0] = diceEntry;
-            InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[min(stageIndex, 3u)], 1u);
+            InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[min(stageIndex, 4u)], 1u);
             InterlockedAdd(telemetryBuffer[0].finalDiceQueueEntryCount, 1u);
         }
         for (uint childIndex = 0u; childIndex < splitCount; ++childIndex) {
@@ -4491,13 +4479,14 @@ void FUNC( \
 DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit1, "ReyesSplit1", "ReyesSplit2", 0u, false)
 DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit2, "ReyesSplit2", "ReyesSplit3", 1u, false)
 DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit3, "ReyesSplit3", "ReyesSplit4", 2u, false)
+DECLARE_REYES_SPLIT_NODE(WG_ReyesSplit4, "ReyesSplit4", "ReyesSplit5", 3u, false)
 
 [Shader("node")]
-[NodeID("ReyesSplit4")]
+[NodeID("ReyesSplit5")]
 [NodeLaunch("broadcasting")]
 [NodeDispatchGrid(1, 1, 1)]
 [NumThreads(REYES_WG_SPLIT_THREADS, 1, 1)]
-void WG_ReyesSplit4(
+void WG_ReyesSplit5(
     DispatchNodeInputRecord<CLodReyesSplitQueueEntry> inputRecord,
     [NodeID("ReyesDice")] [MaxRecords(1)] NodeOutput<CLodReyesDiceQueueEntry> diceOutput,
     uint GI : SV_GroupIndex)
@@ -4546,7 +4535,7 @@ void WG_ReyesSplit4(
             const float3 currentPosition2WS = mul(float4(currentPosition2OS, 1.0f), objectData.model).xyz;
             StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
             const CullingCameraInfo camera = cameras[splitEntry.viewID];
-            const float3 edgeFactors = WGReyesComputeEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
+            const float3 edgeFactors = ReyesComputeVisibilityEdgeTessFactors(currentPosition0WS, currentPosition1WS, currentPosition2WS, camera);
             const float maxEdgeFactor = max(edgeFactors.x, max(edgeFactors.y, edgeFactors.z));
             const uint nextSplitLevel = splitEntry.splitLevel + 1u;
             const uint nextQuantizedTessFactor = (uint)min(65535.0f, ceil(maxEdgeFactor * 256.0f));
@@ -4565,7 +4554,7 @@ void WG_ReyesSplit4(
     GroupNodeOutputRecords<CLodReyesDiceQueueEntry> diceOut = diceOutput.GetGroupNodeOutputRecords(valid ? 1u : 0u);
     if (GI == 0u && valid) {
         diceOut[0] = diceEntry;
-        InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[3], 1u);
+        InterlockedAdd(telemetryBuffer[0].splitDiceOutputCounts[4], 1u);
         InterlockedAdd(telemetryBuffer[0].finalDiceQueueEntryCount, 1u);
     }
     diceOut.OutputComplete();
@@ -4605,14 +4594,14 @@ void WG_ReyesDice(
     uint diceQueueIndex = 0u;
     if (GI == 0u) {
         InterlockedAdd(diceQueueCounter[0], 1u, diceQueueIndex);
-        if (diceQueueIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+        if (diceQueueIndex < CLOD_WG_REYES_DICE_QUEUE_CAPACITY) {
             diceQueue[diceQueueIndex] = diceEntry;
         } else {
             InterlockedAdd(diceQueueOverflow[0], 1u);
         }
     }
     diceQueueIndex = WaveReadLaneFirst(diceQueueIndex);
-    const bool validDice = diceQueueIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY && microTriangleCount != 0u;
+    const bool validDice = diceQueueIndex < CLOD_WG_REYES_DICE_QUEUE_CAPACITY && microTriangleCount != 0u;
     GroupNodeOutputRecords<ReyesRasterBatchRecord> rasterOut =
         rasterOutput.GetGroupNodeOutputRecords(validDice ? rasterBatchCount : 0u);
     for (uint batchIndex = GI; batchIndex < rasterBatchCount && validDice; batchIndex += REYES_WG_DICE_THREADS) {
@@ -4689,7 +4678,7 @@ void WG_ReyesRaster(
     const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const bool displacementEnabled = materialInfo.geometricDisplacementEnabled != 0u;
+    const bool displacementEnabled = ReyesGeometricDisplacementEnabled(materialInfo);
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);

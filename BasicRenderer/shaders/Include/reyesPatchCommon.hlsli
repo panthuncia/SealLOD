@@ -20,6 +20,20 @@ static const uint CLodReyesHardwareRasterPackedEntryCount = 5u;
 static const uint CLodReyesHardwareRasterMaxPackedMicroTriangles =
     CLodReyesHardwareRasterPackedEntryCount * CLodReyesRasterBatchMicroTriangleCount;
 
+float3 ReyesComputeVisibilityEdgeTessFactors(float3 worldPosition0, float3 worldPosition1, float3 worldPosition2, CullingCameraInfo camera)
+{
+    const float distance01 = max(camera.zNear, min(length(worldPosition0 - camera.positionWorldSpace.xyz), length(worldPosition1 - camera.positionWorldSpace.xyz)));
+    const float distance12 = max(camera.zNear, min(length(worldPosition1 - camera.positionWorldSpace.xyz), length(worldPosition2 - camera.positionWorldSpace.xyz)));
+    const float distance20 = max(camera.zNear, min(length(worldPosition2 - camera.positionWorldSpace.xyz), length(worldPosition0 - camera.positionWorldSpace.xyz)));
+
+    const float edge01 = length(worldPosition0 - worldPosition1);
+    const float edge12 = length(worldPosition1 - worldPosition2);
+    const float edge20 = length(worldPosition2 - worldPosition0);
+
+    const float scale = camera.projY * REYES_SCREEN_SCALE_REFERENCE * REYES_PROJECTED_PIXEL_TO_TESS_FACTOR_SCALE;
+    return max(float3(1.0f, 1.0f, 1.0f), float3(edge01 / distance01, edge12 / distance12, edge20 / distance20) * scale);
+}
+
 float3 ReyesDecodePatchBarycentrics(uint encoded)
 {
     float u = (float) (encoded & 0xFFFFu) / REYES_PATCH_BARYCENTRIC_COORD_SCALE;
@@ -503,6 +517,60 @@ float ReyesGeometricDisplacementGlobalScale(MaterialEvalInfo materialInfo)
     return ReyesGeometricDisplacementGlobalScale(materialInfo.materialFlags);
 }
 
+bool ReyesGeometricDisplacementEnabled(MaterialInfo materialInfo)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return false;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        return true;
+    }
+
+    return (materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u &&
+        (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u;
+}
+
+bool ReyesGeometricDisplacementEnabled(MaterialEvalInfo materialInfo)
+{
+    if (materialInfo.geometricDisplacementEnabled == 0u)
+    {
+        return false;
+    }
+
+    if ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u)
+    {
+        return true;
+    }
+
+    return (materialInfo.materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u &&
+        (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u;
+}
+
+float ReyesGeometricDisplacementMagnitude(MaterialInfo materialInfo)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    return max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax)) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+}
+
+float ReyesGeometricDisplacementMagnitude(MaterialEvalInfo materialInfo)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+
+    return max(abs(materialInfo.geometricDisplacementMin), abs(materialInfo.geometricDisplacementMax)) *
+        ReyesGeometricDisplacementGlobalScale(materialInfo);
+}
+
 float ReyesEstimateWorldUnitsPerPixel(CullingCameraInfo camera, float depth)
 {
     const float projectionScale = max(abs(camera.projY), 1.0e-5f) * (0.5f * REYES_SCREEN_SCALE_REFERENCE);
@@ -656,21 +724,17 @@ float ReyesSampleMaterialDisplacementOffset(
     float2 dUVdx,
     float2 dUVdy)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
 
-    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
-    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
+    const float heightValue = saturate(heightSample.r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
@@ -681,21 +745,17 @@ float ReyesSampleMaterialDisplacementOffset(
     float2 dUVdx,
     float2 dUVdy)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
 
-    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
-    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
+    const float heightValue = saturate(heightSample.r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
@@ -713,7 +773,7 @@ float ReyesSampleMaterialDisplacementOffset(MaterialEvalInfo materialInfo, float
 
 float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
@@ -740,7 +800,7 @@ float ReyesSampleDisplacementOffset(
     float2 dUVdx,
     float2 dUVdy)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
@@ -764,7 +824,7 @@ float ReyesSampleDisplacementOffset(
 
 float ReyesSampleDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
@@ -791,7 +851,7 @@ float ReyesSampleDisplacementOffset(
     float2 dUVdx,
     float2 dUVdy)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
@@ -969,25 +1029,21 @@ float3 ReyesApplyGeometricDisplacement(
 
 float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }
 
-    const bool heightFromBaseAlpha = (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u;
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorTextureIndex : materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(
-        heightFromBaseAlpha ? materialInfo.baseColorSamplerIndex : materialInfo.heightSamplerIndex)];
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = heightTexture.SampleLevel(heightSampler, uv, 0.0f);
-    const uint heightChannel = heightFromBaseAlpha ? 3u : materialInfo.heightChannel;
-    const float heightValue = saturate(DynamicSwizzle(heightSample, heightChannel));
+    const float heightValue = saturate(heightSample.r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
 float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float2 uv)
 {
-    if (materialInfo.geometricDisplacementEnabled == 0u)
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
     {
         return 0.0f;
     }

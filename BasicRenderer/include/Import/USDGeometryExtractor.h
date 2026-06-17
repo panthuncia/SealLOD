@@ -33,6 +33,7 @@ struct ExtractOptions {
 	bool brniflyZBufferWrite = true;
 	bool brniflyDecal = false;
 	bool brniflyDynamicDecal = false;
+	bool brniflyModelSpaceNormals = false;
 };
 
 void ResetBenchmarkStats();
