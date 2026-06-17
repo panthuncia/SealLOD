@@ -323,6 +323,30 @@ struct TerrainRvtGenerationRequest
     uint pad0;
 };
 
+struct TerrainRvtPhysicalPageAtlasInfo
+{
+    float2 atlasBaseUv;
+    float2 pageUvScale;
+    float poolIndex;
+    float3 pad0;
+};
+
+struct TerrainRvtHeightResidentCacheEntry
+{
+    uint status;
+    uint requestedTerrainSetIndex;
+    uint requestedClipLevel;
+    uint requestedPageX;
+    uint requestedPageY;
+    uint residentClipLevel;
+    uint residentPageTableIndex;
+    uint physicalPageIndex;
+    uint residentPageX;
+    uint residentPageY;
+    uint pad0;
+    uint pad1;
+};
+
 struct TerrainRvtStats
 {
     uint heightRequests;

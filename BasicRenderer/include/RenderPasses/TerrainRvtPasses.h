@@ -210,6 +210,7 @@ public:
             Builtin::Terrain::RvtPageTable,
             Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtPhysicalPageOwner,
+            Builtin::Terrain::RvtPhysicalPageAtlas,
             Builtin::Terrain::RvtRequestMasks,
             Builtin::Terrain::RvtCounters,
             Builtin::Terrain::RvtStats)
@@ -474,6 +475,50 @@ public:
             .WithUnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
+    }
+
+    void Setup() override {}
+
+    PassReturn Execute(PassExecutionContext& executionContext) override
+    {
+        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        auto& commandList = executionContext.commandList;
+        commandList.SetDescriptorHeaps(renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
+        commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+        commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
+        const auto [dispatchX, dispatchY] = TerrainRvt::Dispatch2DForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+        commandList.Dispatch(dispatchX, dispatchY, 1u);
+        return {};
+    }
+
+    void Cleanup() override {}
+
+private:
+    PipelineState m_pso;
+};
+
+class TerrainRvtBuildHeightResidentCachePass final : public ComputePass {
+public:
+    TerrainRvtBuildHeightResidentCachePass()
+    {
+        m_pso = PSOManager::GetInstance().MakeComputePipeline(
+            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+            L"shaders/TerrainRvt.hlsl",
+            L"TerrainRvtBuildHeightResidentCacheCS",
+            TerrainRvt::ShaderDefines(),
+            "TerrainRvt.BuildHeightResidentCache.PSO");
+    }
+
+    void DeclareResourceUsages(ComputePassBuilder* b) override
+    {
+        b->WithShaderResource(
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable,
+            Builtin::Terrain::RvtPageKeys)
+            .WithUnorderedAccess(Builtin::Terrain::RvtHeightResidentCache)
+            .WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
     void Setup() override {}

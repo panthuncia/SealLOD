@@ -412,6 +412,26 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
         uint32_t pageY;
         uint32_t pad0;
     };
+    struct TerrainRvtPhysicalPageAtlasInfoPOD {
+        float atlasBaseUv[2];
+        float pageUvScale[2];
+        float poolIndex;
+        float pad0[3];
+    };
+    struct TerrainRvtHeightResidentCacheEntryPOD {
+        uint32_t status;
+        uint32_t requestedTerrainSetIndex;
+        uint32_t requestedClipLevel;
+        uint32_t requestedPageX;
+        uint32_t requestedPageY;
+        uint32_t residentClipLevel;
+        uint32_t residentPageTableIndex;
+        uint32_t physicalPageIndex;
+        uint32_t residentPageX;
+        uint32_t residentPageY;
+        uint32_t pad0;
+        uint32_t pad1;
+    };
     struct TerrainRvtStatsPOD {
         uint32_t heightRequests;
         uint32_t materialRequests;
@@ -546,6 +566,30 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     terrainRvtPhysicalPageOwnerBuffer->SetName("TerrainRvt::PhysicalPageOwner");
     rg::memory::SetResourceUsageHint(*terrainRvtPhysicalPageOwnerBuffer, "Terrain RVT");
     graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageOwner, terrainRvtPhysicalPageOwnerBuffer);
+
+    auto terrainRvtPhysicalPageAtlasBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        TerrainRvt::MaxPhysicalPages(),
+        sizeof(TerrainRvtPhysicalPageAtlasInfoPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtPhysicalPageAtlasBuffer->SetAllowAlias(false);
+    terrainRvtPhysicalPageAtlasBuffer->SetName("TerrainRvt::PhysicalPageAtlas");
+    rg::memory::SetResourceUsageHint(*terrainRvtPhysicalPageAtlasBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtPhysicalPageAtlas, terrainRvtPhysicalPageAtlasBuffer);
+
+    auto terrainRvtHeightResidentCacheBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
+        terrainRvtPageTableEntries,
+        sizeof(TerrainRvtHeightResidentCacheEntryPOD),
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    terrainRvtHeightResidentCacheBuffer->SetAllowAlias(false);
+    terrainRvtHeightResidentCacheBuffer->SetName("TerrainRvt::HeightResidentCache");
+    rg::memory::SetResourceUsageHint(*terrainRvtHeightResidentCacheBuffer, "Terrain RVT");
+    graph->RegisterResource(Builtin::Terrain::RvtHeightResidentCache, terrainRvtHeightResidentCacheBuffer);
 
     auto terrainRvtRequestMasksBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         terrainRvtPageTableEntries,
@@ -724,6 +768,9 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 
             graph->BuildComputePass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
             TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
+
+            graph->BuildComputePass<TerrainRvtBuildHeightResidentCachePass>("TerrainRvtBuildHeightResidentCachePass");
+            TagPassTechnique(graph, "TerrainRvtBuildHeightResidentCachePass", "Primary Visibility::Terrain RVT");
 
             graph->BuildComputePass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
             TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");

@@ -61,6 +61,8 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
     RWStructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
     RWStructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
+    RWStructuredBuffer<TerrainRvtPhysicalPageAtlasInfo> physicalPageAtlas =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageAtlas)];
     RWStructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
@@ -187,6 +189,27 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
             }
             physicalPageOwner[linearThreadIndex] = uint4(TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE, 0u, 0u, 0u);
         }
+    }
+
+    if (linearThreadIndex < info.maxPhysicalPages)
+    {
+        const uint tileSide = max(info.physicalTileTexelSide, 1u);
+        const uint pagesWide = max(info.physicalAtlasPagesWide, 1u);
+        const uint poolCount = max(info.physicalAtlasPoolCount, 1u);
+        const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
+        const uint poolIndex = min(linearThreadIndex / pagesPerPool, poolCount - 1u);
+        const uint localPhysicalPageIndex = linearThreadIndex - poolIndex * pagesPerPool;
+        const uint2 physicalPage = uint2(localPhysicalPageIndex % pagesWide, localPhysicalPageIndex / pagesWide);
+        const float2 atlasSize = float2(
+            pagesWide * tileSide,
+            max(info.physicalAtlasPagesHigh, 1u) * tileSide);
+
+        TerrainRvtPhysicalPageAtlasInfo atlasInfo;
+        atlasInfo.atlasBaseUv = ((float2)physicalPage * (float)tileSide + (float)info.borderTexels) / atlasSize;
+        atlasInfo.pageUvScale = (float)max(info.pageSize, 1u) / atlasSize;
+        atlasInfo.poolIndex = (float)poolIndex;
+        atlasInfo.pad0 = 0.0f.xxx;
+        physicalPageAtlas[linearThreadIndex] = atlasInfo;
     }
 
     if (linearThreadIndex < info.maxVirtualPageTableEntries)
@@ -813,6 +836,116 @@ void TerrainRvtFinalizeGeneratedPagesCS(uint3 tid : SV_DispatchThreadID)
         perFrame.frameIndex,
         TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT,
         0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void TerrainRvtBuildHeightResidentCacheCS(uint3 tid : SV_DispatchThreadID)
+{
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    const TerrainRvtInfo info = infoBuffer[0];
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
+    StructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
+    StructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
+    RWStructuredBuffer<TerrainRvtHeightResidentCacheEntry> heightResidentCache =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightResidentCache)];
+
+    const uint pageTableIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
+    if (pageTableIndex >= info.maxVirtualPageTableEntries)
+    {
+        return;
+    }
+
+    TerrainRvtHeightResidentCacheEntry cacheEntry = (TerrainRvtHeightResidentCacheEntry)0;
+    cacheEntry.status = TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_MISSING;
+    cacheEntry.requestedTerrainSetIndex = 0xffffffffu;
+    cacheEntry.requestedClipLevel = 0xffffffffu;
+    cacheEntry.requestedPageX = 0xffffffffu;
+    cacheEntry.requestedPageY = 0xffffffffu;
+    cacheEntry.residentClipLevel = 0xffffffffu;
+    cacheEntry.residentPageTableIndex = 0xffffffffu;
+    cacheEntry.physicalPageIndex = 0xffffffffu;
+    cacheEntry.residentPageX = 0xffffffffu;
+    cacheEntry.residentPageY = 0xffffffffu;
+
+    const TerrainRvtPageTag requestedTag = pageTags[pageTableIndex];
+    if (requestedTag.terrainSetIndex >= info.maxTerrainSets || requestedTag.clipLevel >= info.maxClipLevels)
+    {
+        heightResidentCache[pageTableIndex] = cacheEntry;
+        return;
+    }
+
+    cacheEntry.requestedTerrainSetIndex = requestedTag.terrainSetIndex;
+    cacheEntry.requestedClipLevel = requestedTag.clipLevel;
+    cacheEntry.requestedPageX = requestedTag.pageX;
+    cacheEntry.requestedPageY = requestedTag.pageY;
+
+    const uint directEntry = pageTable[pageTableIndex];
+    if (TerrainRvtPageTableHasContent(directEntry, TERRAIN_RVT_CONTENT_HEIGHT))
+    {
+        cacheEntry.status = TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT;
+        cacheEntry.residentClipLevel = requestedTag.clipLevel;
+        cacheEntry.residentPageTableIndex = pageTableIndex;
+        cacheEntry.physicalPageIndex = TerrainRvtPageTablePhysicalPage(directEntry);
+        cacheEntry.residentPageX = requestedTag.pageX;
+        cacheEntry.residentPageY = requestedTag.pageY;
+        heightResidentCache[pageTableIndex] = cacheEntry;
+        return;
+    }
+
+    const TerrainRvtClipInfo requestedClipInfo =
+        clipInfos[TerrainRvtClipInfoIndex(info, requestedTag.terrainSetIndex, requestedTag.clipLevel)];
+    if (requestedClipInfo.valid == 0u || requestedClipInfo.pageWorldSize <= 0.0f)
+    {
+        heightResidentCache[pageTableIndex] = cacheEntry;
+        return;
+    }
+
+    const uint terrainClipCount = min(requestedClipInfo.terrainClipCount, info.maxClipLevels);
+
+    [loop]
+    for (uint sampleMip = requestedTag.clipLevel + 1u; sampleMip < terrainClipCount; ++sampleMip)
+    {
+        const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, requestedTag.terrainSetIndex, sampleMip)];
+        if (clipInfo.valid == 0u || clipInfo.tableResolution == 0u)
+        {
+            continue;
+        }
+
+        const uint mipDelta = min(sampleMip - requestedTag.clipLevel, 31u);
+        const uint2 residentPageCoord = uint2(requestedTag.pageX >> mipDelta, requestedTag.pageY >> mipDelta);
+
+        if (any(residentPageCoord >= clipInfo.terrainPageCount) ||
+            any(residentPageCoord < clipInfo.originPage) ||
+            residentPageCoord.x >= clipInfo.originPage.x + clipInfo.tableResolution ||
+            residentPageCoord.y >= clipInfo.originPage.y + clipInfo.tableResolution)
+        {
+            continue;
+        }
+
+        const uint residentPageTableIndex = TerrainRvtPageTableSlot(clipInfo, residentPageCoord);
+        if (residentPageTableIndex >= info.maxVirtualPageTableEntries)
+        {
+            continue;
+        }
+
+        const uint residentEntry = pageTable[residentPageTableIndex];
+        const TerrainRvtPageTag residentTag = pageTags[residentPageTableIndex];
+        if (TerrainRvtPageTableHasContent(residentEntry, TERRAIN_RVT_CONTENT_HEIGHT) &&
+            TerrainRvtPageTagMatches(residentTag, requestedTag.terrainSetIndex, sampleMip, residentPageCoord))
+        {
+            cacheEntry.status = TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_COARSER;
+            cacheEntry.residentClipLevel = sampleMip;
+            cacheEntry.residentPageTableIndex = residentPageTableIndex;
+            cacheEntry.physicalPageIndex = TerrainRvtPageTablePhysicalPage(residentEntry);
+            cacheEntry.residentPageX = residentPageCoord.x;
+            cacheEntry.residentPageY = residentPageCoord.y;
+            heightResidentCache[pageTableIndex] = cacheEntry;
+            return;
+        }
+    }
+
+    heightResidentCache[pageTableIndex] = cacheEntry;
 }
 
 [shader("compute")]

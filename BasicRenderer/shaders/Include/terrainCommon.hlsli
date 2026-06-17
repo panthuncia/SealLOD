@@ -1596,7 +1596,6 @@ void TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
     if (rvtEnabled)
     {
         const TerrainRvtSampleContext ctx = TerrainRvtLoadSampleContext(terrainSetIndex);
-#if TERRAIN_RVT_REYES_SHARED_HEIGHT_CLIP
         const float2 skyrimDdx0 = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx0WS);
         const float2 skyrimDdy0 = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy0WS);
         const float2 skyrimDdx1 = TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx1WS);
@@ -1616,48 +1615,20 @@ void TerrainSampleGeometricHeightRvtOnlyOrDirectFallback3(
                 sqrt(max(maxFootprintWorldSq, 1.0e-8f)));
             StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
             const TerrainRvtClipInfo sharedClipInfo = clipInfos[TerrainRvtClipInfoIndex(ctx.info, terrainSetIndex, sharedMip)];
-            rvtHit0 = TerrainRvtTrySampleHeightContextAtClipInfo(
+            TerrainRvtTrySampleHeightContextAtClipInfo3(
                 ctx,
                 sharedClipInfo,
                 position0WS,
-                telemetryEnabled,
-                height0);
-            rvtHit1 = TerrainRvtTrySampleHeightContextAtClipInfo(
-                ctx,
-                sharedClipInfo,
                 position1WS,
-                telemetryEnabled,
-                height1);
-            rvtHit2 = TerrainRvtTrySampleHeightContextAtClipInfo(
-                ctx,
-                sharedClipInfo,
                 position2WS,
                 telemetryEnabled,
+                rvtHit0,
+                rvtHit1,
+                rvtHit2,
+                height0,
+                height1,
                 height2);
         }
-#else
-            rvtHit0 = TerrainRvtTrySampleHeightContext(
-                ctx,
-                position0WS,
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx0WS),
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy0WS),
-                telemetryEnabled,
-                height0);
-            rvtHit1 = TerrainRvtTrySampleHeightContext(
-                ctx,
-                position1WS,
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx1WS),
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy1WS),
-                telemetryEnabled,
-                height1);
-            rvtHit2 = TerrainRvtTrySampleHeightContext(
-                ctx,
-                position2WS,
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdx2WS),
-                TerrainRvtSkyrimXYDerivativeFromRendererDerivative(dpdy2WS),
-                telemetryEnabled,
-                height2);
-#endif
     }
 #else
     const bool rvtHit0 = false;

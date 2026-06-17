@@ -110,6 +110,8 @@ void ReyesDeepVisibilityRasterizationPass::DeclareResourceUsages(ComputePassBuil
             Builtin::Terrain::RvtPageTable,
             Builtin::Terrain::RvtPageKeys,
             Builtin::Terrain::RvtPhysicalPageOwner,
+            Builtin::Terrain::RvtPhysicalPageAtlas,
+            Builtin::Terrain::RvtHeightResidentCache,
             Builtin::Terrain::RvtHeightAtlas,
             Builtin::Terrain::RvtAlbedoAtlas,
             Builtin::Terrain::RvtNormalAtlas,

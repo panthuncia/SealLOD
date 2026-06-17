@@ -19,6 +19,8 @@
       "RvtClipInfos": {},
       "RvtPageTable": {},
       "RvtPhysicalPageOwner": {},
+      "RvtPhysicalPageAtlas": {},
+      "RvtHeightResidentCache": {},
       "RvtRequestMasks": {},
       "RvtRequestList": {},
       "RvtCounters": {},

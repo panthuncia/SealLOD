@@ -158,6 +158,8 @@ struct Builtin {
     inline static constexpr std::string_view RvtNormalAtlas = "Builtin::Terrain::RvtNormalAtlas";
     inline static constexpr std::string_view RvtPageKeys = "Builtin::Terrain::RvtPageKeys";
     inline static constexpr std::string_view RvtPageTable = "Builtin::Terrain::RvtPageTable";
+    inline static constexpr std::string_view RvtHeightResidentCache = "Builtin::Terrain::RvtHeightResidentCache";
+    inline static constexpr std::string_view RvtPhysicalPageAtlas = "Builtin::Terrain::RvtPhysicalPageAtlas";
     inline static constexpr std::string_view RvtPhysicalPageOwner = "Builtin::Terrain::RvtPhysicalPageOwner";
     inline static constexpr std::string_view RvtRequestList = "Builtin::Terrain::RvtRequestList";
     inline static constexpr std::string_view RvtRequestMasks = "Builtin::Terrain::RvtRequestMasks";
