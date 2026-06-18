@@ -1567,17 +1567,11 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
     settingsManager.registerSetting<float>("terrainRvtSourceTexelsPerWorld", 24.0f);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
     settingsManager.registerSetting<float>("terrainReyesDisplacementGlobalScale", 1.0f);
     settingsManager.registerSetting<float>("objectReyesDisplacementScale", 1.0f);
-    settingsManager.getSettingSetter<float>("terrainRvtMipOffset")(
-        settingsManager.getSettingGetter<bool>("enableTerrainReyesDisplacement")() ? 0.0f : -1.6f);
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(
-        "enableTerrainReyesDisplacement",
-        [](const bool& reyesEnabled) {
-            SettingsManager::GetInstance().getSettingSetter<float>("terrainRvtMipOffset")(reyesEnabled ? 0.0f : -1.6f);
-        }));
+    settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.06f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.10f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 25u);
     settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2000.0f);
@@ -1686,7 +1680,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, false);
-    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
+    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, true);
 	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName, CLodVirtualShadowDefaultPhysicalPageCount);
