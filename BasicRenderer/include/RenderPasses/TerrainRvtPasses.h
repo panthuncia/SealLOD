@@ -10,7 +10,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "BuiltinResources.h"
+#include "Render/BuiltinResources.h"
 #include "Managers/MeshManager.h"
 #include "Managers/Singletons/CommandSignatureManager.h"
 #include "Managers/Singletons/PSOManager.h"

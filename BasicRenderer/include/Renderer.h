@@ -36,7 +36,8 @@
 #include "Factories/TextureFactory.h"
 #include "Scene/MovementState.h"
 #include "Telemetry/FrameTaskGraphTelemetry.h"
-#include "../generated/BuiltinResources.h"
+#include "Render/BuiltinResources.h"
+#include "Render/GraphExtensions/RenderGraphExtensionRegistration.h"
 #include "Utilities/Timer.h"
 #include "Render/RenderContext.h"
 #include "Render/OpenPBRLookupResources.h"
@@ -100,6 +101,7 @@ public:
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
     RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
     const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
+    bool RegisterRenderGraphExtension(std::string id, RenderGraphExtensionFactory factory);
 
 private:
 	bool m_isInitialized = false;
@@ -138,6 +140,7 @@ private:
 
     std::unique_ptr<RenderGraph> currentRenderGraph = nullptr;
     bool m_renderGraphRuntimeInitialized = false;
+    std::vector<std::pair<std::string, RenderGraphExtensionFactory>> m_externalRenderGraphExtensionFactories;
     bool rebuildRenderGraph = true;
     bool m_shaderReloadRequested = false;
 

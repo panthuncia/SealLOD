@@ -2491,6 +2491,32 @@ void Renderer::PostUpdate() {
 	currentScene->PostUpdate();
 }
 
+bool Renderer::RegisterRenderGraphExtension(std::string id, RenderGraphExtensionFactory factory) {
+    if (id.empty()) {
+        spdlog::error("Renderer::RegisterRenderGraphExtension rejected an extension with an empty id.");
+        return false;
+    }
+    if (!factory) {
+        spdlog::error("Renderer::RegisterRenderGraphExtension rejected extension '{}' because its factory is empty.", id);
+        return false;
+    }
+    if (m_renderGraphRuntimeInitialized) {
+        spdlog::error(
+            "Renderer::RegisterRenderGraphExtension rejected extension '{}' because the render graph runtime is already initialized.",
+            id);
+        return false;
+    }
+    for (const auto& [registeredId, _] : m_externalRenderGraphExtensionFactories) {
+        if (registeredId == id) {
+            spdlog::error("Renderer::RegisterRenderGraphExtension rejected duplicate extension id '{}'.", id);
+            return false;
+        }
+    }
+
+    m_externalRenderGraphExtensionFactories.emplace_back(std::move(id), std::move(factory));
+    return true;
+}
+
 void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     if (!currentRenderGraph) {
         return;
@@ -3533,6 +3559,15 @@ void Renderer::CreateRenderGraph() {
             currentRenderGraph->RegisterExtension(
                 std::make_unique<CLodExtension>(CLodExtensionType::Shadow, static_cast<uint32_t>(maxClusters)),
                 "CLodShadow");
+        }
+        for (auto& [id, factory] : m_externalRenderGraphExtensionFactories) {
+            auto extension = factory();
+            if (!extension) {
+                spdlog::error("Renderer::CreateRenderGraph skipped external render graph extension '{}' because its factory returned null.", id);
+                continue;
+            }
+            currentRenderGraph->RegisterExtension(std::move(extension), id);
+            spdlog::info("Renderer::CreateRenderGraph registered external render graph extension '{}'.", id);
         }
 		m_renderGraphRuntimeInitialized = true;
     }
