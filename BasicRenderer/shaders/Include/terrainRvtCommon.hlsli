@@ -898,6 +898,16 @@ void TerrainRvtRecordHeightComputePageFailure(bool telemetryEnabled)
     }
 }
 
+void TerrainRvtRecordHeightSampleAttempt(bool telemetryEnabled)
+{
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].heightSampleAttempts, 1u);
+        InterlockedAdd(stats[0].heightFastSampleAttempts, 1u);
+    }
+}
+
 void TerrainRvtSampleHeightResident3(
     TerrainRvtInfo info,
     uint physicalPageIndex,
@@ -920,6 +930,175 @@ void TerrainRvtSampleHeightResident3(
     height0 = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv0, 0.0f));
     height1 = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv1, 0.0f));
     height2 = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv2, 0.0f));
+}
+
+struct TerrainRvtHeightPageCursor
+{
+    TerrainRvtClipInfo clipInfo;
+    TerrainRvtAddress residentAddress;
+    TerrainRvtPhysicalPageAtlasContext atlasContext;
+    uint preferredMip;
+    uint requestedMip;
+    uint2 requestedPageCoord;
+    uint requestedPageTableIndex;
+    float2 pageMinLocal;
+    float2 pageMaxLocal;
+    uint valid;
+};
+
+bool TerrainRvtTryBindHeightPageCursor(
+    TerrainRvtSampleContext ctx,
+    inout TerrainRvtHeightPageCursor cursor,
+    float2 local,
+    bool telemetryEnabled)
+{
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
+
+    uint2 requestedPageCoord;
+    float2 requestedPageUv;
+    uint requestedPageTableIndex;
+    TerrainRvtClipInfo clipInfo = cursor.clipInfo;
+    uint requestedMip = cursor.preferredMip;
+    bool computedPage = false;
+    [loop]
+    for (uint sampleMip = cursor.preferredMip; sampleMip < ctx.terrainClipCount; ++sampleMip)
+    {
+        if (sampleMip == cursor.requestedMip)
+        {
+            clipInfo = cursor.clipInfo;
+        }
+        else
+        {
+            clipInfo = clipInfos[TerrainRvtClipInfoIndex(ctx.info, ctx.terrainSetIndex, sampleMip)];
+        }
+        if (TerrainRvtTryComputePageInClipInfoLocal(
+            ctx.info,
+            clipInfo,
+            local,
+            requestedPageCoord,
+            requestedPageUv,
+            requestedPageTableIndex))
+        {
+            requestedMip = sampleMip;
+            computedPage = true;
+            break;
+        }
+    }
+
+    if (!computedPage)
+    {
+        TerrainRvtRecordHeightComputePageFailure(telemetryEnabled);
+        cursor.valid = 0u;
+        return false;
+    }
+
+    TerrainRvtAddress residentAddress;
+    uint physicalPageIndex;
+    if (!TerrainRvtTryResolveHeightResident(
+        ctx,
+        requestedMip,
+        requestedPageCoord,
+        requestedPageUv,
+        requestedPageTableIndex,
+        telemetryEnabled,
+        residentAddress,
+        physicalPageIndex))
+    {
+        cursor.valid = 0u;
+        return false;
+    }
+
+    cursor.clipInfo = clipInfo;
+    cursor.requestedMip = requestedMip;
+    cursor.requestedPageCoord = requestedPageCoord;
+    cursor.requestedPageTableIndex = requestedPageTableIndex;
+    cursor.pageMinLocal = (float2)requestedPageCoord * cursor.clipInfo.pageWorldSize;
+    cursor.pageMaxLocal = cursor.pageMinLocal + cursor.clipInfo.pageWorldSize;
+    cursor.residentAddress = residentAddress;
+    TerrainRvtPhysicalPageAtlasContextForPage(ctx.info, physicalPageIndex, cursor.atlasContext);
+    cursor.valid = 1u;
+    return true;
+}
+
+bool TerrainRvtTryInitHeightPageCursor(
+    TerrainRvtSampleContext ctx,
+    float2 skyrimXYDdx,
+    float2 skyrimXYDdy,
+    bool telemetryEnabled,
+    out TerrainRvtHeightPageCursor cursor)
+{
+    cursor = (TerrainRvtHeightPageCursor)0;
+    cursor.residentAddress = (TerrainRvtAddress)0;
+    cursor.residentAddress.pageTableIndex = 0xffffffffu;
+    cursor.requestedPageTableIndex = 0xffffffffu;
+
+    if (ctx.valid == 0u)
+    {
+        TerrainRvtRecordHeightComputePageFailure(telemetryEnabled);
+        return false;
+    }
+
+    const float footprintWorldSq = max(dot(skyrimXYDdx, skyrimXYDdx), dot(skyrimXYDdy, skyrimXYDdy));
+    cursor.preferredMip = TerrainRvtSelectClipForFootprintWorld(
+        ctx.info,
+        ctx.terrain,
+        ctx.terrainClipCount,
+        sqrt(max(footprintWorldSq, 1.0e-8f)));
+    cursor.requestedMip = cursor.preferredMip;
+
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
+    cursor.clipInfo = clipInfos[TerrainRvtClipInfoIndex(ctx.info, ctx.terrainSetIndex, cursor.requestedMip)];
+    return true;
+}
+
+bool TerrainRvtTrySampleHeightCursor(
+    TerrainRvtSampleContext ctx,
+    inout TerrainRvtHeightPageCursor cursor,
+    float2 skyrimXY,
+    bool telemetryEnabled,
+    out float heightValue)
+{
+    heightValue = 0.0f;
+    TerrainRvtRecordHeightSampleAttempt(telemetryEnabled);
+
+    const float2 local = skyrimXY - ctx.terrainOrigin;
+    if (ctx.valid == 0u || any(local < 0.0f.xx) || any(local >= ctx.terrainSize))
+    {
+        TerrainRvtRecordHeightComputePageFailure(telemetryEnabled);
+        return false;
+    }
+
+    const bool insideCachedPage =
+        cursor.valid != 0u &&
+        cursor.requestedMip == cursor.preferredMip &&
+        all(local >= cursor.pageMinLocal) &&
+        all(local < cursor.pageMaxLocal);
+    if (!insideCachedPage && !TerrainRvtTryBindHeightPageCursor(ctx, cursor, local, telemetryEnabled))
+    {
+        return false;
+    }
+
+    const float2 requestedPageUv = local * cursor.clipInfo.invPageWorldSize - (float2)cursor.requestedPageCoord;
+    const float2 residentPageUv = cursor.residentAddress.clipLevel == cursor.requestedMip
+        ? requestedPageUv
+        : TerrainRvtCoarserPageUv(
+            cursor.requestedMip,
+            cursor.residentAddress.clipLevel,
+            cursor.requestedPageCoord,
+            requestedPageUv);
+
+    TerrainRvtMarkVisited(cursor.residentAddress.pageTableIndex);
+    float3 atlasUv;
+    TerrainRvtPhysicalPageAtlasUv(cursor.atlasContext, residentPageUv, atlasUv);
+    Texture2DArray<float> heightAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtHeightAtlas)];
+    heightValue = saturate(heightAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f));
+    if (telemetryEnabled)
+    {
+        RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
+        InterlockedAdd(stats[0].heightSampleHits, 1u);
+        InterlockedAdd(stats[0].heightFastSampleHits, 1u);
+    }
+    return true;
 }
 
 void TerrainRvtTrySampleHeightContextAtClipInfo3(

@@ -1280,12 +1280,22 @@ float3 TerrainRvtParallaxPosition(
 
     float prevBound = localHeightScale;
     float2 prevSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (prevBound - centeredHeight));
-    float prevHeight = 0.0f;
-    TerrainRvtTrySampleHeightContext(
+    TerrainRvtHeightPageCursor heightPageCursor;
+    if (!TerrainRvtTryInitHeightPageCursor(
         heightSampleContext,
-        float3(prevSkyrimXY.x, positionWS.y, -prevSkyrimXY.y),
         heightSkyrimXYDdx,
         heightSkyrimXYDdy,
+        terrainRvtTelemetryEnabled,
+        heightPageCursor))
+    {
+        return positionWS;
+    }
+
+    float prevHeight = 0.0f;
+    TerrainRvtTrySampleHeightCursor(
+        heightSampleContext,
+        heightPageCursor,
+        prevSkyrimXY,
         terrainRvtTelemetryEnabled,
         prevHeight);
     float prevF = prevBound - prevHeight;
@@ -1300,13 +1310,11 @@ float3 TerrainRvtParallaxPosition(
     {
         const float currentBound = max(localHeightScale - (float)i * stepSize, 0.0f);
         const float2 currentSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (currentBound - centeredHeight));
-        const float3 currentPositionWS = float3(currentSkyrimXY.x, positionWS.y, -currentSkyrimXY.y);
         float currentHeight = 0.0f;
-        TerrainRvtTrySampleHeightContext(
+        TerrainRvtTrySampleHeightCursor(
             heightSampleContext,
-            currentPositionWS,
-            heightSkyrimXYDdx,
-            heightSkyrimXYDdy,
+            heightPageCursor,
+            currentSkyrimXY,
             terrainRvtTelemetryEnabled,
             currentHeight);
         const float currentF = currentBound - currentHeight;
@@ -1333,13 +1341,11 @@ float3 TerrainRvtParallaxPosition(
         {
             const float rootBound = ParallaxSecantBound(hitBound, hitF, missBound, missF);
             const float2 rootSkyrimXY = baseSkyrimXY + parallaxDirection * (heightToWorldScale * (rootBound - centeredHeight));
-            const float3 rootPositionWS = float3(rootSkyrimXY.x, positionWS.y, -rootSkyrimXY.y);
             float rootHeight = 0.0f;
-            TerrainRvtTrySampleHeightContext(
+            TerrainRvtTrySampleHeightCursor(
                 heightSampleContext,
-                rootPositionWS,
-                heightSkyrimXYDdx,
-                heightSkyrimXYDdy,
+                heightPageCursor,
+                rootSkyrimXY,
                 terrainRvtTelemetryEnabled,
                 rootHeight);
             const float rootF = rootBound - rootHeight;
