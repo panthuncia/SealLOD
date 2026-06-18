@@ -940,7 +940,6 @@ struct TerrainRvtHeightPageCursor
     uint preferredMip;
     uint requestedMip;
     uint2 requestedPageCoord;
-    uint requestedPageTableIndex;
     float2 pageMinLocal;
     float2 pageMaxLocal;
     uint valid;
@@ -1011,7 +1010,6 @@ bool TerrainRvtTryBindHeightPageCursor(
     cursor.clipInfo = clipInfo;
     cursor.requestedMip = requestedMip;
     cursor.requestedPageCoord = requestedPageCoord;
-    cursor.requestedPageTableIndex = requestedPageTableIndex;
     cursor.pageMinLocal = (float2)requestedPageCoord * cursor.clipInfo.pageWorldSize;
     cursor.pageMaxLocal = cursor.pageMinLocal + cursor.clipInfo.pageWorldSize;
     cursor.residentAddress = residentAddress;
@@ -1030,7 +1028,6 @@ bool TerrainRvtTryInitHeightPageCursor(
     cursor = (TerrainRvtHeightPageCursor)0;
     cursor.residentAddress = (TerrainRvtAddress)0;
     cursor.residentAddress.pageTableIndex = 0xffffffffu;
-    cursor.requestedPageTableIndex = 0xffffffffu;
 
     if (ctx.valid == 0u)
     {
