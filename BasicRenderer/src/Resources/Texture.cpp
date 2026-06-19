@@ -2120,6 +2120,7 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 
 TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
 	ZoneScopedN("TextureAsset::EnsureUploaded");
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const uint64_t initialBindingRevision = GetBindingRevision();
 	bool didMainThreadUpload = false;
 	auto makeResult = [&]() {

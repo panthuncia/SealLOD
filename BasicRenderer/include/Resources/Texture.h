@@ -382,6 +382,7 @@ private:
         }
     }
 	TextureDescription m_desc;
+	mutable std::mutex m_uploadAdvanceMutex;
     std::shared_ptr<PixelBuffer> m_image;
     std::shared_ptr<Sampler> m_sampler;
     TextureFileMeta m_meta;
