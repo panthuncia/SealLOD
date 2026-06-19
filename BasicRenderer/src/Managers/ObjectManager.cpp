@@ -773,6 +773,62 @@ std::uint32_t ObjectManager::ActivateDrawRecord(std::uint32_t drawRecordIndex) {
 	return generation;
 }
 
+void ObjectManager::AssignStaticImportTransactionGenerations(MaterializedStaticImportTransaction& transaction) {
+	MaterializedStaticImportTransaction* transactions[] = { &transaction };
+	AssignStaticImportTransactionGenerations(std::span<MaterializedStaticImportTransaction*>(transactions));
+}
+
+void ObjectManager::AssignStaticImportTransactionGenerations(std::span<MaterializedStaticImportTransaction*> transactions) {
+	if (transactions.empty()) {
+		return;
+	}
+
+	std::unordered_map<std::uint32_t, std::uint32_t> generationByDrawRecordIndex;
+	std::size_t activatedDrawRecords = 0;
+	const auto activate = [this, &generationByDrawRecordIndex, &activatedDrawRecords](
+		MaterializedStaticImportTransaction& transaction,
+		std::uint32_t drawRecordIndex) -> std::uint32_t {
+		transaction.reservation.visibilityDirtyStart =
+			(std::min)(transaction.reservation.visibilityDirtyStart, static_cast<std::size_t>(drawRecordIndex));
+		transaction.reservation.visibilityDirtyEnd =
+			(std::max)(transaction.reservation.visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
+
+		const auto it = generationByDrawRecordIndex.find(drawRecordIndex);
+		if (it != generationByDrawRecordIndex.end()) {
+			return it->second;
+		}
+
+		const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
+		generationByDrawRecordIndex.emplace(drawRecordIndex, generation);
+		++activatedDrawRecords;
+		return generation;
+	};
+
+	for (auto* transactionPtr : transactions) {
+		if (!transactionPtr) {
+			continue;
+		}
+
+		auto& transaction = *transactionPtr;
+		transaction.reservation.visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
+		transaction.reservation.visibilityDirtyEnd = 0;
+
+		for (const auto& drawInfo : transaction.drawInfos) {
+			for (const auto drawRecordIndex : drawInfo.instanceDrawRecordIndices) {
+				activate(transaction, drawRecordIndex);
+			}
+		}
+		for (auto& [workloadKey, entries] : transaction.activeDrawSetInserts) {
+			(void)workloadKey;
+			for (auto& entry : entries) {
+				entry.generation = activate(transaction, entry.drawRecordIndex);
+			}
+		}
+	}
+
+	TracyPlot("ObjectManager.StaticImportTransaction.PublishActivatedDrawRecords", static_cast<int64_t>(activatedDrawRecords));
+}
+
 void ObjectManager::TombstoneDrawRecord(std::uint32_t drawRecordIndex) {
 	if (drawRecordIndex >= m_drawRecordVisibilityGenerations.size()) {
 		return;
@@ -1436,22 +1492,6 @@ std::vector<ObjectManager::StaticImportReservationStatus> ObjectManager::TryRese
 		reservation.groupCount = build.prepared.groups.size();
 		reservation.preparedBytes = build.preparedBytes;
 		reservation.drawRecords = build.drawRecords;
-		reservation.drawRecordGenerations.reserve(static_cast<std::size_t>(build.drawRecords));
-
-		for (const auto& range : reservation.instanceDrawRecordRanges) {
-			if (!range.IsValid()) {
-				continue;
-			}
-			const auto firstIndex = static_cast<std::uint32_t>(range.offset / sizeof(InstanceDrawRecordCB));
-			const auto count = static_cast<std::uint32_t>(range.count);
-			for (std::uint32_t i = 0; i < count; ++i) {
-				const auto drawRecordIndex = firstIndex + i;
-				const auto generation = ActivateDrawRecordCPU(drawRecordIndex);
-				reservation.drawRecordGenerations.push_back(generation);
-				reservation.visibilityDirtyStart = (std::min)(reservation.visibilityDirtyStart, static_cast<std::size_t>(drawRecordIndex));
-				reservation.visibilityDirtyEnd = (std::max)(reservation.visibilityDirtyEnd, static_cast<std::size_t>(drawRecordIndex) + 1u);
-			}
-		}
 
 		statuses[buildIndex] = StaticImportReservationStatus::Ready;
 		++readyCount;
@@ -1488,7 +1528,6 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 	transaction.normalRows.reserve(static_cast<std::size_t>(build.prepared.transformRows));
 	transaction.drawRecordRows.reserve(static_cast<std::size_t>(reservation.drawRecords));
 	
-	std::size_t generationCursor = 0;
 	for (std::size_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
 		ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::ProcessGroup");
 		const auto& group = build.prepared.groups[groupIndex];
@@ -1545,10 +1584,6 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 					const auto& meshTemplate = group.meshTemplates[meshTemplateIndex];
 					const auto drawRecordOffset = drawRecordRange.offset + localDrawRecordOrdinal * sizeof(InstanceDrawRecordCB);
 					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
-					const auto generation = generationCursor < reservation.drawRecordGenerations.size()
-						? reservation.drawRecordGenerations[generationCursor]
-						: 1u;
-					++generationCursor;
 
 					InstanceDrawRecordCB record{};
 					record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
@@ -1565,7 +1600,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 						for (const auto& workloadKey : workloadKeys) {
 							transaction.activeDrawSetInserts[workloadKey].push_back(SortedUnsignedIntBuffer::ActiveDrawSetEntry{
 								.drawRecordIndex = drawRecordIndex,
-								.generation = generation
+								.generation = 0u
 							});
 							AppendActiveDrawSetRemoval(drawInfo, workloadKey, drawRecordIndex);
 						}
@@ -1642,6 +1677,8 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 			}
 		}
 	}
+
+	AssignStaticImportTransactionGenerations(transaction);
 
 	if (transaction.reservation.visibilityDirtyStart < transaction.reservation.visibilityDirtyEnd) {
 		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations");
@@ -1728,8 +1765,6 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	std::uint64_t inputGroups = 0;
 	std::uint64_t transformRows = 0;
 	std::uint64_t drawRecordRows = 0;
-	std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
-	std::size_t visibilityDirtyEnd = 0;
 	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 
 	for (const auto* transactionPtr : transactions) {
@@ -1740,8 +1775,6 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 		result.preparedBytes += transaction.reservation.preparedBytes;
 		transformRows += transaction.perObjectRows.size();
 		drawRecordRows += transaction.drawRecordRows.size();
-		visibilityDirtyStart = (std::min)(visibilityDirtyStart, transaction.reservation.visibilityDirtyStart);
-		visibilityDirtyEnd = (std::max)(visibilityDirtyEnd, transaction.reservation.visibilityDirtyEnd);
 	}
 	result.transactionID = transactions.front()->reservation.id;
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputTransactions", static_cast<int64_t>(transactions.size()));
@@ -1794,6 +1827,17 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 				}
 			}
 		}
+	}
+
+	AssignStaticImportTransactionGenerations(transactions);
+
+	std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
+	std::size_t visibilityDirtyEnd = 0;
+	for (const auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		const auto& transaction = *transactionPtr;
+		visibilityDirtyStart = (std::min)(visibilityDirtyStart, transaction.reservation.visibilityDirtyStart);
+		visibilityDirtyEnd = (std::max)(visibilityDirtyEnd, transaction.reservation.visibilityDirtyEnd);
 	}
 
 	if (visibilityDirtyStart < visibilityDirtyEnd) {

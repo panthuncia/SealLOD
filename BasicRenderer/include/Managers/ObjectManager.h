@@ -238,7 +238,6 @@ public:
 		std::vector<DynamicBuffer::PagedAllocation> instanceTransformRanges;
 		std::vector<DynamicBuffer::PagedAllocation> normalMatrixRanges;
 		std::vector<DynamicBuffer::PagedAllocation> instanceDrawRecordRanges;
-		std::vector<std::uint32_t> drawRecordGenerations;
 		std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
 		std::size_t visibilityDirtyEnd = 0;
 		std::shared_ptr<DynamicBuffer> perObjectBuffer;
@@ -520,4 +519,6 @@ private:
 	void TombstoneDrawRecord(std::uint32_t drawRecordIndex);
 	void TombstoneDrawRecords(std::span<const std::uint32_t> drawRecordIndices);
 	void AppendActiveDrawSetEntries(const DrawWorkloadKey& workloadKey, const std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>& entries);
+	void AssignStaticImportTransactionGenerations(MaterializedStaticImportTransaction& transaction);
+	void AssignStaticImportTransactionGenerations(std::span<MaterializedStaticImportTransaction*> transactions);
 };
