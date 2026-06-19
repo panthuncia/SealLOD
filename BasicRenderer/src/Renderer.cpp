@@ -3235,6 +3235,9 @@ void Renderer::Cleanup() {
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
+	if (currentScene) {
+		currentScene->Deactivate();
+	}
 	m_sceneRenderBridge.Clear(m_managerInterface);
 	m_renderSyncObjectQuery = {};
 	m_renderSyncCameraQuery = {};
@@ -3272,9 +3275,6 @@ void Renderer::Cleanup() {
     m_currentEnvironment.reset();
     m_defaultEnvironmentCubemap.reset();
     m_defaultEnvironmentPrefilteredCubemap.reset();
-    if (currentScene) {
-        currentScene->Deactivate();
-    }
 	currentScene.reset();
 	m_pIndirectCommandBufferManager.reset();
 	m_pViewManager.reset();

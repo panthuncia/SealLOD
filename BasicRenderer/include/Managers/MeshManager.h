@@ -288,6 +288,7 @@ private:
 		};
 
 		Mesh* mesh = nullptr;
+		uint32_t maxTraversalDepth = 0;
 		std::unique_ptr<BufferView> ownedMeshMetadataView;
 		uint32_t clodMeshMetadataIndex = 0;
 		uint32_t groupsBase = 0;

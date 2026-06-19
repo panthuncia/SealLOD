@@ -432,6 +432,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 		auto sharedState = std::make_shared<CLodSharedStreamingState>();
 		sharedState->mesh = mesh.get();
+		sharedState->maxTraversalDepth = mesh->GetCLodMaxTraversalDepth();
 
 		// Move hierarchy data into the shared state before the mesh releases its CPU copies.
 		sharedState->groups = mesh->GetCLodGroups();
@@ -555,11 +556,19 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 }
 
 void MeshManager::RemoveMesh(Mesh* mesh) {
+	if (mesh == nullptr) {
+		return;
+	}
 
 	// Deallocate the per mesh buffer view
 	auto& perMeshBufferView = mesh->GetPerMeshBufferView();
 	if (perMeshBufferView != nullptr) {
 		m_perMeshBuffers->Deallocate(perMeshBufferView.get());
+	}
+
+	if (auto sharedStateIt = m_clodSharedStreamingStateByMesh.find(mesh);
+		sharedStateIt != m_clodSharedStreamingStateByMesh.end() && sharedStateIt->second) {
+		sharedStateIt->second->mesh = nullptr;
 	}
 
 	mesh->SetPerMeshBufferView(nullptr);
@@ -820,8 +829,8 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 			if (sharedState) {
 				const bool wasInactive = sharedState->activeInstanceCount == 0u;
 				sharedState->activeInstanceCount++;
-				if (wasInactive && sharedState->mesh != nullptr) {
-					const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
+				if (wasInactive) {
+					const uint32_t meshTraversalDepth = sharedState->maxTraversalDepth;
 					uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
 					while (meshTraversalDepth > cachedDepth
 						&& !m_clodActiveMaxTraversalDepth.compare_exchange_weak(
@@ -896,8 +905,8 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 	if (sharedState) {
 		sharedStateWasInactive = sharedState->activeInstanceCount == 0u;
 		sharedState->activeInstanceCount++;
-		if (sharedStateWasInactive && sharedState->mesh != nullptr) {
-			const uint32_t meshTraversalDepth = sharedState->mesh->GetCLodMaxTraversalDepth();
+		if (sharedStateWasInactive) {
+			const uint32_t meshTraversalDepth = sharedState->maxTraversalDepth;
 			uint32_t cachedDepth = m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire);
 			while (meshTraversalDepth > cachedDepth
 				&& !m_clodActiveMaxTraversalDepth.compare_exchange_weak(
@@ -965,9 +974,7 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 			if (sharedMeshState != nullptr && sharedMeshState->activeInstanceCount > 0u) {
 				sharedMeshState->activeInstanceCount--;
 				if (sharedMeshState->activeInstanceCount == 0u) {
-					const uint32_t removedTraversalDepth = sharedMeshState->mesh
-						? sharedMeshState->mesh->GetCLodMaxTraversalDepth()
-						: 0u;
+					const uint32_t removedTraversalDepth = sharedMeshState->maxTraversalDepth;
 					// Keep shared CLod template/range state alive after the last
 					// instance leaves. CLodStreamingSystem owns delayed page
 					// residency and page-map clearing for these global group
@@ -992,11 +999,11 @@ void MeshManager::RecomputeCLodActiveMaxTraversalDepth()
 {
 	uint32_t maxTraversalDepth = 0u;
 	for (const auto& [_, sharedState] : m_clodSharedStreamingStateByMesh) {
-		if (sharedState == nullptr || sharedState->mesh == nullptr || sharedState->activeInstanceCount == 0u) {
+		if (sharedState == nullptr || sharedState->activeInstanceCount == 0u) {
 			continue;
 		}
 
-		maxTraversalDepth = std::max(maxTraversalDepth, sharedState->mesh->GetCLodMaxTraversalDepth());
+		maxTraversalDepth = std::max(maxTraversalDepth, sharedState->maxTraversalDepth);
 	}
 
 	m_clodActiveMaxTraversalDepth.store(maxTraversalDepth, std::memory_order_release);
