@@ -106,6 +106,7 @@ RenderableAsset RenderableAssetFromPayload(USDLoader::ImportedAssetPayload&& pay
 	for (auto& payloadPart : payload.parts) {
 		RenderableAssetPart part;
 		part.meshes = std::move(payloadPart.meshes);
+		part.prototypeGeometries = std::move(payloadPart.prototypeGeometries);
 		part.localMatrix = payloadPart.localMatrix;
 		part.name = std::move(payloadPart.name);
 		part.skinnedShapeIndex = payloadPart.skinnedShapeIndex;

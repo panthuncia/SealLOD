@@ -402,6 +402,10 @@ void TerrainRvtMarkVisibilityMaterialPagesCS(uint3 dtid : SV_DispatchThreadID)
     uint clusterIndex;
     uint primID;
     UnpackVisKey(vis, depth, clusterIndex, primID);
+    if (clusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE)
+    {
+        return;
+    }
 
     ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue = ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];

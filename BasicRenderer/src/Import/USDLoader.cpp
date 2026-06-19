@@ -2452,7 +2452,13 @@ namespace USDLoader {
 		return skeleton;
 	}
 
-	std::vector<std::shared_ptr<Mesh>> ProcessMeshForPayload(
+	struct PayloadMeshResult
+	{
+		std::vector<std::shared_ptr<Mesh>> meshes;
+		std::vector<br::import::RenderablePrototypeGeometry> prototypeGeometries;
+	};
+
+	PayloadMeshResult ProcessMeshForPayload(
 		const UsdPrim& prim,
 		UsdSkelCache& skelCache,
 		const UsdStageRefPtr& stage,
@@ -2510,6 +2516,14 @@ namespace USDLoader {
 		}
 
 		auto processedMeshes = ProcessMesh(mesh, stage, metersPerUnit, upRot, directory, isUSDZ, skelCache, skelJointOrderRaw, skelJointOrderMapped);
+		std::vector<br::import::RenderablePrototypeGeometry> prototypeGeometries;
+		if (const auto preprocessedIt = loadingCache.preprocessedMeshCache.find(mesh.GetPrim().GetPath().GetString());
+			preprocessedIt != loadingCache.preprocessedMeshCache.end()) {
+			prototypeGeometries.reserve(preprocessedIt->second.subsets.size());
+			for (const auto& subset : preprocessedIt->second.subsets) {
+				prototypeGeometries.push_back(subset.result.prototypeGeometry);
+			}
+		}
 		if (skeleton) {
 			ZoneScopedN("USDLoader::ProcessMeshForPayload::AttachSkeleton");
 			for (auto& processedMesh : processedMeshes) {
@@ -2518,7 +2532,10 @@ namespace USDLoader {
 				}
 			}
 		}
-		return processedMeshes;
+		return PayloadMeshResult{
+			.meshes = std::move(processedMeshes),
+			.prototypeGeometries = std::move(prototypeGeometries),
+		};
 	}
 
 	void ProcessMeshAndAnimations(
@@ -2946,14 +2963,15 @@ namespace USDLoader {
 					return;
 				}
 
-				auto meshes = ProcessMeshForPayload(prim, skelCache, stage, metersPerUnit, upRot, directory, isUSDZ);
-				if (!meshes.empty()) {
+				auto meshResult = ProcessMeshForPayload(prim, skelCache, stage, metersPerUnit, upRot, directory, isUSDZ);
+				if (!meshResult.meshes.empty()) {
 					RenderablePartPayload part;
 					part.localMatrix = worldMatrix;
 					part.name = prim.GetName().GetString();
+					part.prototypeGeometries = std::move(meshResult.prototypeGeometries);
 
 					bool hasSkinnedMesh = false;
-					for (const auto& mesh : meshes) {
+					for (const auto& mesh : meshResult.meshes) {
 						if (!mesh) {
 							continue;
 						}

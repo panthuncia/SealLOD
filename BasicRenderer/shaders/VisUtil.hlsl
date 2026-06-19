@@ -37,6 +37,11 @@ uint GetMaterialIdFromCluster(uint clusterIndex,
     return isReyesPatch ? meshBuffer.materialReyesEvalCompileFlagsID : meshBuffer.materialEvalCompileFlagsID;
 }
 
+bool IsSARPGrassVisibilityCluster(uint clusterIndex)
+{
+    return clusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE;
+}
+
 bool TryGetMaterialEvalDataIndexFromCluster(
     uint clusterIndex,
     ByteAddressBuffer visibleClusterBuffer,
@@ -152,6 +157,10 @@ void MaterialHistogramCS(uint3 dtid : SV_DispatchThreadID)
     uint primID;
 
     UnpackVisKey(vis, depth, clusterIndex, primID);
+    if (IsSARPGrassVisibilityCluster(clusterIndex))
+    {
+        return;
+    }
 
     // Derive material ID
     uint matId = GetMaterialIdFromCluster(clusterIndex, visibleClusterBuffer, diceQueue, perMeshInstance, perMeshBuffer);
@@ -204,6 +213,10 @@ void BuildPixelListCS(uint3 dtid : SV_DispatchThreadID)
     uint clusterIndex;
     uint primID;
     UnpackVisKey(vis, depth, clusterIndex, primID);
+    if (IsSARPGrassVisibilityCluster(clusterIndex))
+    {
+        return;
+    }
     
     uint matId = GetMaterialIdFromCluster(clusterIndex, visibleClusterBuffer, diceQueue, perMeshInstance, perMeshBuffer);
 

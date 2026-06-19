@@ -191,7 +191,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 20u;
+constexpr std::uint32_t kPayloadCacheVersion = 22u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -642,6 +642,51 @@ bool ReadStringVector(BinaryReader& reader, std::vector<std::string>& values)
     values.resize(static_cast<std::size_t>(size));
     for (auto& value : values) {
         if (!reader.String(value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void WritePrototypeGeometry(BinaryWriter& writer, const br::import::RenderablePrototypeGeometry& geometry)
+{
+    writer.Pod(geometry.vertexFlags);
+    writer.PodVector(geometry.vertices);
+    writer.PodVector(geometry.indices);
+}
+
+bool ReadPrototypeGeometry(BinaryReader& reader, br::import::RenderablePrototypeGeometry& geometry)
+{
+    if (!reader.Pod(geometry.vertexFlags) ||
+        !reader.PodVector(geometry.vertices) ||
+        !reader.PodVector(geometry.indices)) {
+        return false;
+    }
+    return geometry.vertices.size() <= 10000000u && geometry.indices.size() <= 30000000u;
+}
+
+void WritePrototypeGeometryVector(
+    BinaryWriter& writer,
+    const std::vector<br::import::RenderablePrototypeGeometry>& geometries)
+{
+    const std::uint64_t size = geometries.size();
+    writer.Pod(size);
+    for (const auto& geometry : geometries) {
+        WritePrototypeGeometry(writer, geometry);
+    }
+}
+
+bool ReadPrototypeGeometryVector(
+    BinaryReader& reader,
+    std::vector<br::import::RenderablePrototypeGeometry>& geometries)
+{
+    std::uint64_t size = 0;
+    if (!reader.Pod(size) || size > 100000u) {
+        return false;
+    }
+    geometries.resize(static_cast<std::size_t>(size));
+    for (auto& geometry : geometries) {
+        if (!ReadPrototypeGeometry(reader, geometry)) {
             return false;
         }
     }
@@ -1165,6 +1210,7 @@ bool WritePayloadCache(
                 const std::uint32_t meshIndex = it == meshIndices.end() ? UINT32_MAX : it->second;
                 writer.Pod(meshIndex);
             }
+            WritePrototypeGeometryVector(writer, part.prototypeGeometries);
         }
     }
     return writer.Good();
@@ -1328,6 +1374,9 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                     return std::nullopt;
                 }
                 part.meshes.push_back(payload.meshes[meshIndex]);
+            }
+            if (!ReadPrototypeGeometryVector(reader, part.prototypeGeometries)) {
+                return std::nullopt;
             }
             payload.parts.push_back(std::move(part));
         }

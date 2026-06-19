@@ -1372,6 +1372,41 @@ namespace {
 
 	AtomicBenchmarkStats g_benchmarkStats;
 
+	br::import::RenderablePrototypeGeometry BuildPrototypeGeometry(
+		const std::vector<std::byte>& rawData,
+		unsigned int vertexSize,
+		unsigned int vertexFlags,
+		const std::vector<UINT32>& indices)
+	{
+		br::import::RenderablePrototypeGeometry geometry;
+		geometry.vertexFlags = vertexFlags;
+		geometry.indices.assign(indices.begin(), indices.end());
+		if (vertexSize == 0u) {
+			return geometry;
+		}
+
+		const size_t vertexCount = rawData.size() / static_cast<size_t>(vertexSize);
+		geometry.vertices.reserve(vertexCount);
+		for (size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertexBytes = rawData.data() + vertexIndex * static_cast<size_t>(vertexSize);
+			br::import::RenderablePrototypeVertex vertex{};
+			std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
+			if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u) {
+				std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
+				std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0u) {
+				DirectX::XMFLOAT3 color{};
+				std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
+				vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
+			}
+			geometry.vertices.push_back(vertex);
+		}
+		return geometry;
+	}
+
 	std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 	{
 		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count());
@@ -1525,6 +1560,9 @@ MeshPreprocessResult ExtractSubMesh(
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;
 	spdlog::info("    LoadGeom done: {} verts, {} indices, vertexSize={}, flags=0x{:X}",
 		loadedVertCount, indices.size(), vertexSize, vertexFlags);
+	auto prototypeGeometry = rawData
+		? BuildPrototypeGeometry(*rawData, vertexSize, vertexFlags, indices)
+		: br::import::RenderablePrototypeGeometry{};
 
 	// Populate MeshIngestBuilder
 	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
@@ -1600,7 +1638,8 @@ MeshPreprocessResult ExtractSubMesh(
 		std::move(ingest),
 		std::move(cacheIdentity),
 		std::move(prebuiltData),
-		previewSubdiv || previewTopology);
+		previewSubdiv || previewTopology,
+		std::move(prototypeGeometry));
 }
 
 StageExtractionResult ExtractAllFromStage(

@@ -8,6 +8,7 @@
 #include <DirectXMath.h>
 
 #include "Import/USDLoader.h"
+#include "Import/RenderablePrototypeGeometry.h"
 
 class Mesh;
 class MeshInstance;
@@ -22,6 +23,7 @@ namespace br::import {
 struct RenderableAssetPart
 {
 	std::vector<std::shared_ptr<Mesh>> meshes;
+	std::vector<RenderablePrototypeGeometry> prototypeGeometries;
 	DirectX::XMMATRIX localMatrix{ DirectX::XMMatrixIdentity() };
 	std::string name;
 	std::uint32_t skinnedShapeIndex{ static_cast<std::uint32_t>(-1) };

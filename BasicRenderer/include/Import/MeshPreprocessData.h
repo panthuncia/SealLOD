@@ -9,22 +9,26 @@
 #include <string>
 
 #include "Import/CLodCacheLoader.h"
+#include "Import/RenderablePrototypeGeometry.h"
 #include "Mesh/ClusterLODTypes.h"
 
 struct MeshPreprocessResult {
 	MeshIngestBuilder ingest;
 	CLodCacheLoader::MeshCacheIdentity cacheIdentity;
 	std::optional<ClusterLODPrebuiltData> prebuiltData;
+	br::import::RenderablePrototypeGeometry prototypeGeometry;
 	bool forceDoubleSidedPreview = false;
 
 	MeshPreprocessResult(
 		MeshIngestBuilder&& ingestData,
 		CLodCacheLoader::MeshCacheIdentity&& identity,
 		std::optional<ClusterLODPrebuiltData>&& prebuilt,
-		bool forceDoubleSidedPreviewMaterial = false)
+		bool forceDoubleSidedPreviewMaterial = false,
+		br::import::RenderablePrototypeGeometry prototype = {})
 		: ingest(std::move(ingestData))
 		, cacheIdentity(std::move(identity))
 		, prebuiltData(std::move(prebuilt))
+		, prototypeGeometry(std::move(prototype))
 		, forceDoubleSidedPreview(forceDoubleSidedPreviewMaterial) {
 	}
 };
