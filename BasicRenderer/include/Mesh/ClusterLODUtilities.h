@@ -18,4 +18,12 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	unsigned int vertexSize,
 	const std::vector<uint32_t>& indices,
 	const ClusterLODBuilderSettings& settings,
+	const std::optional<ClusterLODVoxelGridOverride>& gridOverride,
+	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+	const std::vector<std::byte>& vertices,
+	unsigned int vertexSize,
+	const std::vector<uint32_t>& indices,
+	const ClusterLODBuilderSettings& settings,
 	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);

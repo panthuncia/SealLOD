@@ -3,6 +3,7 @@
 #include "Managers/ViewManager.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "Render/TerrainRvtTelemetry.h"
@@ -149,6 +150,10 @@ bool ReyesPatchRasterizationPass::DeclaredResourcesChanged() const
 
 PassReturn ReyesPatchRasterizationPass::Execute(PassExecutionContext& executionContext)
 {
+    if (SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
+        return {};
+    }
+
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& context = *renderContext;
     auto& commandList = executionContext.commandList;

@@ -12,6 +12,7 @@
 #include "Resources/components.h"
 #include "BuiltinResources.h"
 #include "ShaderBuffers.h"
+#include "Render/GraphExtensions/CLodTelemetry.h"
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
 VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
@@ -19,6 +20,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     std::shared_ptr<Buffer> voxelWorkRecordsBuffer,
     std::shared_ptr<Buffer> voxelWorkCounterBuffer,
     std::shared_ptr<Buffer> voxelIndirectArgsBuffer,
+    std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<Buffer> viewRasterInfoBuffer,
     CLodRasterOutputKind outputKind,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
@@ -30,6 +32,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     , m_voxelWorkRecordsBuffer(std::move(voxelWorkRecordsBuffer))
     , m_voxelWorkCounterBuffer(std::move(voxelWorkCounterBuffer))
     , m_voxelIndirectArgsBuffer(std::move(voxelIndirectArgsBuffer))
+    , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
@@ -94,7 +97,7 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
             m_visibleClustersBuffer,
             m_voxelWorkCounterBuffer,
             m_viewRasterInfoBuffer)
-        .WithUnorderedAccess(m_voxelIndirectArgsBuffer, Builtin::DebugVisualization)
+        .WithUnorderedAccess(m_voxelIndirectArgsBuffer, m_telemetryBuffer, Builtin::DebugVisualization)
         .WithInternalTransition(m_voxelIndirectArgsBuffer, indirectState)
         .WithConstantBuffer(Builtin::PerFrameBuffer);
 
@@ -191,6 +194,10 @@ PassReturn VoxelSoftwareRasterizationPass::Execute(PassExecutionContext& executi
     misc[CLOD_RASTER_VOXEL_INDIRECT_ARGS_DESCRIPTOR_INDEX] = m_voxelIndirectArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     misc[CLOD_RASTER_VOXEL_WORK_CAPACITY] = m_voxelWorkCapacity;
     misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    if (m_telemetryBuffer && IsCLodWorkGraphTelemetryEnabled()) {
+        misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    }
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();

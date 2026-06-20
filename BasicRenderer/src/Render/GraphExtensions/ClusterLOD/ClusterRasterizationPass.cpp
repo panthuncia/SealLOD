@@ -405,6 +405,11 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     auto& context = *renderContext;
     auto& commandList = executionContext.commandList;
 
+    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
+        return {};
+    }
+
     rhi::PassBeginInfo p{};
     p.width = m_passWidth;
     p.height = m_passHeight;

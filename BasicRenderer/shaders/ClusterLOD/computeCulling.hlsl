@@ -130,6 +130,15 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
     const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
     const row_major matrix objectModelMatrix = instanceTransform.model;
+    StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
+    const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
+    const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
+    if (voxelRootCandidate)
+    {
+        WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_CANDIDATES, 1);
+    }
 
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -154,6 +163,10 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
             {
                 WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM, 1);
                 WGTelemetryAddObjectCullPlaneReject(planeIndex);
+                if (voxelRootCandidate)
+                {
+                    WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_FRUSTUM_REJECTED, 1);
+                }
                 culled = true;
                 break;
             }
@@ -163,12 +176,6 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     if (culled) {
         return;
     }
-
-    StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-
-    const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
-    const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
 
     RWStructuredBuffer<TraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
@@ -185,6 +192,11 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
+    if (voxelRootCandidate)
+    {
+        WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_VISIBLE, 1);
+        WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_TRAVERSE_RECORDS, 1);
+    }
 }
 
 [numthreads(64, 1, 1)]
@@ -236,7 +248,17 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     StructuredBuffer<ClusterLODNode> lodNodes =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
-    const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + UnpackNodeId(rec.nodeIdPacked)];
+    const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
+    const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+    const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
+    if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
+    {
+        WGTelemetryAdd(
+            node.range.isLeaf == CLOD_NODE_INTERNAL
+                ? WG_COUNTER_VOXEL_ROOT_INTERNAL_RECORDS
+                : WG_COUNTER_VOXEL_ROOT_LEAF_RECORDS,
+            1);
+    }
 
     if (node.range.isLeaf == CLOD_NODE_INTERNAL) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_INTERNAL_NODE_RECORDS, 1);

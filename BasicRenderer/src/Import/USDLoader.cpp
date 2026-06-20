@@ -185,6 +185,7 @@ namespace USDLoader {
 		std::unordered_map<std::string, std::vector<std::shared_ptr<Mesh>>> meshCache;
 		std::unordered_map<std::string, PreprocessedMeshRecord> preprocessedMeshCache;
 		std::unordered_map<std::string, std::shared_ptr<TextureAsset>> textureCache;
+		std::vector<std::string> textureSearchRoots;
 		//std::unordered_map<std::string, std::shared_ptr<UsdSkelSkeleton>> unprocessedSkeletons;
 		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
 		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonMap;
@@ -198,6 +199,7 @@ namespace USDLoader {
 			meshCache.clear();
 			preprocessedMeshCache.clear();
 			textureCache.clear();
+			textureSearchRoots.clear();
 			primsWithSkeletons.clear();
 			skeletonMap.clear();
 			animationMap.clear();
@@ -680,6 +682,64 @@ namespace USDLoader {
 		return value;
 	}
 
+	std::string NormalizeTextureRelativePath(std::string path)
+	{
+		for (char& ch : path) {
+			if (ch == '/') {
+				ch = '\\';
+			}
+		}
+		while (!path.empty() && (path.front() == '\\' || path.front() == '/')) {
+			path.erase(path.begin());
+		}
+		return path;
+	}
+
+	std::optional<std::filesystem::path> ResolveTexturePathFromSearchRoots(const std::string& texturePath)
+	{
+		if (texturePath.empty()) {
+			return std::nullopt;
+		}
+
+		std::error_code ec;
+		const std::filesystem::path input(texturePath);
+		if (std::filesystem::is_regular_file(input, ec)) {
+			auto canonical = std::filesystem::weakly_canonical(input, ec);
+			return ec ? input : canonical;
+		}
+
+		const std::string normalizedRelative = NormalizeTextureRelativePath(texturePath);
+		std::string withoutTexturesPrefix = normalizedRelative;
+		std::string lower = normalizedRelative;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (lower.rfind("textures\\", 0) == 0) {
+			withoutTexturesPrefix = normalizedRelative.substr(std::string_view("textures\\").size());
+		}
+
+		for (const std::string& rootText : loadingCache.textureSearchRoots) {
+			if (rootText.empty()) {
+				continue;
+			}
+
+			const std::filesystem::path root(rootText);
+			const std::array<std::filesystem::path, 2> candidates = {
+				root / normalizedRelative,
+				root / "textures" / withoutTexturesPrefix
+			};
+			for (const auto& candidate : candidates) {
+				ec.clear();
+				if (std::filesystem::is_regular_file(candidate, ec)) {
+					auto canonical = std::filesystem::weakly_canonical(candidate, ec);
+					return ec ? candidate : canonical;
+				}
+			}
+		}
+
+		return std::nullopt;
+	}
+
 	void DisableModelSpaceNormalMap(MaterialDescription& result);
 
 	void ApplyBrniflyTextureSlot(
@@ -1104,6 +1164,87 @@ namespace USDLoader {
 			"|normalconv:" + std::to_string(static_cast<uint32_t>(normalConvention));
 	}
 
+	std::string GetUsdAssetLogicalPath(const SdfAssetPath& asset)
+	{
+		if (!asset.GetAssetPath().empty()) {
+			return asset.GetAssetPath();
+		}
+		return asset.GetResolvedPath();
+	}
+
+	std::shared_ptr<TextureAsset> LoadUsdTextureAsset(
+		const std::string& logicalPath,
+		const UsdStageRefPtr& stage,
+		TextureSemantic semantic,
+		bool preferSRGB,
+		NormalMapConvention normalConvention)
+	{
+		if (logicalPath.empty()) {
+			return nullptr;
+		}
+
+		const std::string cacheKey = BuildUsdTextureCacheKey(logicalPath, semantic, preferSRGB, normalConvention);
+		if (auto it = loadingCache.textureCache.find(cacheKey); it != loadingCache.textureCache.end()) {
+			return it->second;
+		}
+
+		auto& resolver = ArGetResolver();
+		auto ctx = stage->GetPathResolverContext();
+		ArResolverContextBinder binder(ctx);
+
+		ArResolvedPath resolved = resolver.Resolve(logicalPath);
+		std::string resolvedPath = resolved.GetPathString();
+		if (resolvedPath.empty()) {
+			if (auto fallback = ResolveTexturePathFromSearchRoots(logicalPath)) {
+				resolvedPath = fallback->string();
+				resolved = ArResolvedPath(resolvedPath);
+			}
+		}
+		if (resolvedPath.empty()) {
+			spdlog::warn("USDLoader: unable to resolve texture '{}'", logicalPath);
+			return nullptr;
+		}
+
+		TextureFileMeta cacheProbeMeta{};
+		cacheProbeMeta.filePath = resolvedPath;
+		cacheProbeMeta.preferSRGB = preferSRGB;
+		cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, false, normalConvention);
+
+		std::shared_ptr<TextureAsset> tex;
+		const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
+		if (!cachePath.empty()) {
+			TextureFileMeta deferredMeta = cacheProbeMeta;
+			deferredMeta.filePath = ws2s(cachePath);
+			deferredMeta.isProcessingCacheArtifact = true;
+			tex = LoadTextureFromFileDeferred(cachePath, nullptr, preferSRGB, std::addressof(deferredMeta));
+			if (tex) {
+				tex->Meta().isProcessingCacheArtifact = true;
+				spdlog::debug("USDLoader: texture processing cache hit for '{}' -> '{}'", resolvedPath, ws2s(cachePath));
+			}
+		}
+		else if (std::shared_ptr<ArAsset> arAsset = resolver.OpenAsset(resolved)) {
+			tex = LoadTextureFromMemory(
+				static_cast<const void*>(arAsset->GetBuffer().get()),
+				arAsset->GetSize(),
+				nullptr,
+				{},
+				preferSRGB);
+		}
+		else {
+			TextureFileMeta deferredMeta = cacheProbeMeta;
+			tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
+		}
+
+		if (tex) {
+			tex->Meta().filePath = logicalPath;
+			tex->Meta().preferSRGB = preferSRGB;
+			tex->SetProcessingSettings(cacheProbeMeta.processing);
+			tex->SetGenerateMipmaps(true);
+			loadingCache.textureCache[cacheKey] = tex;
+		}
+		return tex;
+	}
+
 	void ProcessTexture(MaterialDescription& result, const UsdShadeConnectionSourceInfo& src, const UsdStageRefPtr& stage, const TfToken& name, const UsdShadeMaterial& material) {
 		if (auto srcShader = UsdShadeShader(src.source)) {
 			TfToken srcId;
@@ -1114,7 +1255,7 @@ namespace USDLoader {
 				SdfAssetPath asset;
 				srcShader.GetInput(TfToken("file")).Get(&asset);
 				// Resolve asset path
-				std::string logicalPath = asset.GetResolvedPath();
+				std::string logicalPath = GetUsdAssetLogicalPath(asset);
 
 				UsdShadeInput csInput = srcShader.GetInput(TfToken("sourceColorSpace"));
 				TfToken colorSpaceToken;
@@ -1130,58 +1271,7 @@ namespace USDLoader {
 				const NormalMapConvention normalConvention = semantic == TextureSemantic::Normal
 					? NormalMapConvention::OpenGL
 					: NormalMapConvention::DirectX;
-				const std::string cacheKey = BuildUsdTextureCacheKey(logicalPath, semantic, preferSRGB, normalConvention);
-
-				if (!loadingCache.textureCache.contains(cacheKey)) {
-					spdlog::debug("Found texture  {} in material", src.source.GetPrim().GetName().GetString());
-					//auto texPath = asset.GetAssetPath();
-					//spdlog::info("Loading texture from path: {}", texPath);
-
-					auto& resolver = ArGetResolver();
-					auto ctx = stage->GetPathResolverContext();
-					ArResolverContextBinder binder(ctx);
-
-					ArResolvedPath resolved = resolver.Resolve(logicalPath);
-
-					TextureFileMeta cacheProbeMeta{};
-					cacheProbeMeta.filePath = resolved.GetPathString();
-					cacheProbeMeta.preferSRGB = preferSRGB;
-					cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, false, normalConvention);
-					const std::wstring cachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
-					if (!cachePath.empty()) {
-						TextureFileMeta deferredMeta = cacheProbeMeta;
-						deferredMeta.filePath = ws2s(cachePath);
-						deferredMeta.isProcessingCacheArtifact = true;
-						auto tex = LoadTextureFromFileDeferred(cachePath, nullptr, preferSRGB, std::addressof(deferredMeta));
-						tex->Meta().filePath = cacheProbeMeta.filePath;
-						tex->Meta().isProcessingCacheArtifact = true;
-						tex->Meta().preferSRGB = preferSRGB;
-						tex->SetProcessingSettings(cacheProbeMeta.processing);
-						loadingCache.textureCache[cacheKey] = tex;
-						spdlog::debug("USDLoader: texture processing cache hit for '{}' -> '{}'", resolved.GetPathString(), ws2s(cachePath));
-					}
-					else {
-						// Open the asset
-						std::shared_ptr<ArAsset> arAsset = resolver.OpenAsset(resolved);
-						if (!arAsset) {
-							throw std::runtime_error(
-								"Unable to open asset at " + logicalPath);
-						}
-
-						auto tex = LoadTextureFromMemory(
-							static_cast<const void*>(arAsset->GetBuffer().get()),
-							arAsset->GetSize(),
-							nullptr,
-							{},              // default flags; loader will force WIC sRGB/linear as needed
-							preferSRGB);
-						tex->SetProcessingSettings(MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, false, normalConvention));
-
-						tex->SetGenerateMipmaps(true); // TODO: There will be textures where we don't want this
-
-						loadingCache.textureCache[cacheKey] = tex;
-					}
-
-				}
+				LoadUsdTextureAsset(logicalPath, stage, semantic, preferSRGB, normalConvention);
 			}
 
 			// Check if this shader has an "inputs:st" input
@@ -1212,7 +1302,7 @@ namespace USDLoader {
 			SdfAssetPath asset;
 			srcShader.GetInput(TfToken("file")).Get(&asset);
 			// Resolve asset path
-			std::string logicalPath = asset.GetResolvedPath();
+			std::string logicalPath = GetUsdAssetLogicalPath(asset);
 			UsdShadeInput csInput = srcShader.GetInput(TfToken("sourceColorSpace"));
 			TfToken colorSpaceToken;
 			std::string colorSpace = "linear";
@@ -1260,6 +1350,49 @@ namespace USDLoader {
 					result.emissiveColor = { 1.0f, 1.0f, 1.0f, 1.0f };
 				}
 			}
+		}
+	}
+
+	void LoadSourcePathTextureBinding(
+		TextureAndConstant& binding,
+		const UsdStageRefPtr& stage,
+		TextureSemantic semantic,
+		bool preferSRGB,
+		NormalMapConvention normalConvention)
+	{
+		if (binding.texture || binding.sourcePath.empty()) {
+			return;
+		}
+
+		binding.texture = LoadUsdTextureAsset(binding.sourcePath, stage, semantic, preferSRGB, normalConvention);
+	}
+
+	void LoadSourcePathTextures(MaterialDescription& result, const UsdStageRefPtr& stage)
+	{
+		LoadSourcePathTextureBinding(result.baseColor, stage, TextureSemantic::BaseColor, true, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.metallic, stage, TextureSemantic::Metallic, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.roughness, stage, TextureSemantic::Roughness, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.emissive, stage, TextureSemantic::Emissive, true, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.opacity, stage, TextureSemantic::Opacity, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.aoMap, stage, TextureSemantic::AO, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.heightMap, stage, TextureSemantic::Height, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.normal, stage, TextureSemantic::Normal, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.coatColor, stage, TextureSemantic::OpenPBRColor, true, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.coatWeight, stage, TextureSemantic::OpenPBRScalar, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.coatRoughness, stage, TextureSemantic::Roughness, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.fuzzColor, stage, TextureSemantic::OpenPBRColor, true, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.fuzzWeight, stage, TextureSemantic::OpenPBRScalar, false, NormalMapConvention::DirectX);
+		LoadSourcePathTextureBinding(result.openPBRTextures.fuzzRoughness, stage, TextureSemantic::Roughness, false, NormalMapConvention::DirectX);
+
+		if (result.normal.texture) {
+			if (NormalTextureNeedsReconstructedZ(result.normal.texture->Description().format)) {
+				result.normal.channels = { 0u, 1u, 4u };
+			}
+			result.negateNormals =
+				result.normal.texture->Meta().fileType == ImageFiletype::DDS ||
+				(result.normal.texture->Meta().isProcessingCacheArtifact &&
+					result.normal.texture->Meta().processing.semantic == TextureSemantic::Normal);
+			result.invertNormalGreen = false;
 		}
 	}
 
@@ -1487,6 +1620,13 @@ namespace USDLoader {
 		});
 
 		ApplyBrniflyMaterialMetadata(result, material.GetPrim());
+		LoadSourcePathTextures(result, stage);
+
+		ForEachMaterialTextureBinding(result, [](TextureAndConstant& binding) {
+			if (binding.texture && !binding.factor.HasValue()) {
+				binding.factor = 1.0f;
+			}
+		});
 
         spdlog::debug(
             "USD material '{}' displacement: enabled={}, hasHeightMap={}, scale={}, range=[{}, {}]",
@@ -2218,7 +2358,7 @@ namespace USDLoader {
 		(void)skelJointOrderRaw;
 		(void)skelJointOrderMapped;
 
-		auto& cacheKey = mesh.GetPrim().GetPath().GetString();
+		const std::string cacheKey = mesh.GetPrim().GetPath().GetString();
 		if (loadingCache.meshCache.contains(cacheKey)) {
 			ZoneScopedN("USDLoader::ProcessMesh::MeshCacheHit");
 			return loadingCache.meshCache[cacheKey];
@@ -3032,6 +3172,11 @@ namespace USDLoader {
 		}
 
 		const auto stageContext = MakeStageImportContext(stage, options);
+		loadingCache.textureSearchRoots = options.textureSearchRoots;
+		if (!stageContext.directory.empty() &&
+			std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), stageContext.directory) == loadingCache.textureSearchRoots.end()) {
+			loadingCache.textureSearchRoots.push_back(stageContext.directory);
+		}
 
 		auto scene = std::make_shared<Scene>();
 
@@ -3061,6 +3206,11 @@ namespace USDLoader {
 		ArResolverContextBinder binder(ctx);
 
 		const auto stageContext = MakeStageImportContext(stage, options);
+		loadingCache.textureSearchRoots = options.textureSearchRoots;
+		if (!stageContext.directory.empty() &&
+			std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), stageContext.directory) == loadingCache.textureSearchRoots.end()) {
+			loadingCache.textureSearchRoots.push_back(stageContext.directory);
+		}
 
 		try {
 			UsdSkelCache skelCache;

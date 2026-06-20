@@ -169,6 +169,14 @@ struct ClusterLODPrebuildArtifacts
 	ClusterLODCacheBuildOwnedData cacheBuildData;
 };
 
+struct ClusterLODVoxelGridOverride
+{
+	DirectX::XMFLOAT3 aabbMin{};
+	DirectX::XMFLOAT3 aabbMax{};
+	float voxelWidth = 0.0f;
+	uint32_t resolution = 0u;
+};
+
 // Builder settings
 
 enum class ClusterLODVoxelFallbackMode : uint8_t
@@ -436,6 +444,9 @@ public:
 	// Headless: runs the full ClusterLOD build pipeline (CPU-only).
 	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts() const;
 	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
+	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
+		const ClusterLODVoxelGridOverride& grid,
 		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
 
 	void SetClusterLODBuilderSettings(const ClusterLODBuilderSettings& settings) {

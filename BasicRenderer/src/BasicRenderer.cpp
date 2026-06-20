@@ -26,6 +26,7 @@
 #include "Menu/Menu.h"
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
+#include "Resources/Buffers/DynamicBufferBase.h"
 #include "Managers/Singletons/DeletionManager.h"
 #include "Import/ModelLoader.h"
 #include "spdlogStreambuf.h"
@@ -155,6 +156,70 @@ void ConfigureMainRenderThreadScheduling() {
     }
 }
 
+bool IsRendererInputMessage(UINT message) {
+    switch (message) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_MOUSEWHEEL:
+    case WM_INPUT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsRendererKeyboardInputMessage(UINT message) {
+    switch (message) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool IsRendererMouseReleaseMessage(UINT message) {
+    switch (message) {
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ShouldBlockRendererInputForImGui(UINT message) {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return false;
+    }
+
+    const ImGuiIO& io = ImGui::GetIO();
+    if (IsRendererKeyboardInputMessage(message)) {
+        return message != WM_KEYUP && message != WM_SYSKEYUP && io.WantCaptureKeyboard;
+    }
+
+    if (IsRendererMouseReleaseMessage(message)) {
+        return false;
+    }
+
+    return io.WantCaptureMouse ||
+        ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) ||
+        ImGui::IsAnyItemHovered() ||
+        ImGui::IsAnyItemActive();
+}
+
 }
 
 
@@ -247,6 +312,11 @@ HWND InitWindow(HINSTANCE hInstance, int nCmdShow) {
         nullptr
     );
 
+    if (hwnd == nullptr) {
+        MessageBox(nullptr, L"Failed to create window", L"Error", MB_OK);
+        throw std::runtime_error("Failed to create window.");
+    }
+
     HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 
     MONITORINFO mi = { sizeof(mi) };
@@ -263,15 +333,12 @@ HWND InitWindow(HINSTANCE hInstance, int nCmdShow) {
         HWND_TOP,           // or HWND_TOPMOST if you want to stay above every other window
         monX, monY,        // top-left corner of the monitor
         monWidth, monHeight,  // exactly fill it
-        SWP_NOACTIVATE      // don’t steal focus, or add SWP_SHOWWINDOW if needed
+        0
     );
 
-    if (hwnd == nullptr) {
-        MessageBox(nullptr, L"Failed to create window", L"Error", MB_OK);
-        throw std::runtime_error("Failed to create window.");
-    }
-
     ShowWindow(hwnd, nCmdShow);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
 
     RegisterRawInputDevices(hwnd);
 
@@ -373,11 +440,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     spdlog::info("Renderer initialized.");
     renderer.SetInputMode(InputMode::wasd);
 
-    auto baseScene = std::make_shared<Scene>();
+    {
+        BufferBase::ScopedBackingMutation startupSceneBackingMutation;
 
-    //auto dragonScene = LoadModel("models/dragon.glb");
-    //dragonScene->GetRoot().set<Components::Scale>({ 100, 100, 100 });
-    //dragonScene->GetRoot().set<Components::Position>({ 0.0, 1, 1.0 });
+        auto baseScene = std::make_shared<Scene>();
+
+        //auto dragonScene = LoadModel("models/dragon.glb");
+        //dragonScene->GetRoot().set<Components::Scale>({ 100, 100, 100 });
+        //dragonScene->GetRoot().set<Components::Position>({ 0.0, 1, 1.0 });
 
     //auto carScene = LoadModel("models/porche.glb");
     //carScene->GetRoot().set<Components::Scale>({ 0.6, 0.6, 0.6 });
@@ -408,28 +478,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//auto quad = LoadModel("models/quad.usdz");
 	
-	auto cubes = LoadModel("models/cubes/suspicious_cubes.usda");
+	    //auto cubes = LoadModel("models/cubes/suspicious_cubes.usda");
 
     //auto cherry = LoadModel("models/Trees/CherryTree.usd");
 
-    //auto pine = LoadModel("models/Trees/branch.usdz");
+    auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
     //auto needles = LoadModel("models/Trees/PineTree.usd");
 
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
-    renderer.SetCurrentScene(baseScene);
+        renderer.SetCurrentScene(baseScene);
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
+	renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
-
-	renderer.GetCurrentScene()->AppendScene(cubes->Clone());
+    	//renderer.AppendScene(cubes->Clone());
     
 	//renderer.GetCurrentScene()->AppendScene(carScene->Clone());
 
@@ -464,31 +533,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //}
 
 
-    renderer.SetEnvironment("sky");
+        renderer.SetEnvironment("sky");
 
-    XMFLOAT3 lookAt = XMFLOAT3(0.0f, 0.0f, 0.0f);
-    XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
-    float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
-    float aspectRatio;
-    float zNear = 0.1f;
-    float zFar = 1000.0f;
+        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 0.0f, 0.0f);
+        XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
+        float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
+        float aspectRatio;
+        float zNear = 0.1f;
+        float zFar = 1000.0f;
 
 
-    int clientWidth = x_res; // TODO
-    int clientHeight = y_res; // TODO
+        int clientWidth = x_res; // TODO
+        int clientHeight = y_res; // TODO
 
-    aspectRatio = static_cast<float>(clientWidth) / static_cast<float>(clientHeight);
-    auto& scene = renderer.GetCurrentScene();
-    scene->SetCamera(lookAt, up, fov, aspectRatio, zNear, zFar);
+        aspectRatio = static_cast<float>(clientWidth) / static_cast<float>(clientHeight);
+        auto& scene = renderer.GetCurrentScene();
+        scene->SetCamera(lookAt, up, fov, aspectRatio, zNear, zFar);
     
-	auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(0, -6, -1));
-    //auto light3 = renderer.GetCurrentScene()->CreateSpotLightECS(L"light3", XMFLOAT3(0, 10, 3), XMFLOAT3(1, 1, 1), 2000.0, {0, -1, 0}, .5, .8, 0.0, 0.0, 1.0);
-    //auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light1", XMFLOAT3(0, 1, 3), XMFLOAT3(1, 1, 1), 100.0, 0.0, 0.0, 1.0);
+	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(0, -6, -1));
+        //auto light3 = renderer.GetCurrentScene()->CreateSpotLightECS(L"light3", XMFLOAT3(0, 10, 3), XMFLOAT3(1, 1, 1), 2000.0, {0, -1, 0}, .5, .8, 0.0, 0.0, 1.0);
+        //auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light1", XMFLOAT3(0, 1, 3), XMFLOAT3(1, 1, 1), 100.0, 0.0, 0.0, 1.0);
     
-    for (int i = 0; i < 0; i++) {
-		auto point = getRandomPointInVolume(-20, 20, -2, 0, -20, 20);
-		auto color = XMFLOAT3(randomFloat(0.0, 1.0), randomFloat(0.0, 1.0), randomFloat(0.0, 1.0));
-        auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light"+std::to_wstring(i), XMFLOAT3(point.x, point.y, point.z), color, 3.0, 0.0, 0.0, 1.0, false);
+        for (int i = 0; i < 0; i++) {
+		    auto point = getRandomPointInVolume(-20, 20, -2, 0, -20, 20);
+		    auto color = XMFLOAT3(randomFloat(0.0, 1.0), randomFloat(0.0, 1.0), randomFloat(0.0, 1.0));
+            auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light"+std::to_wstring(i), XMFLOAT3(point.x, point.y, point.z), color, 3.0, 0.0, 0.0, 1.0, false);
+        }
     }
 
     MSG msg = {};
@@ -507,6 +577,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
             frameIndex += 1;
             renderer.Update(elapsedSeconds.count());
+            renderer.PostUpdate();
             if (frameIndex % 100 == 0) {
                 spdlog::info("FPS: {}", 1 / elapsedSeconds.count());
             }
@@ -522,28 +593,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 // Window callback procedure
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 
-	Menu::GetInstance().HandleInput(hWnd, message, wParam, lParam);
+	const bool imguiHandled = Menu::GetInstance().HandleInput(hWnd, message, wParam, lParam);
+    const bool blockRendererInput = IsRendererInputMessage(message) && ShouldBlockRendererInputForImGui(message);
 
-    bool isMouseOverAnyWindow = false;
-	bool isMouseCaptured = false;
-	bool isKeyboardCaptured = false;
-
-    if (ImGui::GetCurrentContext() != nullptr) {
-
-        ImGuiIO& io = ImGui::GetIO();
-
-        // Check if the mouse is hovering any ImGui window
-        isMouseOverAnyWindow = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) || ImGui::IsAnyItemHovered();
-
-        // Otherwise, we rely on ImGui's own input capture logic
-        isMouseCaptured = io.WantCaptureMouse;
-        isKeyboardCaptured = io.WantCaptureKeyboard;
+    if (IsRendererInputMessage(message) && !blockRendererInput) {
+        renderer.GetInputManager().ProcessInput(message, wParam, lParam);
     }
 
-    // If neither the mouse nor the keyboard is captured by ImGui, pass input to the renderer
-	// Also allow the renderer to process key up events to prevent the camera from getting stuck moving.
-    if ((!isMouseCaptured && !isKeyboardCaptured) || message == WM_KEYUP || !isMouseOverAnyWindow) {
-        renderer.GetInputManager().ProcessInput(message, wParam, lParam);
+    if (imguiHandled) {
+        return 0;
     }
 
     switch (message)

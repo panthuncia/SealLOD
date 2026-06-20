@@ -8,6 +8,7 @@
 #include <math.h>
 #include <atlbase.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -126,6 +127,23 @@ namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
+
+bool ReadTruthyEnvironmentFlag(const char* name)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return false;
+    }
+
+    const bool result =
+        std::strcmp(value, "1") == 0 ||
+        _stricmp(value, "true") == 0 ||
+        _stricmp(value, "yes") == 0 ||
+        _stricmp(value, "on") == 0;
+    std::free(value);
+    return result;
+}
 
 struct TerrainRvtTelemetryStatsReadback {
     uint32_t heightRequests;
@@ -1605,6 +1623,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
+    settingsManager.registerSetting<bool>(
+        CLodDisableNonVoxelVisibilitySettingName,
+        ReadTruthyEnvironmentFlag("SARP_CLOD_DISABLE_NON_VOXEL_VISIBILITY"));
     settingsManager.registerSetting<bool>(CLodReyesUseNormalMapsSettingName, false);
     settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
@@ -2661,22 +2682,58 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 return decoded.counters[static_cast<size_t>(idx)];
             };
 
-            spdlog::info(
-                "SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} compact_tris={})",
-                requestedFrame,
-                counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
-                counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
-                counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
-                counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration),
-                counter(CLodWorkGraphCounterIndex::ObjectCullRejectedFrustum),
-                counter(CLodWorkGraphCounterIndex::ObjectCullInvalidBounds),
-                counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
+			spdlog::info(
+				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
+				requestedFrame,
+				counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
+				counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
+				counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
+				counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration),
+				counter(CLodWorkGraphCounterIndex::ObjectCullRejectedFrustum),
+				counter(CLodWorkGraphCounterIndex::ObjectCullInvalidBounds),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesInternalNodeRecords),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesActiveChildThreads),
+				counter(CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted),
+				counter(CLodWorkGraphCounterIndex::ChildPrefilterFrustumCulled),
+				counter(CLodWorkGraphCounterIndex::ChildPrefilterLodRejected),
+				counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
                 counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
                 counter(CLodWorkGraphCounterIndex::ClusterCullThreads),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedFrustum),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOcclusion),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOutOfRange),
                 counter(CLodWorkGraphCounterIndex::ClusterCullZeroSurvivorWaves),
+                counter(CLodWorkGraphCounterIndex::VoxelObjectCandidates),
+                counter(CLodWorkGraphCounterIndex::VoxelObjectFrustumRejected),
+                counter(CLodWorkGraphCounterIndex::VoxelObjectVisible),
+                counter(CLodWorkGraphCounterIndex::VoxelObjectTraverseRecords),
+                counter(CLodWorkGraphCounterIndex::VoxelRootInternalRecords),
+                counter(CLodWorkGraphCounterIndex::VoxelRootLeafRecords),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterWorkGroups),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidCluster),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidPackedCluster),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidVoxelWidth),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterProjectionRejected),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterScissorRejected),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterDepthRejected),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterDdaMisses),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterVisibilityWrites),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterVisibilityWins),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterVisibilityLosses),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterProjectedPixels),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterQueuedPixels),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterQueueOverflow),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterNonPositiveDepth),
                 counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
                 counter(CLodWorkGraphCounterIndex::RasterMeshShaderInRange),
                 counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
@@ -2684,6 +2741,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::RasterMeshShaderZeroTriangleOutputs),
                 counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionVoxelSkipped),
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionReyesSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
         });
 
@@ -3393,7 +3452,12 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
         return nullptr;
     }
 
-	return GetCurrentScene()->AppendScene(scene);
+	auto appendedScene = GetCurrentScene()->AppendScene(scene);
+	if (!appendedScene) {
+		return nullptr;
+	}
+
+	return appendedScene;
 }
 
 InputManager& Renderer::GetInputManager() {

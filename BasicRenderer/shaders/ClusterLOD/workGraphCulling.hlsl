@@ -126,6 +126,12 @@ static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_RECORDS = 107;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_DROPPED = 108;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB = 122u;
 static const uint WG_COUNTER_OBJECT_CULL_REJECTED_STALE_GENERATION = 133u;
+static const uint WG_COUNTER_VOXEL_OBJECT_CANDIDATES = 150u;
+static const uint WG_COUNTER_VOXEL_OBJECT_FRUSTUM_REJECTED = 151u;
+static const uint WG_COUNTER_VOXEL_OBJECT_VISIBLE = 152u;
+static const uint WG_COUNTER_VOXEL_OBJECT_TRAVERSE_RECORDS = 153u;
+static const uint WG_COUNTER_VOXEL_ROOT_INTERNAL_RECORDS = 154u;
+static const uint WG_COUNTER_VOXEL_ROOT_LEAF_RECORDS = 155u;
 
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
@@ -250,6 +256,19 @@ uint CLodResolveTraversalRootNode(CLodMeshMetadata clodMeshMetadata)
     StructuredBuffer<CLodHierarchyLevelInfo> levelInfos =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_HIERARCHY_LEVEL_INFOS_BUFFER_ID)];
     return levelInfos[clodMeshMetadata.lodLevelInfoBase + CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT].rootNode;
+}
+
+bool CLodMeshHasVoxelRootGroup(CLodMeshMetadata clodMeshMetadata)
+{
+    if (clodMeshMetadata.groupChunkTableCount == 0u)
+    {
+        return false;
+    }
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup firstGroup = groups[clodMeshMetadata.groupsBase];
+    return (firstGroup.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
 }
 
 bool CLodWorkGraphTelemetryEnabled()
@@ -2115,6 +2134,15 @@ void WG_ObjectCull(
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
+        StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+                        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+        const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
+        const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
+        const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
+        if (voxelRootCandidate)
+        {
+            WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_CANDIDATES, 1);
+        }
 
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
                     ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
@@ -2145,18 +2173,16 @@ void WG_ObjectCull(
                 {
                     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM, 1);
                     WGTelemetryAddObjectCullPlaneReject(planeIndex);
+                    if (voxelRootCandidate)
+                    {
+                        WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_FRUSTUM_REJECTED, 1);
+                    }
                     culled = true;
                     break;
                 }
             }
         }
         if (!culled) {
-            StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
-                            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-
-            const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
-            const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
-
             outRecord.viewId = hdr.viewDataIndex;
             outRecord.instanceIndex = drawRecordIndex;
             outRecord.nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
@@ -2164,6 +2190,11 @@ void WG_ObjectCull(
 
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
+            if (voxelRootCandidate)
+            {
+                WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_VISIBLE, 1);
+                WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_TRAVERSE_RECORDS, 1);
+            }
         }
     }
 
@@ -2259,7 +2290,17 @@ void WG_TraverseNodes(
         StructuredBuffer<ClusterLODNode> lodNodes =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
-        const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + UnpackNodeId(rec.nodeIdPacked)];
+        const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
+        const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+        const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
+        if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
+        {
+            WGTelemetryAdd(
+                node.range.isLeaf == CLOD_NODE_INTERNAL
+                    ? WG_COUNTER_VOXEL_ROOT_INTERNAL_RECORDS
+                    : WG_COUNTER_VOXEL_ROOT_LEAF_RECORDS,
+                1);
+        }
 
         if (node.range.isLeaf == CLOD_NODE_INTERNAL) {
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_INTERNAL_NODE_RECORDS, 1);

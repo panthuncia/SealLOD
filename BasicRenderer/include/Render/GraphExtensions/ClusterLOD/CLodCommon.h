@@ -16,6 +16,7 @@ inline constexpr const char* CLodStreamingMeshManagerGetterSettingName = "getMes
 inline constexpr const char* CLodStreamingCpuUploadBudgetSettingName = "clodStreamingCpuUploadBudgetRequests";
 inline constexpr const char* CLodStreamingEnableDirectStorageSettingName = "clodStreamingEnableDirectStorage";
 inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDisableReyesRasterization";
+inline constexpr const char* CLodDisableNonVoxelVisibilitySettingName = "clodDisableNonVoxelVisibility";
 inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";

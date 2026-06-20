@@ -25,3 +25,15 @@ ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts
 		m_clusterLODBuilderSettings,
 		maxCubesPerCluster);
 }
+
+ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts(
+	const ClusterLODVoxelGridOverride& grid,
+	uint32_t maxCubesPerCluster) const {
+	return BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+		m_vertices,
+		m_vertexSize,
+		m_indices,
+		m_clusterLODBuilderSettings,
+		grid,
+		maxCubesPerCluster);
+}

@@ -44,6 +44,28 @@
 static const uint VOXEL_RASTER_THREADS_PER_GROUP = CLOD_VOXEL_RASTER_THREADS_PER_GROUP;
 static const uint VOXEL_RASTER_PIXEL_QUEUE_CAPACITY = CLOD_VOXEL_RASTER_PIXEL_QUEUE_CAPACITY;
 static const uint64_t VOXEL_RASTER_VISIBILITY_EMPTY = 0xFFFFFFFFFFFFFFFF;
+static const uint WG_COUNTER_VOXEL_RASTER_WORK_GROUPS = 134u;
+static const uint WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER = 135u;
+static const uint WG_COUNTER_VOXEL_RASTER_DESCRIPTOR_MISSES = 136u;
+static const uint WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER = 137u;
+static const uint WG_COUNTER_VOXEL_RASTER_INVALID_VOXEL_WIDTH = 138u;
+static const uint WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED = 139u;
+static const uint WG_COUNTER_VOXEL_RASTER_SCISSOR_REJECTED = 140u;
+static const uint WG_COUNTER_VOXEL_RASTER_DEPTH_REJECTED = 141u;
+static const uint WG_COUNTER_VOXEL_RASTER_DDA_MISSES = 142u;
+static const uint WG_COUNTER_VOXEL_RASTER_VISIBILITY_WRITES = 143u;
+static const uint WG_COUNTER_VOXEL_RASTER_PROJECTED_PIXELS = 144u;
+static const uint WG_COUNTER_VOXEL_RASTER_QUEUED_PIXELS = 145u;
+static const uint WG_COUNTER_VOXEL_RASTER_QUEUE_OVERFLOW = 146u;
+static const uint WG_COUNTER_VOXEL_RASTER_NON_POSITIVE_DEPTH = 147u;
+static const uint WG_COUNTER_VOXEL_RASTER_VISIBILITY_WINS = 148u;
+static const uint WG_COUNTER_VOXEL_RASTER_VISIBILITY_LOSSES = 149u;
+
+// Voxel cubes are coarse coverage proxies. Their projected AABB depth bounds are
+// often too conservative for grass sitting directly on terrain, so use the
+// visibility buffer only for the final ordered write rather than as a pre-DDA
+// rejection source.
+static const bool CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST = false;
 
 #if CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
 groupshared uint gs_voxelRasterQueueCount;
@@ -54,6 +76,17 @@ groupshared uint2 gs_voxelRasterPixelQueue[VOXEL_RASTER_PIXEL_QUEUE_CAPACITY];
 bool VoxelMaskTest(uint2 mask, uint bitIndex)
 {
     return bitIndex < 32u ? ((mask.x & (1u << bitIndex)) != 0u) : ((mask.y & (1u << (bitIndex - 32u))) != 0u);
+}
+
+void VoxelRasterTelemetryAdd(uint counterIndex, uint value)
+{
+    if (CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return;
+    }
+
+    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
+    InterlockedAdd(telemetryCounters[counterIndex], value);
 }
 
 bool RayBoxIntersect(float3 rayOrigin, float3 rayDir, float3 boxMin, float3 boxMax, out float tEnter, out float tExit)
@@ -246,7 +279,15 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusters, work.visibleClusterIndex);
     if (!CLodVisibleClusterIsVoxel(packedCluster))
     {
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER, 1u);
+        }
         return;
+    }
+    if (GI == 0u)
+    {
+        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_WORK_GROUPS, 1u);
     }
 
     StructuredBuffer<CLodMeshMetadata> metadataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
@@ -268,6 +309,10 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     CLodVoxelGroupDescriptor descriptor;
     if (!CLodTryLoadVoxelDescriptorByClusterIndex(metadata, localGroupId, localVoxelClusterIndex, descriptor))
     {
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DESCRIPTOR_MISSES, 1u);
+        }
         return;
     }
 
@@ -276,12 +321,20 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelCluster(metadata, descriptor, localGroupId, localVoxelClusterIndex, pageEntry, pageHeader);
     if (voxelCluster.cubeCount == 0u || voxelCluster.cubeCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
     {
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER, 1u);
+        }
         return;
     }
 
     const float voxelWidth = descriptor.aabbMinAndVoxelWidth.w;
     if (voxelWidth <= 0.0f)
     {
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_VOXEL_WIDTH, 1u);
+        }
         return;
     }
 
@@ -386,6 +439,10 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         }
         if (!validProjection || cubeMaxLinearDepth <= 0.0f)
         {
+            if (GI == 0u)
+            {
+                VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, 1u);
+            }
             continue;
         }
         if (hasBehindNearCorner)
@@ -401,19 +458,23 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         maxPx = min(maxPx, int2(int(targetDims.x) - 1, int(targetDims.y) - 1));
         if (minPx.x > maxPx.x || minPx.y > maxPx.y)
         {
+            if (GI == 0u)
+            {
+                VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SCISSOR_REJECTED, 1u);
+            }
             continue;
         }
 
-        const row_major matrix clipToLocalMatrix = mul(mul(camera.projectionInverse, camera.viewInverse), worldToLocal);
-        const float4 clipToLocalX = clipToLocalMatrix[0];
-        const float4 clipToLocalY = clipToLocalMatrix[1];
-        const float4 clipToLocalW = clipToLocalMatrix[3];
         const float3 cameraOriginLocal = mul(float4(camera.positionWorldSpace.xyz, 1.0f), worldToLocal).xyz;
         const float rayOriginViewZ = dot(float4(cameraOriginLocal, 1.0f), localViewZ);
         const float3 rayOriginCube = (cameraOriginLocal - cubeMinObject) * invVoxelWidth;
         const uint pixelWidth = uint(maxPx.x - minPx.x + 1);
         const uint pixelHeight = uint(maxPx.y - minPx.y + 1);
         const uint pixelCount = pixelWidth * pixelHeight;
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTED_PIXELS, pixelCount);
+        }
 
 #if !CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
         for (uint pixelLinear = GI; pixelLinear < pixelCount; pixelLinear += VOXEL_RASTER_THREADS_PER_GROUP)
@@ -423,35 +484,44 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
             const uint64_t currentVisKey = visibilityBuffer[uint2(px, py)];
-            if (currentVisKey != VOXEL_RASTER_VISIBILITY_EMPTY)
+            if (CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST)
             {
-                float currentDepth = 0.0f;
-                uint currentClusterId = 0u;
-                uint currentPrimId = 0u;
-                UnpackVisKey(currentVisKey, currentDepth, currentClusterId, currentPrimId);
-                if (currentDepth <= cubeMinLinearDepth)
+                if (currentVisKey != VOXEL_RASTER_VISIBILITY_EMPTY)
                 {
-                    continue;
+                    float currentDepth = 0.0f;
+                    uint currentClusterId = 0u;
+                    uint currentPrimId = 0u;
+                    UnpackVisKey(currentVisKey, currentDepth, currentClusterId, currentPrimId);
+                    if (currentDepth <= cubeMinLinearDepth)
+                    {
+                        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DEPTH_REJECTED, 1u);
+                        continue;
+                    }
                 }
             }
 #endif
 
             const float2 uv = (float2(px, py) + 0.5f) * targetDimsInv;
             const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-            const float4 localNear = ndc.x * clipToLocalX + ndc.y * clipToLocalY + clipToLocalW;
-            const float3 localPoint = localNear.xyz / max(localNear.w, 1.0e-6f);
+            float4 viewNear = mul(float4(ndc, 0.0f, 1.0f), camera.projectionInverse);
+            viewNear.xyz /= max(viewNear.w, 1.0e-6f);
+            const float4 worldNear = mul(float4(viewNear.xyz, 1.0f), camera.viewInverse);
+            const float3 worldPoint = worldNear.xyz / max(worldNear.w, 1.0e-6f);
+            const float3 localPoint = mul(float4(worldPoint, 1.0f), worldToLocal).xyz;
             const float3 rayDirObject = normalize(localPoint - cameraOriginLocal);
             const float3 rayDirCube = rayDirObject * invVoxelWidth;
 
             float tHitCube = 0.0f;
             if (!RaycastVoxelCubeDDA(rayOriginCube, rayDirCube, occupancyMask, tHitCube))
             {
+                VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DDA_MISSES, 1u);
                 continue;
             }
 
             const float linearDepth = -(rayOriginViewZ + tHitCube * dot(rayDirObject, localViewZ.xyz));
             if (linearDepth <= 0.0f)
             {
+                VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_NON_POSITIVE_DEPTH, 1u);
                 continue;
             }
 
@@ -464,7 +534,14 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
             VoxelRasterWriteVirtualShadow(uint2(px, py), linearDepth, clipmapInfo, pageTable, physicalPages);
 #else
             const uint64_t visKey = PackVisKey(linearDepth, work.visibleClusterIndex, cubeOffset);
-            InterlockedMin(visibilityBuffer[uint2(px, py)], visKey);
+            uint64_t previousVisKey = 0u;
+            InterlockedMin(visibilityBuffer[uint2(px, py)], visKey, previousVisKey);
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_VISIBILITY_WRITES, 1u);
+            VoxelRasterTelemetryAdd(
+                previousVisKey > visKey
+                    ? WG_COUNTER_VOXEL_RASTER_VISIBILITY_WINS
+                    : WG_COUNTER_VOXEL_RASTER_VISIBILITY_LOSSES,
+                1u);
 #endif
         }
 #else
@@ -485,13 +562,18 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
                 const uint64_t currentVisKey = visibilityBuffer[uint2(px, py)];
-                if (currentVisKey != VOXEL_RASTER_VISIBILITY_EMPTY)
+                if (CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST &&
+                    currentVisKey != VOXEL_RASTER_VISIBILITY_EMPTY)
                 {
                     float currentDepth = 0.0f;
                     uint currentClusterId = 0u;
                     uint currentPrimId = 0u;
                     UnpackVisKey(currentVisKey, currentDepth, currentClusterId, currentPrimId);
                     enqueuePixel = currentDepth > cubeMinLinearDepth;
+                    if (!enqueuePixel)
+                    {
+                        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DEPTH_REJECTED, 1u);
+                    }
                 }
 #endif
 
@@ -499,7 +581,15 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
                 {
                     uint queueSlot = 0u;
                     InterlockedAdd(gs_voxelRasterQueueCount, 1u, queueSlot);
-                    gs_voxelRasterPixelQueue[queueSlot] = uint2(px, py);
+                    VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_QUEUED_PIXELS, 1u);
+                    if (queueSlot < VOXEL_RASTER_PIXEL_QUEUE_CAPACITY)
+                    {
+                        gs_voxelRasterPixelQueue[queueSlot] = uint2(px, py);
+                    }
+                    else
+                    {
+                        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_QUEUE_OVERFLOW, 1u);
+                    }
                 }
             }
 
@@ -520,26 +610,35 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
                 {
                     break;
                 }
+                if (queueSlot >= VOXEL_RASTER_PIXEL_QUEUE_CAPACITY)
+                {
+                    break;
+                }
 
                 const uint2 pixel = gs_voxelRasterPixelQueue[queueSlot];
                 const uint px = pixel.x;
                 const uint py = pixel.y;
                 const float2 uv = (float2(px, py) + 0.5f) * targetDimsInv;
                 const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-                const float4 localNear = ndc.x * clipToLocalX + ndc.y * clipToLocalY + clipToLocalW;
-                const float3 localPoint = localNear.xyz / max(localNear.w, 1.0e-6f);
+                float4 viewNear = mul(float4(ndc, 0.0f, 1.0f), camera.projectionInverse);
+                viewNear.xyz /= max(viewNear.w, 1.0e-6f);
+                const float4 worldNear = mul(float4(viewNear.xyz, 1.0f), camera.viewInverse);
+                const float3 worldPoint = worldNear.xyz / max(worldNear.w, 1.0e-6f);
+                const float3 localPoint = mul(float4(worldPoint, 1.0f), worldToLocal).xyz;
                 const float3 rayDirObject = normalize(localPoint - cameraOriginLocal);
                 const float3 rayDirCube = rayDirObject * invVoxelWidth;
 
                 float tHitCube = 0.0f;
                 if (!RaycastVoxelCubeDDA(rayOriginCube, rayDirCube, occupancyMask, tHitCube))
                 {
+                    VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DDA_MISSES, 1u);
                     continue;
                 }
 
                 const float linearDepth = -(rayOriginViewZ + tHitCube * dot(rayDirObject, localViewZ.xyz));
                 if (linearDepth <= 0.0f)
                 {
+                    VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_NON_POSITIVE_DEPTH, 1u);
                     continue;
                 }
 
@@ -552,7 +651,14 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
                 VoxelRasterWriteVirtualShadow(uint2(px, py), linearDepth, clipmapInfo, pageTable, physicalPages);
 #else
                 const uint64_t visKey = PackVisKey(linearDepth, work.visibleClusterIndex, cubeOffset);
-                InterlockedMin(visibilityBuffer[uint2(px, py)], visKey);
+                uint64_t previousVisKey = 0u;
+                InterlockedMin(visibilityBuffer[uint2(px, py)], visKey, previousVisKey);
+                VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_VISIBILITY_WRITES, 1u);
+                VoxelRasterTelemetryAdd(
+                    previousVisKey > visKey
+                        ? WG_COUNTER_VOXEL_RASTER_VISIBILITY_WINS
+                        : WG_COUNTER_VOXEL_RASTER_VISIBILITY_LOSSES,
+                    1u);
 #endif
             }
 

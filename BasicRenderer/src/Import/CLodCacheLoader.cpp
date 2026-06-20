@@ -275,8 +275,11 @@ bool SavePrebuiltLocked(const MeshCacheIdentity& identity, const ClusterLODPrebu
 	spdlog::debug("CLodCacheLoader::SavePrebuiltLocked  src='{}' prim='{}' subset='{}'",
 		identity.sourceIdentifier, identity.primPath, identity.subsetName);
 	std::lock_guard<std::mutex> saveLock(GetCacheSaveMutexForIdentity(identity));
-	if (TryLoadPrebuilt(identity).has_value()) {
+	if (auto cached = TryLoadPrebuilt(identity)) {
 		spdlog::debug("  -> already cached (race-condition guard).");
+		if (outSavedPrebuiltData != nullptr) {
+			*outSavedPrebuiltData = std::move(*cached);
+		}
 		return true;
 	}
 

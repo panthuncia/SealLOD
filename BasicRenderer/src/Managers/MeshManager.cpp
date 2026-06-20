@@ -344,10 +344,23 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	std::vector<std::unique_ptr<BufferView>> clodMeshletTriangleChunkViews;
 	std::vector<std::unique_ptr<BufferView>> clodMeshletBoundsChunkViews;
 
-	const bool hasDiskBackedGroupChunks = !pageDiskLocators.empty();
-	const bool hasData = hasDiskBackedGroupChunks && mesh->HasCLodDiskStreamingSource();
+	const bool hasDiskBackedGroupChunks = !pageDiskLocators.empty() && mesh->HasCLodDiskStreamingSource();
+	const bool hasCLodHierarchy = mesh->IsCLodMesh() &&
+		!mesh->GetCLodGroups().empty() &&
+		!mesh->GetCLodSegments().empty() &&
+		!mesh->GetCLodNodes().empty();
+	const bool hasClassicGeometry = vertexByteSize != 0u && mesh->GetPerMeshCBData().numVertices != 0u;
+	const bool hasData = hasClassicGeometry || (hasCLodHierarchy && hasDiskBackedGroupChunks);
 	if (!hasData) {
-		spdlog::warn("Loading mesh with no associated geometry, skipping");
+		spdlog::warn(
+			"Loading mesh with no associated geometry or disk-backed CLOD payload, skipping globalID={} clod={} groups={} segments={} nodes={} pageLocators={} hasCacheSource={}",
+			mesh->GetGlobalID(),
+			mesh->IsCLodMesh() ? 1 : 0,
+			mesh->GetCLodGroups().size(),
+			mesh->GetCLodSegments().size(),
+			mesh->GetCLodNodes().size(),
+			pageDiskLocators.size(),
+			mesh->HasCLodDiskStreamingSource() ? 1 : 0);
 		return true; //Empty mesh? Nothing to upload.
 	}
 	if (mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) {

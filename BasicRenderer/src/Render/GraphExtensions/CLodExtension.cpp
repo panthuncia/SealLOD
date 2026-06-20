@@ -2102,6 +2102,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     m_voxelRasterWorkBuffer,
                     m_voxelRasterWorkCounterBuffer,
                     m_voxelRasterIndirectArgsBuffer,
+                    m_workGraphTelemetryBuffer,
                     m_viewRasterInfoBuffer,
                     traits.rasterOutputKind,
                     m_shadowPageTableTexture,

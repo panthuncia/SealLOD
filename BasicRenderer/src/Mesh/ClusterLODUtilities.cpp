@@ -5954,6 +5954,23 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const ClusterLODBuilderSettings& settings,
 	uint32_t maxCubesPerCluster)
 {
+	return BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+		vertices,
+		vertexSize,
+		indices,
+		settings,
+		std::nullopt,
+		maxCubesPerCluster);
+}
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+	const std::vector<std::byte>& vertices,
+	unsigned int vertexSize,
+	const std::vector<uint32_t>& indices,
+	const ClusterLODBuilderSettings& settings,
+	const std::optional<ClusterLODVoxelGridOverride>& gridOverride,
+	uint32_t maxCubesPerCluster)
+{
 	ClusterLODPrebuildArtifacts artifacts{};
 	const size_t vertexStrideBytes = vertexSize;
 	const size_t vertexCount = vertexStrideBytes != 0u ? vertices.size() / vertexStrideBytes : 0u;
@@ -5996,46 +6013,66 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 		return artifacts;
 	}
 
-	const float minVoxelizationThickness = std::max(longestExtent * 1.0e-4f, 1.0e-5f);
-	auto padDegenerateAxis = [minVoxelizationThickness](float& minValue, float& maxValue)
-	{
-		if (maxValue - minValue > minVoxelizationThickness)
-		{
-			return;
-		}
-
-		const float center = 0.5f * (minValue + maxValue);
-		minValue = center - 0.5f * minVoxelizationThickness;
-		maxValue = center + 0.5f * minVoxelizationThickness;
-	};
-	padDegenerateAxis(aabbMin.x, aabbMax.x);
-	padDegenerateAxis(aabbMin.y, aabbMax.y);
-	padDegenerateAxis(aabbMin.z, aabbMax.z);
-
-	auto expandAxisToExtent = [](float& minValue, float& maxValue, float targetExtent)
-	{
-		const float currentExtent = maxValue - minValue;
-		if (currentExtent >= targetExtent)
-		{
-			return;
-		}
-
-		const float center = 0.5f * (minValue + maxValue);
-		minValue = center - 0.5f * targetExtent;
-		maxValue = center + 0.5f * targetExtent;
-	};
-	expandAxisToExtent(aabbMin.x, aabbMax.x, longestExtent);
-	expandAxisToExtent(aabbMin.y, aabbMax.y, longestExtent);
-	expandAxisToExtent(aabbMin.z, aabbMax.z, longestExtent);
-
 	const uint32_t resolution = std::max(
 		2u,
 		std::max(settings.voxelMinResolution, settings.voxelGridBaseResolution));
-	const float voxelWidth = longestExtent / static_cast<float>(resolution);
+	float voxelWidth = longestExtent / static_cast<float>(resolution);
+	if (gridOverride)
+	{
+		const auto& grid = *gridOverride;
+		if (grid.resolution < 2u ||
+			!(grid.voxelWidth > 0.0f) ||
+			!std::isfinite(grid.voxelWidth) ||
+			grid.aabbMax.x <= grid.aabbMin.x ||
+			grid.aabbMax.y <= grid.aabbMin.y ||
+			grid.aabbMax.z <= grid.aabbMin.z)
+		{
+			return artifacts;
+		}
+
+		aabbMin = grid.aabbMin;
+		aabbMax = grid.aabbMax;
+		voxelWidth = grid.voxelWidth;
+	}
+	else
+	{
+		const float minVoxelizationThickness = std::max(longestExtent * 1.0e-4f, 1.0e-5f);
+		auto padDegenerateAxis = [minVoxelizationThickness](float& minValue, float& maxValue)
+		{
+			if (maxValue - minValue > minVoxelizationThickness)
+			{
+				return;
+			}
+
+			const float center = 0.5f * (minValue + maxValue);
+			minValue = center - 0.5f * minVoxelizationThickness;
+			maxValue = center + 0.5f * minVoxelizationThickness;
+		};
+		padDegenerateAxis(aabbMin.x, aabbMax.x);
+		padDegenerateAxis(aabbMin.y, aabbMax.y);
+		padDegenerateAxis(aabbMin.z, aabbMax.z);
+
+		auto expandAxisToExtent = [](float& minValue, float& maxValue, float targetExtent)
+		{
+			const float currentExtent = maxValue - minValue;
+			if (currentExtent >= targetExtent)
+			{
+				return;
+			}
+
+			const float center = 0.5f * (minValue + maxValue);
+			minValue = center - 0.5f * targetExtent;
+			maxValue = center + 0.5f * targetExtent;
+		};
+		expandAxisToExtent(aabbMin.x, aabbMax.x, longestExtent);
+		expandAxisToExtent(aabbMin.y, aabbMax.y, longestExtent);
+		expandAxisToExtent(aabbMin.z, aabbMax.z, longestExtent);
+	}
 	if (!(voxelWidth > 0.0f) || !std::isfinite(voxelWidth))
 	{
 		return artifacts;
 	}
+	const uint32_t voxelResolution = gridOverride ? gridOverride->resolution : resolution;
 
 	VoxelSourceTriangleBVH coverageSourceTriangles;
 	coverageSourceTriangles.Build(
@@ -6057,7 +6094,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	voxelInput.aabbMin = aabbMin;
 	voxelInput.aabbMax = aabbMax;
 	voxelInput.voxelWidth = voxelWidth;
-	voxelInput.resolution = resolution;
+	voxelInput.resolution = voxelResolution;
 	voxelInput.raysPerCell = settings.voxelRaysPerCell;
 	voxelInput.pruningMode = settings.voxelFallbackPruningMode;
 	VoxelizeTrianglesResult voxelResult = VoxelizeTrianglesDetailed(voxelInput);

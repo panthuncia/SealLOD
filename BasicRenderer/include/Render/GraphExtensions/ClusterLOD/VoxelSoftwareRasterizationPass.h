@@ -20,6 +20,7 @@ public:
         std::shared_ptr<Buffer> voxelWorkRecordsBuffer,
         std::shared_ptr<Buffer> voxelWorkCounterBuffer,
         std::shared_ptr<Buffer> voxelIndirectArgsBuffer,
+        std::shared_ptr<Buffer> telemetryBuffer,
         std::shared_ptr<Buffer> viewRasterInfoBuffer,
         CLodRasterOutputKind outputKind,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
@@ -44,6 +45,7 @@ private:
     std::shared_ptr<Buffer> m_voxelWorkRecordsBuffer;
     std::shared_ptr<Buffer> m_voxelWorkCounterBuffer;
     std::shared_ptr<Buffer> m_voxelIndirectArgsBuffer;
+    std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;

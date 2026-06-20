@@ -157,6 +157,10 @@ PassReturn ClusterSoftwareRasterizationPass::Execute(PassExecutionContext& execu
     if (m_runWhenComputeSWRasterEnabledOnly && !CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())) {
         return {};
     }
+    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)()) {
+        return {};
+    }
 
     auto* renderContext = executionContext.hostData->Get<RenderContext>();
     auto& context = *renderContext;
