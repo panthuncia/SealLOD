@@ -53,6 +53,7 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
     switch (outputType) {
         case OUTPUT_NORMAL:
         case OUTPUT_ALBEDO:
+        case OUTPUT_TERRAIN_GRASS_OVERLAY:
         case OUTPUT_METALLIC:
         case OUTPUT_ROUGHNESS:
         case OUTPUT_EMISSIVE:

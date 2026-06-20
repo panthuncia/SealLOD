@@ -620,6 +620,7 @@ struct TerrainLayerInfo {
     float roughnessScale;
     float specularLevel;
     float4 glintParameters;
+    float4 farOverlayParams;
 };
 
 struct TerrainStochasticLayerInfo {

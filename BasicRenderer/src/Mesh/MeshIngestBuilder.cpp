@@ -16,3 +16,12 @@ ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildClusterLODArtifacts() const 
 		m_flags,
 		m_clusterLODBuilderSettings);
 }
+
+ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts(uint32_t maxCubesPerCluster) const {
+	return BuildVoxelOnlyClusterLODArtifactsFromGeometry(
+		m_vertices,
+		m_vertexSize,
+		m_indices,
+		m_clusterLODBuilderSettings,
+		maxCubesPerCluster);
+}

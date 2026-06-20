@@ -150,6 +150,7 @@ namespace {
         result.roughnessScale = 1.0f;
         result.specularLevel = 0.04f;
         result.glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+        result.farOverlayParams = { 0.0f, 0.0f, 1.0f, 0.0f };
         return result;
     }
 
@@ -487,6 +488,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             layer.roughnessScale = source.roughnessScale;
             layer.specularLevel = source.specularLevel;
             layer.glintParameters = source.glintParameters;
+            layer.farOverlayParams = source.farOverlayParams;
             if ((source.flags & TERRAIN_LAYER_FLAG_SNOW) != 0u) {
                 ++snowLayerCount;
             }
@@ -785,6 +787,22 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     const auto layerRefsEnd = std::chrono::steady_clock::now();
 
     std::vector<float> expandedWeightBlocks = ExpandTerrainWeightBlocks(desc.weightBlocks, denseRegions);
+    constexpr std::size_t kMaxTerrainWeightBlockFloats = 256ull * 1024ull * 1024ull;
+    if (expandedWeightBlocks.size() > kMaxTerrainWeightBlockFloats) {
+        spdlog::error(
+            "Terrain close-landscape material weight buffer too large: expandedFloats={} packedWords={} regions={} layerRefs={}; using fallback weights",
+            expandedWeightBlocks.size(),
+            desc.weightBlocks.size(),
+            denseRegions.size(),
+            desc.layerRefs.size());
+        expandedWeightBlocks = std::vector<float>{ MakeFallbackWeightBlock() };
+        for (auto& region : denseRegions) {
+            region.layerRefCount = 0u;
+            region.weightBlockStart = 0u;
+            region.weightSampleSide = 1u;
+            region.weightSamplesPerLayer = 1u;
+        }
+    }
     const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(expandedWeightBlocks.size()));
     m_weightBlocks->ReplaceData(std::move(expandedWeightBlocks));
     const auto weightBlocksEnd = std::chrono::steady_clock::now();

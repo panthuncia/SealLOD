@@ -386,7 +386,12 @@ namespace {
             localSegmentIndex < static_cast<uint32_t>(info.segments.size());
             ++localSegmentIndex) {
             const ClusterLODGroupSegment& segment = info.segments[localSegmentIndex];
-            if (segment.pageIndex != meshPageIndex || segment.meshletCount == 0u) {
+            if (segment.meshletCount == 0u || segment.pageIndex < info.group.pageMapBase) {
+                continue;
+            }
+            const uint32_t localPageIndex = segment.pageIndex - info.group.pageMapBase;
+            if (localPageIndex >= static_cast<uint32_t>(info.meshPageIndices.size()) ||
+                info.meshPageIndices[localPageIndex] != meshPageIndex) {
                 continue;
             }
 
@@ -2052,10 +2057,11 @@ void CLodStreamingSystem::ReleasePendingMeshPageReference(uint32_t page, uint64_
 void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWriteEvent& event) {
     if (event.reason == MeshManager::CLodPageMapWriteReason::EvictClearSkippedResidentReference) {
         spdlog::warn(
-            "CLod page-map provenance: skipped clear for group {} localGroup={} meshPage={} groupsBase={} because another resident group still references it; retainedMap={}:{} tick={}",
+            "CLod page-map provenance: skipped clear for group {} localGroup={} meshPage={} pageMapOffset={} groupsBase={} because another resident group still references it; retainedMap={}:{} tick={}",
             event.groupGlobalIndex,
             event.groupLocalIndex,
             event.meshPageIndex,
+            event.pageMapOffset,
             event.groupsBase,
             event.previousSlabDescriptorIndex,
             event.previousSlabByteOffset,
@@ -2063,13 +2069,14 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
         return;
     }
 
-    const uint64_t key = MakeCLodMeshPageKey(event.groupsBase, event.meshPageIndex);
+    const uint64_t key = MakeCLodMeshPageKey(event.groupsBase, event.pageMapOffset);
     PageMapWriteProvenance provenance{};
     provenance.reason = event.reason;
     provenance.groupGlobalIndex = event.groupGlobalIndex;
     provenance.groupLocalIndex = event.groupLocalIndex;
     provenance.groupsBase = event.groupsBase;
     provenance.meshPageIndex = event.meshPageIndex;
+    provenance.pageMapOffset = event.pageMapOffset;
     provenance.physicalPage = event.physicalPage;
     provenance.slabDescriptorIndex = event.slabDescriptorIndex;
     provenance.slabByteOffset = event.slabByteOffset;
@@ -2086,10 +2093,11 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
             event.previousSlabByteOffset != event.slabByteOffset);
     if (overwroteNonZeroEntry) {
         spdlog::warn(
-            "CLod page-map provenance: commit for group {} localGroup={} meshPage={} groupsBase={} physicalPage={} overwrote nonzero map {}:{} with {}:{} tick={}",
+            "CLod page-map provenance: commit for group {} localGroup={} meshPage={} pageMapOffset={} groupsBase={} physicalPage={} overwrote nonzero map {}:{} with {}:{} tick={}",
             event.groupGlobalIndex,
             event.groupLocalIndex,
             event.meshPageIndex,
+            event.pageMapOffset,
             event.groupsBase,
             event.physicalPage,
             event.previousSlabDescriptorIndex,
@@ -2101,14 +2109,14 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
 }
 
 void CLodStreamingSystem::LogPageMapProvenanceForMismatch(const CLodSourceGroupMismatchDetail& detail) const {
-    const uint32_t meshPageIndex = detail.expectedSegmentPageIndex;
-    const uint64_t key = MakeCLodMeshPageKey(detail.groupsBase, meshPageIndex);
+    const uint32_t pageMapOffset = detail.expectedSegmentPageIndex;
+    const uint64_t key = MakeCLodMeshPageKey(detail.groupsBase, pageMapOffset);
     const auto provenanceIt = m_pageMapWriteProvenance.find(key);
     if (provenanceIt == m_pageMapWriteProvenance.end()) {
         spdlog::error(
-            "CLod source group mismatch page-map provenance: no CPU page-map write recorded for groupsBase={} meshPage={} expectedGlobalGroup={} expectedMap={}:{}",
+            "CLod source group mismatch page-map provenance: no CPU page-map write recorded for groupsBase={} pageMapOffset={} expectedGlobalGroup={} expectedMap={}:{}",
             detail.groupsBase,
-            meshPageIndex,
+            pageMapOffset,
             detail.expectedGroupGlobalIndex,
             detail.expectedSegmentPageSlabDescriptorIndex,
             detail.expectedSegmentPageSlabByteOffset);
@@ -2117,9 +2125,10 @@ void CLodStreamingSystem::LogPageMapProvenanceForMismatch(const CLodSourceGroupM
 
     const PageMapWriteProvenance& provenance = provenanceIt->second;
     spdlog::error(
-        "CLod source group mismatch page-map provenance: groupsBase={} meshPage={} lastAction={} lastWriterGroup={} lastWriterLocalGroup={} physicalPage={} wroteMap={}:{} previousMap={}:{} writeTick={} currentTick={} expectedGlobalGroup={} foundGlobalGroup={} expectedMap={}:{}",
+        "CLod source group mismatch page-map provenance: groupsBase={} pageMapOffset={} meshPage={} lastAction={} lastWriterGroup={} lastWriterLocalGroup={} physicalPage={} wroteMap={}:{} previousMap={}:{} writeTick={} currentTick={} expectedGlobalGroup={} foundGlobalGroup={} expectedMap={}:{}",
         detail.groupsBase,
-        meshPageIndex,
+        pageMapOffset,
+        provenance.meshPageIndex,
         CLodPageMapWriteReasonName(provenance.reason),
         provenance.groupGlobalIndex,
         provenance.groupLocalIndex,

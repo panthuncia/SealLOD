@@ -435,6 +435,8 @@ public:
 
 	// Headless: runs the full ClusterLOD build pipeline (CPU-only).
 	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts() const;
+	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
 
 	void SetClusterLODBuilderSettings(const ClusterLODBuilderSettings& settings) {
 		m_clusterLODBuilderSettings = settings;

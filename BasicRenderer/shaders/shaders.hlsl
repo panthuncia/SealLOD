@@ -240,6 +240,7 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
                 payload = PackDebugFloat3(fragmentInfo.normalWS * 0.5 + 0.5);
                 break;
             case OUTPUT_ALBEDO:
+            case OUTPUT_TERRAIN_GRASS_OVERLAY:
                 payload = PackDebugFloat3(fragmentInfo.albedo.rgb);
                 break;
             case OUTPUT_METALLIC:

@@ -67,6 +67,7 @@ void EvaluateGBufferOptimized(uint2 pixel)
             payload = PackDebugFloat3(sample.materialInputs.normalWS * 0.5 + 0.5);
             break;
         case OUTPUT_ALBEDO:
+        case OUTPUT_TERRAIN_GRASS_OVERLAY:
             payload = PackDebugFloat3(sample.materialInputs.albedo);
             break;
         case OUTPUT_METALLIC:

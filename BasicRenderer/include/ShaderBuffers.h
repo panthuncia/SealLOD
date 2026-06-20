@@ -361,6 +361,7 @@ struct TerrainLayerGPU {
     float roughnessScale;
     float specularLevel;
     DirectX::XMFLOAT4 glintParameters;
+    DirectX::XMFLOAT4 farOverlayParams;
 };
 
 struct TerrainStochasticLayerGPU {

@@ -172,6 +172,7 @@ public:
 		uint32_t groupLocalIndex = 0u;
 		uint32_t groupsBase = 0u;
 		uint32_t meshPageIndex = 0u;
+		uint32_t pageMapOffset = 0u;
 		uint32_t physicalPage = ~0u;
 		uint32_t slabDescriptorIndex = 0u;
 		uint32_t slabByteOffset = 0u;
@@ -289,6 +290,10 @@ private:
 
 		Mesh* mesh = nullptr;
 		uint32_t maxTraversalDepth = 0;
+		uint32_t vertexByteSize = 0;
+		ClusterLODCacheSource cacheSource{};
+		std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
+		std::vector<ClusterLODRuntimeSummary::GroupChunkHint> groupChunkHints;
 		std::unique_ptr<BufferView> ownedMeshMetadataView;
 		uint32_t clodMeshMetadataIndex = 0;
 		uint32_t groupsBase = 0;
@@ -488,6 +493,7 @@ private:
 	void RecomputeCLodActiveMaxTraversalDepth();
 	std::shared_ptr<CLodSharedStreamingState> FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex);
 	std::vector<uint32_t> GetCLodGroupMeshPageIndices(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
+	std::vector<uint32_t> GetCLodGroupPageMapOffsets(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
 
 	ViewManager* m_pViewManager;
 

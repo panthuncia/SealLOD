@@ -504,7 +504,7 @@ namespace CLodCache {
 				return false;
 			}
 
-			spdlog::info("CLodCache::SaveImpl  metadata='{}' container='{}'",
+			spdlog::debug("CLodCache::SaveImpl  metadata='{}' container='{}'",
 				ws2s(cachePath), ws2s(containerPath));
 
 			std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
@@ -673,10 +673,6 @@ namespace CLodCache {
 			return false;
 		}
 		const ClusterLODGroup& group = prebuilt.groups[groupLocalIndex];
-		const uint64_t groupPageEnd = static_cast<uint64_t>(group.pageMapBase) + static_cast<uint64_t>(group.pageCount);
-		if (groupPageEnd > prebuilt.pageDiskLocators.size()) {
-			return false;
-		}
 		if (groupLocalIndex < prebuilt.groupChunks.size()) {
 			outPayload.groupChunkMetadata = prebuilt.groupChunks[groupLocalIndex];
 		}
@@ -689,12 +685,20 @@ namespace CLodCache {
 			}
 		}
 		if (!meshPageIndices.empty()) {
+			if (meshPageIndices.size() != group.pageCount ||
+				std::any_of(meshPageIndices.begin(), meshPageIndices.end(), [&](uint32_t pageIndex) { return pageIndex >= prebuilt.pageDiskLocators.size(); })) {
+				return false;
+			}
 			return LoadMeshPagesSelective(
 				file,
 				std::span<const ClusterLODGroupDiskLocator>(prebuilt.pageDiskLocators.data(), prebuilt.pageDiskLocators.size()),
 				std::span<const uint32_t>(meshPageIndices.data(), meshPageIndices.size()),
 				{},
 				outPayload);
+		}
+		const uint64_t groupPageEnd = static_cast<uint64_t>(group.pageMapBase) + static_cast<uint64_t>(group.pageCount);
+		if (groupPageEnd > prebuilt.pageDiskLocators.size()) {
+			return false;
 		}
 		return LoadMeshPagesSelective(
 			file,

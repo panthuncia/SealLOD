@@ -132,8 +132,8 @@ struct ClusterLODGroup
 
 	uint32_t terminalSegmentCount = 0;
 	uint32_t flags = 0;         // Bit 0: IS_VOXEL_GROUP
-	uint32_t pageMapBase = 0;   // mesh-local compatibility page-map interval base
-	uint32_t pageCount = 0;     // compatibility interval size for group-triggered streaming
+	uint32_t pageMapBase = 0;   // first mesh-local page-map slot owned by this group
+	uint32_t pageCount = 0;     // number of group-owned page-map slots / streamable pages
 	int32_t  parentGroupId = -1; // mesh-local group index of the parent group (-1 for root)
 	float maxParentError = 0.0f; // max error of any parent group that refines into this group
 	float representationError = 0.0f; // actual render representation error; currently used by voxel groups

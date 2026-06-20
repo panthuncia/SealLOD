@@ -193,6 +193,7 @@ private:
         uint32_t groupLocalIndex = 0u;
         uint32_t groupsBase = 0u;
         uint32_t meshPageIndex = 0u;
+        uint32_t pageMapOffset = 0u;
         uint32_t physicalPage = ~0u;
         uint32_t slabDescriptorIndex = 0u;
         uint32_t slabByteOffset = 0u;

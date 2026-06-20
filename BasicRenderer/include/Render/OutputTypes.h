@@ -66,6 +66,7 @@ enum OutputType {
 	MATERIAL_UV_DERIVATIVE = 62,
 	REYES_SOURCE_BARYCENTRICS = 63,
 	MATERIAL_EVAL_FEATURES = 64,
+	TERRAIN_GRASS_OVERLAY = 65,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -134,4 +135,5 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Material UV Derivative",
 	"Reyes Source Barycentrics",
 	"Material Eval Features",
+	"Terrain Grass Overlay",
 };
