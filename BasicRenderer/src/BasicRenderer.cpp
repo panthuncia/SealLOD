@@ -466,7 +466,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //auto usdScene = LoadModel("models/sponza.usdz");
     
     //auto bistro = LoadModel("models/bistroExteriorNoMats.usdz");
-    //auto bistro = LoadModel("models/bistroExterior.glb");
+    auto bistro = LoadModel("models/bistroExterior.glb");
     //auto wine = LoadModel("models/bistroInterior.usdz");
     //bistro->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
 
@@ -482,7 +482,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto cherry = LoadModel("models/Trees/CherryTree.usd");
 
-    auto pine = LoadModel("models/Trees/branch.usdz");
+    //auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
     //auto needles = LoadModel("models/Trees/PineTree.usd");
@@ -495,7 +495,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
-	renderer.GetCurrentScene()->AppendScene(pine->Clone());
+	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
     	//renderer.AppendScene(cubes->Clone());
@@ -521,7 +521,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(robot->Clone());
 
-    //renderer.GetCurrentScene()->AppendScene(bistro->Clone());
+    renderer.GetCurrentScene()->AppendScene(bistro->Clone());
 
 	//sphereScene->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
     //renderer.GetCurrentScene()->AppendScene(sphereScene->Clone());

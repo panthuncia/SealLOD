@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <execution>
+#include <limits>
 #include <flecs.h>
 #include <BasicScene/SceneWorldManager.h>
 
@@ -224,13 +225,14 @@ namespace {
 		auto count = legacyDrawStatsCount;
 		if (auto* objectManager = managerInterface.GetObjectManager()) {
 			if (const auto activeDrawSet = objectManager->TryGetActiveDrawSetIndices(workloadKey)) {
-				// Append-only active draw sets are the authoritative scan domain for
-				// clustered object culling. Legacy scene draw stats do not include
-				// direct static streaming entries, so using them here can clip shared
-				// workloads until the next static-streaming update repairs the count.
-				count = static_cast<unsigned int>((std::min<std::uint64_t>)(
+				// Static streaming can add active draw records that legacy scene draw
+				// stats never see, while AppendScene updates draw stats before the
+				// bridge appends object-manager active draw records. Request the larger
+				// domain and let IndirectCommandBufferManager clamp to resident data.
+				const auto activeDrawSetCount = static_cast<unsigned int>((std::min<std::uint64_t>)(
 					activeDrawSet->Size(),
 					std::numeric_limits<unsigned int>::max()));
+				count = std::max(count, activeDrawSetCount);
 			}
 		}
 

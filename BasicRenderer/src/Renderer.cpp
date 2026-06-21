@@ -3457,6 +3457,30 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 		return nullptr;
 	}
 
+	currentScene->PropagateTransforms();
+	InvalidateSceneOverlapState();
+	if (m_sceneRenderOverlapEnabled) {
+		BootstrapCommittedSceneSnapshot();
+	} else {
+		RunSceneBridgeSyncStage();
+	}
+
+	{
+		BufferBase::ScopedBackingMutation appendBackingMutation;
+		(void)PublishReadyDeferredBackingResizes(true);
+	}
+	rg::runtime::FlushUploadPolicies();
+	if (m_pMaterialManager) {
+		m_pMaterialManager->CommitGpuVisibleSnapshot();
+	}
+	if (m_pIndirectCommandBufferManager && m_pObjectManager) {
+		m_pIndirectCommandBufferManager->CommitGpuVisibleSnapshot(*m_pObjectManager);
+	}
+
+	m_warnedNullScene = false;
+	m_warnedMissingPrimaryCamera = false;
+	rebuildRenderGraph = true;
+
 	return appendedScene;
 }
 
