@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <span>
@@ -29,6 +30,23 @@
 #include "Resources/Buffers/DynamicBuffer.h"
 #include "Mesh/ClusterLODShaderTypes.h"
 #include "BuiltinResources.h"
+
+namespace {
+bool SarpClodImportDebugLoggingEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0;
+        if (_dupenv_s(&value, &length, "SARP_DEBUG_CLOD_IMPORT") != 0 || value == nullptr) {
+            return false;
+        }
+        const bool result = length > 1 && value[0] != '0';
+        std::free(value);
+        return result;
+    }();
+    return enabled;
+}
+}
 
 struct CLodStreamingSystem::ParallelSortState {
     std::shared_ptr<Buffer> keyScratch;
@@ -152,11 +170,11 @@ namespace {
             CLodAsyncUploadInputs nextInputs{};
             nextInputs.uploadInstance = m_getUploadInstance ? m_getUploadInstance() : nullptr;
             std::vector<uint64_t> nextDestinationIds;
+            std::vector<std::shared_ptr<Resource>> nextDestinations;
             if (nextInputs.uploadInstance && nextInputs.uploadInstance->HasPendingWork()) {
-                std::vector<std::shared_ptr<Resource>> destinations;
-                nextInputs.uploadInstance->CollectPendingDestinations(destinations);
-                nextDestinationIds.reserve(destinations.size());
-                for (const auto& destination : destinations) {
+                nextInputs.uploadInstance->CollectPendingDestinations(nextDestinations);
+                nextDestinationIds.reserve(nextDestinations.size());
+                for (const auto& destination : nextDestinations) {
                     nextDestinationIds.push_back(destination ? destination->GetGlobalResourceID() : 0ull);
                 }
                 if (m_makePoolResolver) {
@@ -167,11 +185,26 @@ namespace {
             const bool changed = !m_initialized || nextDestinationIds != m_declaredDestinationIds;
             m_initialized = true;
             m_declaredDestinationIds = std::move(nextDestinationIds);
+            m_declaredDestinations = std::move(nextDestinations);
             m_inputs = std::move(nextInputs);
+            if (SarpClodImportDebugLoggingEnabled() && (!m_declaredDestinations.empty() || changed)) {
+                spdlog::info(
+                    "SARPDBG CLodAsyncUpload declared changed={} pendingDests={}",
+                    changed ? 1 : 0,
+                    m_declaredDestinations.size());
+            }
             return changed;
         }
 
         void DeclareResourceUsages(CopyPassBuilder* builder) override {
+            for (auto& destination : m_declaredDestinations) {
+                if (destination) {
+                    builder->WithCopyDest(destination);
+                }
+            }
+            if (m_inputs.poolResolver) {
+                builder->WithCopyDest(*m_inputs.poolResolver);
+            }
             builder->PreferQueue(QueueKind::Copy);
         }
 
@@ -179,6 +212,12 @@ namespace {
 
         void RecordImmediateCommands(ImmediateExecutionContext& context) override {
             if (m_inputs.uploadInstance) {
+                if (SarpClodImportDebugLoggingEnabled() && m_inputs.uploadInstance->HasPendingWork()) {
+                    spdlog::info(
+                        "SARPDBG CLodAsyncUpload processing frame={} declaredDests={}",
+                        static_cast<uint32_t>(context.frameIndex),
+                        m_declaredDestinations.size());
+                }
                 m_inputs.uploadInstance->ProcessUploads(
                     static_cast<uint8_t>(context.frameIndex), context.list);
             }
@@ -192,6 +231,7 @@ namespace {
         MakePoolResolverFn m_makePoolResolver;
         mutable CLodAsyncUploadInputs m_inputs;
         mutable std::vector<uint64_t> m_declaredDestinationIds;
+        mutable std::vector<std::shared_ptr<Resource>> m_declaredDestinations;
         mutable bool m_initialized = false;
     };
 
@@ -250,6 +290,30 @@ namespace {
         }
 
         void DeclareResourceUsages(CopyPassBuilder* builder) override {
+            if (m_armed) {
+                builder->WithCopySource(
+                    m_snapshot.inputs.counterSource,
+                    m_snapshot.inputs.requestsSource,
+                    m_snapshot.inputs.usedGroupsCounterSource,
+                    m_snapshot.inputs.usedGroupsBufferSource);
+                if (m_snapshot.inputs.sourceGroupMismatchCounterSource) {
+                    builder->WithCopySource(m_snapshot.inputs.sourceGroupMismatchCounterSource);
+                }
+                if (m_snapshot.inputs.sourceGroupMismatchDetailsSource) {
+                    builder->WithCopySource(m_snapshot.inputs.sourceGroupMismatchDetailsSource);
+                }
+                builder->WithCopyDest(
+                    m_snapshot.counterStaging,
+                    m_snapshot.requestsStaging,
+                    m_snapshot.usedGroupsCounterStaging,
+                    m_snapshot.usedGroupsBufferStaging);
+                if (m_snapshot.sourceGroupMismatchCounterStaging) {
+                    builder->WithCopyDest(m_snapshot.sourceGroupMismatchCounterStaging);
+                }
+                if (m_snapshot.sourceGroupMismatchDetailsStaging) {
+                    builder->WithCopyDest(m_snapshot.sourceGroupMismatchDetailsStaging);
+                }
+            }
             builder->PreferQueue(QueueKind::Copy);
         }
 
@@ -268,11 +332,19 @@ namespace {
             CopyWholeBuffer(context, m_snapshot.sourceGroupMismatchDetailsStaging, m_snapshot.inputs.sourceGroupMismatchDetailsSource);
         }
 
-        PassReturn Execute(PassExecutionContext&) override {
+        PassReturn Execute(PassExecutionContext& context) override {
             if (!m_armed || !m_completeSnapshot) {
                 return {};
             }
-            return m_completeSnapshot(m_snapshot.selectedSlot);
+            PassReturn ret = m_completeSnapshot(m_snapshot.selectedSlot);
+            if (SarpClodImportDebugLoggingEnabled() && ret.fence.has_value()) {
+                spdlog::info(
+                    "SARPDBG CLodReadbackCopy execute frame={} slot={} fenceValue={}",
+                    static_cast<uint32_t>(context.frameIndex),
+                    m_snapshot.selectedSlot,
+                    ret.fenceValue);
+            }
+            return ret;
         }
 
         void Cleanup() override {}
@@ -1003,44 +1075,44 @@ void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
     TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
 }
 
-void CLodStreamingSystem::RunStreamingServiceWorkOnWorker() {
-    ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork");
+void CLodStreamingSystem::RunStreamingServiceWork() {
+    ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork");
     std::unique_lock serviceLock(m_streamingServiceMutex, std::defer_lock);
     {
-        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::AcquireServiceLock");
+        ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::AcquireServiceLock");
         serviceLock.lock();
     }
 
     MeshManager* meshManager = nullptr;
     {
-        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::GetMeshManager");
+        ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::GetMeshManager");
         if (m_getMeshManager) {
             meshManager = m_getMeshManager();
         }
     }
 
     {
-        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::ProcessStreamingDomainEvents");
+        ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingDomainEvents");
         ProcessStreamingDomainEvents();
     }
 
     if (meshManager != nullptr) {
         {
-            ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::PollCompletedReadbackSlots");
+            ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PollCompletedReadbackSlots");
             PollCompletedReadbackSlots();
         }
         {
-            ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::ProcessStreamingRequestsBudgeted");
+            ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingRequestsBudgeted");
             ProcessStreamingRequestsBudgeted();
         }
     }
     {
-        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::QueuePendingNonResidentBitsUpload");
+        ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::QueuePendingNonResidentBitsUpload");
         QueuePendingNonResidentBitsUpload();
     }
 
     {
-        ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork::PublishTelemetry");
+        ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PublishTelemetry");
         TracyPlot("CLodStreaming.Service.PendingDecodedGroups", static_cast<int64_t>(m_readbackBatchScratch.size()));
         TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
     }
@@ -1136,7 +1208,7 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
             PublishStreamingFrameWorkForFrame();
         },
         [this]() {
-            RequestStreamingFrameWork();
+            RunStreamingServiceWork();
         });
 
     auto streamingBeginPassDesc = RenderGraph::ExternalPassDesc::Compute(
@@ -1241,6 +1313,13 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
                 armedSlot.fenceValue = fenceValue;
             }
 
+            if (SarpClodImportDebugLoggingEnabled()) {
+                spdlog::info(
+                    "SARPDBG CLodReadbackCopy arm slot={} fenceValue={} counter={}",
+                    selectedSlot,
+                    fenceValue,
+                    m_streamingReadbackFenceCounter.load(std::memory_order_relaxed));
+            }
             m_streamingWorkerCV.notify_one();
             return { m_streamingReadbackFenceHandle, fenceValue };
         });
@@ -1262,6 +1341,13 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
     if (m_getMeshManager) {
         meshManager = m_getMeshManager();
     }
+    if (SarpClodImportDebugLoggingEnabled() && meshManager != nullptr) {
+        spdlog::info(
+            "SARPDBG CLodStreaming GatherFramePasses pendingUploads={} pendingLaunches={} outPassesBefore={}",
+            meshManager->HasPendingCLodDirectStorageUploads() ? 1 : 0,
+            meshManager->HasPendingCLodDirectStorageLaunches() ? 1 : 0,
+            outPasses.size());
+    }
 
     if (meshManager != nullptr && meshManager->HasPendingCLodDirectStorageUploads()) {
         std::vector<ExternalTimelinePoint> waits;
@@ -1282,6 +1368,9 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
                     std::make_shared<CLodDirectStorageCompletionWaitPass>(std::move(waitInputs)))
                     .At(RenderGraph::ExternalInsertPoint::Before("CLod::StreamingBeginFramePass"))
                     .PreferQueue(QueueKind::Graphics));
+            if (SarpClodImportDebugLoggingEnabled()) {
+                spdlog::info("SARPDBG CLodStreaming emitted DirectStorageCompletionWait waits={}", waits.size());
+            }
         }
     }
 
@@ -1318,9 +1407,11 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
                 std::make_shared<CLodDirectStorageLaunchPass>(std::move(launchInputs)))
                 .At(RenderGraph::ExternalInsertPoint::After("PresentPass"))
                 .PreferQueue(QueueKind::Graphics));
+        if (SarpClodImportDebugLoggingEnabled()) {
+            spdlog::info("SARPDBG CLodStreaming emitted DirectStorageLaunch");
+        }
     }
 
-    RequestStreamingFrameWork();
 }
 
 uint32_t CLodStreamingSystem::BitWordAddress(uint32_t key) {
@@ -1829,6 +1920,16 @@ void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
         uploadBits.size() * sizeof(uint32_t),
         rg::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
         begin * sizeof(uint32_t));
+    if (SarpClodImportDebugLoggingEnabled()) {
+        spdlog::info(
+            "SARPDBG QueueNonResidentBitsUpload begin={} end={} words={} epoch={} dirtyRemaining={} queuedTick={}",
+            begin,
+            end,
+            uploadBits.size(),
+            m_streamingResidencyMutationEpoch,
+            m_streamingNonResidentBitsUploadPending ? 1 : 0,
+            m_streamingDiagnosticTick);
+    }
     RecordNonResidentBitsUploadQueued();
 }
 
@@ -3272,25 +3373,43 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions() {
 
     {
         ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions");
+        uint32_t promoted = 0u;
+        uint32_t deferred = 0u;
+        uint32_t skipped = 0u;
         for (uint32_t groupIndex : groups) {
             if (groupIndex >= m_streamingStorageGroupCapacity || !IsGroupActive(groupIndex)) {
                 ClearStreamingRequestInProgress(groupIndex);
                 ClearPendingLoadPriority(groupIndex);
+                ++skipped;
                 continue;
             }
             if (m_groupOwnedPages.find(groupIndex) == m_groupOwnedPages.end()) {
                 ClearStreamingRequestInProgress(groupIndex);
                 ClearPendingLoadPriority(groupIndex);
+                ++skipped;
                 continue;
             }
             if (!PromoteGroupPagesAfterUploadDrain(groupIndex)) {
                 m_pendingResidencyCommitGroups.insert(groupIndex);
+                ++deferred;
                 continue;
             }
 
             SetGroupResidentBit(groupIndex, true);
             ClearStreamingRequestInProgress(groupIndex);
             ClearPendingLoadPriority(groupIndex);
+            ++promoted;
+        }
+        if (SarpClodImportDebugLoggingEnabled()) {
+            spdlog::info(
+                "SARPDBG CommitPendingResidencyPromotions groups={} promoted={} deferred={} skipped={} pendingAfter={} epoch={} dirtyPending={}",
+                groups.size(),
+                promoted,
+                deferred,
+                skipped,
+                m_pendingResidencyCommitGroups.size(),
+                m_streamingResidencyMutationEpoch,
+                m_streamingNonResidentBitsUploadPending ? 1 : 0);
         }
     }
 }
@@ -3598,6 +3717,13 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
     if (m_streamingDomainEventScratch.empty()) {
         return;
     }
+    if (SarpClodImportDebugLoggingEnabled()) {
+        spdlog::info(
+            "SARPDBG CLodStreaming ProcessDomainEvents drained={} generation={} fullResetPending={}",
+            m_streamingDomainEventScratch.size(),
+            eventGeneration,
+            m_streamingDomainFullResetPending ? 1 : 0);
+    }
 
     m_lastStreamingDomainEventGeneration = eventGeneration;
     TracyPlot("CLodStreaming.Domain.EventsDrained", static_cast<int64_t>(m_streamingDomainEventScratch.size()));
@@ -3646,9 +3772,15 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
                 ++queuedPinnedGroups;
                 MarkStreamingRequestDiskIo(groupIndex);
                 SetGroupResidentBit(groupIndex, false);
+                if (SarpClodImportDebugLoggingEnabled() && queuedPinnedGroups <= 16u) {
+                    spdlog::info("SARPDBG CLodStreaming queued pinned root group={}", groupIndex);
+                }
             } else {
                 SetGroupResidentBit(groupIndex, false);
                 m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                if (SarpClodImportDebugLoggingEnabled()) {
+                    spdlog::warn("SARPDBG CLodStreaming failed to queue pinned root group={}", groupIndex);
+                }
             }
         }
     };
@@ -3726,6 +3858,16 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
     TracyPlot("CLodStreaming.Domain.ActiveRangesRemoved", static_cast<int64_t>(activeRangesRemoved));
     TracyPlot("CLodStreaming.Domain.InitializedActiveGroups", static_cast<int64_t>(initializedGroups));
     TracyPlot("CLodStreaming.Domain.QueuedPinnedGroups", static_cast<int64_t>(queuedPinnedGroups));
+    if (SarpClodImportDebugLoggingEnabled()) {
+        spdlog::info(
+            "SARPDBG CLodStreaming DomainSummary activeAdded={} activeRemoved={} initialized={} queuedPinned={} activeScan={} storageCapacity={}",
+            activeRangesAdded,
+            activeRangesRemoved,
+            initializedGroups,
+            queuedPinnedGroups,
+            m_streamingActiveGroupScanCount,
+            m_streamingStorageGroupCapacity);
+    }
 }
 
 bool CLodStreamingSystem::IsStreamingRequestInProgress(uint32_t groupIndex) const {
@@ -4418,37 +4560,57 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
 
 void CLodStreamingSystem::StreamingWorkerMain() {
     uint64_t lastProcessed = 0;
-    uint64_t lastServiceRequest = 0;
 
     while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-        // Wait until there is a new fence value to process or service work to run.
+        // Wait until there is a new readback fence value to process.
         {
             std::unique_lock lock(m_streamingWorkerMutex);
             m_streamingWorkerCV.wait(lock, [&] {
                 return m_streamingWorkerQuit.load(std::memory_order_relaxed)
-                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed
-                    || m_streamingServiceRequestCounter.load(std::memory_order_relaxed) > lastServiceRequest
-                    || m_streamingServiceRequested.load(std::memory_order_relaxed);
+                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed;
             });
         }
         if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
 
         const uint64_t target = m_streamingReadbackFenceCounter.load(std::memory_order_acquire);
-        const uint64_t serviceTarget = m_streamingServiceRequestCounter.load(std::memory_order_acquire);
         const bool hasFenceWork = target > lastProcessed;
-
-        if (hasFenceWork) {
-            ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
-            // HostWait with a timeout so we can check for shutdown periodically.
-            while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-                auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
-                if (result != rhi::Result::WaitTimeout) break;
-            }
-            if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
+        if (!hasFenceWork) {
+            continue;
         }
 
+        ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
+        if (SarpClodImportDebugLoggingEnabled()) {
+            spdlog::info(
+                "SARPDBG StreamingWorker wait-readback target={} lastProcessed={}",
+                target,
+                lastProcessed);
+        }
+        uint32_t waitTimeouts = 0u;
+        // HostWait with a timeout so we can check for shutdown periodically.
+        while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
+            auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
+            if (result != rhi::Result::WaitTimeout) {
+                if (SarpClodImportDebugLoggingEnabled() && waitTimeouts != 0u) {
+                    spdlog::info(
+                        "SARPDBG StreamingWorker readback-ready target={} waitTimeouts={}",
+                        target,
+                        waitTimeouts);
+                }
+                break;
+            }
+            ++waitTimeouts;
+            if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 100u) == 0u) {
+                spdlog::warn(
+                    "CLod StreamingWorker readback fence wait timed out: target={} waitTimeouts={} completed={}",
+                    target,
+                    waitTimeouts,
+                    m_streamingReadbackFenceHandle.GetCompletedValue());
+            }
+        }
+        if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
+
         // Process all completed staging slots under the mutex.
-        if (hasFenceWork) {
+        {
             ZoneScopedN("CLodStreamingWorker::DecodeReadbackSlots");
             std::lock_guard lock(m_streamingWorkerMutex);
 
@@ -4457,6 +4619,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
             std::vector<uint32_t> decodedUsedGroups;
             uint32_t totalRequestCount = 0;
             uint32_t totalUsedGroupsCount = 0;
+            uint32_t completedSlotCount = 0;
             bool decodedAnyCompletedSlot = false;
             const bool sortedFeedback = m_parallelSortAvailable;
 
@@ -4476,6 +4639,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     continue;
                 }
                 decodedAnyCompletedSlot = true;
+                ++completedSlotCount;
 
                 // Map and read the load counter
                 uint32_t requestCount = 0;
@@ -4604,19 +4768,20 @@ void CLodStreamingSystem::StreamingWorkerMain() {
 
             TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
             TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
+            if (SarpClodImportDebugLoggingEnabled() && decodedAnyCompletedSlot) {
+                spdlog::info(
+                    "SARPDBG StreamingWorker decoded target={} slots={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={} sortedFeedback={}",
+                    target,
+                    completedSlotCount,
+                    totalRequestCount,
+                    static_cast<uint32_t>(decodedRequests.size()),
+                    totalUsedGroupsCount,
+                    static_cast<uint32_t>(decodedUsedGroups.size()),
+                    sortedFeedback ? 1 : 0);
+            }
         }
 
-        if (hasFenceWork) {
-            lastProcessed = target;
-        }
-
-        const bool serviceRequested = m_streamingServiceRequested.exchange(false, std::memory_order_acq_rel);
-        if (hasFenceWork || serviceRequested || serviceTarget > lastServiceRequest) {
-            m_streamingServiceRunning.store(true, std::memory_order_release);
-            RunStreamingServiceWorkOnWorker();
-            m_streamingServiceRunning.store(false, std::memory_order_release);
-            lastServiceRequest = std::max(lastServiceRequest, serviceTarget);
-        }
+        lastProcessed = target;
     }
 }
 

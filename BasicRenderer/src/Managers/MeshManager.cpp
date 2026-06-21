@@ -14,8 +14,10 @@
 #include "Managers/ViewManager.h"
 #include "Import/CLodCache.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -28,6 +30,26 @@
 #include "Render/MemoryIntrospectionAPI.h"
 
 namespace {
+
+bool SarpClodImportDebugLoggingEnabled()
+{
+	static const bool enabled = [] {
+		char* value = nullptr;
+		size_t length = 0;
+		if (_dupenv_s(&value, &length, "SARP_DEBUG_CLOD_IMPORT") != 0 || value == nullptr) {
+			return false;
+		}
+		const bool result = length > 1 && value[0] != '0';
+		std::free(value);
+		return result;
+	}();
+	return enabled;
+}
+
+std::string NarrowDebugPath(const std::wstring& path)
+{
+	return ws2s(path);
+}
 
 size_t ReserveBytesWithImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
 	if (requestedBytes == 0) {
@@ -558,6 +580,23 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 		m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
 		m_clodSharedStreamingRangesDirty = true;
+		if (SarpClodImportDebugLoggingEnabled()) {
+			std::uint32_t coarsestGroups = 0u;
+			for (const auto& range : sharedState->coarsestRanges) {
+				coarsestGroups += range.groupCount;
+			}
+			spdlog::info(
+				"SARPDBG AddMesh CLOD mesh={} groupsBase={} groups={} coarsestRanges={} coarsestGroups={} pages={} container='{}' maxTraversalDepth={} rootNode={}",
+				mesh->GetGlobalID(),
+				sharedState->groupsBase,
+				sharedState->groupCount,
+				sharedState->coarsestRanges.size(),
+				coarsestGroups,
+				sharedState->pageDiskLocators.size(),
+				NarrowDebugPath(sharedState->cacheSource.containerFileName),
+				sharedState->maxTraversalDepth,
+				mesh->GetCLodRootNodeIndex());
+		}
 		PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::SharedMeshAdded, sharedState);
 	}
 
@@ -957,6 +996,15 @@ bool MeshManager::AddMeshInstance(MeshInstance* mesh, bool useMeshletReorderedVe
 		m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
 		m_clodStreamingInstanceIndexByPtr[mesh] = static_cast<uint32_t>(mesh->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB));
 		if (sharedStateWasInactive) {
+			if (SarpClodImportDebugLoggingEnabled()) {
+				spdlog::info(
+					"SARPDBG AddMeshInstance ActiveRangeAdded mesh={} meshInstanceIndex={} groupsBase={} groups={} coarsestRanges={}",
+					mesh->GetMesh()->GetGlobalID(),
+					static_cast<uint32_t>(mesh->GetPerMeshInstanceBufferOffset() / sizeof(PerMeshInstanceCB)),
+					sharedState->groupsBase,
+					sharedState->groupCount,
+					sharedState->coarsestRanges.size());
+			}
 			PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
 		}
 	}
@@ -1104,6 +1152,17 @@ void MeshManager::ProcessCLodDiskStreamingIO() {
 		for (auto& completion : newCompletions) {
 			m_clodDiskStreamingCompletions.push_back(std::move(completion));
 		}
+	}
+
+	if (SarpClodImportDebugLoggingEnabled() &&
+		(!localResults.empty() || !newCompletions.empty() || !finishedGroups.empty() || HasPendingCLodDirectStorageLaunches() || HasPendingCLodDirectStorageUploads())) {
+		spdlog::info(
+			"SARPDBG ProcessCLodDiskStreamingIO localResults={} newCompletions={} finishedGroups={} pendingLaunches={} pendingUploads={}",
+			localResults.size(),
+			newCompletions.size(),
+			finishedGroups.size(),
+			HasPendingCLodDirectStorageLaunches() ? 1 : 0,
+			HasPendingCLodDirectStorageUploads() ? 1 : 0);
 	}
 }
 
@@ -1468,10 +1527,18 @@ void MeshManager::FinalizePendingCLodDirectStorageUploads(
 	uint64_t currentGeneration,
 	std::vector<CLodDiskStreamingCompletion>& outCompletions,
 	std::vector<uint32_t>& outFinishedGroups) {
+	const std::size_t pendingBefore = m_clodPendingDirectStorageUploads.size();
+	std::size_t readyCount = 0u;
+	std::size_t failedCount = 0u;
 	for (size_t uploadIndex = 0; uploadIndex < m_clodPendingDirectStorageUploads.size();) {
 		auto& pendingUpload = m_clodPendingDirectStorageUploads[uploadIndex];
 
 		auto finishUpload = [&](bool success) {
+			if (success) {
+				++readyCount;
+			} else {
+				++failedCount;
+			}
 			CLodDiskStreamingCompletion completion{};
 			completion.groupGlobalIndex = pendingUpload.groupGlobalIndex;
 			completion.success = success;
@@ -1528,6 +1595,14 @@ void MeshManager::FinalizePendingCLodDirectStorageUploads(
 			static_cast<uint32_t>(pendingUpload.meshPageIndices.size()) - pendingUpload.fetchedPageCount);
 
 		finishUpload(true);
+	}
+	if (SarpClodImportDebugLoggingEnabled() && (pendingBefore != 0u || readyCount != 0u || failedCount != 0u)) {
+		spdlog::info(
+			"SARPDBG FinalizePendingCLodDirectStorageUploads pendingBefore={} ready={} failed={} pendingAfter={}",
+			pendingBefore,
+			readyCount,
+			failedCount,
+			m_clodPendingDirectStorageUploads.size());
 	}
 }
 
@@ -1731,6 +1806,12 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 		launches = std::move(m_clodPendingDirectStorageLaunches);
 		m_clodPendingDirectStorageLaunches.clear();
 	}
+	if (SarpClodImportDebugLoggingEnabled()) {
+		spdlog::info(
+			"SARPDBG LaunchPendingCLodDirectStorageUploads launches={} waitValue={}",
+			launches.size(),
+			waitValue);
+	}
 
 	std::vector<CLodPendingDirectStorageUpload> activeUploads;
 	std::vector<CLodDiskStreamingCompletion> failedCompletions;
@@ -1800,6 +1881,13 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 		for (uint32_t group : failedGroups) {
 			m_clodDiskStreamingQueuedGroups.erase(group);
 		}
+	}
+	if (SarpClodImportDebugLoggingEnabled()) {
+		spdlog::info(
+			"SARPDBG LaunchPendingCLodDirectStorageUploads activeUploads={} failed={} pendingUploadsNow={}",
+			activeUploads.size(),
+			failedGroups.size(),
+			HasPendingCLodDirectStorageUploads() ? 1 : 0);
 	}
 
 	return true;
@@ -1910,6 +1998,20 @@ uint32_t MeshManager::QueueCLodGroupDiskIOBatch(const std::vector<CLodGroupDiskI
 				queuedCount++;
 			}
 		}
+	}
+
+	if (SarpClodImportDebugLoggingEnabled() && (!requests.empty() || queuedCount != 0u)) {
+		std::size_t queuedGroupCount = 0u;
+		{
+			std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
+			queuedGroupCount = m_clodDiskStreamingQueuedGroups.size();
+		}
+		spdlog::info(
+			"SARPDBG QueueCLodGroupDiskIOBatch requested={} prepared={} queued={} queuedGroups={}",
+			requests.size(),
+			prepared.size(),
+			queuedCount,
+			queuedGroupCount);
 	}
 
 	return queuedCount;

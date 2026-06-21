@@ -20,10 +20,26 @@
 #include <chrono>
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <limits>
 #include <spdlog/spdlog.h>
 
 namespace {
+
+bool SarpClodImportDebugLoggingEnabled()
+{
+	static const bool enabled = [] {
+		char* value = nullptr;
+		size_t length = 0;
+		if (_dupenv_s(&value, &length, "SARP_DEBUG_CLOD_IMPORT") != 0 || value == nullptr) {
+			return false;
+		}
+		const bool result = length > 1 && value[0] != '0';
+		std::free(value);
+		return result;
+	}();
+	return enabled;
+}
 
 size_t ReserveBytesWithStaticImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
 	if (requestedBytes == 0) {
@@ -722,6 +738,16 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 	}
 	m_activeDrawSetIndices[workloadKey] = buffer;
 	++m_drawSetDeclarationRevision;
+	if (SarpClodImportDebugLoggingEnabled()) {
+		spdlog::info(
+			"SARPDBG active-draw-set created rev={} flags={} phase={} clodOnly={} capacity={} resourceId={}",
+			m_drawSetDeclarationRevision,
+			static_cast<std::uint64_t>(workloadKey.compileFlags),
+			workloadKey.renderPhase.hash,
+			workloadKey.clodOnly ? 1 : 0,
+			capacity,
+			buffer->GetGlobalResourceID());
+	}
 	return buffer;
 }
 
@@ -906,8 +932,23 @@ void ObjectManager::AppendActiveDrawSetEntries(
 		return;
 	}
 	auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
+	const auto oldSize = buffer->Size();
+	const auto oldResident = buffer->ResidentSize();
 	buffer->AppendActiveEntries(entries);
 	buffer->SetLiveSize(buffer->LiveSize() + entries.size());
+	if (SarpClodImportDebugLoggingEnabled()) {
+		spdlog::info(
+			"SARPDBG active-draw-set append flags={} phase={} clodOnly={} entries={} size {}->{} resident {}->{} live={}",
+			static_cast<std::uint64_t>(workloadKey.compileFlags),
+			workloadKey.renderPhase.hash,
+			workloadKey.clodOnly ? 1 : 0,
+			entries.size(),
+			oldSize,
+			buffer->Size(),
+			oldResident,
+			buffer->ResidentSize(),
+			buffer->LiveSize());
+	}
 }
 
 Components::ObjectDrawInfo ObjectManager::AddObject(const PerObjectCB& perObjectCB, const Components::MeshInstances* meshInstances) {
@@ -1154,6 +1195,22 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			m_stats.activeDrawSetInsertUs += static_cast<std::uint64_t>(
 				std::chrono::duration_cast<std::chrono::microseconds>(insertEnd - insertBegin).count());
 		}
+	}
+
+	if (SarpClodImportDebugLoggingEnabled()) {
+		std::size_t activeInsertEntries = 0;
+		for (const auto& [_, entries] : activeDrawSetInserts) {
+			activeInsertEntries += entries.size();
+		}
+		spdlog::info(
+			"SARPDBG AddObjectsBulk objects={} perObjectRows={} drawRecords={} drawInfos={} activeWorkloads={} activeEntries={} drawRecordResident={}",
+			objects.size(),
+			perObjectCBs.size(),
+			drawRecords.size(),
+			drawInfos.size(),
+			activeDrawSetInserts.size(),
+			activeInsertEntries,
+			GetResidentInstanceDrawRecordCount());
 	}
 
 	return drawInfos;

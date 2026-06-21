@@ -122,7 +122,7 @@ private:
     void ProcessStreamingRequestsBudgeted();
     void RequestStreamingFrameWork();
     void PublishStreamingFrameWorkForFrame();
-    void RunStreamingServiceWorkOnWorker();
+    void RunStreamingServiceWork();
     bool EnsureParallelSortResources();
     void DestroyParallelSortResources();
 
