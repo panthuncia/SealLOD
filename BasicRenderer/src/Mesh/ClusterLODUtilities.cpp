@@ -5963,6 +5963,120 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 		maxCubesPerCluster);
 }
 
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
+	const VoxelGroupPayload& payload,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t maxCubesPerCluster)
+{
+	ClusterLODPrebuildArtifacts artifacts{};
+	if (payload.activeCells.empty() || payload.resolution == 0u || !(payload.voxelWidth > 0.0f))
+	{
+		return artifacts;
+	}
+
+	const float voxelTraversalError = ComputeVoxelTraversalError(payload.voxelWidth, 0.0f);
+	PackVoxelGroupInput packInput{};
+	packInput.payload = &payload;
+	packInput.voxelError = voxelTraversalError;
+	packInput.opacityThreshold = settings.voxelFallbackOpacityThreshold;
+	packInput.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+	PackedVoxelGroupBuildResult packed = PackVoxelGroupToCubes(packInput);
+	BuildVoxelClustersFromCubes(packed, std::max(1u, maxCubesPerCluster));
+	if (packed.cubeRecords.empty() || packed.clusterRecords.empty())
+	{
+		return artifacts;
+	}
+
+	std::vector<ClusterLODGroupSegment> voxelSegments;
+	std::vector<BoundingSphere> voxelSegmentBounds;
+	SplitVoxelClustersIntoPageSegments(packed, voxelSegments, voxelSegmentBounds);
+	std::vector<std::vector<std::byte>> voxelPageBlobs = BuildVoxelGroupPageBlobs(
+		packed.descriptor,
+		voxelSegments,
+		packed.clusterRecords,
+		packed.cubeRecords,
+		packed.attributeSamples,
+		0u);
+	if (voxelSegments.empty() || voxelPageBlobs.empty())
+	{
+		return artifacts;
+	}
+
+	ClusterLODBuildState state{};
+	ClusterLODGroup group{};
+	const DirectX::XMFLOAT3 payloadMin = payload.aabbMin;
+	const DirectX::XMFLOAT3 payloadMax = payload.aabbMax;
+	const float centerX = 0.5f * (payloadMin.x + payloadMax.x);
+	const float centerY = 0.5f * (payloadMin.y + payloadMax.y);
+	const float centerZ = 0.5f * (payloadMin.z + payloadMax.z);
+	const float dx = payloadMax.x - centerX;
+	const float dy = payloadMax.y - centerY;
+	const float dz = payloadMax.z - centerZ;
+	group.bounds.center[0] = centerX;
+	group.bounds.center[1] = centerY;
+	group.bounds.center[2] = centerZ;
+	group.bounds.radius = std::sqrt(dx * dx + dy * dy + dz * dz);
+	group.bounds.error = voxelTraversalError;
+	group.depth = 0;
+	group.firstSegment = 0u;
+	group.segmentCount = static_cast<uint32_t>(voxelSegments.size());
+	group.terminalSegmentCount = group.segmentCount;
+	group.flags = CLOD_GROUP_FLAG_IS_VOXEL;
+	group.pageCount = static_cast<uint32_t>(voxelPageBlobs.size());
+	group.representationError = voxelTraversalError;
+
+	state.groups.push_back(group);
+	state.segments = std::move(voxelSegments);
+	state.segmentBounds = std::move(voxelSegmentBounds);
+	state.groupChunks.resize(1);
+	state.groupPageBlobs.resize(1);
+	state.groupPageBlobs[0] = std::move(voxelPageBlobs);
+	state.voxelGroupMapping.groupToPayloadIndex = { 0 };
+	state.voxelGroupMapping.groupToPackedDescriptorIndex = { 0 };
+	state.voxelGroupMapping.payloads.push_back(payload);
+	state.voxelGroupMapping.packedGroupDescriptors.push_back(packed.descriptor);
+	state.voxelGroupMapping.packedClusterRecords = std::move(packed.clusterRecords);
+	state.voxelGroupMapping.packedCubeRecords = std::move(packed.cubeRecords);
+	state.voxelGroupMapping.packedAttributeSamples = std::move(packed.attributeSamples);
+
+	BuildClusterLODTraversalHierarchy(state, /*preferredNodeWidth=*/8u);
+
+	std::vector<std::vector<std::byte>> meshPageBlobs;
+	std::vector<uint32_t> groupPageReferences;
+	std::vector<uint32_t> groupPageReferenceOffsets;
+	uint32_t trianglePageCount = 0u;
+	uint32_t voxelPageBase = 0u;
+	uint32_t voxelPageCount = 0u;
+	FinalizeMeshWidePagePacking(
+		state,
+		meshPageBlobs,
+		groupPageReferences,
+		groupPageReferenceOffsets,
+		trianglePageCount,
+		voxelPageBase,
+		voxelPageCount);
+
+	artifacts.prebuiltData.groups = std::move(state.groups);
+	artifacts.prebuiltData.segments = std::move(state.segments);
+	artifacts.prebuiltData.segmentBounds = std::move(state.segmentBounds);
+	artifacts.prebuiltData.objectBoundingSphere = BuildObjectBoundingSphereFromRootNode(state.nodes, state.topRootNode);
+	artifacts.prebuiltData.groupChunks = std::move(state.groupChunks);
+	artifacts.prebuiltData.groupPageReferences = std::move(groupPageReferences);
+	artifacts.prebuiltData.groupPageReferenceOffsets = std::move(groupPageReferenceOffsets);
+	artifacts.prebuiltData.trianglePageCount = trianglePageCount;
+	artifacts.prebuiltData.voxelPageBase = voxelPageBase;
+	artifacts.prebuiltData.voxelPageCount = voxelPageCount;
+	artifacts.prebuiltData.nodes = std::move(state.nodes);
+	artifacts.prebuiltData.lodNodeRanges = std::move(state.lodNodeRanges);
+	artifacts.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
+	artifacts.prebuiltData.maxDepth = state.maxDepth;
+	artifacts.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
+	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
+	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
+
+	return artifacts;
+}
+
 ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,
 	unsigned int vertexSize,

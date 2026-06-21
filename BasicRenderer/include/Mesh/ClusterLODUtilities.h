@@ -27,3 +27,8 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const std::vector<uint32_t>& indices,
 	const ClusterLODBuilderSettings& settings,
 	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
+	const VoxelGroupPayload& payload,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);

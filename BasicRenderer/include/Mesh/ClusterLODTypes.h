@@ -434,6 +434,18 @@ public:
 		return m_uvSets;
 	}
 
+	const std::vector<std::byte>& GetVertices() const {
+		return m_vertices;
+	}
+
+	const std::vector<uint32_t>& GetIndices() const {
+		return m_indices;
+	}
+
+	unsigned int GetVertexSize() const {
+		return m_vertexSize;
+	}
+
 	// GPU-side: creates a Mesh object with buffer views.
 	// Only implemented in the renderer (Mesh.cpp); not available in headless builds.
 	std::shared_ptr<Mesh> Build(
@@ -448,6 +460,11 @@ public:
 	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
 		const ClusterLODVoxelGridOverride& grid,
 		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
+	VoxelGroupPayload BuildVoxelOnlyPayload(const ClusterLODVoxelGridOverride& grid) const;
+	static ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
+		const VoxelGroupPayload& payload,
+		const ClusterLODBuilderSettings& settings,
+		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
 
 	void SetClusterLODBuilderSettings(const ClusterLODBuilderSettings& settings) {
 		m_clusterLODBuilderSettings = settings;
