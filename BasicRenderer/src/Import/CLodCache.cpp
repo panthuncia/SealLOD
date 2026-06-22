@@ -8,10 +8,12 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <cwctype>
 
@@ -488,6 +490,35 @@ namespace CLodCache {
 			return file.good();
 		}
 
+		std::mutex& MetadataMemoryCacheMutex()
+		{
+			static std::mutex mutex;
+			return mutex;
+		}
+
+		std::unordered_map<std::wstring, std::shared_ptr<const CacheData>>& MetadataMemoryCache()
+		{
+			static std::unordered_map<std::wstring, std::shared_ptr<const CacheData>> cache;
+			return cache;
+		}
+
+		std::optional<CacheData> TryLoadMetadataFromMemoryCache(const std::wstring& cachePath)
+		{
+			std::lock_guard lock(MetadataMemoryCacheMutex());
+			const auto it = MetadataMemoryCache().find(cachePath);
+			if (it == MetadataMemoryCache().end() || !it->second) {
+				return std::nullopt;
+			}
+			return *it->second;
+		}
+
+		void StoreMetadataInMemoryCache(const std::wstring& cachePath, CacheData data)
+		{
+			auto cached = std::make_shared<CacheData>(std::move(data));
+			std::lock_guard lock(MetadataMemoryCacheMutex());
+			MetadataMemoryCache().insert_or_assign(cachePath, std::move(cached));
+		}
+
 	}
 
 	namespace {
@@ -526,11 +557,18 @@ namespace CLodCache {
 				return false;
 			}
 
+			CacheData savedData{};
+			savedData.schemaVersion = kSchemaVersion;
+			savedData.buildConfigHash = buildConfigHash;
+			savedData.prebuiltData = prebuiltData;
+			savedData.prebuiltData.pageDiskLocators = pageDiskLocators;
+			savedData.prebuiltData.cacheSource = cacheSource;
+
 			if (outSavedPrebuiltData != nullptr) {
-				*outSavedPrebuiltData = prebuiltData;
-				outSavedPrebuiltData->pageDiskLocators = std::move(pageDiskLocators);
-				outSavedPrebuiltData->cacheSource = std::move(cacheSource);
+				*outSavedPrebuiltData = savedData.prebuiltData;
 			}
+
+			StoreMetadataInMemoryCache(cachePath, std::move(savedData));
 
 			return true;
 		}
@@ -597,6 +635,12 @@ namespace CLodCache {
 	{
 		const std::wstring fileName = BuildCacheFileName(key, expectedBuildConfigHash);
 		const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
+		if (auto memoryCached = TryLoadMetadataFromMemoryCache(cachePath)) {
+			if (memoryCached->buildConfigHash == expectedBuildConfigHash &&
+				memoryCached->schemaVersion == kSchemaVersion) {
+				return memoryCached;
+			}
+		}
 		if (!std::filesystem::exists(cachePath)) {
 			return std::nullopt;
 		}
@@ -631,6 +675,7 @@ namespace CLodCache {
 		const uint32_t pageCount = out.prebuiltData.voxelPageBase + out.prebuiltData.voxelPageCount;
 		const bool hasContainerLocators = pageCount > 0u && (out.prebuiltData.pageDiskLocators.size() == pageCount);
 		if (hasContainerLocators) {
+			StoreMetadataInMemoryCache(cachePath, out);
 			return out;
 		}
 

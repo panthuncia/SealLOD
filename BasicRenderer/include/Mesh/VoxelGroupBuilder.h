@@ -81,6 +81,7 @@ struct VoxelizeTrianglesInput
 	// coverage tracing. Candidate generation still uses triangleIndices and
 	// source/candidate voxel payloads.
 	const VoxelSourceTriangleBVH* coverageSourceTriangles = nullptr;
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr;
 
 	// Optional already-voxelized sources. These are re-sampled as volumes when
 	// building a coarser voxel parent.

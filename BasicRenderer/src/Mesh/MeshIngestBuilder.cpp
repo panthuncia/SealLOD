@@ -39,6 +39,12 @@ ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts
 }
 
 VoxelGroupPayload MeshIngestBuilder::BuildVoxelOnlyPayload(const ClusterLODVoxelGridOverride& grid) const {
+	return BuildVoxelOnlyPayload(grid, nullptr);
+}
+
+VoxelGroupPayload MeshIngestBuilder::BuildVoxelOnlyPayload(
+	const ClusterLODVoxelGridOverride& grid,
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler) const {
 	VoxelSourceTriangleBVH coverageSourceTriangles;
 	coverageSourceTriangles.Build(
 		&m_vertices,
@@ -55,6 +61,7 @@ VoxelGroupPayload MeshIngestBuilder::BuildVoxelOnlyPayload(const ClusterLODVoxel
 	voxelInput.triangleIndices = &m_indices;
 	voxelInput.doubleSidedTriangles = m_clusterLODBuilderSettings.doubleSidedVoxelSourceNormals;
 	voxelInput.coverageSourceTriangles = coverageSourceTriangles.IsValid() ? &coverageSourceTriangles : nullptr;
+	voxelInput.coverageMaterialSampler = coverageMaterialSampler;
 	voxelInput.keepZeroCoverageSourceCells = m_clusterLODBuilderSettings.voxelFallbackCarryZeroCoverage;
 	voxelInput.aabbMin = grid.aabbMin;
 	voxelInput.aabbMax = grid.aabbMax;

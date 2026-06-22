@@ -1167,6 +1167,40 @@ namespace
 		return representative;
 	}
 
+	bool ApplyCoverageMaterialSample(
+		const VoxelCoverageMaterialSampler* sampler,
+		VoxelCoverageHit& hit,
+		Float3& normal,
+		float& weight)
+	{
+		weight = 1.0f;
+		if (sampler == nullptr)
+		{
+			return true;
+		}
+
+		const VoxelCoverageMaterialSample sample = (*sampler)(hit);
+		if (!sample.accepted || sample.weight <= 0.0f || !std::isfinite(sample.weight))
+		{
+			return false;
+		}
+
+		weight = sample.weight;
+		if (sample.overrideNormal &&
+			std::isfinite(sample.normal.x) &&
+			std::isfinite(sample.normal.y) &&
+			std::isfinite(sample.normal.z))
+		{
+			const Float3 sampledNormal(sample.normal.x, sample.normal.y, sample.normal.z);
+			if (sampledNormal.lengthSq() > 1.0e-20f)
+			{
+				normal = sampledNormal.normalized();
+				hit.normal = sample.normal;
+			}
+		}
+		return true;
+	}
+
 	// Per-cell coverage sampling via ray tracing against triangles.
 	CellCoverageSample SampleCellCoverageTriangles(
 		const std::vector<std::byte>& vertices,
@@ -1176,7 +1210,8 @@ namespace
 		const Float3& cellWorldMin,
 		const Float3& cellWorldMax,
 		const std::vector<Ray>& rays,
-		bool doubleSidedTriangles)
+		bool doubleSidedTriangles,
+		const VoxelCoverageMaterialSampler* materialSampler)
 	{
 		CellCoverageSample sample{};
 		if (rays.empty() || cellTriangleIndices.empty())
@@ -1196,6 +1231,7 @@ namespace
 			float nearestT = tMax;
 			Float3 nearestNormal{};
 			DirectX::XMFLOAT2 nearestUv{};
+			float nearestWeight = 1.0f;
 			for (uint32_t triLocalIdx : cellTriangleIndices)
 			{
 				const uint32_t i0 = meshTriangleIndices[triLocalIdx * 3 + 0];
@@ -1211,24 +1247,45 @@ namespace
 				float hitV = 0.0f;
 				if (RayTriangleIntersect(origin, dir, v0, v1, v2, nearestT, hitT, &hitU, &hitV))
 				{
-					nearestT = hitT;
-					nearestTriangleIndex = triLocalIdx;
 					const Float3 n0 = ReadNormal(vertices, vertexStrideBytes, i0);
 					const Float3 n1 = ReadNormal(vertices, vertexStrideBytes, i1);
 					const Float3 n2 = ReadNormal(vertices, vertexStrideBytes, i2);
 					const float hitW = 1.0f - hitU - hitV;
 					const Float3 interpolatedNormal = n0 * hitW + n1 * hitU + n2 * hitV;
-					nearestNormal = interpolatedNormal.lengthSq() > 1.0e-20f
+					Float3 candidateNormal = interpolatedNormal.lengthSq() > 1.0e-20f
 						? interpolatedNormal.normalized()
 						: TriangleNormal(v0, v1, v2);
-					nearestNormal = OrientHitNormalForSidedness(nearestNormal, TriangleNormal(v0, v1, v2), dir, doubleSidedTriangles);
-					nearestUv = InterpolateUv(
-						ReadTexcoord(vertices, vertexStrideBytes, i0),
-						ReadTexcoord(vertices, vertexStrideBytes, i1),
-						ReadTexcoord(vertices, vertexStrideBytes, i2),
+					candidateNormal = OrientHitNormalForSidedness(candidateNormal, TriangleNormal(v0, v1, v2), dir, doubleSidedTriangles);
+					const DirectX::XMFLOAT2 uv0 = ReadTexcoord(vertices, vertexStrideBytes, i0);
+					const DirectX::XMFLOAT2 uv1 = ReadTexcoord(vertices, vertexStrideBytes, i1);
+					const DirectX::XMFLOAT2 uv2 = ReadTexcoord(vertices, vertexStrideBytes, i2);
+					DirectX::XMFLOAT2 candidateUv = InterpolateUv(
+						uv0,
+						uv1,
+						uv2,
 						hitW,
 						hitU,
 						hitV);
+					float candidateWeight = 1.0f;
+					VoxelCoverageHit materialHit{
+						.triangleIndex = triLocalIdx,
+						.position = ToXM(origin + dir * hitT),
+						.normal = ToXM(candidateNormal),
+						.uv = candidateUv,
+						.trianglePositions = { ToXM(v0), ToXM(v1), ToXM(v2) },
+						.triangleUvs = { uv0, uv1, uv2 },
+						.barycentrics = { hitW, hitU, hitV },
+					};
+					if (!ApplyCoverageMaterialSample(materialSampler, materialHit, candidateNormal, candidateWeight))
+					{
+						continue;
+					}
+
+					nearestT = hitT;
+					nearestTriangleIndex = triLocalIdx;
+					nearestNormal = candidateNormal;
+					nearestUv = candidateUv;
+					nearestWeight = candidateWeight;
 				}
 			}
 
@@ -1241,7 +1298,7 @@ namespace
 				}
 				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal;
 				sample.normalSamples.push_back(nearestNormal);
-				AddCoverageUvSample(sample, nearestUv, 1.0f);
+				AddCoverageUvSample(sample, nearestUv, nearestWeight);
 			}
 		}
 
@@ -1260,6 +1317,7 @@ namespace
 		const Float3& cellWorldMin,
 		const Float3& cellWorldMax,
 		const std::vector<Ray>& rays,
+		const VoxelCoverageMaterialSampler* materialSampler,
 		uint64_t& sourceCoverageQueryCount,
 		uint64_t& sourceCoverageTriangleCandidateCount,
 		uint64_t& sourceCoverageTriangleTestCount,
@@ -1312,6 +1370,7 @@ namespace
 			float nearestT = tExit + kCellHitEpsilon;
 			Float3 nearestNormal{};
 			DirectX::XMFLOAT2 nearestUv{};
+			float nearestWeight = 1.0f;
 			for (uint32_t triLocalIdx : sourceCandidateTriangles)
 			{
 				if (triangleRefinedGroupIds != nullptr && triLocalIdx < triangleRefinedGroupIds->size() && (*triangleRefinedGroupIds)[triLocalIdx] != refinedGroupFilter)
@@ -1349,24 +1408,45 @@ namespace
 					continue;
 				}
 
-				nearestT = hitT;
-				nearestTriangleIndex = triLocalIdx;
 				const Float3 n0 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i0);
 				const Float3 n1 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i1);
 				const Float3 n2 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i2);
 				const float hitW = 1.0f - hitU - hitV;
 				const Float3 interpolatedNormal = n0 * hitW + n1 * hitU + n2 * hitV;
-				nearestNormal = interpolatedNormal.lengthSq() > 1.0e-20f
+				Float3 candidateNormal = interpolatedNormal.lengthSq() > 1.0e-20f
 					? interpolatedNormal.normalized()
 					: TriangleNormal(v0, v1, v2);
-				nearestNormal = OrientHitNormalForSidedness(nearestNormal, TriangleNormal(v0, v1, v2), dir, doubleSidedTriangles);
-				nearestUv = InterpolateUv(
-					ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i0),
-					ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i1),
-					ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i2),
+				candidateNormal = OrientHitNormalForSidedness(candidateNormal, TriangleNormal(v0, v1, v2), dir, doubleSidedTriangles);
+				const DirectX::XMFLOAT2 uv0 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i0);
+				const DirectX::XMFLOAT2 uv1 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i1);
+				const DirectX::XMFLOAT2 uv2 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i2);
+				DirectX::XMFLOAT2 candidateUv = InterpolateUv(
+					uv0,
+					uv1,
+					uv2,
 					hitW,
 					hitU,
 					hitV);
+				float candidateWeight = 1.0f;
+				VoxelCoverageHit materialHit{
+					.triangleIndex = triLocalIdx,
+					.position = ToXM(hitPoint),
+					.normal = ToXM(candidateNormal),
+					.uv = candidateUv,
+					.trianglePositions = { ToXM(v0), ToXM(v1), ToXM(v2) },
+					.triangleUvs = { uv0, uv1, uv2 },
+					.barycentrics = { hitW, hitU, hitV },
+				};
+				if (!ApplyCoverageMaterialSample(materialSampler, materialHit, candidateNormal, candidateWeight))
+				{
+					continue;
+				}
+
+				nearestT = hitT;
+				nearestTriangleIndex = triLocalIdx;
+				nearestNormal = candidateNormal;
+				nearestUv = candidateUv;
+				nearestWeight = candidateWeight;
 			}
 
 			if (nearestTriangleIndex != std::numeric_limits<uint32_t>::max())
@@ -1378,7 +1458,7 @@ namespace
 				}
 				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal;
 				sample.normalSamples.push_back(nearestNormal);
-				AddCoverageUvSample(sample, nearestUv, 1.0f);
+				AddCoverageUvSample(sample, nearestUv, nearestWeight);
 			}
 		}
 
@@ -2058,6 +2138,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					cellMin,
 					cellMax,
 					rays,
+					input.coverageMaterialSampler,
 					workResult.sourceCoverageQueryCount,
 					workResult.sourceCoverageTriangleCandidateCount,
 					workResult.sourceCoverageTriangleTestCount,
@@ -2075,7 +2156,8 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					ownedTriangles,
 					cellMin, cellMax,
 					rays,
-					input.doubleSidedTriangles);
+					input.doubleSidedTriangles,
+					input.coverageMaterialSampler);
 				dominantBoneIndex = ComputeDominantBoneIndexForCell(input, ownedTriangles);
 			}
 

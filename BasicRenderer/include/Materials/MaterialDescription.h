@@ -110,6 +110,7 @@ struct MaterialDescription {
 	bool brniflyDynamicDecal = false;
 	bool brniflyModelSpaceNormals = false;
     bool heightMapFromBaseColorAlpha = false;
+	bool forceVoxelMaterial = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};
     TextureAndConstant  metallic = { nullptr, 0.0f };

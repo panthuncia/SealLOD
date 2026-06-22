@@ -6,6 +6,7 @@
 #include <mutex>
 #include <system_error>
 #include <unordered_set>
+#include <vector>
 
 #include <windows.h>
 
@@ -77,8 +78,18 @@ std::string ws2s(const std::wstring_view& wide)
 }
 
 std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
-	std::filesystem::path workingDir = std::filesystem::current_path();
-	std::filesystem::path cacheDir = workingDir / L"cache" / directory;
+	std::filesystem::path cacheRoot;
+	const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
+	if (envLength > 1) {
+		std::vector<char> envRoot(envLength);
+		if (::GetEnvironmentVariableA("SARP_CACHE_ROOT", envRoot.data(), envLength) != 0 && envRoot.front() != '\0') {
+			cacheRoot = std::filesystem::path(envRoot.data());
+		}
+	}
+	if (cacheRoot.empty()) {
+		cacheRoot = std::filesystem::current_path() / L"cache";
+	}
+	std::filesystem::path cacheDir = cacheRoot / directory;
 
 	// Avoid repeated OS syscalls: only call create_directories once per unique
 	// directory path.  The set persists for the lifetime of the process.

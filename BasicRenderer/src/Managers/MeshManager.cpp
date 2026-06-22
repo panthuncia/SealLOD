@@ -13,6 +13,7 @@
 #include "Resources/Buffers/PagePool.h"
 #include "Managers/ViewManager.h"
 #include "Import/CLodCache.h"
+#include "Materials/Material.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
@@ -374,9 +375,14 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	const bool hasClassicGeometry = vertexByteSize != 0u && mesh->GetPerMeshCBData().numVertices != 0u;
 	const bool hasData = hasClassicGeometry || (hasCLodHierarchy && hasDiskBackedGroupChunks);
 	if (!hasData) {
+		std::string materialName;
+		if (mesh->material) {
+			materialName = mesh->material->ToCacheDescription().name;
+		}
 		spdlog::warn(
-			"Loading mesh with no associated geometry or disk-backed CLOD payload, skipping globalID={} clod={} groups={} segments={} nodes={} pageLocators={} hasCacheSource={}",
+			"Loading mesh with no associated geometry or disk-backed CLOD payload, skipping globalID={} material='{}' clod={} groups={} segments={} nodes={} pageLocators={} hasCacheSource={}",
 			mesh->GetGlobalID(),
+			materialName,
 			mesh->IsCLodMesh() ? 1 : 0,
 			mesh->GetCLodGroups().size(),
 			mesh->GetCLodSegments().size(),

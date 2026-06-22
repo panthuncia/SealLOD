@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <functional>
 #include <directxmath.h>
 #include <memory>
 #include <optional>
@@ -31,6 +32,27 @@ enum class MeshCpuDataPolicy {
 	Retain,
 	ReleaseAfterUpload,
 };
+
+struct VoxelCoverageHit
+{
+	uint32_t triangleIndex = 0;
+	DirectX::XMFLOAT3 position{};
+	DirectX::XMFLOAT3 normal{ 0.0f, 0.0f, 1.0f };
+	DirectX::XMFLOAT2 uv{};
+	DirectX::XMFLOAT3 trianglePositions[3]{};
+	DirectX::XMFLOAT2 triangleUvs[3]{};
+	float barycentrics[3]{};
+};
+
+struct VoxelCoverageMaterialSample
+{
+	bool accepted = true;
+	bool overrideNormal = false;
+	DirectX::XMFLOAT3 normal{ 0.0f, 0.0f, 1.0f };
+	float weight = 1.0f;
+};
+
+using VoxelCoverageMaterialSampler = std::function<VoxelCoverageMaterialSample(const VoxelCoverageHit&)>;
 
 // Traversal types
 
@@ -461,6 +483,9 @@ public:
 		const ClusterLODVoxelGridOverride& grid,
 		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
 	VoxelGroupPayload BuildVoxelOnlyPayload(const ClusterLODVoxelGridOverride& grid) const;
+	VoxelGroupPayload BuildVoxelOnlyPayload(
+		const ClusterLODVoxelGridOverride& grid,
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler) const;
 	static ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 		const VoxelGroupPayload& payload,
 		const ClusterLODBuilderSettings& settings,

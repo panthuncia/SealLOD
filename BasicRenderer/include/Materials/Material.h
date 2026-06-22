@@ -139,6 +139,9 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
          d.openPBRTextures.fuzzRoughness.texture)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileTextureStreaming;
     }
+    if (d.forceVoxelMaterial) {
+        tech.compileFlags |= MaterialCompileFlags::MaterialCompileVoxel;
+    }
 
     return tech;
 }
