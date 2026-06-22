@@ -21,6 +21,8 @@ public:
         std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
         std::shared_ptr<Buffer> voxelRasterWorkBuffer,
         std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
+        std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
+        std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
         uint32_t voxelRasterWorkCapacity,
         std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
         std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
@@ -86,6 +88,8 @@ private:
     std::shared_ptr<Buffer> m_swVisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_voxelRasterWorkBuffer;
     std::shared_ptr<Buffer> m_voxelRasterWorkCounterBuffer;
+    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkBuffer;
+    std::shared_ptr<Buffer> m_skinnedVoxelRasterWorkCounterBuffer;
     std::shared_ptr<Buffer> m_voxelRasterQueueDescriptorsBuffer;
     std::string m_voxelRasterQueueDescriptorResourceId;
     uint32_t m_voxelRasterWorkCapacity = 0u;

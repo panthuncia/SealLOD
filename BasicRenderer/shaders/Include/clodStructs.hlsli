@@ -258,18 +258,23 @@ struct CLodVoxelAttributeSample
 
 struct CLodVoxelRasterQueueDescriptors
 {
-    uint workRecordsUAVDescriptorIndex;
-    uint workRecordCounterUAVDescriptorIndex;
+    uint rigidWorkRecordsUAVDescriptorIndex;
+    uint rigidWorkRecordCounterUAVDescriptorIndex;
+    uint skinnedWorkRecordsUAVDescriptorIndex;
+    uint skinnedWorkRecordCounterUAVDescriptorIndex;
     uint workRecordCapacity;
     uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 struct CLodVoxelRasterWorkRecord
 {
     uint visibleClusterIndex;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint instanceIndex;
+    uint viewId;
+    uint localGroupId;
+    uint localVoxelClusterIndex;
 };
 
 struct CLodVoxelRasterDispatchCommand
@@ -390,6 +395,27 @@ CLodVoxelCubeRecord CLodLoadVoxelCubeFromPage(uint slabDescriptorIndex, uint pag
     cube.refinedGroup = asint(d1.z);
     cube.reserved0 = d1.w;
     return cube;
+}
+
+bool CLodVoxelClusterHasSkinnedCubes(
+    uint slabDescriptorIndex,
+    uint pageByteOffset,
+    uint cubeRecordsOffset,
+    CLodVoxelClusterRecord cluster)
+{
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
+    [loop]
+    for (uint cubeIndex = 0u; cubeIndex < cluster.cubeCount; ++cubeIndex)
+    {
+        const uint addr = pageByteOffset + cubeRecordsOffset + (cluster.firstCube + cubeIndex) * CLOD_VOXEL_CUBE_RECORD_STRIDE;
+        const uint dominantBoneIndex = slab.Load(addr + 4u);
+        if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool CLodTryFindVoxelPage(

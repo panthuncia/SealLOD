@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -17,9 +18,12 @@ class VoxelSoftwareRasterizationPass : public ComputePass, public IDynamicDeclar
 public:
     VoxelSoftwareRasterizationPass(
         std::shared_ptr<Buffer> visibleClustersBuffer,
-        std::shared_ptr<Buffer> voxelWorkRecordsBuffer,
-        std::shared_ptr<Buffer> voxelWorkCounterBuffer,
-        std::shared_ptr<Buffer> voxelIndirectArgsBuffer,
+        std::shared_ptr<Buffer> rigidVoxelWorkRecordsBuffer,
+        std::shared_ptr<Buffer> rigidVoxelWorkCounterBuffer,
+        std::shared_ptr<Buffer> skinnedVoxelWorkRecordsBuffer,
+        std::shared_ptr<Buffer> skinnedVoxelWorkCounterBuffer,
+        std::shared_ptr<Buffer> rigidVoxelIndirectArgsBuffer,
+        std::shared_ptr<Buffer> skinnedVoxelIndirectArgsBuffer,
         std::shared_ptr<Buffer> telemetryBuffer,
         std::shared_ptr<Buffer> viewRasterInfoBuffer,
         CLodRasterOutputKind outputKind,
@@ -39,12 +43,15 @@ public:
 
 private:
     PipelineState m_buildArgsPso;
-    PipelineState m_rasterPso;
+    PipelineState m_rigidRasterPso;
+    PipelineState m_skinnedRasterPso;
+    PipelineState m_rigidTelemetryRasterPso;
+    PipelineState m_skinnedTelemetryRasterPso;
     rhi::CommandSignaturePtr m_dispatchCommandSignature;
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
-    std::shared_ptr<Buffer> m_voxelWorkRecordsBuffer;
-    std::shared_ptr<Buffer> m_voxelWorkCounterBuffer;
-    std::shared_ptr<Buffer> m_voxelIndirectArgsBuffer;
+    std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkRecordsBuffers;
+    std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkCounterBuffers;
+    std::array<std::shared_ptr<Buffer>, 2> m_voxelIndirectArgsBuffers;
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;

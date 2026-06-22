@@ -6016,7 +6016,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	group.bounds.center[1] = centerY;
 	group.bounds.center[2] = centerZ;
 	group.bounds.radius = std::sqrt(dx * dx + dy * dy + dz * dz);
-	group.bounds.error = voxelTraversalError;
+	group.bounds.error = std::numeric_limits<float>::max();
 	group.depth = 0;
 	group.firstSegment = 0u;
 	group.segmentCount = static_cast<uint32_t>(voxelSegments.size());
@@ -6259,7 +6259,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	group.bounds.center[1] = centerY;
 	group.bounds.center[2] = centerZ;
 	group.bounds.radius = std::sqrt(dx * dx + dy * dy + dz * dz);
-	group.bounds.error = voxelTraversalError;
+	group.bounds.error = std::numeric_limits<float>::max();
 	group.depth = 0;
 	group.firstSegment = 0u;
 	group.segmentCount = static_cast<uint32_t>(voxelSegments.size());

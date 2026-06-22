@@ -36,4 +36,11 @@ void UnpackVisKey(uint64_t key, out float depth, out uint clusterId, out uint tr
     depth = asfloat(depthBits);
 }
 
+float UnpackVisKeyDepth(uint64_t key)
+{
+    uint depthBits = (uint)(key >> META_BITS);
+    depthBits <<= 1u;
+    return asfloat(depthBits);
+}
+
 #endif // VISIBILITY_PACKING_HLSL

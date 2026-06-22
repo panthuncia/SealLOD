@@ -149,6 +149,8 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
     std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
     std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
@@ -209,6 +211,8 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     m_swVisibleClustersCounterBuffer = std::move(swVisibleClustersCounterBuffer);
     m_voxelRasterWorkBuffer = std::move(voxelRasterWorkBuffer);
     m_voxelRasterWorkCounterBuffer = std::move(voxelRasterWorkCounterBuffer);
+    m_skinnedVoxelRasterWorkBuffer = std::move(skinnedVoxelRasterWorkBuffer);
+    m_skinnedVoxelRasterWorkCounterBuffer = std::move(skinnedVoxelRasterWorkCounterBuffer);
     m_voxelRasterWorkCapacity = voxelRasterWorkCapacity;
     m_voxelRasterQueueDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -288,6 +292,8 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_workGraphTelemetryBuffer,
             m_voxelRasterWorkBuffer,
             m_voxelRasterWorkCounterBuffer,
+            m_skinnedVoxelRasterWorkBuffer,
+            m_skinnedVoxelRasterWorkCounterBuffer,
             m_occlusionReplayBuffer,
             m_occlusionReplayStateBuffer,
             m_occlusionNodeGpuInputsBuffer)
@@ -471,13 +477,16 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         commandList.Barriers(clearBarrierBatch);
     }
 
-    if (m_voxelRasterWorkCounterBuffer) {
+    auto clearCounterBuffer = [&](const std::shared_ptr<Buffer>& buffer) {
+        if (!buffer) {
+            return;
+        }
         BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_clearPipelineState.GetAPIPipelineState().GetHandle());
 
         uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
-            m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            buffer->GetUAVShaderVisibleInfo(0).slot.index;
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = 1u;
         commandList.PushConstants(
@@ -490,7 +499,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         commandList.Dispatch(1u, 1u, 1u);
 
         rhi::BufferBarrier voxelCounterBarrier{};
-        voxelCounterBarrier.buffer = m_voxelRasterWorkCounterBuffer->GetAPIResource().GetHandle();
+        voxelCounterBarrier.buffer = buffer->GetAPIResource().GetHandle();
         voxelCounterBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
         voxelCounterBarrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
         voxelCounterBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
@@ -499,7 +508,9 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         rhi::BarrierBatch clearBarrierBatch{};
         clearBarrierBatch.buffers = { &voxelCounterBarrier };
         commandList.Barriers(clearBarrierBatch);
-    }
+    };
+    clearCounterBuffer(m_voxelRasterWorkCounterBuffer);
+    clearCounterBuffer(m_skinnedVoxelRasterWorkCounterBuffer);
 
     if (m_workGraphReyesVisibility && m_isFirstPass) {
         BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
@@ -865,8 +876,10 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
     {
         ZoneScopedN("HierarchicalCullingPass::UpdateDescriptorTables");
         CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
-        voxelQueueDescriptors.workRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.workRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.rigidWorkRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.skinnedWorkRecordsUAVDescriptorIndex = m_skinnedVoxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex = m_skinnedVoxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
         if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
             m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;

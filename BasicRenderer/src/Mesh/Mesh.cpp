@@ -454,6 +454,10 @@ Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertex
 	m_skinningVertexSize = skinningVertexSize;
     this->material = material;
 
+	if (m_prebuiltClusterLOD.has_value()) {
+		ApplyPrebuiltClusterLODData(*m_prebuiltClusterLOD);
+	}
+
 	if (!deferResourceCreation) {
 		CreateBuffers(indices);
 

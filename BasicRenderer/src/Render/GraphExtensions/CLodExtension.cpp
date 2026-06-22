@@ -873,13 +873,22 @@ void CLodExtension::InitializeCoreResources()
 
     m_voxelRasterWorkCapacity = CLodVoxelRasterWorkCapacity(m_visibleClusterCapacity);
     m_voxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
-    m_voxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer"));
+    m_voxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Rigid"));
 
     m_voxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_voxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer"));
+    m_voxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Rigid"));
+
+    m_skinnedVoxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
+    m_skinnedVoxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Skinned"));
+
+    m_skinnedVoxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+    m_skinnedVoxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Skinned"));
 
     m_voxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
-    m_voxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer"));
+    m_voxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Rigid"));
+
+    m_skinnedVoxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
+    m_skinnedVoxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Skinned"));
 
     m_sortedToUnsortedMappingBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
     m_sortedToUnsortedMappingBuffer->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer"));
@@ -957,6 +966,8 @@ void CLodExtension::TagCoreResourceUsages()
     tagBufferUsage(m_swVisibleClustersCounterBufferPhase2, "Cluster LOD visibility");
     tagBufferUsage(m_voxelRasterWorkBuffer, "Cluster LOD voxel rasterization");
     tagBufferUsage(m_voxelRasterWorkCounterBuffer, "Cluster LOD voxel rasterization");
+    tagBufferUsage(m_skinnedVoxelRasterWorkBuffer, "Cluster LOD voxel rasterization");
+    tagBufferUsage(m_skinnedVoxelRasterWorkCounterBuffer, "Cluster LOD voxel rasterization");
     tagBufferUsage(m_voxelRasterIndirectArgsBuffer, "Cluster LOD voxel rasterization");
     tagBufferUsage(m_sortedToUnsortedMappingBuffer, "Cluster LOD visibility");
     tagBufferUsage(m_sortedToUnsortedMappingBufferSw, "Cluster LOD visibility");
@@ -1070,7 +1081,10 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_swVisibleClustersCounterBufferPhase2);
     releaseBufferBacking(m_voxelRasterWorkBuffer);
     releaseBufferBacking(m_voxelRasterWorkCounterBuffer);
+    releaseBufferBacking(m_skinnedVoxelRasterWorkBuffer);
+    releaseBufferBacking(m_skinnedVoxelRasterWorkCounterBuffer);
     releaseBufferBacking(m_voxelRasterIndirectArgsBuffer);
+    releaseBufferBacking(m_skinnedVoxelRasterIndirectArgsBuffer);
     releaseBufferBacking(m_sortedToUnsortedMappingBuffer);
     releaseBufferBacking(m_sortedToUnsortedMappingBufferSw);
     releaseBufferBacking(m_viewRasterInfoBuffer);
@@ -1656,6 +1670,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     swVisibleClustersCounterBuffer,
                     m_voxelRasterWorkBuffer,
                     m_voxelRasterWorkCounterBuffer,
+                    m_skinnedVoxelRasterWorkBuffer,
+                    m_skinnedVoxelRasterWorkCounterBuffer,
                     m_voxelRasterWorkCapacity,
                     traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? swPageJobVisibleClustersBuffer : nullptr,
                     traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? swPageJobVisibleClustersCounterBuffer : nullptr,
@@ -1684,6 +1700,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     swVisibleClustersCounterBuffer,
                     m_voxelRasterWorkBuffer,
                     m_voxelRasterWorkCounterBuffer,
+                    m_skinnedVoxelRasterWorkBuffer,
+                    m_skinnedVoxelRasterWorkCounterBuffer,
                     m_voxelRasterWorkCapacity,
                     traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? swPageJobVisibleClustersBuffer : nullptr,
                     traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? swPageJobVisibleClustersCounterBuffer : nullptr,
@@ -2101,7 +2119,10 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     m_visibleClustersBuffer,
                     m_voxelRasterWorkBuffer,
                     m_voxelRasterWorkCounterBuffer,
+                    m_skinnedVoxelRasterWorkBuffer,
+                    m_skinnedVoxelRasterWorkCounterBuffer,
                     m_voxelRasterIndirectArgsBuffer,
+                    m_skinnedVoxelRasterIndirectArgsBuffer,
                     m_workGraphTelemetryBuffer,
                     m_viewRasterInfoBuffer,
                     traits.rasterOutputKind,

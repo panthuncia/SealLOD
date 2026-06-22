@@ -157,6 +157,8 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkCounterBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkBuffer,
+    std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
     std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
     std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
@@ -181,6 +183,8 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_swVisibleClustersCounterBuffer(std::move(swVisibleClustersCounterBuffer))
     , m_voxelRasterWorkBuffer(std::move(voxelRasterWorkBuffer))
     , m_voxelRasterWorkCounterBuffer(std::move(voxelRasterWorkCounterBuffer))
+    , m_skinnedVoxelRasterWorkBuffer(std::move(skinnedVoxelRasterWorkBuffer))
+    , m_skinnedVoxelRasterWorkCounterBuffer(std::move(skinnedVoxelRasterWorkCounterBuffer))
     , m_voxelRasterWorkCapacity(voxelRasterWorkCapacity)
     , m_pageJobVisibleClustersBuffer(std::move(pageJobVisibleClustersBuffer))
     , m_pageJobVisibleClustersCounterBuffer(std::move(pageJobVisibleClustersCounterBuffer))
@@ -398,6 +402,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             m_visibleClustersCounterBuffer,
             m_voxelRasterWorkBuffer,
             m_voxelRasterWorkCounterBuffer,
+            m_skinnedVoxelRasterWorkBuffer,
+            m_skinnedVoxelRasterWorkCounterBuffer,
             m_histogramIndirectCommand,
             m_workGraphTelemetryBuffer,
             m_occlusionReplayBuffer,
@@ -690,6 +696,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     };
 
     clearCounter(m_voxelRasterWorkCounterBuffer);
+    clearCounter(m_skinnedVoxelRasterWorkCounterBuffer);
 
     auto bufferBarrier = [&](std::initializer_list<std::shared_ptr<Buffer>> buffers,
                              rhi::ResourceAccessType beforeAccess,
@@ -764,7 +771,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             rhi::ResourceSyncState::ComputeShading);
     };
 
-    uavBarrier({ m_voxelRasterWorkCounterBuffer });
+    uavBarrier({ m_voxelRasterWorkCounterBuffer, m_skinnedVoxelRasterWorkCounterBuffer });
 
     bool nodeDispatchArgsNeedReuseBarrier = false;
     bool clusterDispatchArgsNeedReuseBarrier = false;
@@ -1320,8 +1327,10 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         }
 
         CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
-        voxelQueueDescriptors.workRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.workRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.rigidWorkRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.skinnedWorkRecordsUAVDescriptorIndex = m_skinnedVoxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        voxelQueueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex = m_skinnedVoxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
         if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
             m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;

@@ -1123,17 +1123,23 @@ void CLodAppendVoxelRasterClusterWork(
     StructuredBuffer<CLodVoxelRasterQueueDescriptors> queueDescriptorBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID)];
     const CLodVoxelRasterQueueDescriptors queueDescriptors = queueDescriptorBuffer[0];
-    if (queueDescriptors.workRecordsUAVDescriptorIndex == 0xFFFFFFFFu ||
-        queueDescriptors.workRecordCounterUAVDescriptorIndex == 0xFFFFFFFFu ||
+    if (queueDescriptors.rigidWorkRecordsUAVDescriptorIndex == 0xFFFFFFFFu ||
+        queueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex == 0xFFFFFFFFu ||
+        queueDescriptors.skinnedWorkRecordsUAVDescriptorIndex == 0xFFFFFFFFu ||
+        queueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex == 0xFFFFFFFFu ||
         queueDescriptors.workRecordCapacity == 0u)
     {
         return;
     }
 
-    RWStructuredBuffer<CLodVoxelRasterWorkRecord> workRecords =
-        ResourceDescriptorHeap[queueDescriptors.workRecordsUAVDescriptorIndex];
-    RWStructuredBuffer<uint> workRecordCounter =
-        ResourceDescriptorHeap[queueDescriptors.workRecordCounterUAVDescriptorIndex];
+    RWStructuredBuffer<CLodVoxelRasterWorkRecord> rigidWorkRecords =
+        ResourceDescriptorHeap[queueDescriptors.rigidWorkRecordsUAVDescriptorIndex];
+    RWStructuredBuffer<uint> rigidWorkRecordCounter =
+        ResourceDescriptorHeap[queueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex];
+    RWStructuredBuffer<CLodVoxelRasterWorkRecord> skinnedWorkRecords =
+        ResourceDescriptorHeap[queueDescriptors.skinnedWorkRecordsUAVDescriptorIndex];
+    RWStructuredBuffer<uint> skinnedWorkRecordCounter =
+        ResourceDescriptorHeap[queueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex];
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> visibleClusterCounter =
@@ -1194,11 +1200,31 @@ void CLodAppendVoxelRasterClusterWork(
             continue;
         }
 
+        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(
+            voxelPageEntry.slabDescriptorIndex,
+            voxelPageEntry.slabByteOffset,
+            voxelPageHeader.cubeRecordsOffset,
+            voxelCluster);
+
         uint baseSlot = 0u;
-        InterlockedAdd(workRecordCounter[0], 1u, baseSlot);
+        if (clusterHasSkinnedCubes)
+        {
+            InterlockedAdd(skinnedWorkRecordCounter[0], 1u, baseSlot);
+        }
+        else
+        {
+            InterlockedAdd(rigidWorkRecordCounter[0], 1u, baseSlot);
+        }
         if (baseSlot >= queueDescriptors.workRecordCapacity)
         {
-            InterlockedMin(workRecordCounter[0], queueDescriptors.workRecordCapacity);
+            if (clusterHasSkinnedCubes)
+            {
+                InterlockedMin(skinnedWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+            }
+            else
+            {
+                InterlockedMin(rigidWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+            }
             ++droppedCount;
             continue;
         }
@@ -1219,10 +1245,18 @@ void CLodAppendVoxelRasterClusterWork(
 
         CLodVoxelRasterWorkRecord record;
         record.visibleClusterIndex = visibleClusterIndex;
-        record.pad0 = 0u;
-        record.pad1 = 0u;
-        record.pad2 = 0u;
-        workRecords[baseSlot] = record;
+        record.instanceIndex = instanceIndex;
+        record.viewId = viewId;
+        record.localGroupId = localGroupId;
+        record.localVoxelClusterIndex = localVoxelClusterIndex;
+        if (clusterHasSkinnedCubes)
+        {
+            skinnedWorkRecords[baseSlot] = record;
+        }
+        else
+        {
+            rigidWorkRecords[baseSlot] = record;
+        }
         ++appendedCount;
     }
 

@@ -264,23 +264,28 @@ inline constexpr const char* CLodVoxelRasterQueueDescriptorBufferId = "CLod::Vox
 
 struct CLodVoxelRasterQueueDescriptors
 {
-    uint32_t workRecordsUAVDescriptorIndex = 0xFFFFFFFFu;
-    uint32_t workRecordCounterUAVDescriptorIndex = 0xFFFFFFFFu;
+    uint32_t rigidWorkRecordsUAVDescriptorIndex = 0xFFFFFFFFu;
+    uint32_t rigidWorkRecordCounterUAVDescriptorIndex = 0xFFFFFFFFu;
+    uint32_t skinnedWorkRecordsUAVDescriptorIndex = 0xFFFFFFFFu;
+    uint32_t skinnedWorkRecordCounterUAVDescriptorIndex = 0xFFFFFFFFu;
     uint32_t workRecordCapacity = 0u;
-    uint32_t pad0 = 0u;
-};
-
-static_assert(sizeof(CLodVoxelRasterQueueDescriptors) == 16u, "CLodVoxelRasterQueueDescriptors size must match HLSL");
-
-struct CLodVoxelRasterWorkRecord
-{
-    uint32_t visibleClusterIndex = 0u;
     uint32_t pad0 = 0u;
     uint32_t pad1 = 0u;
     uint32_t pad2 = 0u;
 };
 
-static_assert(sizeof(CLodVoxelRasterWorkRecord) == 16u, "CLodVoxelRasterWorkRecord size must match HLSL");
+static_assert(sizeof(CLodVoxelRasterQueueDescriptors) == 32u, "CLodVoxelRasterQueueDescriptors size must match HLSL");
+
+struct CLodVoxelRasterWorkRecord
+{
+    uint32_t visibleClusterIndex = 0u;
+    uint32_t instanceIndex = 0u;
+    uint32_t viewId = 0u;
+    uint32_t localGroupId = 0u;
+    uint32_t localVoxelClusterIndex = 0u;
+};
+
+static_assert(sizeof(CLodVoxelRasterWorkRecord) == 20u, "CLodVoxelRasterWorkRecord size must match HLSL");
 
 struct CLodVoxelRasterDispatchCommand
 {
