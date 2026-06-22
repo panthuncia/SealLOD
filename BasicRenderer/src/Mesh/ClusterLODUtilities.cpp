@@ -4118,6 +4118,7 @@ namespace
 		size_t vertexStrideBytes,
 		size_t skinningVertexStrideBytes,
 		const VoxelSourceTriangleBVH* coverageSourceTriangles,
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler,
 		const ClusterLODBuilderSettings& settings)
 	{
 		const bool enabled = settings.enableVoxelFallback && settings.voxelFallbackMode != ClusterLODVoxelFallbackMode::MeshOnly;
@@ -4383,6 +4384,7 @@ namespace
 				voxelInput.triangleRefinedGroupIds = buildInput.voxelTriangleRefinedGroupIds.empty() ? nullptr : &buildInput.voxelTriangleRefinedGroupIds;
 				voxelInput.doubleSidedTriangles = settings.doubleSidedVoxelSourceNormals;
 				voxelInput.coverageSourceTriangles = voxelCoverageSourceTriangles;
+				voxelInput.coverageMaterialSampler = coverageMaterialSampler;
 				voxelInput.sourceVoxelPayloads = sourceVoxelPayloads.empty() ? nullptr : &sourceVoxelPayloads;
 				voxelInput.candidateVoxelPayloads = candidateVoxelPayloads.empty() ? nullptr : &candidateVoxelPayloads;
 				voxelInput.keepZeroCoverageSourceCells = settings.voxelFallbackCarryZeroCoverage;
@@ -5512,7 +5514,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<uint32_t>& indices,
 	const std::vector<MeshUvSetData>& uvSets,
 	unsigned int flags,
-	const ClusterLODBuilderSettings& settings)
+	const ClusterLODBuilderSettings& settings,
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler)
 {
 	ClusterLODBuildState state{};
 
@@ -5885,6 +5888,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		vertexStrideBytes,
 		skinningVertexSize,
 		coverageSourceTriangles.IsValid() ? &coverageSourceTriangles : nullptr,
+		coverageMaterialSampler,
 		settings);
 
 	// Build traversal hierarchy.

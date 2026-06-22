@@ -476,7 +476,8 @@ public:
 		MeshCpuDataPolicy cpuDataPolicy = MeshCpuDataPolicy::Retain);
 
 	// Headless: runs the full ClusterLOD build pipeline (CPU-only).
-	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts() const;
+	ClusterLODPrebuildArtifacts BuildClusterLODArtifacts(
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr) const;
 	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(
 		uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER) const;
 	ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifacts(

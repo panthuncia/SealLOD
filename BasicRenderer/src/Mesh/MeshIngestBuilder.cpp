@@ -4,7 +4,8 @@
 #include "Mesh/ClusterLODTypes.h"
 #include "Mesh/ClusterLODUtilities.h"
 
-ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildClusterLODArtifacts() const {
+ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildClusterLODArtifacts(
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler) const {
 	const std::vector<std::byte>* skinningVertices = m_skinningVertices.empty() ? nullptr : &m_skinningVertices;
 	return BuildClusterLODArtifactsFromGeometry(
 		m_vertices,
@@ -14,7 +15,8 @@ ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildClusterLODArtifacts() const 
 		m_indices,
 		m_uvSets,
 		m_flags,
-		m_clusterLODBuilderSettings);
+		m_clusterLODBuilderSettings,
+		coverageMaterialSampler);
 }
 
 ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts(uint32_t maxCubesPerCluster) const {
