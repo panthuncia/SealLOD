@@ -108,6 +108,10 @@ find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
 find_package(pxr CONFIG REQUIRED)
+if(TARGET TBB::tbb AND NOT TARGET TBB::tbbmalloc)
+    add_library(TBB::tbbmalloc INTERFACE IMPORTED)
+endif()
+find_package(embree CONFIG REQUIRED)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
@@ -1053,6 +1057,7 @@ PRIVATE
     Microsoft::DirectXTex 
     imgui::imgui 
     meshoptimizer
+    embree
     assimp::assimp 
     flecs::flecs 
     flecs::flecs_static 

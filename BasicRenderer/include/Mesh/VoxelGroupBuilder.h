@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 #include <vector>
 #include <directxmath.h>
 
@@ -16,6 +17,9 @@ struct VoxelSourceCandidatePayload
 class VoxelSourceTriangleBVH
 {
 public:
+	VoxelSourceTriangleBVH();
+	~VoxelSourceTriangleBVH();
+
 	void Build(
 		const std::vector<std::byte>* vertices,
 		size_t vertexStrideBytes,
@@ -30,6 +34,16 @@ public:
 		const DirectX::XMFLOAT3& aabbMin,
 		const DirectX::XMFLOAT3& aabbMax,
 		std::vector<uint32_t>& outTriangleIndices) const;
+	bool IntersectNearest(
+		int32_t refinedGroupFilter,
+		const DirectX::XMFLOAT3& origin,
+		const DirectX::XMFLOAT3& direction,
+		float tMin,
+		float tMax,
+		uint32_t& outTriangleIndex,
+		float& outT,
+		float& outU,
+		float& outV) const;
 
 	const std::vector<std::byte>* Vertices() const { return m_vertices; }
 	size_t VertexStrideBytes() const { return m_vertexStrideBytes; }
@@ -52,6 +66,8 @@ private:
 
 	uint32_t BuildNode(uint32_t firstTriangle, uint32_t triangleCount);
 
+	struct EmbreeScene;
+
 	const std::vector<std::byte>* m_vertices = nullptr;
 	size_t m_vertexStrideBytes = 0;
 	const std::vector<std::byte>* m_skinningVertices = nullptr;
@@ -61,6 +77,7 @@ private:
 	bool m_doubleSidedTriangles = false;
 	std::vector<uint32_t> m_triangleOrder;
 	std::vector<Node> m_nodes;
+	std::unique_ptr<EmbreeScene> m_embreeScene;
 };
 
 // Input: triangle-based source geometry to voxelize into a single group.

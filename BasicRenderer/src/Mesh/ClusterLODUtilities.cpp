@@ -20,6 +20,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 
@@ -2745,6 +2746,17 @@ namespace
 		uint32_t generatedPayloads = 0;
 		uint32_t generatedCubes = 0;
 		uint32_t failedBuilds = 0;
+		uint32_t coverageBvhBuilds = 0;
+		uint32_t coverageBvhReuses = 0;
+		uint64_t sourceCoverageQueries = 0;
+		uint64_t sourceCoverageCandidates = 0;
+		uint64_t sourceCoverageTests = 0;
+		uint64_t sourceCoverageOutOfCell = 0;
+		uint64_t analysisUs = 0;
+		uint64_t sourceBuildUs = 0;
+		uint64_t coverageBvhUs = 0;
+		uint64_t voxelizeUs = 0;
+		uint64_t packUs = 0;
 	};
 
 	struct VoxelFallbackGroupBuildInput
@@ -4144,6 +4156,11 @@ namespace
 		{
 			return std::isfinite(error) && error > 0.0f && error < std::numeric_limits<float>::max() * 0.5f;
 		};
+		auto elapsedUsSince = [](std::chrono::steady_clock::time_point start) -> uint64_t
+		{
+			return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - start).count());
+		};
 
 		for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 		{
@@ -4186,13 +4203,18 @@ namespace
 
 			const ClusterLODGroup& group = state.groups[groupIndex];
 			VoxelFallbackGroupBuildInput& buildInput = groupInputs[groupIndex];
+			const auto sourceBuildStart = std::chrono::steady_clock::now();
 			if (!BuildVoxelFallbackSourceGeometry(state, groupIndex, vertexStrideBytes, buildInput))
 			{
+				stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
 				stats.failedBuilds++;
 				continue;
 			}
+			stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
 
+			const auto analysisStart = std::chrono::steady_clock::now();
 			buildInput.analysis = AnalyzeVoxelFallbackBuildInput(state, buildInput, vertexStrideBytes, settings);
+			stats.analysisUs += elapsedUsSince(analysisStart);
 
 			if (!buildInput.analysis.valid)
 			{
@@ -4232,13 +4254,18 @@ namespace
 			}
 
 			VoxelFallbackGroupBuildInput& buildInput = groupInputs[groupIndex];
+			const auto sourceBuildStart = std::chrono::steady_clock::now();
 			if (!BuildVoxelFallbackSourceGeometry(state, groupIndex, vertexStrideBytes, buildInput))
 			{
+				stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
 				stats.failedBuilds++;
 				return false;
 			}
+			stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
 
+			const auto analysisStart = std::chrono::steady_clock::now();
 			buildInput.analysis = AnalyzeVoxelFallbackBuildInput(state, buildInput, vertexStrideBytes, settings);
+			stats.analysisUs += elapsedUsSince(analysisStart);
 
 			if (!buildInput.analysis.valid)
 			{
@@ -4309,11 +4336,12 @@ namespace
 			};
 			VoxelFallbackGroupBuildInput coverageBuildInput;
 			VoxelSourceTriangleBVH groupCoverageSourceTriangles;
-			const VoxelSourceTriangleBVH* voxelCoverageSourceTriangles = coverageSourceTriangles;
+			const VoxelSourceTriangleBVH* voxelCoverageSourceTriangles = nullptr;
 			if (BuildVoxelFallbackCoverageSourceGeometry(state, groupIndex, vertexStrideBytes, coverageBuildInput) &&
 				!coverageBuildInput.voxelVertices.empty() && !coverageBuildInput.voxelTriangleIndices.empty())
 			{
 				LogVoxelTriangleTagHistogram("coverage", groupIndex, group.depth, coverageBuildInput);
+				const auto coverageBvhStart = std::chrono::steady_clock::now();
 				groupCoverageSourceTriangles.Build(
 					&coverageBuildInput.voxelVertices,
 					vertexStrideBytes,
@@ -4322,10 +4350,17 @@ namespace
 					skinningVertexStrideBytes,
 					coverageBuildInput.voxelTriangleRefinedGroupIds.empty() ? nullptr : &coverageBuildInput.voxelTriangleRefinedGroupIds,
 					settings.doubleSidedVoxelSourceNormals);
+				stats.coverageBvhUs += elapsedUsSince(coverageBvhStart);
+				stats.coverageBvhBuilds++;
 				if (groupCoverageSourceTriangles.IsValid())
 				{
 					voxelCoverageSourceTriangles = &groupCoverageSourceTriangles;
 				}
+			}
+			if (voxelCoverageSourceTriangles == nullptr && coverageSourceTriangles != nullptr)
+			{
+				voxelCoverageSourceTriangles = coverageSourceTriangles;
+				stats.coverageBvhReuses++;
 			}
 
 			const uint32_t retryCount = std::max(1u, settings.voxelFallbackMaxRetryCount + 1u);
@@ -4394,7 +4429,13 @@ namespace
 				voxelInput.resolution = resolution;
 				voxelInput.raysPerCell = settings.voxelRaysPerCell;
 				voxelInput.pruningMode = settings.voxelFallbackPruningMode;
+				const auto voxelizeStart = std::chrono::steady_clock::now();
 				VoxelizeTrianglesResult voxelResult = VoxelizeTrianglesDetailed(voxelInput);
+				stats.voxelizeUs += elapsedUsSince(voxelizeStart);
+				stats.sourceCoverageQueries += voxelResult.sourceCoverageQueryCount;
+				stats.sourceCoverageCandidates += voxelResult.sourceCoverageTriangleCandidateCount;
+				stats.sourceCoverageTests += voxelResult.sourceCoverageTriangleTestCount;
+				stats.sourceCoverageOutOfCell += voxelResult.sourceCoverageOutOfCellRejectionCount;
 				spdlog::debug(
 					"ClusterLOD voxel build detail: group={} depth={} attempt={} resolution={} voxel_width={} traversal_error={} source_representation_error={} min_source_voxel_width={} hierarchy_error_floor={} pruning={} source_tris={} source_voxel_groups={} source_primitives={} cube_budget={} tri_candidates={} voxel_candidates={} candidates={} positive_cells={} total_coverage={} max_coverage={} source_cells={} render_cells={} pruned={} source_coverage_queries={} source_coverage_candidates={} source_coverage_tests={} source_coverage_out_of_cell={}",
 					groupIndex,
@@ -4450,7 +4491,9 @@ namespace
 
 				if (!payload.activeCells.empty())
 				{
+					const auto packStart = std::chrono::steady_clock::now();
 					packed = packCurrentPayload();
+					stats.packUs += elapsedUsSince(packStart);
 					packedVoxelTraversalError = voxelTraversalError;
 				}
 
@@ -4769,8 +4812,8 @@ namespace
 		const uint32_t totalVoxelClusters = static_cast<uint32_t>(state.voxelGroupMapping.packedClusterRecords.size());
 		const uint32_t totalVoxelCubes = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
 
-		spdlog::debug(
-			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} failed={}",
+		spdlog::info(
+			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} failed={} coverage_bvh_builds={} coverage_bvh_reuses={} source_coverage(queries={} candidates={} tests={} out_of_cell={}) timing_ms(analysis={:.2f} source={:.2f} coverage_bvh={:.2f} voxelize={:.2f} pack={:.2f})",
 			stats.analyzedGroups,
 			stats.validGroups,
 			stats.autoCandidateGroups,
@@ -4782,7 +4825,18 @@ namespace
 			totalVoxelPayloads,
 			totalVoxelClusters,
 			totalVoxelCubes,
-			stats.failedBuilds);
+			stats.failedBuilds,
+			stats.coverageBvhBuilds,
+			stats.coverageBvhReuses,
+			stats.sourceCoverageQueries,
+			stats.sourceCoverageCandidates,
+			stats.sourceCoverageTests,
+			stats.sourceCoverageOutOfCell,
+			static_cast<double>(stats.analysisUs) / 1000.0,
+			static_cast<double>(stats.sourceBuildUs) / 1000.0,
+			static_cast<double>(stats.coverageBvhUs) / 1000.0,
+			static_cast<double>(stats.voxelizeUs) / 1000.0,
+			static_cast<double>(stats.packUs) / 1000.0);
 	}
 
 	void BuildClusterLODTraversalHierarchy(ClusterLODBuildState& state, uint32_t preferredNodeWidth)
