@@ -30,8 +30,6 @@ struct Builtin {
     inline static constexpr std::string_view StreamingTouchedGroupsCounter = "Builtin::CLod::StreamingTouchedGroupsCounter";
     inline static constexpr std::string_view VoxelAttributeSamples = "Builtin::CLod::VoxelAttributeSamples";
     inline static constexpr std::string_view VoxelCubeRecords = "Builtin::CLod::VoxelCubeRecords";
-    inline static constexpr std::string_view VoxelDescriptorIndices = "Builtin::CLod::VoxelDescriptorIndices";
-    inline static constexpr std::string_view VoxelGroupDescriptors = "Builtin::CLod::VoxelGroupDescriptors";
   };
   inline static constexpr std::string_view CameraBuffer = "Builtin::CameraBuffer";
   struct Color {

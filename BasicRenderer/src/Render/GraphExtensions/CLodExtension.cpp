@@ -1526,6 +1526,14 @@ void CLodExtension::Initialize(RenderGraph& rg)
     }
 }
 
+void CLodExtension::Shutdown(RenderGraph& rg)
+{
+    (void)rg;
+    if (m_streamingSystem) {
+        m_streamingSystem->Shutdown();
+    }
+}
+
 void CLodExtension::OnRegistryReset(ResourceRegistry* reg)
 {
     m_providerRegisteredForCurrentRegistry = false;

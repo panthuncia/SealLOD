@@ -1781,6 +1781,11 @@ bool MeshManager::HasPendingCLodDirectStorageUploads() const {
 	return !m_clodPendingDirectStorageUploads.empty();
 }
 
+std::pair<std::size_t, std::size_t> MeshManager::GetPendingCLodDirectStorageCounts() const {
+	std::lock_guard<std::mutex> lock(m_clodDiskStreamingResultsMutex);
+	return { m_clodPendingDirectStorageLaunches.size(), m_clodPendingDirectStorageUploads.size() };
+}
+
 void MeshManager::SetCLodStreamingUploadFunction(PagePool::UploadFn fn) {
 	m_clodStreamingUploadFn = std::move(fn);
 	if (m_clodPagePool != nullptr) {

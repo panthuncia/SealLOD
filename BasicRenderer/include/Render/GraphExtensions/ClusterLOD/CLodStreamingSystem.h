@@ -30,6 +30,7 @@ public:
     CLodPriorityMode GetPriorityMode() const { return m_priorityMode; }
 
     void Initialize(RenderGraph& rg);
+    void Shutdown();
     void OnRegistryReset(ResourceRegistry* reg);
     void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
     void GatherStructuralTailPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
@@ -249,6 +250,7 @@ private:
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_groupOwnedPages; // group to page IDs by segment (~0u = no page)
     std::unordered_map<uint32_t, std::vector<uint64_t>> m_groupOwnedMeshPageKeys; // group to mesh-page keys by page slot
     std::unordered_map<uint32_t, CommittedGroupPageMap> m_groupCommittedPageMaps;
+    mutable std::mutex m_pageMapWriteProvenanceMutex;
     std::unordered_map<uint64_t, PageMapWriteProvenance> m_pageMapWriteProvenance;
     std::unordered_map<uint64_t, uint32_t> m_residentMeshPageToPhysicalPage;
     std::unordered_map<uint64_t, uint32_t> m_residentMeshPageRefCounts;

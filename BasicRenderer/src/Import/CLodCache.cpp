@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cwctype>
+#include <string_view>
 
 #include <boost/container_hash/hash.hpp>
 #include <spdlog/spdlog.h>
@@ -274,7 +275,7 @@ namespace CLodCache {
 			return file.good();
 		}
 
-		std::wstring BuildGroupContainerFileName(const CacheKey& key, uint64_t buildConfigHash)
+		std::wstring BuildCacheArtifactFileName(const CacheKey& key, uint64_t buildConfigHash, std::string_view extension)
 		{
 			size_t hashSeed = 0;
 			boost::hash_combine(hashSeed, key.sourceIdentifier);
@@ -283,7 +284,7 @@ namespace CLodCache {
 			boost::hash_combine(hashSeed, buildConfigHash);
 
 			std::stringstream ss;
-			ss << "clod_" << std::hex << hashSeed << ".clodbin";
+			ss << "clod_" << std::hex << hashSeed << extension;
 			return s2ws(ss.str());
 		}
 
@@ -524,23 +525,20 @@ namespace CLodCache {
 	namespace {
 		bool SaveImpl(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 		{
-			const std::wstring fileName = BuildCacheFileName(key, buildConfigHash);
-			const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
-			const std::wstring containerFileName = BuildGroupContainerFileName(key, buildConfigHash);
-			const std::wstring containerPath = GetCacheFilePathBySource(containerFileName, key.sourceIdentifier);
-			if (std::filesystem::exists(cachePath)) {
+			const CacheLookup lookup = BuildCacheLookup(key, buildConfigHash);
+			if (std::filesystem::exists(lookup.metadataPath)) {
 				spdlog::warn(
 					"Skipping CLod cache save because metadata file already exists but did not load cleanly: {}",
-					ws2s(cachePath));
+					ws2s(lookup.metadataPath));
 				return false;
 			}
 
 			spdlog::debug("CLodCache::SaveImpl  metadata='{}' container='{}'",
-				ws2s(cachePath), ws2s(containerPath));
+				ws2s(lookup.metadataPath), ws2s(lookup.containerPath));
 
 			std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
-			if (!SaveContainerPayload(containerPath, prebuiltData, payload, pageDiskLocators)) {
-				spdlog::warn("Failed to write CLod container payload: {}", ws2s(containerPath));
+			if (!SaveContainerPayload(lookup.containerPath, prebuiltData, payload, pageDiskLocators)) {
+				spdlog::warn("Failed to write CLod container payload: {}", ws2s(lookup.containerPath));
 				return false;
 			}
 
@@ -549,11 +547,11 @@ namespace CLodCache {
 			cacheSource.primPath = key.primPath;
 			cacheSource.subsetName = key.subsetName;
 			cacheSource.buildConfigHash = buildConfigHash;
-			cacheSource.containerFileName = containerFileName;
+			cacheSource.containerFileName = lookup.containerFileName;
 
 			auto blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
-			if (!WriteMetadataBlob(cachePath, blob)) {
-				spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(cachePath));
+			if (!WriteMetadataBlob(lookup.metadataPath, blob)) {
+				spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(lookup.metadataPath));
 				return false;
 			}
 
@@ -568,7 +566,7 @@ namespace CLodCache {
 				*outSavedPrebuiltData = savedData.prebuiltData;
 			}
 
-			StoreMetadataInMemoryCache(cachePath, std::move(savedData));
+			StoreMetadataInMemoryCache(lookup.metadataPath, std::move(savedData));
 
 			return true;
 		}
@@ -615,15 +613,19 @@ namespace CLodCache {
 
 	std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash)
 	{
-		size_t hashSeed = 0;
-		boost::hash_combine(hashSeed, key.sourceIdentifier);
-		boost::hash_combine(hashSeed, key.primPath);
-		boost::hash_combine(hashSeed, key.subsetName);
-		boost::hash_combine(hashSeed, buildConfigHash);
+		return BuildCacheArtifactFileName(key, buildConfigHash, ".clodmeta");
+	}
 
-		std::stringstream ss;
-		ss << "clod_" << std::hex << hashSeed << ".clodmeta";
-		return s2ws(ss.str());
+	CacheLookup BuildCacheLookup(const CacheKey& key, uint64_t buildConfigHash)
+	{
+		CacheLookup lookup{};
+		lookup.key = key;
+		lookup.buildConfigHash = buildConfigHash;
+		lookup.metadataFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodmeta");
+		lookup.metadataPath = GetCacheFilePathBySource(lookup.metadataFileName, key.sourceIdentifier);
+		lookup.containerFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodbin");
+		lookup.containerPath = GetCacheFilePathBySource(lookup.containerFileName, key.sourceIdentifier);
+		return lookup;
 	}
 
 	std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier)
@@ -633,22 +635,21 @@ namespace CLodCache {
 
 	std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash)
 	{
-		const std::wstring fileName = BuildCacheFileName(key, expectedBuildConfigHash);
-		const std::wstring cachePath = GetCacheFilePathBySource(fileName, key.sourceIdentifier);
-		if (auto memoryCached = TryLoadMetadataFromMemoryCache(cachePath)) {
+		const CacheLookup lookup = BuildCacheLookup(key, expectedBuildConfigHash);
+		if (auto memoryCached = TryLoadMetadataFromMemoryCache(lookup.metadataPath)) {
 			if (memoryCached->buildConfigHash == expectedBuildConfigHash &&
 				memoryCached->schemaVersion == kSchemaVersion) {
 				return memoryCached;
 			}
 		}
-		if (!std::filesystem::exists(cachePath)) {
+		if (!std::filesystem::exists(lookup.metadataPath)) {
 			return std::nullopt;
 		}
 
 		CacheData out;
 		std::vector<std::byte> bytes;
-		if (!ReadMetadataBlob(cachePath, bytes) || !DeserializeMetadata(bytes, out)) {
-			spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(cachePath));
+		if (!ReadMetadataBlob(lookup.metadataPath, bytes) || !DeserializeMetadata(bytes, out)) {
+			spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
 			return std::nullopt;
 		}
 
@@ -669,19 +670,19 @@ namespace CLodCache {
 			out.prebuiltData.cacheSource.buildConfigHash = expectedBuildConfigHash;
 		}
 		if (out.prebuiltData.cacheSource.containerFileName.empty()) {
-			out.prebuiltData.cacheSource.containerFileName = BuildGroupContainerFileName(key, expectedBuildConfigHash);
+			out.prebuiltData.cacheSource.containerFileName = lookup.containerFileName;
 		}
 
 		const uint32_t pageCount = out.prebuiltData.voxelPageBase + out.prebuiltData.voxelPageCount;
 		const bool hasContainerLocators = pageCount > 0u && (out.prebuiltData.pageDiskLocators.size() == pageCount);
 		if (hasContainerLocators) {
-			StoreMetadataInMemoryCache(cachePath, out);
+			StoreMetadataInMemoryCache(lookup.metadataPath, out);
 			return out;
 		}
 
 		spdlog::warn(
 			"CLod cache '{}' is missing disk locator metadata for {} mesh pages; treating as cache miss.",
-			ws2s(cachePath),
+			ws2s(lookup.metadataPath),
 			pageCount);
 		return std::nullopt;
 	}
@@ -760,6 +761,16 @@ namespace CLodCache {
 			return {};
 		}
 
+		CacheKey key{};
+		key.sourceIdentifier = cacheSource.sourceIdentifier;
+		key.primPath = cacheSource.primPath;
+		key.subsetName = cacheSource.subsetName;
+		if (!key.sourceIdentifier.empty() && !key.primPath.empty() && cacheSource.buildConfigHash != 0) {
+			const CacheLookup lookup = BuildCacheLookup(key, cacheSource.buildConfigHash);
+			if (lookup.containerFileName == cacheSource.containerFileName) {
+				return lookup.containerPath;
+			}
+		}
 		return GetCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
 	}
 
@@ -981,7 +992,7 @@ namespace CLodCache {
 			return false;
 		}
 
-		const std::wstring containerPath = GetCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
+		const std::wstring containerPath = ResolveContainerPath(cacheSource);
 		outFile.open(containerPath, std::ios::binary);
 		if (!outFile.is_open()) {
 			return false;

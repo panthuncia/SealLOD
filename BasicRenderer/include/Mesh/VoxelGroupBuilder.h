@@ -177,7 +177,7 @@ struct PackVoxelGroupInput
 
 struct PackedVoxelGroupBuildResult
 {
-	CLodVoxelGroupDescriptor descriptor{};
+	VoxelGroupPackedMetadata metadata{};
 	std::vector<CLodVoxelClusterRecord> clusterRecords;
 	std::vector<CLodVoxelCubeRecord> cubeRecords;
 	std::vector<CLodVoxelAttributeSample> attributeSamples;

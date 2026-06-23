@@ -60,7 +60,7 @@ static const uint VOXEL_RASTER_PIXEL_QUEUE_CAPACITY = CLOD_VOXEL_RASTER_PIXEL_QU
 static const uint64_t VOXEL_RASTER_VISIBILITY_EMPTY = 0xFFFFFFFFFFFFFFFF;
 static const uint WG_COUNTER_VOXEL_RASTER_WORK_GROUPS = 134u;
 static const uint WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER = 135u;
-static const uint WG_COUNTER_VOXEL_RASTER_DESCRIPTOR_MISSES = 136u;
+static const uint WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES = 136u;
 static const uint WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER = 137u;
 static const uint WG_COUNTER_VOXEL_RASTER_INVALID_VOXEL_WIDTH = 138u;
 static const uint WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED = 139u;
@@ -755,7 +755,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const uint instanceIndex = work.instanceIndex;
     const uint viewId = work.viewId;
     const uint localGroupId = work.localGroupId;
-    const uint localVoxelClusterIndex = work.localVoxelClusterIndex;
+    const uint localPageIndex = work.localPageIndex;
+    const uint pageLocalClusterIndex = work.pageLocalClusterIndex;
 
 #if PSO_SKINNED
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceIndex);
@@ -766,19 +767,37 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const CullingCameraInfo camera = cameras[viewId];
     const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[viewId];
 
-    CLodVoxelGroupDescriptor descriptor;
-    if (!CLodTryLoadVoxelDescriptorByClusterIndex(metadata, localGroupId, localVoxelClusterIndex, descriptor))
+    StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
+        localPageIndex < group.pageMapBase ||
+        localPageIndex >= group.pageMapBase + group.pageCount)
     {
         if (GI == 0u)
         {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DESCRIPTOR_MISSES, 1u);
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
         }
         return;
     }
 
-    GroupPageMapEntry pageEntry;
-    CLodVoxelPageHeader pageHeader;
-    const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelCluster(metadata, descriptor, localGroupId, localVoxelClusterIndex, pageEntry, pageHeader);
+    GroupPageMapEntry pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
+    CLodVoxelPageHeader pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
+    if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
+        pageHeader.version != CLOD_VOXEL_PAGE_VERSION ||
+        pageLocalClusterIndex >= pageHeader.clusterCount)
+    {
+        if (GI == 0u)
+        {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
+        }
+        return;
+    }
+
+    const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelClusterFromPage(
+        pageEntry.slabDescriptorIndex,
+        pageEntry.slabByteOffset,
+        pageHeader.clusterRecordsOffset,
+        pageLocalClusterIndex);
     if (voxelCluster.cubeCount == 0u || voxelCluster.cubeCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
     {
         if (GI == 0u)
@@ -788,7 +807,7 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         return;
     }
 
-    const float voxelWidth = descriptor.aabbMinAndVoxelWidth.w;
+    const float voxelWidth = voxelCluster.aabbMinAndVoxelWidth.w;
     if (voxelWidth <= 0.0f)
     {
         if (GI == 0u)
@@ -827,7 +846,7 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const float2 targetDimsInv = rcp(max(float2(targetDims), float2(1.0f, 1.0f)));
 
     VoxelRasterVoxelSetup voxelSetup;
-    voxelSetup.aabbMin = descriptor.aabbMinAndVoxelWidth.xyz;
+    voxelSetup.aabbMin = voxelCluster.aabbMinAndVoxelWidth.xyz;
     voxelSetup.cubeObjectWidth = voxelWidth * 4.0f;
     voxelSetup.invVoxelWidth = rcp(voxelWidth);
 

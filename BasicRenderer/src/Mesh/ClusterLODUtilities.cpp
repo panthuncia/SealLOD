@@ -38,7 +38,7 @@ namespace
 	constexpr uint32_t CLOD_COMPRESSED_MESHLET_VERTEX_INDICES = 1u << 1;
 	constexpr uint32_t CLOD_COMPRESSED_NORMALS = 1u << 2;
 	constexpr uint32_t CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u; // VXCL
-	constexpr uint32_t CLOD_VOXEL_PAGE_VERSION = 10u;
+	constexpr uint32_t CLOD_VOXEL_PAGE_VERSION = 11u;
 	constexpr uint32_t CLOD_VOXEL_PAGE_HEADER_SIZE = 64u;
 	constexpr uint32_t CLOD_STREAMING_PAGE_SIZE_BYTES = 256u * 1024u;
 	constexpr uint32_t CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE = 64u;
@@ -124,7 +124,6 @@ namespace
 	}
 
 	std::vector<std::vector<std::byte>> BuildVoxelGroupPageBlobs(
-		const CLodVoxelGroupDescriptor& groupDescriptor,
 		std::span<const ClusterLODGroupSegment> pageSegments,
 		std::span<const CLodVoxelClusterRecord> clusterRecords,
 		std::span<const CLodVoxelCubeRecord> cubeRecords,
@@ -138,8 +137,7 @@ namespace
 		}
 
 		auto align4 = [](size_t value) -> size_t { return (value + 3u) & ~size_t(3); };
-		const uint32_t groupDescriptorOffset = CLOD_VOXEL_PAGE_HEADER_SIZE;
-		const uint32_t clusterRecordOffset = static_cast<uint32_t>(align4(static_cast<size_t>(groupDescriptorOffset) + sizeof(CLodVoxelGroupDescriptor)));
+		const uint32_t clusterRecordOffset = CLOD_VOXEL_PAGE_HEADER_SIZE;
 
 		pageBlobs.reserve(pageSegments.size());
 		uint32_t runningFirstClusterInGroup = 0u;
@@ -189,7 +187,7 @@ namespace
 				pageClusterCount,
 				firstCubeInGroup,
 				pageCubeCount,
-				groupDescriptorOffset,
+				0u,
 				0u,
 				0u,
 				clusterRecordOffset,
@@ -201,13 +199,6 @@ namespace
 				static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
 			};
 			std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
-
-			CLodVoxelGroupDescriptor pageDescriptor = groupDescriptor;
-			pageDescriptor.firstCluster = 0u;
-			pageDescriptor.clusterCount = static_cast<uint32_t>(clusterRecords.size());
-			pageDescriptor.firstCube = 0u;
-			pageDescriptor.cubeCount = static_cast<uint32_t>(cubeRecords.size());
-			StorePod(blob, groupDescriptorOffset, pageDescriptor);
 
 			for (uint32_t clusterIndex = 0; clusterIndex < pageClusterCount; ++clusterIndex)
 			{
@@ -247,7 +238,7 @@ namespace
 
 	uint32_t ComputeVoxelPageSizeBytes(uint32_t clusterCount, uint32_t cubeCount)
 	{
-		constexpr uint32_t fixedBytes = CLOD_VOXEL_PAGE_HEADER_SIZE + static_cast<uint32_t>(sizeof(CLodVoxelGroupDescriptor));
+		constexpr uint32_t fixedBytes = CLOD_VOXEL_PAGE_HEADER_SIZE;
 		return fixedBytes +
 			clusterCount * static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)) +
 			cubeCount * (static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)) +
@@ -263,7 +254,7 @@ namespace
 		outSegmentBounds.clear();
 		if (packed.clusterRecords.empty())
 		{
-			packed.descriptor.clusterCount = 0u;
+			packed.metadata.clusterCount = 0u;
 			return;
 		}
 
@@ -356,8 +347,8 @@ namespace
 		flushPage();
 
 		packed.clusterRecords = std::move(pageClusterRecords);
-		packed.descriptor.clusterCount = static_cast<uint32_t>(packed.clusterRecords.size());
-		packed.descriptor.cubeCount = static_cast<uint32_t>(packed.cubeRecords.size());
+		packed.metadata.clusterCount = static_cast<uint32_t>(packed.clusterRecords.size());
+		packed.metadata.cubeCount = static_cast<uint32_t>(packed.cubeRecords.size());
 		for (uint32_t pageIndex = 0; pageIndex < static_cast<uint32_t>(outSegments.size()); ++pageIndex)
 		{
 			outSegments[pageIndex].pageIndex = pageIndex;
@@ -1995,7 +1986,7 @@ namespace
 		std::vector<VoxelGroupPayload> voxelCarryPayloads;
 	};
 
-	struct TriangleMeshPageSegmentRef
+	struct PagePackingSegmentRef
 	{
 		uint32_t groupIndex = 0;
 		uint32_t segmentIndex = 0;
@@ -2003,6 +1994,8 @@ namespace
 		uint32_t firstMeshletInPage = 0;
 		uint32_t meshletCount = 0;
 	};
+
+	using TriangleMeshPageSegmentRef = PagePackingSegmentRef;
 
 	struct TriangleMeshPageBuildTotals
 	{
@@ -2015,6 +2008,32 @@ namespace
 		uint32_t totalColorWords = 0;
 		uint32_t totalBoneIndexCount = 0;
 		uint32_t totalTriangleBytes = 0;
+	};
+
+	struct VoxelMeshPageBuildTotals
+	{
+		uint32_t clusterCount = 0;
+		uint32_t cubeCount = 0;
+	};
+
+	struct VoxelPageHeaderFields
+	{
+		uint32_t magic = 0;
+		uint32_t version = 0;
+		uint32_t firstCluster = 0;
+		uint32_t clusterCount = 0;
+		uint32_t firstCube = 0;
+		uint32_t cubeCount = 0;
+		uint32_t reservedPage0 = 0;
+		uint32_t reserved0 = 0;
+		uint32_t reserved1 = 0;
+		uint32_t clusterRecordsOffset = 0;
+		uint32_t cubeRecordsOffset = 0;
+		uint32_t attributeSamplesOffset = 0;
+		uint32_t attributeSamplesPerCube = 0;
+		uint32_t clusterRecordStride = 0;
+		uint32_t cubeRecordStride = 0;
+		uint32_t attributeSampleStride = 0;
 	};
 
 	template<typename T>
@@ -2075,6 +2094,74 @@ namespace
 			outHeader.descriptorOffset != 0u &&
 			outHeader.positionBitstreamOffset != 0u &&
 			outHeader.triangleStreamOffset != 0u;
+	}
+
+	bool ReadVoxelPageHeader(const std::vector<std::byte>& blob, VoxelPageHeaderFields& outHeader)
+	{
+		if (blob.size() < CLOD_VOXEL_PAGE_HEADER_SIZE || !IsVoxelPageBlob(blob))
+		{
+			return false;
+		}
+
+		std::array<uint32_t, 16> words{};
+		std::memcpy(words.data(), blob.data(), words.size() * sizeof(uint32_t));
+		outHeader.magic = words[0];
+		outHeader.version = words[1];
+		outHeader.firstCluster = words[2];
+		outHeader.clusterCount = words[3];
+		outHeader.firstCube = words[4];
+		outHeader.cubeCount = words[5];
+		outHeader.reservedPage0 = words[6];
+		outHeader.reserved0 = words[7];
+		outHeader.reserved1 = words[8];
+		outHeader.clusterRecordsOffset = words[9];
+		outHeader.cubeRecordsOffset = words[10];
+		outHeader.attributeSamplesOffset = words[11];
+		outHeader.attributeSamplesPerCube = words[12];
+		outHeader.clusterRecordStride = words[13];
+		outHeader.cubeRecordStride = words[14];
+		outHeader.attributeSampleStride = words[15];
+		return outHeader.magic == CLOD_VOXEL_PAGE_MAGIC &&
+			outHeader.version == CLOD_VOXEL_PAGE_VERSION &&
+			outHeader.clusterRecordsOffset != 0u &&
+			outHeader.cubeRecordsOffset != 0u &&
+			outHeader.attributeSamplesOffset != 0u &&
+			outHeader.attributeSamplesPerCube == CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE &&
+			outHeader.clusterRecordStride == sizeof(CLodVoxelClusterRecord) &&
+			outHeader.cubeRecordStride == sizeof(CLodVoxelCubeRecord) &&
+			outHeader.attributeSampleStride == sizeof(CLodVoxelAttributeSample);
+	}
+
+	bool ReadVoxelClusterRecord(
+		const std::vector<std::byte>& blob,
+		const VoxelPageHeaderFields& header,
+		uint32_t clusterIndex,
+		CLodVoxelClusterRecord& outRecord)
+	{
+		if (clusterIndex >= header.clusterCount)
+		{
+			return false;
+		}
+		return ReadPodAt(
+			blob,
+			static_cast<size_t>(header.clusterRecordsOffset) + static_cast<size_t>(clusterIndex) * header.clusterRecordStride,
+			outRecord);
+	}
+
+	bool ReadVoxelCubeRecord(
+		const std::vector<std::byte>& blob,
+		const VoxelPageHeaderFields& header,
+		uint32_t cubeIndex,
+		CLodVoxelCubeRecord& outRecord)
+	{
+		if (cubeIndex >= header.cubeCount)
+		{
+			return false;
+		}
+		return ReadPodAt(
+			blob,
+			static_cast<size_t>(header.cubeRecordsOffset) + static_cast<size_t>(cubeIndex) * header.cubeRecordStride,
+			outRecord);
 	}
 
 	bool ReadTriangleMeshletDescriptor(
@@ -2463,77 +2550,206 @@ namespace
 		return blob;
 	}
 
-	void FinalizeMeshWidePagePacking(
-		ClusterLODBuildState& state,
-		std::vector<std::vector<std::byte>>& outMeshPageBlobs,
-		std::vector<uint32_t>& outGroupPageReferences,
-		std::vector<uint32_t>& outGroupPageReferenceOffsets,
-		uint32_t& outTrianglePageCount,
-		uint32_t& outVoxelPageBase,
-		uint32_t& outVoxelPageCount)
+	VoxelMeshPageBuildTotals ComputeVoxelMeshPageTotals(
+		const ClusterLODBuildState& state,
+		std::span<const PagePackingSegmentRef> segments)
 	{
-		outMeshPageBlobs.clear();
-		outGroupPageReferences.clear();
-		outGroupPageReferenceOffsets.clear();
-		outTrianglePageCount = 0u;
-		outVoxelPageBase = 0u;
-		outVoxelPageCount = 0u;
-
-		std::vector<TriangleMeshPageSegmentRef> currentTrianglePage;
-		uint32_t currentAttributeMask = 0u;
-		uint32_t currentUvSetCount = 0u;
-		std::vector<std::vector<uint32_t>> groupReferencedPages(state.groups.size());
-
-		auto flushTrianglePage = [&]()
+		VoxelMeshPageBuildTotals totals{};
+		for (const PagePackingSegmentRef& segment : segments)
 		{
-			if (currentTrianglePage.empty())
+			if (segment.groupIndex >= state.groupPageBlobs.size() ||
+				segment.sourcePageIndex >= state.groupPageBlobs[segment.groupIndex].size())
+			{
+				continue;
+			}
+
+			const std::vector<std::byte>& sourceBlob = state.groupPageBlobs[segment.groupIndex][segment.sourcePageIndex];
+			VoxelPageHeaderFields sourceHeader{};
+			if (!ReadVoxelPageHeader(sourceBlob, sourceHeader) ||
+				segment.firstMeshletInPage + segment.meshletCount > sourceHeader.clusterCount)
+			{
+				continue;
+			}
+
+			for (uint32_t localCluster = 0; localCluster < segment.meshletCount; ++localCluster)
+			{
+				CLodVoxelClusterRecord cluster{};
+				if (!ReadVoxelClusterRecord(sourceBlob, sourceHeader, segment.firstMeshletInPage + localCluster, cluster))
+				{
+					continue;
+				}
+				totals.clusterCount++;
+				totals.cubeCount += cluster.cubeCount;
+			}
+		}
+		return totals;
+	}
+
+	std::vector<std::byte> BuildPackedVoxelMeshPageBlob(
+		const ClusterLODBuildState& state,
+		std::span<const PagePackingSegmentRef> segments)
+	{
+		auto align4 = [](size_t value) -> size_t { return (value + 3u) & ~size_t(3); };
+		const VoxelMeshPageBuildTotals totals = ComputeVoxelMeshPageTotals(state, segments);
+		if (totals.clusterCount == 0u || totals.cubeCount == 0u)
+		{
+			return {};
+		}
+
+		const uint32_t clusterRecordOffset = CLOD_VOXEL_PAGE_HEADER_SIZE;
+		const uint32_t cubeRecordOffset = static_cast<uint32_t>(align4(
+			static_cast<size_t>(clusterRecordOffset) +
+			static_cast<size_t>(totals.clusterCount) * sizeof(CLodVoxelClusterRecord)));
+		const uint32_t attributeOffset = cubeRecordOffset + totals.cubeCount * static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord));
+		const size_t pageSize = static_cast<size_t>(attributeOffset) +
+			static_cast<size_t>(totals.cubeCount) * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE * sizeof(CLodVoxelAttributeSample);
+		if (pageSize > CLOD_STREAMING_PAGE_SIZE_BYTES)
+		{
+			return {};
+		}
+
+		std::vector<std::byte> blob(pageSize, std::byte{ 0 });
+		const std::array<uint32_t, 16> header = {
+			CLOD_VOXEL_PAGE_MAGIC,
+			CLOD_VOXEL_PAGE_VERSION,
+			0u,
+			totals.clusterCount,
+			0u,
+			totals.cubeCount,
+			0u,
+			0u,
+			0u,
+			clusterRecordOffset,
+			cubeRecordOffset,
+			attributeOffset,
+			CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE,
+			static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)),
+			static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)),
+			static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
+		};
+		std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
+
+		uint32_t outputClusterIndex = 0u;
+		uint32_t outputCubeIndex = 0u;
+		for (const PagePackingSegmentRef& segment : segments)
+		{
+			if (segment.groupIndex >= state.groupPageBlobs.size() ||
+				segment.sourcePageIndex >= state.groupPageBlobs[segment.groupIndex].size())
+			{
+				continue;
+			}
+
+			const std::vector<std::byte>& sourceBlob = state.groupPageBlobs[segment.groupIndex][segment.sourcePageIndex];
+			VoxelPageHeaderFields sourceHeader{};
+			if (!ReadVoxelPageHeader(sourceBlob, sourceHeader) ||
+				segment.firstMeshletInPage + segment.meshletCount > sourceHeader.clusterCount)
+			{
+				continue;
+			}
+
+			for (uint32_t localCluster = 0; localCluster < segment.meshletCount; ++localCluster)
+			{
+				CLodVoxelClusterRecord sourceCluster{};
+				if (!ReadVoxelClusterRecord(sourceBlob, sourceHeader, segment.firstMeshletInPage + localCluster, sourceCluster))
+				{
+					continue;
+				}
+
+				const uint32_t outputFirstCube = outputCubeIndex;
+				CLodVoxelClusterRecord outputCluster = sourceCluster;
+				outputCluster.firstCube = outputFirstCube;
+				StorePod(blob, clusterRecordOffset + outputClusterIndex * sizeof(CLodVoxelClusterRecord), outputCluster);
+				outputClusterIndex++;
+
+				for (uint32_t cubeOffset = 0; cubeOffset < sourceCluster.cubeCount; ++cubeOffset)
+				{
+					CLodVoxelCubeRecord sourceCube{};
+					if (!ReadVoxelCubeRecord(sourceBlob, sourceHeader, sourceCluster.firstCube + cubeOffset, sourceCube))
+					{
+						continue;
+					}
+
+					const uint32_t outputFirstAttribute = outputCubeIndex * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE;
+					CLodVoxelCubeRecord outputCube = sourceCube;
+					outputCube.firstAttribute = outputFirstAttribute;
+					StorePod(blob, cubeRecordOffset + outputCubeIndex * sizeof(CLodVoxelCubeRecord), outputCube);
+
+					const size_t sourceAttributeOffset =
+						static_cast<size_t>(sourceHeader.attributeSamplesOffset) +
+						static_cast<size_t>(sourceCube.firstAttribute) * sourceHeader.attributeSampleStride;
+					const size_t destAttributeOffset =
+						static_cast<size_t>(attributeOffset) +
+						static_cast<size_t>(outputFirstAttribute) * sizeof(CLodVoxelAttributeSample);
+					const size_t attributeBytes =
+						static_cast<size_t>(CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE) * sizeof(CLodVoxelAttributeSample);
+					if (sourceAttributeOffset + attributeBytes <= sourceBlob.size() &&
+						destAttributeOffset + attributeBytes <= blob.size())
+					{
+						std::memcpy(blob.data() + destAttributeOffset, sourceBlob.data() + sourceAttributeOffset, attributeBytes);
+					}
+
+					outputCubeIndex++;
+				}
+			}
+		}
+
+		return blob;
+	}
+
+	template <class PageTraits, class ReadTraitsFn, class MergeTraitsFn, class ComputeSizeFn, class BuildPageFn>
+	void FinalizeRepresentationPagePacking(
+		ClusterLODBuildState& state,
+		std::span<const uint32_t> groupOrder,
+		bool packVoxelGroups,
+		std::vector<std::vector<std::byte>>& outMeshPageBlobs,
+		std::vector<std::vector<uint32_t>>& groupReferencedPages,
+		ReadTraitsFn readTraits,
+		MergeTraitsFn mergeTraits,
+		ComputeSizeFn computeSize,
+		BuildPageFn buildPage)
+	{
+		std::vector<PagePackingSegmentRef> currentPage;
+		PageTraits currentTraits{};
+
+		auto flushPage = [&]()
+		{
+			if (currentPage.empty())
 			{
 				return;
 			}
 
-			std::vector<std::byte> pageBlob = BuildPackedTriangleMeshPageBlob(
+			std::vector<std::byte> pageBlob = buildPage(
 				state,
-				std::span<const TriangleMeshPageSegmentRef>(currentTrianglePage.data(), currentTrianglePage.size()),
-				currentAttributeMask,
-				currentUvSetCount);
+				std::span<const PagePackingSegmentRef>(currentPage.data(), currentPage.size()),
+				currentTraits);
 			if (pageBlob.empty())
 			{
-				currentTrianglePage.clear();
-				currentAttributeMask = 0u;
-				currentUvSetCount = 0u;
+				currentPage.clear();
+				currentTraits = {};
 				return;
 			}
 
 			const uint32_t meshPageIndex = static_cast<uint32_t>(outMeshPageBlobs.size());
 			uint32_t pageLocalMeshlet = 0u;
-			for (const TriangleMeshPageSegmentRef& segment : currentTrianglePage)
+			for (const PagePackingSegmentRef& segment : currentPage)
 			{
 				if (segment.segmentIndex < state.segments.size())
 				{
 					ClusterLODGroupSegment& outSegment = state.segments[segment.segmentIndex];
 					outSegment.pageIndex = meshPageIndex;
 					outSegment.firstMeshletInPage = pageLocalMeshlet;
-					groupReferencedPages[segment.groupIndex].push_back(meshPageIndex);
+					if (segment.groupIndex < groupReferencedPages.size())
+					{
+						groupReferencedPages[segment.groupIndex].push_back(meshPageIndex);
+					}
 				}
 				pageLocalMeshlet += segment.meshletCount;
 			}
 
 			outMeshPageBlobs.push_back(std::move(pageBlob));
-			currentTrianglePage.clear();
-			currentAttributeMask = 0u;
-			currentUvSetCount = 0u;
+			currentPage.clear();
+			currentTraits = {};
 		};
-
-		std::vector<uint32_t> groupOrder(state.groups.size());
-		std::iota(groupOrder.begin(), groupOrder.end(), 0u);
-		std::stable_sort(groupOrder.begin(), groupOrder.end(), [&](uint32_t a, uint32_t b)
-		{
-			const ClusterLODGroup& groupA = state.groups[a];
-			const ClusterLODGroup& groupB = state.groups[b];
-			if (groupA.depth != groupB.depth) return groupA.depth < groupB.depth;
-			if (groupA.parentGroupId != groupB.parentGroupId) return groupA.parentGroupId < groupB.parentGroupId;
-			return a < b;
-		});
 
 		for (uint32_t groupIndex : groupOrder)
 		{
@@ -2542,7 +2758,8 @@ namespace
 				continue;
 			}
 			const ClusterLODGroup& group = state.groups[groupIndex];
-			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
+			const bool isVoxelGroup = (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
+			if (isVoxelGroup != packVoxelGroups)
 			{
 				continue;
 			}
@@ -2561,37 +2778,118 @@ namespace
 				}
 
 				const std::vector<std::byte>& sourceBlob = state.groupPageBlobs[groupIndex][segment.pageIndex];
-				CLodPageHeader sourceHeader{};
-				if (!ReadTrianglePageHeader(sourceBlob, sourceHeader))
+				PageTraits sourceTraits{};
+				if (!readTraits(sourceBlob, sourceTraits))
 				{
 					continue;
 				}
 
-				TriangleMeshPageSegmentRef candidate{};
+				PagePackingSegmentRef candidate{};
 				candidate.groupIndex = groupIndex;
 				candidate.segmentIndex = segmentIndex;
 				candidate.sourcePageIndex = segment.pageIndex;
 				candidate.firstMeshletInPage = segment.firstMeshletInPage;
 				candidate.meshletCount = segment.meshletCount;
 
-				const uint32_t candidateMask = currentTrianglePage.empty()
-					? sourceHeader.attributeMask
-					: (currentAttributeMask | sourceHeader.attributeMask);
-				const uint32_t candidateUvSetCount = currentTrianglePage.empty()
-					? sourceHeader.uvSetCount
-					: std::max(currentUvSetCount, sourceHeader.uvSetCount);
-
-				std::vector<TriangleMeshPageSegmentRef> candidatePage = currentTrianglePage;
+				std::vector<PagePackingSegmentRef> candidatePage = currentPage;
 				candidatePage.push_back(candidate);
-				const TriangleMeshPageBuildTotals candidateTotals = ComputeTriangleMeshPageTotals(
+				PageTraits candidateTraits = currentPage.empty() ? sourceTraits : currentTraits;
+				if (!currentPage.empty())
+				{
+					mergeTraits(candidateTraits, sourceTraits);
+				}
+
+				const size_t candidateSize = computeSize(
 					state,
-					std::span<const TriangleMeshPageSegmentRef>(candidatePage.data(), candidatePage.size()),
-					candidateMask,
-					candidateUvSetCount);
-				const size_t candidateSize = ComputePageBlobSize(
-					candidateMask,
+					std::span<const PagePackingSegmentRef>(candidatePage.data(), candidatePage.size()),
+					candidateTraits);
+				if (candidateSize > CLOD_STREAMING_PAGE_SIZE_BYTES && !currentPage.empty())
+				{
+					flushPage();
+					candidatePage.clear();
+					candidatePage.push_back(candidate);
+					candidateTraits = sourceTraits;
+				}
+
+				currentPage.push_back(candidate);
+				currentTraits = currentPage.size() == 1u ? sourceTraits : currentTraits;
+				if (currentPage.size() != 1u)
+				{
+					mergeTraits(currentTraits, sourceTraits);
+				}
+			}
+		}
+
+		flushPage();
+	}
+
+	void FinalizeMeshWidePagePacking(
+		ClusterLODBuildState& state,
+		std::vector<std::vector<std::byte>>& outMeshPageBlobs,
+		std::vector<uint32_t>& outGroupPageReferences,
+		std::vector<uint32_t>& outGroupPageReferenceOffsets,
+		uint32_t& outTrianglePageCount,
+		uint32_t& outVoxelPageBase,
+		uint32_t& outVoxelPageCount)
+	{
+		outMeshPageBlobs.clear();
+		outGroupPageReferences.clear();
+		outGroupPageReferenceOffsets.clear();
+		outTrianglePageCount = 0u;
+		outVoxelPageBase = 0u;
+		outVoxelPageCount = 0u;
+
+		std::vector<std::vector<uint32_t>> groupReferencedPages(state.groups.size());
+
+		std::vector<uint32_t> groupOrder(state.groups.size());
+		std::iota(groupOrder.begin(), groupOrder.end(), 0u);
+		std::stable_sort(groupOrder.begin(), groupOrder.end(), [&](uint32_t a, uint32_t b)
+		{
+			const ClusterLODGroup& groupA = state.groups[a];
+			const ClusterLODGroup& groupB = state.groups[b];
+			if (groupA.depth != groupB.depth) return groupA.depth < groupB.depth;
+			if (groupA.parentGroupId != groupB.parentGroupId) return groupA.parentGroupId < groupB.parentGroupId;
+			return a < b;
+		});
+
+		struct TrianglePageTraits
+		{
+			uint32_t attributeMask = 0u;
+			uint32_t uvSetCount = 0u;
+		};
+		FinalizeRepresentationPagePacking<TrianglePageTraits>(
+			state,
+			std::span<const uint32_t>(groupOrder.data(), groupOrder.size()),
+			false,
+			outMeshPageBlobs,
+			groupReferencedPages,
+			[](const std::vector<std::byte>& sourceBlob, TrianglePageTraits& outTraits) -> bool
+			{
+				CLodPageHeader sourceHeader{};
+				if (!ReadTrianglePageHeader(sourceBlob, sourceHeader))
+				{
+					return false;
+				}
+				outTraits.attributeMask = sourceHeader.attributeMask;
+				outTraits.uvSetCount = sourceHeader.uvSetCount;
+				return true;
+			},
+			[](TrianglePageTraits& target, const TrianglePageTraits& source)
+			{
+				target.attributeMask |= source.attributeMask;
+				target.uvSetCount = std::max(target.uvSetCount, source.uvSetCount);
+			},
+			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const TrianglePageTraits& traits) -> size_t
+			{
+				const TriangleMeshPageBuildTotals candidateTotals = ComputeTriangleMeshPageTotals(
+					packState,
+					segments,
+					traits.attributeMask,
+					traits.uvSetCount);
+				return ComputePageBlobSize(
+					traits.attributeMask,
 					candidateTotals.meshletCount,
-					candidateUvSetCount,
+					traits.uvSetCount,
 					candidateTotals.totalPositionBytes,
 					candidateTotals.totalUvBitsPerSet,
 					candidateTotals.totalVertexCount,
@@ -2600,56 +2898,45 @@ namespace
 					candidateTotals.totalColorWords,
 					candidateTotals.totalBoneIndexCount,
 					candidateTotals.totalTriangleBytes);
+			},
+			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const TrianglePageTraits& traits) -> std::vector<std::byte>
+			{
+				return BuildPackedTriangleMeshPageBlob(packState, segments, traits.attributeMask, traits.uvSetCount);
+			});
 
-				if (candidateSize > CLOD_PAGE_SIZE && !currentTrianglePage.empty())
-				{
-					flushTrianglePage();
-				}
-
-				currentTrianglePage.push_back(candidate);
-				currentAttributeMask = currentTrianglePage.size() == 1u
-					? sourceHeader.attributeMask
-					: (currentAttributeMask | sourceHeader.attributeMask);
-				currentUvSetCount = currentTrianglePage.size() == 1u
-					? sourceHeader.uvSetCount
-					: std::max(currentUvSetCount, sourceHeader.uvSetCount);
-			}
-		}
-
-		flushTrianglePage();
 		outTrianglePageCount = static_cast<uint32_t>(outMeshPageBlobs.size());
 		outVoxelPageBase = outTrianglePageCount;
 
-		for (uint32_t groupIndex : groupOrder)
+		struct VoxelPageTraits
 		{
-			if (groupIndex >= state.groups.size())
+			uint32_t unused = 0u;
+		};
+		FinalizeRepresentationPagePacking<VoxelPageTraits>(
+			state,
+			std::span<const uint32_t>(groupOrder.data(), groupOrder.size()),
+			true,
+			outMeshPageBlobs,
+			groupReferencedPages,
+			[](const std::vector<std::byte>& sourceBlob, VoxelPageTraits& outTraits) -> bool
 			{
-				continue;
-			}
-			ClusterLODGroup& group = state.groups[groupIndex];
-			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
-				groupIndex >= state.groupPageBlobs.size())
+				(void)outTraits;
+				VoxelPageHeaderFields sourceHeader{};
+				return ReadVoxelPageHeader(sourceBlob, sourceHeader);
+			},
+			[](VoxelPageTraits& target, const VoxelPageTraits& source)
 			{
-				continue;
-			}
-
-			const uint32_t voxelGroupPageBase = static_cast<uint32_t>(outMeshPageBlobs.size());
-			for (uint32_t sourcePageIndex = 0; sourcePageIndex < static_cast<uint32_t>(state.groupPageBlobs[groupIndex].size()); ++sourcePageIndex)
+				(void)target;
+				(void)source;
+			},
+			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const VoxelPageTraits&) -> size_t
 			{
-				const uint32_t meshPageIndex = static_cast<uint32_t>(outMeshPageBlobs.size());
-				outMeshPageBlobs.push_back(state.groupPageBlobs[groupIndex][sourcePageIndex]);
-				groupReferencedPages[groupIndex].push_back(meshPageIndex);
-			}
-
-			const uint32_t segEnd = std::min<uint32_t>(
-				group.firstSegment + group.segmentCount,
-				static_cast<uint32_t>(state.segments.size()));
-			for (uint32_t segmentIndex = group.firstSegment; segmentIndex < segEnd; ++segmentIndex)
+				const VoxelMeshPageBuildTotals totals = ComputeVoxelMeshPageTotals(packState, segments);
+				return ComputeVoxelPageSizeBytes(totals.clusterCount, totals.cubeCount);
+			},
+			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const VoxelPageTraits&) -> std::vector<std::byte>
 			{
-				ClusterLODGroupSegment& segment = state.segments[segmentIndex];
-				segment.pageIndex += voxelGroupPageBase;
-			}
-		}
+				return BuildPackedVoxelMeshPageBlob(packState, segments);
+			});
 
 		outVoxelPageCount = static_cast<uint32_t>(outMeshPageBlobs.size()) - outVoxelPageBase;
 
@@ -3574,18 +3861,18 @@ namespace
 
 	uint32_t GetVoxelPackedCubeCountForGroup(const ClusterLODBuildState& state, uint32_t groupIndex)
 	{
-		if (groupIndex >= state.voxelGroupMapping.groupToPackedDescriptorIndex.size())
+		if (groupIndex >= state.voxelGroupMapping.groupToPackedMetadataIndex.size())
 		{
 			return 0u;
 		}
 
-		const int32_t descriptorIndex = state.voxelGroupMapping.groupToPackedDescriptorIndex[groupIndex];
-		if (descriptorIndex < 0 || static_cast<size_t>(descriptorIndex) >= state.voxelGroupMapping.packedGroupDescriptors.size())
+		const int32_t metadataIndex = state.voxelGroupMapping.groupToPackedMetadataIndex[groupIndex];
+		if (metadataIndex < 0 || static_cast<size_t>(metadataIndex) >= state.voxelGroupMapping.packedGroupMetadata.size())
 		{
 			return 0u;
 		}
 
-		return state.voxelGroupMapping.packedGroupDescriptors[static_cast<size_t>(descriptorIndex)].cubeCount;
+		return state.voxelGroupMapping.packedGroupMetadata[static_cast<size_t>(metadataIndex)].cubeCount;
 	}
 
 	uint32_t CountGroupMeshTriangles(const ClusterLODBuildState& state, uint32_t groupIndex)
@@ -3641,34 +3928,34 @@ namespace
 
 	uint32_t GetVoxelPackedClusterCountForGroup(const ClusterLODBuildState& state, uint32_t groupIndex)
 	{
-		if (groupIndex >= state.voxelGroupMapping.groupToPackedDescriptorIndex.size())
+		if (groupIndex >= state.voxelGroupMapping.groupToPackedMetadataIndex.size())
 		{
 			return 0u;
 		}
 
-		const int32_t descriptorIndex = state.voxelGroupMapping.groupToPackedDescriptorIndex[groupIndex];
-		if (descriptorIndex < 0 || static_cast<size_t>(descriptorIndex) >= state.voxelGroupMapping.packedGroupDescriptors.size())
+		const int32_t metadataIndex = state.voxelGroupMapping.groupToPackedMetadataIndex[groupIndex];
+		if (metadataIndex < 0 || static_cast<size_t>(metadataIndex) >= state.voxelGroupMapping.packedGroupMetadata.size())
 		{
 			return 0u;
 		}
 
-		return state.voxelGroupMapping.packedGroupDescriptors[static_cast<size_t>(descriptorIndex)].clusterCount;
+		return state.voxelGroupMapping.packedGroupMetadata[static_cast<size_t>(metadataIndex)].clusterCount;
 	}
 
-	float GetVoxelDescriptorErrorForGroup(const ClusterLODBuildState& state, uint32_t groupIndex)
+	float GetVoxelMetadataErrorForGroup(const ClusterLODBuildState& state, uint32_t groupIndex)
 	{
-		if (groupIndex >= state.voxelGroupMapping.groupToPackedDescriptorIndex.size())
+		if (groupIndex >= state.voxelGroupMapping.groupToPackedMetadataIndex.size())
 		{
 			return 0.0f;
 		}
 
-		const int32_t descriptorIndex = state.voxelGroupMapping.groupToPackedDescriptorIndex[groupIndex];
-		if (descriptorIndex < 0 || static_cast<size_t>(descriptorIndex) >= state.voxelGroupMapping.packedGroupDescriptors.size())
+		const int32_t metadataIndex = state.voxelGroupMapping.groupToPackedMetadataIndex[groupIndex];
+		if (metadataIndex < 0 || static_cast<size_t>(metadataIndex) >= state.voxelGroupMapping.packedGroupMetadata.size())
 		{
 			return 0.0f;
 		}
 
-		return state.voxelGroupMapping.packedGroupDescriptors[static_cast<size_t>(descriptorIndex)].aabbMaxAndError.w;
+		return state.voxelGroupMapping.packedGroupMetadata[static_cast<size_t>(metadataIndex)].aabbMaxAndError.w;
 	}
 
 	float GetMaxSourceVoxelWidthForBuildInput(
@@ -3728,10 +4015,10 @@ namespace
 			return representationError;
 		}
 
-		const float descriptorError = GetVoxelDescriptorErrorForGroup(state, groupIndex);
-		if (std::isfinite(descriptorError) && descriptorError > 0.0f)
+		const float metadataError = GetVoxelMetadataErrorForGroup(state, groupIndex);
+		if (std::isfinite(metadataError) && metadataError > 0.0f)
 		{
-			return descriptorError;
+			return metadataError;
 		}
 
 		const float groupError = state.groups[groupIndex].bounds.error;
@@ -4140,7 +4427,7 @@ namespace
 		}
 
 		state.voxelGroupMapping.groupToPayloadIndex.assign(state.groups.size(), -1);
-		state.voxelGroupMapping.groupToPackedDescriptorIndex.assign(state.groups.size(), -1);
+		state.voxelGroupMapping.groupToPackedMetadataIndex.assign(state.groups.size(), -1);
 		state.voxelCarryPayloads.assign(state.groups.size(), {});
 
 		VoxelFallbackBuildStats stats{};
@@ -4281,7 +4568,7 @@ namespace
 
 			VoxelGroupPayload payload{};
 			const uint32_t payloadIndex = static_cast<uint32_t>(state.voxelGroupMapping.payloads.size());
-			const uint32_t descriptorIndex = static_cast<uint32_t>(state.voxelGroupMapping.packedGroupDescriptors.size());
+			const uint32_t metadataIndex = static_cast<uint32_t>(state.voxelGroupMapping.packedGroupMetadata.size());
 			const uint32_t firstCluster = static_cast<uint32_t>(state.voxelGroupMapping.packedClusterRecords.size());
 			const uint32_t firstCube = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
 			const uint32_t firstAttribute = static_cast<uint32_t>(state.voxelGroupMapping.packedAttributeSamples.size());
@@ -4322,7 +4609,7 @@ namespace
 				packInput.firstCube = firstCube;
 				packInput.firstAttribute = firstAttribute;
 				PackedVoxelGroupBuildResult result = PackVoxelGroupToCubes(packInput);
-				result.descriptor.firstCluster = firstCluster;
+				result.metadata.firstCluster = firstCluster;
 				BuildVoxelClustersFromCubes(result, CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
 				return result;
 			};
@@ -4575,14 +4862,13 @@ namespace
 			}
 
 			state.voxelGroupMapping.groupToPayloadIndex[groupIndex] = static_cast<int32_t>(payloadIndex);
-			state.voxelGroupMapping.groupToPackedDescriptorIndex[groupIndex] = static_cast<int32_t>(descriptorIndex);
+			state.voxelGroupMapping.groupToPackedMetadataIndex[groupIndex] = static_cast<int32_t>(metadataIndex);
 			std::vector<ClusterLODGroupSegment> voxelSegments;
 			std::vector<BoundingSphere> voxelSegmentBounds;
 			SplitVoxelClustersIntoPageSegments(packed, voxelSegments, voxelSegmentBounds);
 			state.voxelGroupMapping.payloads.push_back(std::move(payload));
-			state.voxelGroupMapping.packedGroupDescriptors.push_back(packed.descriptor);
+			state.voxelGroupMapping.packedGroupMetadata.push_back(packed.metadata);
 			std::vector<std::vector<std::byte>> voxelPageBlobs = BuildVoxelGroupPageBlobs(
-				packed.descriptor,
 				voxelSegments,
 				packed.clusterRecords,
 				packed.cubeRecords,
@@ -6049,7 +6335,6 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	std::vector<BoundingSphere> voxelSegmentBounds;
 	SplitVoxelClustersIntoPageSegments(packed, voxelSegments, voxelSegmentBounds);
 	std::vector<std::vector<std::byte>> voxelPageBlobs = BuildVoxelGroupPageBlobs(
-		packed.descriptor,
 		voxelSegments,
 		packed.clusterRecords,
 		packed.cubeRecords,
@@ -6090,9 +6375,9 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	state.groupPageBlobs.resize(1);
 	state.groupPageBlobs[0] = std::move(voxelPageBlobs);
 	state.voxelGroupMapping.groupToPayloadIndex = { 0 };
-	state.voxelGroupMapping.groupToPackedDescriptorIndex = { 0 };
+	state.voxelGroupMapping.groupToPackedMetadataIndex = { 0 };
 	state.voxelGroupMapping.payloads.push_back(payload);
-	state.voxelGroupMapping.packedGroupDescriptors.push_back(packed.descriptor);
+	state.voxelGroupMapping.packedGroupMetadata.push_back(packed.metadata);
 	state.voxelGroupMapping.packedClusterRecords = std::move(packed.clusterRecords);
 	state.voxelGroupMapping.packedCubeRecords = std::move(packed.cubeRecords);
 	state.voxelGroupMapping.packedAttributeSamples = std::move(packed.attributeSamples);
@@ -6292,7 +6577,6 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	std::vector<BoundingSphere> voxelSegmentBounds;
 	SplitVoxelClustersIntoPageSegments(packed, voxelSegments, voxelSegmentBounds);
 	std::vector<std::vector<std::byte>> voxelPageBlobs = BuildVoxelGroupPageBlobs(
-		packed.descriptor,
 		voxelSegments,
 		packed.clusterRecords,
 		packed.cubeRecords,
@@ -6333,9 +6617,9 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	state.groupPageBlobs.resize(1);
 	state.groupPageBlobs[0] = std::move(voxelPageBlobs);
 	state.voxelGroupMapping.groupToPayloadIndex = { 0 };
-	state.voxelGroupMapping.groupToPackedDescriptorIndex = { 0 };
+	state.voxelGroupMapping.groupToPackedMetadataIndex = { 0 };
 	state.voxelGroupMapping.payloads.push_back(std::move(voxelResult.renderPayload));
-	state.voxelGroupMapping.packedGroupDescriptors.push_back(packed.descriptor);
+	state.voxelGroupMapping.packedGroupMetadata.push_back(packed.metadata);
 	state.voxelGroupMapping.packedClusterRecords = std::move(packed.clusterRecords);
 	state.voxelGroupMapping.packedCubeRecords = std::move(packed.cubeRecords);
 	state.voxelGroupMapping.packedAttributeSamples = std::move(packed.attributeSamples);

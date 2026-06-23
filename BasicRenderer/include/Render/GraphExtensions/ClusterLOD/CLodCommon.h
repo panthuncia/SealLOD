@@ -282,10 +282,11 @@ struct CLodVoxelRasterWorkRecord
     uint32_t instanceIndex = 0u;
     uint32_t viewId = 0u;
     uint32_t localGroupId = 0u;
-    uint32_t localVoxelClusterIndex = 0u;
+    uint32_t localPageIndex = 0u;
+    uint32_t pageLocalClusterIndex = 0u;
 };
 
-static_assert(sizeof(CLodVoxelRasterWorkRecord) == 20u, "CLodVoxelRasterWorkRecord size must match HLSL");
+static_assert(sizeof(CLodVoxelRasterWorkRecord) == 24u, "CLodVoxelRasterWorkRecord size must match HLSL");
 
 struct CLodVoxelRasterDispatchCommand
 {

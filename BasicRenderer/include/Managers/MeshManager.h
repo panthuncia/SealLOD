@@ -206,6 +206,7 @@ public:
 	bool IsCLodStreamingDirectStorageEnabled() const { return m_clodStreamingDirectStorageEnabled.load(std::memory_order_acquire); }
 	bool HasPendingCLodDirectStorageLaunches() const;
 	bool HasPendingCLodDirectStorageUploads() const;
+	std::pair<std::size_t, std::size_t> GetPendingCLodDirectStorageCounts() const;
 	void CollectCLodDirectStorageCompletionWaits(std::vector<ExternalTimelinePoint>& outWaits) const;
 	bool LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeline, uint64_t waitValue);
 

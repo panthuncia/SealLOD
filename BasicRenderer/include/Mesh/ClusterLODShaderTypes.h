@@ -144,21 +144,6 @@ static constexpr uint32_t CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
 static constexpr uint32_t CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
 
-struct CLodVoxelGroupDescriptor
-{
-	DirectX::XMFLOAT4 aabbMinAndVoxelWidth = {}; // xyz=min, w=voxel width
-	DirectX::XMFLOAT4 aabbMaxAndError = {};      // xyz=max, w=accepted voxel error
-	uint32_t firstCluster = 0;
-	uint32_t clusterCount = 0;
-	uint32_t firstCube = 0;
-	uint32_t cubeCount = 0;
-	uint32_t resolution = 0;
-	uint32_t flags = 0;
-	uint32_t reserved0 = 0;
-	uint32_t reserved1 = 0;
-};
-static_assert(sizeof(CLodVoxelGroupDescriptor) == 64, "CLodVoxelGroupDescriptor must be 64 bytes");
-
 struct CLodVoxelClusterRecord
 {
 	uint32_t firstCube = 0;
@@ -166,8 +151,13 @@ struct CLodVoxelClusterRecord
 	int32_t refinedGroup = -1;
 	uint32_t flags = 0;
 	DirectX::XMFLOAT4 bounds = {};
+	DirectX::XMFLOAT4 aabbMinAndVoxelWidth = {}; // xyz=min, w=voxel width
+	uint32_t resolution = 0;
+	uint32_t reserved0 = 0;
+	uint32_t reserved1 = 0;
+	uint32_t reserved2 = 0;
 };
-static_assert(sizeof(CLodVoxelClusterRecord) == 32, "CLodVoxelClusterRecord must be 32 bytes");
+static_assert(sizeof(CLodVoxelClusterRecord) == 64, "CLodVoxelClusterRecord must be 64 bytes");
 
 struct CLodVoxelCubeRecord
 {

@@ -2250,8 +2250,43 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
 	// Wait until the GPU has completed commands up to this fence point.
 	auto device = DeviceManager::GetInstance().GetDevice();
 	auto completedValue = m_frameFence->GetCompletedValue();
-    if (completedValue < m_frameFenceValues[currentFrameIndex]) {
-        m_frameFence->HostWait(m_frameFenceValues[currentFrameIndex]);
+    const UINT64 targetValue = m_frameFenceValues[currentFrameIndex];
+    if (completedValue < targetValue) {
+        spdlog::info(
+            "Renderer::WaitForFrame waiting frameIndex={} target={} completed={}",
+            currentFrameIndex,
+            targetValue,
+            completedValue);
+        uint32_t waitTimeouts = 0u;
+        while (completedValue < targetValue) {
+            const rhi::Result waitResult = m_frameFence->HostWait(targetValue, 1000);
+            completedValue = m_frameFence->GetCompletedValue();
+            if (waitResult != rhi::Result::WaitTimeout) {
+                if (waitResult != rhi::Result::Ok) {
+                    spdlog::warn(
+                        "Renderer::WaitForFrame wait failed frameIndex={} target={} completed={} result={}",
+                        currentFrameIndex,
+                        targetValue,
+                        completedValue,
+                        rhi::ResultName(waitResult));
+                }
+                break;
+            }
+            ++waitTimeouts;
+            if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 60u) == 0u) {
+                spdlog::warn(
+                    "Renderer::WaitForFrame timed out frameIndex={} target={} completed={} waitTimeouts={}",
+                    currentFrameIndex,
+                    targetValue,
+                    completedValue,
+                    waitTimeouts);
+            }
+        }
+        spdlog::info(
+            "Renderer::WaitForFrame completed frameIndex={} target={} completed={}",
+            currentFrameIndex,
+            targetValue,
+            m_frameFence->GetCompletedValue());
     }
 }
 
@@ -2714,13 +2749,13 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::VoxelRootLeafRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped),
                 counter(CLodWorkGraphCounterIndex::VoxelRasterWorkGroups),
                 counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidCluster),
-                counter(CLodWorkGraphCounterIndex::VoxelRasterDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::VoxelRasterSegmentPageMisses),
                 counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidPackedCluster),
                 counter(CLodWorkGraphCounterIndex::VoxelRasterInvalidVoxelWidth),
                 counter(CLodWorkGraphCounterIndex::VoxelRasterProjectionRejected),
@@ -3265,11 +3300,27 @@ void Renderer::Render() {
 
 void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) {
     // Signal the fence
-    m_currentFrameFenceValue++;
-	commandQueue.Signal({ m_frameFence->GetHandle(), m_currentFrameFenceValue });
+    const UINT64 nextFrameFenceValue = m_currentFrameFenceValue + 1;
+	const rhi::Result signalResult = commandQueue.Signal({ m_frameFence->GetHandle(), nextFrameFenceValue });
+    if (signalResult != rhi::Result::Ok) {
+        spdlog::error(
+            "Renderer::SignalFence failed frameIndex={} target={} current={} completed={} result={}",
+            frameIndexToSignal,
+            nextFrameFenceValue,
+            m_currentFrameFenceValue,
+            m_frameFence ? m_frameFence->GetCompletedValue() : 0u,
+            rhi::ResultName(signalResult));
+        return;
+    }
+    m_currentFrameFenceValue = nextFrameFenceValue;
 
     // Store the fence value for the current frame
     m_frameFenceValues[frameIndexToSignal] = m_currentFrameFenceValue;
+    spdlog::debug(
+        "Renderer::SignalFence queued frameIndex={} target={} completed={}",
+        frameIndexToSignal,
+        m_currentFrameFenceValue,
+        m_frameFence ? m_frameFence->GetCompletedValue() : 0u);
 }
 
 void Renderer::AdvanceFrameIndex() {
@@ -3286,11 +3337,16 @@ void Renderer::StallPipeline() {
         WaitForFrame(i);
     }
     auto device = DeviceManager::GetInstance().GetDevice();
+    spdlog::info("Renderer::StallPipeline waiting for device idle");
     device.WaitIdle();
+    spdlog::info("Renderer::StallPipeline device idle complete");
 }
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
+    if (currentRenderGraph) {
+        currentRenderGraph->ShutdownExtensions();
+    }
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();

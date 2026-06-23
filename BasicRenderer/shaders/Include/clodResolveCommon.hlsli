@@ -1425,7 +1425,8 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
 
     const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
     const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
-    const uint localVoxelClusterIndex = CLodVisibleClusterVoxelClusterIndex(packedCluster);
+    const uint localPageIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint pageLocalClusterIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
     const PerObjectBuffer obj = LoadInstanceTransformForDraw(instanceIndex);
@@ -1433,15 +1434,29 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
-    CLodVoxelGroupDescriptor descriptor;
-    if (!CLodTryLoadVoxelDescriptorByClusterIndex(metadata, localGroupId, localVoxelClusterIndex, descriptor))
+    StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
+        localPageIndex < group.pageMapBase ||
+        localPageIndex >= group.pageMapBase + group.pageCount)
     {
         return false;
     }
 
-    GroupPageMapEntry pageEntry;
-    CLodVoxelPageHeader pageHeader;
-    const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelCluster(metadata, descriptor, localGroupId, localVoxelClusterIndex, pageEntry, pageHeader);
+    GroupPageMapEntry pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
+    CLodVoxelPageHeader pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
+    if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
+        pageHeader.version != CLOD_VOXEL_PAGE_VERSION ||
+        pageLocalClusterIndex >= pageHeader.clusterCount)
+    {
+        return false;
+    }
+
+    const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelClusterFromPage(
+        pageEntry.slabDescriptorIndex,
+        pageEntry.slabByteOffset,
+        pageHeader.clusterRecordsOffset,
+        pageLocalClusterIndex);
     const uint cubeLocalIndex = primID;
     if (cubeLocalIndex >= voxelCluster.cubeCount)
     {
@@ -1453,12 +1468,12 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
         pageHeader.cubeRecordsOffset,
         voxelCluster.firstCube + cubeLocalIndex);
     const uint3 cubeCoord = CLodDecodeVoxelCubeCoord(cube.cubeCoord);
-    const float voxelWidth = descriptor.aabbMinAndVoxelWidth.w;
+    const float voxelWidth = voxelCluster.aabbMinAndVoxelWidth.w;
     if (voxelWidth <= 0.0f)
     {
         return false;
     }
-    const float3 cubeMinObject = descriptor.aabbMinAndVoxelWidth.xyz + float3(cubeCoord) * (voxelWidth * 4.0f);
+    const float3 cubeMinObject = voxelCluster.aabbMinAndVoxelWidth.xyz + float3(cubeCoord) * (voxelWidth * 4.0f);
 
     float4x4 skinMatrix = IdentitySkinMatrix();
     float4x4 inverseSkinMatrix = IdentitySkinMatrix();
@@ -1528,7 +1543,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
         cube,
         cell,
         attributeSample.uv,
-        descriptor.resolution);
+        voxelCluster.resolution);
     const float pixelFootprint = CLodVoxelEstimatePixelFootprint(
         objectPosition,
         voxelWidth,
@@ -1542,7 +1557,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     sample.linearDepth = linearDepth;
     sample.clusterIndex = visibleClusterIndex;
     sample.meshletTriangleIndex = cubeLocalIndex;
-    sample.meshletIndex = localVoxelClusterIndex;
+    sample.meshletIndex = pageLocalClusterIndex;
     sample.geometryGroupIndex = localGroupId;
     sample.isVoxelPath = true;
     sample.positionWS = worldPosition;

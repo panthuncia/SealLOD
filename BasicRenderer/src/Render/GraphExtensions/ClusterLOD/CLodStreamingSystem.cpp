@@ -799,7 +799,6 @@ CLodStreamingSystem::CLodStreamingSystem() {
     m_usedGroupsBuffer->SetName("CLod Used Groups Buffer");
     tagBufferUsage(m_usedGroupsBuffer, "Cluster LOD streaming");
 
-#if 0
     m_sourceGroupMismatchCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     m_sourceGroupMismatchCounter->SetName("CLod Source Group Mismatch Counter");
     tagBufferUsage(m_sourceGroupMismatchCounter, "Cluster LOD diagnostics");
@@ -813,7 +812,6 @@ CLodStreamingSystem::CLodStreamingSystem() {
         false);
     m_sourceGroupMismatchDetails->SetName("CLod Source Group Mismatch Details");
     tagBufferUsage(m_sourceGroupMismatchDetails, "Cluster LOD diagnostics");
-#endif
 
     // Self-managed readback pipeline
     {
@@ -847,7 +845,6 @@ CLodStreamingSystem::CLodStreamingSystem() {
         slot.usedGroupsBufferStaging = Buffer::CreateShared(rhi::HeapType::Readback, usedGroupsBufferStagingBytes);
         slot.usedGroupsBufferStaging->SetName(("CLodReadbackUsedGroupsBuffer_" + std::to_string(i)).c_str());
         tagBufferUsage(slot.usedGroupsBufferStaging, "Cluster LOD streaming readback");
-#if 0
         const uint64_t sourceGroupMismatchCounterStagingBytes = sizeof(uint32_t);
         const uint64_t sourceGroupMismatchDetailsStagingBytes =
             static_cast<uint64_t>(CLodSourceGroupMismatchDetailCapacity) * sizeof(CLodSourceGroupMismatchDetail);
@@ -857,7 +854,6 @@ CLodStreamingSystem::CLodStreamingSystem() {
         slot.sourceGroupMismatchDetailsStaging = Buffer::CreateShared(rhi::HeapType::Readback, sourceGroupMismatchDetailsStagingBytes);
         slot.sourceGroupMismatchDetailsStaging->SetName(("CLodReadbackSourceGroupMismatchDetails_" + std::to_string(i)).c_str());
         tagBufferUsage(slot.sourceGroupMismatchDetailsStaging, "Cluster LOD diagnostics readback");
-#endif
     }
 
     // Start the background streaming worker thread.
@@ -865,12 +861,48 @@ CLodStreamingSystem::CLodStreamingSystem() {
 }
 
 CLodStreamingSystem::~CLodStreamingSystem() {
-    m_streamingWorkerQuit.store(true, std::memory_order_release);
+    Shutdown();
+    DestroyParallelSortResources();
+}
+
+void CLodStreamingSystem::Shutdown() {
+    const bool wasAlreadyQuitting = m_streamingWorkerQuit.exchange(true, std::memory_order_acq_rel);
+    if (!wasAlreadyQuitting && m_getMeshManager) {
+        if (MeshManager* meshManager = m_getMeshManager()) {
+            const auto [pendingLaunches, pendingUploads] = meshManager->GetPendingCLodDirectStorageCounts();
+            if (pendingLaunches != 0u || pendingUploads != 0u) {
+                std::vector<ExternalTimelinePoint> waits;
+                meshManager->CollectCLodDirectStorageCompletionWaits(waits);
+                spdlog::warn(
+                    "CLod streaming shutdown with pending DirectStorage work: launches={} uploads={} completionWaits={}",
+                    pendingLaunches,
+                    pendingUploads,
+                    waits.size());
+                for (std::size_t i = 0; i < waits.size(); ++i) {
+                    const auto handle = waits[i].timeline.GetHandle();
+                    spdlog::warn(
+                        "CLod streaming shutdown pending DirectStorage wait[{}]: timeline(idx={}, gen={}) value={} completed={}",
+                        i,
+                        handle.index,
+                        handle.generation,
+                        waits[i].value,
+                        waits[i].timeline.GetCompletedValue());
+                }
+            }
+        }
+    }
     m_streamingWorkerCV.notify_all();
     if (m_streamingWorkerThread.joinable()) {
         m_streamingWorkerThread.join();
     }
-    DestroyParallelSortResources();
+
+    if (!wasAlreadyQuitting) {
+        std::lock_guard lock(m_streamingWorkerMutex);
+        for (auto& slot : m_readbackStagingSlots) {
+            slot.inFlight = false;
+            slot.fenceValue = 0;
+        }
+    }
 }
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
@@ -951,7 +983,10 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_groupOwnedPages.clear();
     m_groupOwnedMeshPageKeys.clear();
     m_groupCommittedPageMaps.clear();
-    m_pageMapWriteProvenance.clear();
+    {
+        std::lock_guard lock(m_pageMapWriteProvenanceMutex);
+        m_pageMapWriteProvenance.clear();
+    }
     m_residentMeshPageToPhysicalPage.clear();
     m_residentMeshPageRefCounts.clear();
     m_pendingMeshPageToPhysicalPage.clear();
@@ -1820,12 +1855,10 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
         pool->SetUploadFunction(uploadFn);
         meshManager->SetCLodStreamingUploadFunction(std::move(uploadFn));
     }
-#if 0
     meshManager->SetCLodPageMapWriteCallback(
         [this](const MeshManager::CLodPageMapWriteEvent& event) {
             RecordPageMapWrite(event);
         });
-#endif
 
     spdlog::info("CLodPageLRU initialized with {} general pages", generalPages);
 }
@@ -2185,7 +2218,10 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
     provenance.previousSlabByteOffset = event.previousSlabByteOffset;
     provenance.referencedResidentGroupCount = event.referencedResidentGroupCount;
     provenance.tick = m_streamingDiagnosticTick;
-    m_pageMapWriteProvenance[key] = provenance;
+    {
+        std::lock_guard lock(m_pageMapWriteProvenanceMutex);
+        m_pageMapWriteProvenance[key] = provenance;
+    }
 
     const bool overwroteNonZeroEntry =
         event.reason == MeshManager::CLodPageMapWriteReason::Commit &&
@@ -2212,6 +2248,7 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
 void CLodStreamingSystem::LogPageMapProvenanceForMismatch(const CLodSourceGroupMismatchDetail& detail) const {
     const uint32_t pageMapOffset = detail.expectedSegmentPageIndex;
     const uint64_t key = MakeCLodMeshPageKey(detail.groupsBase, pageMapOffset);
+    std::lock_guard lock(m_pageMapWriteProvenanceMutex);
     const auto provenanceIt = m_pageMapWriteProvenance.find(key);
     if (provenanceIt == m_pageMapWriteProvenance.end()) {
         spdlog::error(
@@ -4728,9 +4765,61 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     }
                 }
 
-#if 0
-                // Source-group mismatch readback was temporary CLod streaming diagnostics.
-#endif
+                uint32_t sourceGroupMismatchCount = 0u;
+                if (slot.sourceGroupMismatchCounterStaging) {
+                    auto apiResource = slot.sourceGroupMismatchCounterStaging->GetAPIResource();
+                    void* mapped = nullptr;
+                    apiResource.Map(&mapped);
+                    if (mapped) {
+                        std::memcpy(&sourceGroupMismatchCount, mapped, sizeof(uint32_t));
+                        apiResource.Unmap(0, 0);
+                    }
+                }
+
+                if (sourceGroupMismatchCount > 0u && slot.sourceGroupMismatchDetailsStaging) {
+                    const uint32_t detailCount =
+                        std::min<uint32_t>(sourceGroupMismatchCount, CLodSourceGroupMismatchDetailCapacity);
+                    spdlog::error(
+                        "CLod source group mismatch telemetry: count={} details_captured={}",
+                        sourceGroupMismatchCount,
+                        detailCount);
+
+                    auto apiResource = slot.sourceGroupMismatchDetailsStaging->GetAPIResource();
+                    void* mapped = nullptr;
+                    apiResource.Map(&mapped);
+                    if (mapped) {
+                        const auto* details = static_cast<const CLodSourceGroupMismatchDetail*>(mapped);
+                        for (uint32_t i = 0; i < detailCount; ++i) {
+                            const CLodSourceGroupMismatchDetail& detail = details[i];
+                            spdlog::error(
+                                "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
+                                i,
+                                detail.expectedGroupLocalIndex,
+                                detail.foundGroupLocalIndex,
+                                detail.expectedGroupGlobalIndex,
+                                detail.foundGroupGlobalIndex,
+                                detail.clodMeshMetadataIndex,
+                                detail.groupsBase,
+                                detail.expectedSegmentGlobalIndex,
+                                detail.expectedSegmentPageIndex,
+                                detail.expectedSegmentFirstMeshlet,
+                                detail.expectedSegmentFirstMeshlet + detail.expectedSegmentMeshletCount,
+                                detail.expectedSegmentPageSlabDescriptorIndex,
+                                detail.expectedSegmentPageSlabByteOffset,
+                                detail.pageLocalMeshletIndex,
+                                detail.pageSlabDescriptorIndex,
+                                detail.pageSlabByteOffset,
+                                detail.visibleClusterIndex,
+                                detail.unsortedClusterIndex,
+                                detail.instanceId,
+                                detail.viewId,
+                                detail.bucketMeshletIndex,
+                                detail.bucketCount);
+                            LogPageMapProvenanceForMismatch(detail);
+                        }
+                        apiResource.Unmap(0, 0);
+                    }
+                }
 
                 slot.inFlight = false;
             }

@@ -350,35 +350,26 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
             const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
             const ClusterLODGroupSegment seg = segments[segGlobalIndex];
-            CLodVoxelGroupDescriptor voxelDescriptor;
-            if (CLodTryLoadVoxelDescriptorForSegment(clodMeshMetadata, leaf.group, seg, voxelDescriptor))
-            {
-                WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_HITS, 1);
-                CLodAppendVoxelRasterClusterWork(
-                    clodMeshMetadata,
-                    rec.instanceIndex,
-                    rec.viewId,
-                    node.range.ownerGroupId,
-                    leaf.group,
-                    seg,
-                    voxelDescriptor,
-                    objectModelMatrix,
-                    lodUniformScale,
-                    cullCamera,
-                    lodCam,
-                    lodCamera.isOrtho,
+            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
+            CLodAppendVoxelRasterClusterWork(
+                clodMeshMetadata,
+                rec.instanceIndex,
+                rec.viewId,
+                node.range.ownerGroupId,
+                leaf.group,
+                seg,
+                objectModelMatrix,
+                lodUniformScale,
+                cullCamera,
+                lodCam,
+                lodCamera.isOrtho,
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-                    dirtyPageCullingEnabled,
+                dirtyPageCullingEnabled,
 #else
-                    false,
+                false,
 #endif
-                    instanceData.perMeshBufferIndex,
-                    leaf.errorOverDistance);
-            }
-            else
-            {
-                WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_MISSES, 1);
-            }
+                instanceData.perMeshBufferIndex,
+                leaf.errorOverDistance);
             return;
         }
 

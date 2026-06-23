@@ -12,7 +12,7 @@
 
 namespace CLodCache {
 
-inline constexpr uint32_t kSchemaVersion = 51;
+inline constexpr uint32_t kSchemaVersion = 52;
 
 struct CacheKey {
 	std::string sourceIdentifier;
@@ -24,6 +24,15 @@ struct CacheData {
 	uint32_t schemaVersion = kSchemaVersion;
 	uint64_t buildConfigHash = 0;
 	ClusterLODPrebuiltData prebuiltData;
+};
+
+struct CacheLookup {
+	CacheKey key;
+	uint64_t buildConfigHash = 0;
+	std::wstring metadataFileName;
+	std::wstring metadataPath;
+	std::wstring containerFileName;
+	std::wstring containerPath;
 };
 
 struct LoadedGroupPayload {
@@ -52,6 +61,7 @@ using GroupPayloadLayoutMetadata = PagePayloadLayoutMetadata;
 std::wstring ResolveContainerPath(const ClusterLODCacheSource& cacheSource);
 
 uint64_t ComputeBuildConfigHash();
+CacheLookup BuildCacheLookup(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier);
 

@@ -178,7 +178,7 @@ std::string ExtractPathHashFromFileName(const fs::path& path)
 
 fs::path CLodCacheRoot()
 {
-    return fs::current_path() / "cache" / "clod";
+    return fs::path(GetCacheFilePath(L"", L"clod"));
 }
 
 fs::path AssetPathIndexRoot()
@@ -415,13 +415,51 @@ void LoadAssetManifestLocked(AssetCacheIndex& index)
 
             std::string pathHash = line.substr(0, tab);
             fs::path path(line.substr(tab + 1));
-            if (!pathHash.empty() && HasAssetCacheSuffix(path) && ExtractPathHashFromFileName(path) == pathHash) {
+            std::error_code ec;
+            if (!pathHash.empty() &&
+                HasAssetCacheSuffix(path) &&
+                ExtractPathHashFromFileName(path) == pathHash &&
+                fs::is_regular_file(path, ec)) {
                 loaded[std::move(pathHash)].push_back(std::move(path));
             }
         }
     }
 
     index.byPathHash = std::move(loaded);
+}
+
+std::vector<fs::path> ScanCachedAssetsByPathHash(const std::string& pathHash)
+{
+    std::vector<fs::path> paths;
+    if (pathHash.empty()) {
+        return paths;
+    }
+
+    const fs::path cacheRoot = CLodCacheRoot();
+    std::error_code ec;
+    if (!fs::exists(cacheRoot, ec)) {
+        return paths;
+    }
+
+    for (fs::recursive_directory_iterator it(
+             cacheRoot,
+             fs::directory_options::skip_permission_denied,
+             ec);
+         !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        std::error_code entryEc;
+        if (!it->is_regular_file(entryEc)) {
+            continue;
+        }
+
+        const fs::path path = it->path();
+        if (HasAssetCacheSuffix(path) && ExtractPathHashFromFileName(path) == pathHash) {
+            paths.push_back(path);
+        }
+    }
+
+    SortNewestFirst(paths);
+    return paths;
 }
 
 std::vector<fs::path> FindCachedAssets(const std::string& pathHash)
@@ -433,6 +471,17 @@ std::vector<fs::path> FindCachedAssets(const std::string& pathHash)
         auto it = index.byPathHash.find(pathHash);
         if (it != index.byPathHash.end()) {
             return it->second;
+        }
+
+        auto scanned = ScanCachedAssetsByPathHash(pathHash);
+        if (!scanned.empty()) {
+            index.byPathHash[pathHash] = scanned;
+            StoreAssetManifest(index.byPathHash);
+            spdlog::info(
+                "nif_meta_cache=index_recovered path_hash='{}' candidates={}",
+                pathHash,
+                scanned.size());
+            return scanned;
         }
     }
     return {};
@@ -863,7 +912,7 @@ void WriteTextureBinding(
     const std::string texturePath = !binding.sourcePath.empty()
         ? binding.sourcePath
         : (binding.texture ? binding.texture->Meta().filePath : std::string{});
-    writer.Pod(binding.texture != nullptr);
+    writer.Pod(binding.texture != nullptr || !texturePath.empty());
     writer.String(texturePath);
     writer.Pod(binding.factor.Get());
     writer.Pod(binding.uvSetIndex);
@@ -879,7 +928,8 @@ bool ReadTextureBinding(
     TextureAndConstant& binding,
     TextureSemantic semantic,
     bool preferSRGB,
-    const std::vector<std::string>& textureSearchRoots)
+    const std::vector<std::string>& textureSearchRoots,
+    bool loadMaterialTextures)
 {
     bool hadTexture = false;
     std::string texturePath;
@@ -900,7 +950,7 @@ bool ReadTextureBinding(
     }
     binding.factor = factor;
     binding.sourcePath = texturePath;
-    if (!hadTexture) {
+    if (!hadTexture || !loadMaterialTextures) {
         return true;
     }
 
@@ -994,7 +1044,8 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
 bool ReadMaterialDescription(
     BinaryReader& reader,
     MaterialDescription& desc,
-    const std::vector<std::string>& textureSearchRoots)
+    const std::vector<std::string>& textureSearchRoots,
+    bool loadMaterialTextures)
 {
     ZoneScopedN("NifLoader::ReadMaterialDescription");
     std::uint32_t model = 0;
@@ -1022,23 +1073,23 @@ bool ReadMaterialDescription(
     }
     desc.materialModel = static_cast<MaterialModel>(model);
     desc.blendState = static_cast<BlendState>(blend);
-    return ReadTextureBinding(reader, desc.baseColor, TextureSemantic::BaseColor, true, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.metallic, TextureSemantic::Metallic, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.roughness, TextureSemantic::Roughness, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.emissive, TextureSemantic::Emissive, true, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.opacity, TextureSemantic::Opacity, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.aoMap, TextureSemantic::AO, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.heightMap, TextureSemantic::Height, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.normal, TextureSemantic::Normal, false, textureSearchRoots) &&
+    return ReadTextureBinding(reader, desc.baseColor, TextureSemantic::BaseColor, true, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.metallic, TextureSemantic::Metallic, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.roughness, TextureSemantic::Roughness, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.emissive, TextureSemantic::Emissive, true, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.opacity, TextureSemantic::Opacity, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.aoMap, TextureSemantic::AO, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.heightMap, TextureSemantic::Height, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.normal, TextureSemantic::Normal, false, textureSearchRoots, loadMaterialTextures) &&
         reader.Pod(desc.openPBR) &&
         reader.Pod(desc.glintEnabled) &&
         reader.Pod(desc.glintParameters) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots) &&
-        ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false, textureSearchRoots);
+        ReadTextureBinding(reader, desc.openPBRTextures.coatColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.coatWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.coatRoughness, TextureSemantic::Roughness, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots, loadMaterialTextures) &&
+        ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false, textureSearchRoots, loadMaterialTextures);
 }
 
 void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
@@ -1220,7 +1271,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     const fs::path& cachePath,
     const std::string& normalizedCacheKey,
     const std::string& pathHash,
-    const std::string& contentHash)
+    const std::string& contentHash,
+    bool loadMaterialTextures)
 {
     ZoneScopedN("NifLoader::TryLoadPayloadCache");
     const auto cachePathText = cachePath.string();
@@ -1261,7 +1313,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         std::uint64_t materialHash = 0;
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
-            if (!ReadMaterialDescription(reader, desc, textureSearchRoots) || !reader.Pod(materialHash) || !ReadPrebuilt(reader, prebuilt)) {
+            if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures) || !reader.Pod(materialHash) || !ReadPrebuilt(reader, prebuilt)) {
                 return std::nullopt;
             }
         }
@@ -1390,7 +1442,6 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
 {
     ZoneScopedN("NifLoader::TryLoadCachedImportedAsset");
     ZoneText(cacheKey.data(), cacheKey.size());
-    (void)settings;
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
     if (normalizedCacheKey.empty()) {
@@ -1419,7 +1470,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
 
-        if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash)) {
+        if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash, settings.loadMaterialTextures)) {
             spdlog::debug(
                 "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
@@ -1521,15 +1572,29 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, package->contentHash)),
             stableSourceIdentifier);
         const auto cacheWriteBegin = std::chrono::steady_clock::now();
-        const bool wrote = WritePayloadCache(
-            cachePath,
-            normalizedCacheKey,
-            pathHash,
-            package->contentHash,
-            package->textureSearchRoots,
-            *payload);
+        bool wrote = false;
+        bool reusedExisting = false;
+        if (auto existingPayload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, package->contentHash, settings.loadMaterialTextures)) {
+            payload = std::move(existingPayload);
+            reusedExisting = true;
+            RegisterCachedAsset(pathHash, cachePath);
+            spdlog::info(
+                "nif_meta_cache=existing game='{}' path='{}' content_hash='{}'",
+                normalizedCacheKey,
+                cachePath.string(),
+                package->contentHash);
+        } else {
+            wrote = WritePayloadCache(
+                cachePath,
+                normalizedCacheKey,
+                pathHash,
+                package->contentHash,
+                package->textureSearchRoots,
+                *payload);
+        }
         if (stats) {
             stats->assetWriteMs += ElapsedMs(cacheWriteBegin, std::chrono::steady_clock::now());
+            stats->payloadCacheHit = stats->payloadCacheHit || reusedExisting;
             stats->assetCacheWritten = wrote;
             stats->cachePath = cachePath;
             stats->sourceIdentifier = stableSourceIdentifier;

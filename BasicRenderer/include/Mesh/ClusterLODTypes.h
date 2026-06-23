@@ -131,12 +131,26 @@ struct VoxelGroupPayload
 	std::vector<VoxelCell> activeCells;
 };
 
+struct VoxelGroupPackedMetadata
+{
+	DirectX::XMFLOAT4 aabbMinAndVoxelWidth{}; // xyz=min, w=voxel width
+	DirectX::XMFLOAT4 aabbMaxAndError{};      // xyz=max, w=accepted voxel error
+	uint32_t firstCluster = 0;
+	uint32_t clusterCount = 0;
+	uint32_t firstCube = 0;
+	uint32_t cubeCount = 0;
+	uint32_t resolution = 0;
+	uint32_t flags = 0;
+	uint32_t reserved0 = 0;
+	uint32_t reserved1 = 0;
+};
+
 struct VoxelGroupMapping
 {
 	std::vector<int32_t> groupToPayloadIndex;
 	std::vector<VoxelGroupPayload> payloads;
-	std::vector<int32_t> groupToPackedDescriptorIndex;
-	std::vector<CLodVoxelGroupDescriptor> packedGroupDescriptors;
+	std::vector<int32_t> groupToPackedMetadataIndex;
+	std::vector<VoxelGroupPackedMetadata> packedGroupMetadata;
 	std::vector<CLodVoxelClusterRecord> packedClusterRecords;
 	std::vector<CLodVoxelCubeRecord> packedCubeRecords;
 	std::vector<CLodVoxelAttributeSample> packedAttributeSamples;

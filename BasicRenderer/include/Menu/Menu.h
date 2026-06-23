@@ -3296,8 +3296,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t replayMeshletInput = counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletInputRecords);
                 const uint32_t voxelLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords);
                 const uint32_t voxelRejected = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords);
-                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits);
-                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses);
+                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits);
+                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses);
                 const uint32_t voxelRasterWork = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords);
                 const uint32_t voxelRasterDropped = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped);
                 const uint32_t sortHistInputs = counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs);
@@ -3465,8 +3465,8 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t replayMeshletInput = counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletInputRecords);
                 const uint32_t voxelLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords);
                 const uint32_t voxelRejected = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords);
-                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits);
-                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses);
+                const uint32_t voxelHits = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits);
+                const uint32_t voxelMisses = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses);
                 const uint32_t voxelRasterWork = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords);
                 const uint32_t voxelRasterDropped = counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped);
                 const uint32_t sortHistInputs = counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs);
@@ -4067,11 +4067,11 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords));
 
-            ImGui::Text("Voxel leaves: reached=%u rejectedByError=%u descriptorHit=%u descriptorMiss=%u rasterWork=%u rasterDrop=%u",
+            ImGui::Text("Voxel leaves: reached=%u rejectedByError=%u segmentPageHit=%u segmentPageMiss=%u rasterWork=%u rasterDrop=%u",
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRejectedByErrorRecords),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorHits),
-                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelDescriptorMisses),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageHits),
+                counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelSegmentPageMisses),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelRasterWorkDropped));
 

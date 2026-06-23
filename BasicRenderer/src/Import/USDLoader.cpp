@@ -185,6 +185,7 @@ namespace USDLoader {
 		std::unordered_map<std::string, std::vector<std::shared_ptr<Mesh>>> meshCache;
 		std::unordered_map<std::string, PreprocessedMeshRecord> preprocessedMeshCache;
 		std::unordered_map<std::string, std::shared_ptr<TextureAsset>> textureCache;
+		std::unordered_set<std::string> unresolvedTextureCache;
 		std::vector<std::string> textureSearchRoots;
 		//std::unordered_map<std::string, std::shared_ptr<UsdSkelSkeleton>> unprocessedSkeletons;
 		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
@@ -199,6 +200,7 @@ namespace USDLoader {
 			meshCache.clear();
 			preprocessedMeshCache.clear();
 			textureCache.clear();
+			unresolvedTextureCache.clear();
 			textureSearchRoots.clear();
 			primsWithSkeletons.clear();
 			skeletonMap.clear();
@@ -1187,6 +1189,9 @@ namespace USDLoader {
 		if (auto it = loadingCache.textureCache.find(cacheKey); it != loadingCache.textureCache.end()) {
 			return it->second;
 		}
+		if (loadingCache.unresolvedTextureCache.contains(cacheKey)) {
+			return nullptr;
+		}
 
 		auto& resolver = ArGetResolver();
 		auto ctx = stage->GetPathResolverContext();
@@ -1201,6 +1206,7 @@ namespace USDLoader {
 			}
 		}
 		if (resolvedPath.empty()) {
+			loadingCache.unresolvedTextureCache.insert(cacheKey);
 			spdlog::warn("USDLoader: unable to resolve texture '{}'", logicalPath);
 			return nullptr;
 		}
@@ -1245,7 +1251,14 @@ namespace USDLoader {
 		return tex;
 	}
 
-	void ProcessTexture(MaterialDescription& result, const UsdShadeConnectionSourceInfo& src, const UsdStageRefPtr& stage, const TfToken& name, const UsdShadeMaterial& material) {
+	void ProcessTexture(
+		MaterialDescription& result,
+		const UsdShadeConnectionSourceInfo& src,
+		const UsdStageRefPtr& stage,
+		const TfToken& name,
+		const UsdShadeMaterial& material,
+		bool loadMaterialTextures)
+	{
 		if (auto srcShader = UsdShadeShader(src.source)) {
 			TfToken srcId;
 			srcShader.GetIdAttr().Get(&srcId);
@@ -1271,7 +1284,9 @@ namespace USDLoader {
 				const NormalMapConvention normalConvention = semantic == TextureSemantic::Normal
 					? NormalMapConvention::OpenGL
 					: NormalMapConvention::DirectX;
-				LoadUsdTextureAsset(logicalPath, stage, semantic, preferSRGB, normalConvention);
+				if (loadMaterialTextures) {
+					LoadUsdTextureAsset(logicalPath, stage, semantic, preferSRGB, normalConvention);
+				}
 			}
 
 			// Check if this shader has an "inputs:st" input
@@ -1318,37 +1333,41 @@ namespace USDLoader {
 				: NormalMapConvention::DirectX;
 			const std::string cacheKey = BuildUsdTextureCacheKey(logicalPath, semantic, preferSRGB, normalConvention);
 			auto texIt = loadingCache.textureCache.find(cacheKey);
-			if (texIt != loadingCache.textureCache.end()) {
-				auto tex = texIt->second;
-				std::string swizzle = src.sourceName.GetString();
-				TextureAndConstant* textureBinding = FindTextureBinding(result, name);
-				if (textureBinding == nullptr) {
-					spdlog::warn("Unknown texture input: {}", name.GetString());
-					return;
-				}
+			auto tex = texIt != loadingCache.textureCache.end() ? texIt->second : std::shared_ptr<TextureAsset>{};
+			if (loadMaterialTextures && texIt == loadingCache.textureCache.end()) {
+				return;
+			}
 
-				textureBinding->texture = tex;
-				textureBinding->sourcePath = logicalPath;
+			std::string swizzle = src.sourceName.GetString();
+			TextureAndConstant* textureBinding = FindTextureBinding(result, name);
+			if (textureBinding == nullptr) {
+				spdlog::warn("Unknown texture input: {}", name.GetString());
+				return;
+			}
+
+			textureBinding->texture = tex;
+			textureBinding->sourcePath = logicalPath;
+			if (tex) {
+				tex->Meta().filePath = logicalPath;
+				tex->Meta().preferSRGB = preferSRGB;
+			}
+			textureBinding->channels = SwizzleToIndices(swizzle);
+			if (name == TfToken("diffuseColor") && textureBinding->channels.size() == 3) {
+				textureBinding->channels.push_back(3);
+			}
+			if (name == TfToken("normal")) {
+				if (tex && NormalTextureNeedsReconstructedZ(tex->Description().format)) {
+					textureBinding->channels = { 0u, 1u, 4u };
+				}
 				if (tex) {
-					tex->Meta().filePath = logicalPath;
-					tex->Meta().preferSRGB = preferSRGB;
-				}
-				textureBinding->channels = SwizzleToIndices(swizzle);
-				if (name == TfToken("diffuseColor") && textureBinding->channels.size() == 3) {
-					textureBinding->channels.push_back(3);
-				}
-				if (name == TfToken("normal")) {
-					if (tex && NormalTextureNeedsReconstructedZ(tex->Description().format)) {
-						textureBinding->channels = { 0u, 1u, 4u };
-					}
 					result.negateNormals =
 						tex->Meta().fileType == ImageFiletype::DDS ||
 						(tex->Meta().isProcessingCacheArtifact && tex->Meta().processing.semantic == TextureSemantic::Normal);
-					result.invertNormalGreen = false;
 				}
-				if (name == TfToken("emissiveColor") && IsBlack(result.emissiveColor)) {
-					result.emissiveColor = { 1.0f, 1.0f, 1.0f, 1.0f };
-				}
+				result.invertNormalGreen = false;
+			}
+			if (name == TfToken("emissiveColor") && IsBlack(result.emissiveColor)) {
+				result.emissiveColor = { 1.0f, 1.0f, 1.0f, 1.0f };
 			}
 		}
 	}
@@ -1367,8 +1386,12 @@ namespace USDLoader {
 		binding.texture = LoadUsdTextureAsset(binding.sourcePath, stage, semantic, preferSRGB, normalConvention);
 	}
 
-	void LoadSourcePathTextures(MaterialDescription& result, const UsdStageRefPtr& stage)
+	void LoadSourcePathTextures(MaterialDescription& result, const UsdStageRefPtr& stage, bool loadMaterialTextures)
 	{
+		if (!loadMaterialTextures) {
+			return;
+		}
+
 		LoadSourcePathTextureBinding(result.baseColor, stage, TextureSemantic::BaseColor, true, NormalMapConvention::DirectX);
 		LoadSourcePathTextureBinding(result.metallic, stage, TextureSemantic::Metallic, false, NormalMapConvention::DirectX);
 		LoadSourcePathTextureBinding(result.roughness, stage, TextureSemantic::Roughness, false, NormalMapConvention::DirectX);
@@ -1400,7 +1423,8 @@ namespace USDLoader {
 		MaterialDescription& result,
 		const pxr::UsdShadeMaterial& material,
 		const UsdStageRefPtr& stage,
-		std::unordered_map<ResolveCacheKey, ResolvedProducer, ResolveCacheKeyHash>& cache)
+		std::unordered_map<ResolveCacheKey, ResolvedProducer, ResolveCacheKeyHash>& cache,
+		bool loadMaterialTextures)
 	{
 		pxr::UsdShadeOutput displacementOut = material.GetDisplacementOutput(pxr::UsdShadeTokens->universalRenderContext);
 		if (!displacementOut) {
@@ -1427,7 +1451,7 @@ namespace USDLoader {
 
 			if (prodId == pxr::TfToken("UsdUVTexture")) {
 				MarkDisplacementEnabled(result, result.heightMapScale);
-				ProcessTexture(result, src, stage, TfToken("displacement"), material);
+				ProcessTexture(result, src, stage, TfToken("displacement"), material, loadMaterialTextures);
 				continue;
 			}
 
@@ -1461,7 +1485,7 @@ namespace USDLoader {
 					resolvedInput->shader.GetIdAttr().Get(&inputProdId);
 					if (inputProdId == pxr::TfToken("UsdUVTexture")) {
 						MarkDisplacementEnabled(result, result.heightMapScale);
-						ProcessTexture(result, inputSource, stage, pxr::TfToken("displacement"), material);
+						ProcessTexture(result, inputSource, stage, pxr::TfToken("displacement"), material, loadMaterialTextures);
 					}
 				}
 			}
@@ -1472,7 +1496,8 @@ namespace USDLoader {
 		const pxr::UsdShadeMaterial& material,
 		const std::string& directory,
 		const UsdStageRefPtr& stage,
-		bool isUSDZ)
+		bool isUSDZ,
+		bool loadMaterialTextures)
 	{
 		MaterialDescription result;
 		
@@ -1592,7 +1617,7 @@ namespace USDLoader {
 					if (*legacyTextureName == TfToken("displacement")) {
 						MarkDisplacementEnabled(result, result.heightMapScale);
 					}
-					ProcessTexture(result, src, stage, *legacyTextureName, material);
+					ProcessTexture(result, src, stage, *legacyTextureName, material, loadMaterialTextures);
 				}
 				else if (prodId == pxr::TfToken("UsdPrimvarReader_float2")) {
 					if (legacyTextureName.has_value()) {
@@ -1610,7 +1635,7 @@ namespace USDLoader {
 			}
 		}
 
-        ProcessDisplacementTerminal(result, material, stage, cache);
+        ProcessDisplacementTerminal(result, material, stage, cache, loadMaterialTextures);
 
 		//Post-process to assign 1.0 to undefined factors with a valid texture
 		ForEachMaterialTextureBinding(result, [](TextureAndConstant& binding) {
@@ -1620,7 +1645,7 @@ namespace USDLoader {
 		});
 
 		ApplyBrniflyMaterialMetadata(result, material.GetPrim());
-		LoadSourcePathTextures(result, stage);
+		LoadSourcePathTextures(result, stage, loadMaterialTextures);
 
 		ForEachMaterialTextureBinding(result, [](TextureAndConstant& binding) {
 			if (binding.texture && !binding.factor.HasValue()) {
@@ -1640,7 +1665,13 @@ namespace USDLoader {
 		return result;
 	}
 
-	void ProcessMaterial(const pxr::UsdShadeMaterial& material, const pxr::UsdStageRefPtr& stage, bool isUSDZ, const std::string& directory) {
+	void ProcessMaterial(
+		const pxr::UsdShadeMaterial& material,
+		const pxr::UsdStageRefPtr& stage,
+		bool isUSDZ,
+		const std::string& directory,
+		bool loadMaterialTextures)
+	{
 		ZoneScopedN("USDLoader::ProcessMaterial");
 		if (!material) {
 			return;
@@ -1658,7 +1689,7 @@ namespace USDLoader {
 		MaterialDescription materialDesc;
 		{
 			ZoneScopedN("USDLoader::ProcessMaterial::ParseMaterialGraph");
-			materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ);
+			materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ, loadMaterialTextures);
 		}
         MaterialTemplateRecord record;
         record.desc = std::move(materialDesc);
@@ -2219,7 +2250,7 @@ namespace USDLoader {
 
 				if (subsets.empty()) {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
-					ProcessMaterial(mat, stage, isUSDZ, directory);
+					ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
 					const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
@@ -2250,7 +2281,7 @@ namespace USDLoader {
 				else {
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
-						ProcessMaterial(mat, stage, isUSDZ, directory);
+						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
 						const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(

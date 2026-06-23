@@ -101,6 +101,7 @@ find_package(nlohmann_json REQUIRED CONFIG)
 find_package(Boost        REQUIRED CONFIG COMPONENTS container_hash)
 find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(Tracy REQUIRED CONFIG)
+find_package(embree CONFIG REQUIRED)
 
 # OpenUSD – prefix path already set by the top-level CMakeLists.txt
 find_package(pxr REQUIRED CONFIG)
@@ -123,6 +124,7 @@ target_link_libraries(CLodCacheTool PRIVATE
     Boost::container_hash
     TBB::tbb
     Tracy::TracyClient
+    embree
 
     # OpenUSD libs needed by CLodCache / CLodCacheLoader / USDGeometryExtractor
     usd

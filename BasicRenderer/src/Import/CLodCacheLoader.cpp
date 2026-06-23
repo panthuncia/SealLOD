@@ -223,9 +223,15 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 {
 	const auto cacheKey = ToCacheKey(identity);
 	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
+	const auto lookup = CLodCache::BuildCacheLookup(cacheKey, buildHash);
 	LogBuildConfigOnce(buildHash);
-	spdlog::debug("CLodCacheLoader::TryLoadPrebuilt  src='{}' prim='{}' subset='{}' hash=0x{:X}",
-		identity.sourceIdentifier, identity.primPath, identity.subsetName, buildHash);
+	spdlog::debug("CLodCacheLoader::TryLoadPrebuilt  src='{}' prim='{}' subset='{}' hash=0x{:X} metadata='{}' container='{}'",
+		identity.sourceIdentifier,
+		identity.primPath,
+		identity.subsetName,
+		buildHash,
+		ws2s(lookup.metadataPath),
+		ws2s(lookup.containerPath));
 	auto cached = CLodCache::TryLoad(cacheKey, buildHash);
 	if (!cached.has_value()) {
 		spdlog::debug("  -> cache not found on disk.");

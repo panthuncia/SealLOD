@@ -2493,18 +2493,18 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 	const VoxelGroupPayload& payload = *input.payload;
 	const float voxelWidth = payload.voxelWidth;
 
-	result.descriptor.aabbMinAndVoxelWidth = DirectX::XMFLOAT4(
+	result.metadata.aabbMinAndVoxelWidth = DirectX::XMFLOAT4(
 		payload.aabbMin.x,
 		payload.aabbMin.y,
 		payload.aabbMin.z,
 		voxelWidth);
-	result.descriptor.aabbMaxAndError = DirectX::XMFLOAT4(
+	result.metadata.aabbMaxAndError = DirectX::XMFLOAT4(
 		payload.aabbMax.x,
 		payload.aabbMax.y,
 		payload.aabbMax.z,
 		input.voxelError);
-	result.descriptor.firstCube = input.firstCube;
-	result.descriptor.resolution = payload.resolution;
+	result.metadata.firstCube = input.firstCube;
+	result.metadata.resolution = payload.resolution;
 
 	struct CubeAccum
 	{
@@ -2575,14 +2575,14 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		return lhs.refinedGroup == rhs.refinedGroup ? lhs.cubeCoord < rhs.cubeCoord : lhs.refinedGroup < rhs.refinedGroup;
 	});
 
-	result.descriptor.cubeCount = static_cast<uint32_t>(result.cubeRecords.size());
+	result.metadata.cubeCount = static_cast<uint32_t>(result.cubeRecords.size());
 	return result;
 }
 
 void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t maxCubesPerCluster)
 {
 	packed.clusterRecords.clear();
-	packed.descriptor.clusterCount = 0u;
+	packed.metadata.clusterCount = 0u;
 
 	if (packed.cubeRecords.empty())
 	{
@@ -2591,11 +2591,11 @@ void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t m
 
 	const uint32_t clusterLimit = std::clamp(maxCubesPerCluster, 1u, CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
 	const DirectX::XMFLOAT3 aabbMin{
-		packed.descriptor.aabbMinAndVoxelWidth.x,
-		packed.descriptor.aabbMinAndVoxelWidth.y,
-		packed.descriptor.aabbMinAndVoxelWidth.z
+		packed.metadata.aabbMinAndVoxelWidth.x,
+		packed.metadata.aabbMinAndVoxelWidth.y,
+		packed.metadata.aabbMinAndVoxelWidth.z
 	};
-	const float voxelWidth = packed.descriptor.aabbMinAndVoxelWidth.w;
+	const float voxelWidth = packed.metadata.aabbMinAndVoxelWidth.w;
 	const float cubeWidth = voxelWidth * 4.0f;
 
 	uint32_t runBegin = 0u;
@@ -2662,13 +2662,15 @@ void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t m
 			cluster.cubeCount = clusterEnd - clusterBegin;
 			cluster.refinedGroup = refinedGroup;
 			cluster.bounds = DirectX::XMFLOAT4(center.x, center.y, center.z, radius);
+			cluster.aabbMinAndVoxelWidth = packed.metadata.aabbMinAndVoxelWidth;
+			cluster.resolution = packed.metadata.resolution;
 			packed.clusterRecords.push_back(cluster);
 		}
 
 		runBegin = runEnd;
 	}
 
-	packed.descriptor.clusterCount = static_cast<uint32_t>(packed.clusterRecords.size());
+	packed.metadata.clusterCount = static_cast<uint32_t>(packed.clusterRecords.size());
 }
 
 // Public API: MortonSort

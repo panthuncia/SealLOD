@@ -120,8 +120,8 @@ static const uint WG_COUNTER_CLUSTER_CULL_DENSE_EXPANSION_BUCKETS = 101;
 static const uint WG_COUNTER_CLUSTER_CULL_DENSE_CLUSTERS_DISPATCHED = 102;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_LEAF_RECORDS = 103;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_REJECTED_BY_ERROR_RECORDS = 104;
-static const uint WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_HITS = 105;
-static const uint WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_MISSES = 106;
+static const uint WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS = 105;
+static const uint WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_MISSES = 106;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_RECORDS = 107;
 static const uint WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_DROPPED = 108;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB = 122u;
@@ -1091,7 +1091,6 @@ void CLodAppendVoxelRasterClusterWork(
     uint localGroupId,
     ClusterLODGroup voxelGroup,
     ClusterLODGroupSegment voxelSegment,
-    CLodVoxelGroupDescriptor voxelDescriptor,
     float4x4 objectModelMatrix,
     float lodUniformScale,
     Camera cullCamera,
@@ -1106,16 +1105,14 @@ void CLodAppendVoxelRasterClusterWork(
     (void)meshBufferIndex;
     (void)ownGroupErrorOverDistance;
 
-    if (voxelDescriptor.clusterCount == 0u)
+    if (voxelSegment.meshletCount == 0u)
     {
         return;
     }
 
-    GroupPageMapEntry voxelPageEntry = CLodLoadVoxelPageMapEntry(clodMeshMetadata, voxelGroup, voxelSegment.pageIndex);
-    CLodVoxelPageHeader voxelPageHeader = CLodLoadVoxelPageHeader(voxelPageEntry.slabDescriptorIndex, voxelPageEntry.slabByteOffset);
-    if (voxelPageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
-        voxelPageHeader.version != CLOD_VOXEL_PAGE_VERSION ||
-        voxelSegment.firstMeshletInPage + voxelDescriptor.clusterCount > voxelPageHeader.clusterCount)
+    GroupPageMapEntry voxelPageEntry;
+    CLodVoxelPageHeader voxelPageHeader;
+    if (!CLodTryLoadVoxelPageForSegment(clodMeshMetadata, voxelGroup, voxelSegment, voxelPageEntry, voxelPageHeader))
     {
         return;
     }
@@ -1159,9 +1156,8 @@ void CLodAppendVoxelRasterClusterWork(
         phase1HWBase,
         phase1SWBase);
 
-    for (uint clusterIndex = 0u; clusterIndex < voxelDescriptor.clusterCount; ++clusterIndex)
+    for (uint clusterIndex = 0u; clusterIndex < voxelSegment.meshletCount; ++clusterIndex)
     {
-        const uint localVoxelClusterIndex = voxelDescriptor.firstCluster + clusterIndex;
         const uint pageLocalClusterIndex = voxelSegment.firstMeshletInPage + clusterIndex;
         const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelClusterFromPage(
             voxelPageEntry.slabDescriptorIndex,
@@ -1237,9 +1233,9 @@ void CLodAppendVoxelRasterClusterWork(
             visibleClusterIndex,
             viewId,
             instanceIndex,
-            localVoxelClusterIndex & 0x3FFFu,
+            pageLocalClusterIndex & 0x3FFFu,
             localGroupId,
-            localVoxelClusterIndex >> 14u,
+            voxelSegment.pageIndex,
             0u,
             CLodVisibleClusterMarkVoxelPayload(CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX)));
 
@@ -1248,7 +1244,8 @@ void CLodAppendVoxelRasterClusterWork(
         record.instanceIndex = instanceIndex;
         record.viewId = viewId;
         record.localGroupId = localGroupId;
-        record.localVoxelClusterIndex = localVoxelClusterIndex;
+        record.localPageIndex = voxelSegment.pageIndex;
+        record.pageLocalClusterIndex = pageLocalClusterIndex;
         if (clusterHasSkinnedCubes)
         {
             skinnedWorkRecords[baseSlot] = record;
@@ -1936,7 +1933,7 @@ bool CLodPrepareRenderableLeaf(
     {
         if (leaf.isVoxel)
         {
-            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_MISSES, 1);
+            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_MISSES, 1);
         }
     }
 
@@ -2039,14 +2036,13 @@ void CLodHandleRenderableLeaf(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
         const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
         const ClusterLODGroupSegment seg = segments[segGlobalIndex];
-        CLodVoxelGroupDescriptor voxelDescriptor;
         if (!voxelRepresentationAcceptable)
         {
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_REJECTED_BY_ERROR_RECORDS, 1);
         }
-        else if (CLodTryLoadVoxelDescriptorForSegment(clodMeshMetadata, leaf.group, seg, voxelDescriptor))
+        else
         {
-            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_HITS, 1);
+            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
             CLodAppendVoxelRasterClusterWork(
                 clodMeshMetadata,
                 rec.instanceIndex,
@@ -2054,7 +2050,6 @@ void CLodHandleRenderableLeaf(
                 node.range.ownerGroupId,
                 leaf.group,
                 seg,
-                voxelDescriptor,
                 objectModelMatrix,
                 lodUniformScale,
                 cullCamera,
@@ -2063,10 +2058,6 @@ void CLodHandleRenderableLeaf(
                 dirtyPageCullingEnabled,
                 instanceData.perMeshBufferIndex,
                 leaf.errorOverDistance);
-        }
-        else
-        {
-            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_DESCRIPTOR_MISSES, 1);
         }
     }
     else

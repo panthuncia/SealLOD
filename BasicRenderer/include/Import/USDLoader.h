@@ -18,6 +18,7 @@ class Mesh;
 namespace USDLoader {
 	struct ImportSettings {
 		bool enableDoubleSidedNameHeuristic = true;
+		bool loadMaterialTextures = true;
 		std::uint32_t nifTessellationFactor = 1;
 	};
 
