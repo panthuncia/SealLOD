@@ -1036,6 +1036,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_streamingDomainFullResetPending = true;
 
     // Discard any stale decoded readback data from the worker thread.
+    std::lock_guard workerLock(m_streamingWorkerMutex);
     {
         std::lock_guard lock(m_decodedReadbackMutex);
         m_decodedReadbackBatch.clear();
@@ -1044,7 +1045,6 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
 
     // Clear in-flight flags so the worker thread doesn't process stale readback data.
     {
-        std::lock_guard workerLock(m_streamingWorkerMutex);
         for (auto& slot : m_readbackStagingSlots) {
             slot.inFlight = false;
             slot.fenceValue = 0;
@@ -1052,6 +1052,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
         m_readbackStagingCursor = 0;
     }
     m_streamingServiceRequested.store(true, std::memory_order_release);
+    m_streamingWorkerCV.notify_one();
 }
 
 void CLodStreamingSystem::Initialize(RenderGraph& rg) {
@@ -1243,7 +1244,7 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
             PublishStreamingFrameWorkForFrame();
         },
         [this]() {
-            RunStreamingServiceWork();
+            RequestStreamingFrameWork();
         });
 
     auto streamingBeginPassDesc = RenderGraph::ExternalPassDesc::Compute(
@@ -1372,6 +1373,12 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
     (void)rg;
     PublishStreamingFrameWorkForFrame();
 
+    std::unique_lock serviceLock(m_streamingServiceMutex, std::try_to_lock);
+    if (!serviceLock.owns_lock()) {
+        TracyPlot("CLodStreaming.Service.SkippedFramePassGatherLockBusy", static_cast<int64_t>(1));
+        return;
+    }
+
     MeshManager* meshManager = nullptr;
     if (m_getMeshManager) {
         meshManager = m_getMeshManager();
@@ -1425,6 +1432,7 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
                 return {};
             }
 
+            std::lock_guard serviceLock(m_streamingServiceMutex);
             const uint64_t fenceValue =
                 m_directStorageLaunchFenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
             meshManager->LaunchPendingCLodDirectStorageUploads(
@@ -4599,278 +4607,291 @@ void CLodStreamingSystem::StreamingWorkerMain() {
     uint64_t lastProcessed = 0;
 
     while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-        // Wait until there is a new readback fence value to process.
+        // Wait until there is a new readback fence value or frame service work to process.
         {
             std::unique_lock lock(m_streamingWorkerMutex);
             m_streamingWorkerCV.wait(lock, [&] {
                 return m_streamingWorkerQuit.load(std::memory_order_relaxed)
-                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed;
+                    || m_streamingReadbackFenceCounter.load(std::memory_order_relaxed) > lastProcessed
+                    || m_streamingServiceRequested.load(std::memory_order_acquire);
             });
         }
         if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
 
         const uint64_t target = m_streamingReadbackFenceCounter.load(std::memory_order_acquire);
         const bool hasFenceWork = target > lastProcessed;
-        if (!hasFenceWork) {
-            continue;
-        }
-
-        ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
-        if (SarpClodImportDebugLoggingEnabled()) {
-            spdlog::info(
-                "SARPDBG StreamingWorker wait-readback target={} lastProcessed={}",
-                target,
-                lastProcessed);
-        }
-        uint32_t waitTimeouts = 0u;
-        // HostWait with a timeout so we can check for shutdown periodically.
-        while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-            auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
-            if (result != rhi::Result::WaitTimeout) {
-                if (SarpClodImportDebugLoggingEnabled() && waitTimeouts != 0u) {
-                    spdlog::info(
-                        "SARPDBG StreamingWorker readback-ready target={} waitTimeouts={}",
-                        target,
-                        waitTimeouts);
-                }
-                break;
-            }
-            ++waitTimeouts;
-            if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 100u) == 0u) {
-                spdlog::warn(
-                    "CLod StreamingWorker readback fence wait timed out: target={} waitTimeouts={} completed={}",
-                    target,
-                    waitTimeouts,
-                    m_streamingReadbackFenceHandle.GetCompletedValue());
-            }
-        }
-        if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
-
-        // Process all completed staging slots under the mutex.
-        {
-            ZoneScopedN("CLodStreamingWorker::DecodeReadbackSlots");
-            std::lock_guard lock(m_streamingWorkerMutex);
-
-            std::vector<std::pair<uint32_t, uint32_t>> decodedRequests;
-            std::vector<uint32_t> sumSeenGroups;
-            std::vector<uint32_t> decodedUsedGroups;
-            uint32_t totalRequestCount = 0;
-            uint32_t totalUsedGroupsCount = 0;
-            uint32_t completedSlotCount = 0;
-            bool decodedAnyCompletedSlot = false;
-            const bool sortedFeedback = m_parallelSortAvailable;
-
-            auto beginDecodeGeneration = [](uint32_t& generation, std::vector<uint32_t>& seen) {
-                ++generation;
-                if (generation == 0u) {
-                    generation = 1u;
-                    std::fill(seen.begin(), seen.end(), 0u);
-                }
-            };
-
-            beginDecodeGeneration(m_decodeSeenGeneration, m_decodeSeenGenerationByGroup);
-            beginDecodeGeneration(m_decodeUsedSeenGeneration, m_decodeUsedSeenGenerationByGroup);
-
-            for (auto& slot : m_readbackStagingSlots) {
-                if (!slot.inFlight || slot.fenceValue == 0 || slot.fenceValue > target) {
-                    continue;
-                }
-                decodedAnyCompletedSlot = true;
-                ++completedSlotCount;
-
-                // Map and read the load counter
-                uint32_t requestCount = 0;
-                {
-                    auto apiResource = slot.counterStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        std::memcpy(&requestCount, mapped, sizeof(uint32_t));
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-                requestCount = std::min<uint32_t>(requestCount, CLodStreamingRequestCapacity);
-
-                if (requestCount > 0 && slot.requestsStaging) {
-                    totalRequestCount += requestCount;
-
-                    auto apiResource = slot.requestsStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        const auto* requests = static_cast<const CLodStreamingRequest*>(mapped);
-                        for (uint32_t i = 0; i < requestCount; ++i) {
-                            const uint32_t groupIndex = requests[i].groupGlobalIndex;
-                            const uint32_t priority = UnpackStreamingRequestPriority(requests[i]);
-                            if (groupIndex >= m_decodeSeenGenerationByGroup.size()) {
-                                const size_t newSize = static_cast<size_t>(groupIndex) + 1u;
-                                m_decodeSeenGenerationByGroup.resize(newSize, 0u);
-                                m_decodePriorityAccumByGroup.resize(newSize, 0u);
-                            }
-
-                            if (m_priorityMode == CLodPriorityMode::Sum || !sortedFeedback) {
-                                if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
-                                    m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
-                                    m_decodePriorityAccumByGroup[groupIndex] = priority;
-                                    sumSeenGroups.push_back(groupIndex);
-                                }
-                                else if (m_priorityMode == CLodPriorityMode::Sum) {
-                                    m_decodePriorityAccumByGroup[groupIndex] += priority;
-                                }
-                                else {
-                                    m_decodePriorityAccumByGroup[groupIndex] = std::max(m_decodePriorityAccumByGroup[groupIndex], priority);
-                                }
-                            }
-                            else if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
-                                // Sorted feedback is highest-priority first, so the first occurrence wins.
-                                m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
-                                decodedRequests.emplace_back(groupIndex, priority);
-                            }
-                        }
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-
-                // Read the used-groups append buffer (GPU-reported visible groups for LRU touch).
-                uint32_t usedGroupsCount = 0;
-                if (slot.usedGroupsCounterStaging) {
-                    auto apiResource = slot.usedGroupsCounterStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        std::memcpy(&usedGroupsCount, mapped, sizeof(uint32_t));
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-                usedGroupsCount = std::min<uint32_t>(usedGroupsCount, CLodUsedGroupsCapacity);
-
-                if (usedGroupsCount > 0 && slot.usedGroupsBufferStaging) {
-                    totalUsedGroupsCount += usedGroupsCount;
-                    auto apiResource = slot.usedGroupsBufferStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        const auto* usedGroups = static_cast<const uint32_t*>(mapped);
-                        for (uint32_t i = 0; i < usedGroupsCount; ++i) {
-                            const uint32_t groupIndex = usedGroups[i];
-                            if (groupIndex >= m_decodeUsedSeenGenerationByGroup.size()) {
-                                m_decodeUsedSeenGenerationByGroup.resize(static_cast<size_t>(groupIndex) + 1u, 0u);
-                            }
-                            if (m_decodeUsedSeenGenerationByGroup[groupIndex] != m_decodeUsedSeenGeneration) {
-                                m_decodeUsedSeenGenerationByGroup[groupIndex] = m_decodeUsedSeenGeneration;
-                                decodedUsedGroups.push_back(groupIndex);
-                            }
-                        }
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-
-                uint32_t sourceGroupMismatchCount = 0u;
-                if (slot.sourceGroupMismatchCounterStaging) {
-                    auto apiResource = slot.sourceGroupMismatchCounterStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        std::memcpy(&sourceGroupMismatchCount, mapped, sizeof(uint32_t));
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-
-                if (sourceGroupMismatchCount > 0u && slot.sourceGroupMismatchDetailsStaging) {
-                    const uint32_t detailCount =
-                        std::min<uint32_t>(sourceGroupMismatchCount, CLodSourceGroupMismatchDetailCapacity);
-                    spdlog::error(
-                        "CLod source group mismatch telemetry: count={} details_captured={}",
-                        sourceGroupMismatchCount,
-                        detailCount);
-
-                    auto apiResource = slot.sourceGroupMismatchDetailsStaging->GetAPIResource();
-                    void* mapped = nullptr;
-                    apiResource.Map(&mapped);
-                    if (mapped) {
-                        const auto* details = static_cast<const CLodSourceGroupMismatchDetail*>(mapped);
-                        for (uint32_t i = 0; i < detailCount; ++i) {
-                            const CLodSourceGroupMismatchDetail& detail = details[i];
-                            spdlog::error(
-                                "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
-                                i,
-                                detail.expectedGroupLocalIndex,
-                                detail.foundGroupLocalIndex,
-                                detail.expectedGroupGlobalIndex,
-                                detail.foundGroupGlobalIndex,
-                                detail.clodMeshMetadataIndex,
-                                detail.groupsBase,
-                                detail.expectedSegmentGlobalIndex,
-                                detail.expectedSegmentPageIndex,
-                                detail.expectedSegmentFirstMeshlet,
-                                detail.expectedSegmentFirstMeshlet + detail.expectedSegmentMeshletCount,
-                                detail.expectedSegmentPageSlabDescriptorIndex,
-                                detail.expectedSegmentPageSlabByteOffset,
-                                detail.pageLocalMeshletIndex,
-                                detail.pageSlabDescriptorIndex,
-                                detail.pageSlabByteOffset,
-                                detail.visibleClusterIndex,
-                                detail.unsortedClusterIndex,
-                                detail.instanceId,
-                                detail.viewId,
-                                detail.bucketMeshletIndex,
-                                detail.bucketCount);
-                            LogPageMapProvenanceForMismatch(detail);
-                        }
-                        apiResource.Unmap(0, 0);
-                    }
-                }
-
-                slot.inFlight = false;
-            }
-
-            if (!sumSeenGroups.empty()) {
-                decodedRequests.reserve(decodedRequests.size() + sumSeenGroups.size());
-                for (uint32_t groupIndex : sumSeenGroups) {
-                    decodedRequests.emplace_back(groupIndex, m_decodePriorityAccumByGroup[groupIndex]);
-                }
-                std::sort(
-                    decodedRequests.begin(),
-                    decodedRequests.end(),
-                    [](const auto& a, const auto& b) {
-                        return a.second > b.second;
-                    });
-            }
-
-            {
-                std::lock_guard decodedLock(m_decodedReadbackMutex);
-                m_decodedReadbackBatch.reserve(m_decodedReadbackBatch.size() + decodedRequests.size());
-                if (decodedAnyCompletedSlot) {
-                    ++m_decodedUsedGroupsSampleGeneration;
-                    m_decodedUsedGroupsBatch.clear();
-                }
-                m_decodedUsedGroupsBatch.reserve(m_decodedUsedGroupsBatch.size() + decodedUsedGroups.size());
-
-                // Push cross-slot deduplicated results for the main thread.
-                for (const auto& [groupIndex, priority] : decodedRequests) {
-                    m_decodedReadbackBatch.emplace_back(groupIndex, priority);
-                }
-                for (const uint32_t g : decodedUsedGroups) {
-                    m_decodedUsedGroupsBatch.push_back(g);
-                }
-            }
-
-            TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
-            TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
-            if (SarpClodImportDebugLoggingEnabled() && decodedAnyCompletedSlot) {
+        bool readbackReady = false;
+        if (hasFenceWork) {
+            ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
+            if (SarpClodImportDebugLoggingEnabled()) {
                 spdlog::info(
-                    "SARPDBG StreamingWorker decoded target={} slots={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={} sortedFeedback={}",
+                    "SARPDBG StreamingWorker wait-readback target={} lastProcessed={}",
                     target,
-                    completedSlotCount,
-                    totalRequestCount,
-                    static_cast<uint32_t>(decodedRequests.size()),
-                    totalUsedGroupsCount,
-                    static_cast<uint32_t>(decodedUsedGroups.size()),
-                    sortedFeedback ? 1 : 0);
+                    lastProcessed);
             }
+            uint32_t waitTimeouts = 0u;
+            // HostWait with a timeout so we can check for shutdown and frame service work periodically.
+            while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
+                auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
+                if (result != rhi::Result::WaitTimeout) {
+                    readbackReady = true;
+                    if (SarpClodImportDebugLoggingEnabled() && waitTimeouts != 0u) {
+                        spdlog::info(
+                            "SARPDBG StreamingWorker readback-ready target={} waitTimeouts={}",
+                            target,
+                            waitTimeouts);
+                    }
+                    break;
+                }
+                ++waitTimeouts;
+                if (m_streamingServiceRequested.load(std::memory_order_acquire)) {
+                    break;
+                }
+                if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 100u) == 0u) {
+                    spdlog::warn(
+                        "CLod StreamingWorker readback fence wait timed out: target={} waitTimeouts={} completed={}",
+                        target,
+                        waitTimeouts,
+                        m_streamingReadbackFenceHandle.GetCompletedValue());
+                }
+            }
+            if (m_streamingWorkerQuit.load(std::memory_order_relaxed)) break;
         }
 
-        lastProcessed = target;
+        if (readbackReady) {
+            // Process all completed staging slots under the mutex.
+            {
+                ZoneScopedN("CLodStreamingWorker::DecodeReadbackSlots");
+                std::lock_guard lock(m_streamingWorkerMutex);
+
+                std::vector<std::pair<uint32_t, uint32_t>> decodedRequests;
+                std::vector<uint32_t> sumSeenGroups;
+                std::vector<uint32_t> decodedUsedGroups;
+                uint32_t totalRequestCount = 0;
+                uint32_t totalUsedGroupsCount = 0;
+                uint32_t completedSlotCount = 0;
+                bool decodedAnyCompletedSlot = false;
+                const bool sortedFeedback = m_parallelSortAvailable;
+
+                auto beginDecodeGeneration = [](uint32_t& generation, std::vector<uint32_t>& seen) {
+                    ++generation;
+                    if (generation == 0u) {
+                        generation = 1u;
+                        std::fill(seen.begin(), seen.end(), 0u);
+                    }
+                };
+
+                beginDecodeGeneration(m_decodeSeenGeneration, m_decodeSeenGenerationByGroup);
+                beginDecodeGeneration(m_decodeUsedSeenGeneration, m_decodeUsedSeenGenerationByGroup);
+
+                for (auto& slot : m_readbackStagingSlots) {
+                    if (!slot.inFlight || slot.fenceValue == 0 || slot.fenceValue > target) {
+                        continue;
+                    }
+                    decodedAnyCompletedSlot = true;
+                    ++completedSlotCount;
+
+                    // Map and read the load counter
+                    uint32_t requestCount = 0;
+                    {
+                        auto apiResource = slot.counterStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            std::memcpy(&requestCount, mapped, sizeof(uint32_t));
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+                    requestCount = std::min<uint32_t>(requestCount, CLodStreamingRequestCapacity);
+
+                    if (requestCount > 0 && slot.requestsStaging) {
+                        totalRequestCount += requestCount;
+
+                        auto apiResource = slot.requestsStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            const auto* requests = static_cast<const CLodStreamingRequest*>(mapped);
+                            for (uint32_t i = 0; i < requestCount; ++i) {
+                                const uint32_t groupIndex = requests[i].groupGlobalIndex;
+                                const uint32_t priority = UnpackStreamingRequestPriority(requests[i]);
+                                if (groupIndex >= m_decodeSeenGenerationByGroup.size()) {
+                                    const size_t newSize = static_cast<size_t>(groupIndex) + 1u;
+                                    m_decodeSeenGenerationByGroup.resize(newSize, 0u);
+                                    m_decodePriorityAccumByGroup.resize(newSize, 0u);
+                                }
+
+                                if (m_priorityMode == CLodPriorityMode::Sum || !sortedFeedback) {
+                                    if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
+                                        m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
+                                        m_decodePriorityAccumByGroup[groupIndex] = priority;
+                                        sumSeenGroups.push_back(groupIndex);
+                                    }
+                                    else if (m_priorityMode == CLodPriorityMode::Sum) {
+                                        m_decodePriorityAccumByGroup[groupIndex] += priority;
+                                    }
+                                    else {
+                                        m_decodePriorityAccumByGroup[groupIndex] = std::max(m_decodePriorityAccumByGroup[groupIndex], priority);
+                                    }
+                                }
+                                else if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
+                                    // Sorted feedback is highest-priority first, so the first occurrence wins.
+                                    m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
+                                    decodedRequests.emplace_back(groupIndex, priority);
+                                }
+                            }
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+
+                    // Read the used-groups append buffer (GPU-reported visible groups for LRU touch).
+                    uint32_t usedGroupsCount = 0;
+                    if (slot.usedGroupsCounterStaging) {
+                        auto apiResource = slot.usedGroupsCounterStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            std::memcpy(&usedGroupsCount, mapped, sizeof(uint32_t));
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+                    usedGroupsCount = std::min<uint32_t>(usedGroupsCount, CLodUsedGroupsCapacity);
+
+                    if (usedGroupsCount > 0 && slot.usedGroupsBufferStaging) {
+                        totalUsedGroupsCount += usedGroupsCount;
+                        auto apiResource = slot.usedGroupsBufferStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            const auto* usedGroups = static_cast<const uint32_t*>(mapped);
+                            for (uint32_t i = 0; i < usedGroupsCount; ++i) {
+                                const uint32_t groupIndex = usedGroups[i];
+                                if (groupIndex >= m_decodeUsedSeenGenerationByGroup.size()) {
+                                    m_decodeUsedSeenGenerationByGroup.resize(static_cast<size_t>(groupIndex) + 1u, 0u);
+                                }
+                                if (m_decodeUsedSeenGenerationByGroup[groupIndex] != m_decodeUsedSeenGeneration) {
+                                    m_decodeUsedSeenGenerationByGroup[groupIndex] = m_decodeUsedSeenGeneration;
+                                    decodedUsedGroups.push_back(groupIndex);
+                                }
+                            }
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+
+                    uint32_t sourceGroupMismatchCount = 0u;
+                    if (slot.sourceGroupMismatchCounterStaging) {
+                        auto apiResource = slot.sourceGroupMismatchCounterStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            std::memcpy(&sourceGroupMismatchCount, mapped, sizeof(uint32_t));
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+
+                    if (sourceGroupMismatchCount > 0u && slot.sourceGroupMismatchDetailsStaging) {
+                        const uint32_t detailCount =
+                            std::min<uint32_t>(sourceGroupMismatchCount, CLodSourceGroupMismatchDetailCapacity);
+                        spdlog::error(
+                            "CLod source group mismatch telemetry: count={} details_captured={}",
+                            sourceGroupMismatchCount,
+                            detailCount);
+
+                        auto apiResource = slot.sourceGroupMismatchDetailsStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            const auto* details = static_cast<const CLodSourceGroupMismatchDetail*>(mapped);
+                            for (uint32_t i = 0; i < detailCount; ++i) {
+                                const CLodSourceGroupMismatchDetail& detail = details[i];
+                                spdlog::error(
+                                    "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
+                                    i,
+                                    detail.expectedGroupLocalIndex,
+                                    detail.foundGroupLocalIndex,
+                                    detail.expectedGroupGlobalIndex,
+                                    detail.foundGroupGlobalIndex,
+                                    detail.clodMeshMetadataIndex,
+                                    detail.groupsBase,
+                                    detail.expectedSegmentGlobalIndex,
+                                    detail.expectedSegmentPageIndex,
+                                    detail.expectedSegmentFirstMeshlet,
+                                    detail.expectedSegmentFirstMeshlet + detail.expectedSegmentMeshletCount,
+                                    detail.expectedSegmentPageSlabDescriptorIndex,
+                                    detail.expectedSegmentPageSlabByteOffset,
+                                    detail.pageLocalMeshletIndex,
+                                    detail.pageSlabDescriptorIndex,
+                                    detail.pageSlabByteOffset,
+                                    detail.visibleClusterIndex,
+                                    detail.unsortedClusterIndex,
+                                    detail.instanceId,
+                                    detail.viewId,
+                                    detail.bucketMeshletIndex,
+                                    detail.bucketCount);
+                                LogPageMapProvenanceForMismatch(detail);
+                            }
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+
+                    slot.inFlight = false;
+                }
+
+                if (!sumSeenGroups.empty()) {
+                    decodedRequests.reserve(decodedRequests.size() + sumSeenGroups.size());
+                    for (uint32_t groupIndex : sumSeenGroups) {
+                        decodedRequests.emplace_back(groupIndex, m_decodePriorityAccumByGroup[groupIndex]);
+                    }
+                    std::sort(
+                        decodedRequests.begin(),
+                        decodedRequests.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.second > b.second;
+                        });
+                }
+
+                {
+                    std::lock_guard decodedLock(m_decodedReadbackMutex);
+                    m_decodedReadbackBatch.reserve(m_decodedReadbackBatch.size() + decodedRequests.size());
+                    if (decodedAnyCompletedSlot) {
+                        ++m_decodedUsedGroupsSampleGeneration;
+                        m_decodedUsedGroupsBatch.clear();
+                    }
+                    m_decodedUsedGroupsBatch.reserve(m_decodedUsedGroupsBatch.size() + decodedUsedGroups.size());
+
+                    // Push cross-slot deduplicated results for the streaming service.
+                    for (const auto& [groupIndex, priority] : decodedRequests) {
+                        m_decodedReadbackBatch.emplace_back(groupIndex, priority);
+                    }
+                    for (const uint32_t g : decodedUsedGroups) {
+                        m_decodedUsedGroupsBatch.push_back(g);
+                    }
+                }
+
+                TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
+                TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
+                if (SarpClodImportDebugLoggingEnabled() && decodedAnyCompletedSlot) {
+                    spdlog::info(
+                        "SARPDBG StreamingWorker decoded target={} slots={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={} sortedFeedback={}",
+                        target,
+                        completedSlotCount,
+                        totalRequestCount,
+                        static_cast<uint32_t>(decodedRequests.size()),
+                        totalUsedGroupsCount,
+                        static_cast<uint32_t>(decodedUsedGroups.size()),
+                        sortedFeedback ? 1 : 0);
+                }
+            }
+
+            lastProcessed = target;
+        }
+
+        if (m_streamingServiceRequested.exchange(false, std::memory_order_acq_rel)) {
+            ZoneScopedN("CLodStreamingWorker::RunStreamingServiceWork");
+            m_streamingServiceRunning.store(true, std::memory_order_release);
+            RunStreamingServiceWork();
+            m_streamingServiceRunning.store(false, std::memory_order_release);
+        }
     }
 }
 

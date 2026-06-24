@@ -136,7 +136,7 @@ struct ClusterLODGroup
 	uint32_t pageCount = 0;     // number of group-owned page-map slots / streamable pages
 	int32_t  parentGroupId = -1; // mesh-local group index of the parent group (-1 for root)
 	float maxParentError = 0.0f; // max error of any parent group that refines into this group
-	float representationError = 0.0f; // actual render representation error; currently used by voxel groups
+	float representationError = 0.0f; // voxel payload quality/diagnostic error; not used for runtime LOD cut
 };
 
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;

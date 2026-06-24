@@ -2021,44 +2021,26 @@ void CLodHandleRenderableLeaf(
     }
     else if (leaf.isVoxel)
     {
-        const float voxelRepresentationError = leaf.group.representationError > 0.0f ? leaf.group.representationError : leaf.group.bounds.error;
-        const float voxelRepresentationErrorOverDistance = ProjectedGeometricError(
-            mul(float4(leaf.group.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz,
-            leaf.group.bounds.centerAndRadius.w * lodUniformScale,
-            voxelRepresentationError,
-            lodUniformScale,
-            lodCam.positionWorldSpace.xyz,
-            lodCam.zNear,
-            lodCamera.isOrtho);
-        const bool voxelRepresentationAcceptable = forceLodDecision || voxelRepresentationErrorOverDistance <= lodCam.errorOverDistanceThreshold;
-
         StructuredBuffer<ClusterLODGroupSegment> segments =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
         const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
         const ClusterLODGroupSegment seg = segments[segGlobalIndex];
-        if (!voxelRepresentationAcceptable)
-        {
-            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_REJECTED_BY_ERROR_RECORDS, 1);
-        }
-        else
-        {
-            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
-            CLodAppendVoxelRasterClusterWork(
-                clodMeshMetadata,
-                rec.instanceIndex,
-                rec.viewId,
-                node.range.ownerGroupId,
-                leaf.group,
-                seg,
-                objectModelMatrix,
-                lodUniformScale,
-                cullCamera,
-                lodCam,
-                lodCamera.isOrtho,
-                dirtyPageCullingEnabled,
-                instanceData.perMeshBufferIndex,
-                leaf.errorOverDistance);
-        }
+        WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
+        CLodAppendVoxelRasterClusterWork(
+            clodMeshMetadata,
+            rec.instanceIndex,
+            rec.viewId,
+            node.range.ownerGroupId,
+            leaf.group,
+            seg,
+            objectModelMatrix,
+            lodUniformScale,
+            cullCamera,
+            lodCam,
+            lodCamera.isOrtho,
+            dirtyPageCullingEnabled,
+            instanceData.perMeshBufferIndex,
+            leaf.errorOverDistance);
     }
     else
     {
