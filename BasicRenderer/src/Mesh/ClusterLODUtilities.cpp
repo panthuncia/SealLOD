@@ -5001,7 +5001,71 @@ namespace
 			}
 		}
 
-		uint32_t autoVoxelRepresentationCutViolations = 0u;
+		uint32_t voxelTraversalErrorRaises = 0u;
+		for (ClusterLODGroup& group : state.groups)
+		{
+			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
+				!std::isfinite(group.representationError) ||
+				group.representationError <= 0.0f ||
+				IsTerminalErrorSentinel(group.bounds.error) ||
+				group.bounds.error >= group.representationError)
+			{
+				continue;
+			}
+
+			group.bounds.error = group.representationError;
+			voxelTraversalErrorRaises++;
+		}
+
+		uint32_t parentTraversalErrorRaises = 0u;
+		bool raisedParentError = true;
+		while (raisedParentError)
+		{
+			raisedParentError = false;
+			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+			{
+				ClusterLODGroup& group = state.groups[groupIndex];
+				if (IsTerminalErrorSentinel(group.bounds.error))
+				{
+					continue;
+				}
+
+				float maxChildError = 0.0f;
+				bool hasFiniteChild = false;
+				for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+				{
+					const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+					if (segment.refinedGroup < 0)
+					{
+						continue;
+					}
+
+					const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+					if (childGroupIndex >= state.groups.size())
+					{
+						continue;
+					}
+
+					const float childError = state.groups[childGroupIndex].bounds.error;
+					if (std::isfinite(childError) && childError > 0.0f && !IsTerminalErrorSentinel(childError))
+					{
+						maxChildError = std::max(maxChildError, childError);
+						hasFiniteChild = true;
+					}
+				}
+
+				if (!hasFiniteChild || group.bounds.error > maxChildError)
+				{
+					continue;
+				}
+
+				group.bounds.error = std::nextafter(maxChildError, std::numeric_limits<float>::infinity());
+				parentTraversalErrorRaises++;
+				raisedParentError = true;
+			}
+		}
+
+		uint32_t voxelTraversalErrorUnderreports = 0u;
 		for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(state.groups.size()); ++groupIndex)
 		{
 			const ClusterLODGroup& group = state.groups[groupIndex];
@@ -5058,14 +5122,15 @@ namespace
 			else if (autoMode &&
 				std::isfinite(group.representationError) &&
 				group.representationError > 0.0f &&
-				std::isfinite(minChildError) &&
-				group.representationError > minChildError)
+				std::isfinite(group.bounds.error) &&
+				!IsTerminalErrorSentinel(group.bounds.error) &&
+				group.representationError > group.bounds.error)
 			{
-				autoVoxelRepresentationCutViolations++;
-				if (autoVoxelRepresentationCutViolations <= 8u)
+				voxelTraversalErrorUnderreports++;
+				if (voxelTraversalErrorUnderreports <= 8u)
 				{
 					spdlog::warn(
-						"ClusterLOD auto voxel quality exceeds child cut boundary: group={} depth={} representation_error={} min_child_error={} max_child_error={} group_cut_error={} terminal_segments={}/{}",
+						"ClusterLOD voxel traversal error underreports representation error: group={} depth={} representation_error={} min_child_error={} max_child_error={} group_cut_error={} terminal_segments={}/{}",
 						groupIndex,
 						group.depth,
 						group.representationError,
@@ -5105,7 +5170,7 @@ namespace
 		const uint32_t totalVoxelCubes = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
 
 		spdlog::info(
-			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} auto_quality_cut_violations={} failed={} coverage_bvh_builds={} coverage_bvh_reuses={} source_coverage(queries={} candidates={} tests={} out_of_cell={}) timing_ms(analysis={:.2f} source={:.2f} coverage_bvh={:.2f} voxelize={:.2f} pack={:.2f})",
+			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} traversal_error_underreports={} voxel_error_raises={} parent_error_raises={} failed={} coverage_bvh_builds={} coverage_bvh_reuses={} source_coverage(queries={} candidates={} tests={} out_of_cell={}) timing_ms(analysis={:.2f} source={:.2f} coverage_bvh={:.2f} voxelize={:.2f} pack={:.2f})",
 			stats.analyzedGroups,
 			stats.validGroups,
 			stats.autoCandidateGroups,
@@ -5117,7 +5182,9 @@ namespace
 			totalVoxelPayloads,
 			totalVoxelClusters,
 			totalVoxelCubes,
-			autoVoxelRepresentationCutViolations,
+			voxelTraversalErrorUnderreports,
+			voxelTraversalErrorRaises,
+			parentTraversalErrorRaises,
 			stats.failedBuilds,
 			stats.coverageBvhBuilds,
 			stats.coverageBvhReuses,

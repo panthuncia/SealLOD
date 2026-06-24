@@ -2094,7 +2094,11 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
             passName,
             std::make_shared<PerViewLinearDepthCopyPass>());
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            depthCopyPassDesc.At(RenderGraph::ExternalInsertPoint::Before("DeferredShadingPass"));
+            auto depthCopyInsertPoint = RenderGraph::ExternalInsertPoint::Before("DeferredShadingPass");
+            if (phaseIndex == 2u && SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")()) {
+                depthCopyInsertPoint.AlsoBefore("GTAOFilterPass");
+            }
+            depthCopyPassDesc.At(std::move(depthCopyInsertPoint));
         }
         outPasses.push_back(std::move(depthCopyPassDesc));
     };
