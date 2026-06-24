@@ -4344,10 +4344,6 @@ namespace
 			if (GetVoxelRenderPayloadForGroup(state, childGroupIndex) != nullptr)
 			{
 				buildInput.sourceVoxelGroupIndices.push_back(childGroupIndex);
-				if (!AppendGroupTriangleSourceGeometry(state, childGroupIndex, buildInput, vertexStrideBytes, static_cast<int32_t>(childGroupIndex)))
-				{
-					return false;
-				}
 				continue;
 			}
 
@@ -4395,6 +4391,11 @@ namespace
 		// used for candidate ownership; descendant expansion breaks DAG sharing.
 		for (uint32_t childGroupIndex : refinedChildren)
 		{
+			if (GetVoxelRenderPayloadForGroup(state, childGroupIndex) != nullptr)
+			{
+				continue;
+			}
+
 			if (!AppendGroupTriangleSourceGeometry(state, childGroupIndex, buildInput, vertexStrideBytes, static_cast<int32_t>(childGroupIndex)))
 			{
 				return false;
@@ -4500,7 +4501,7 @@ namespace
 			}
 		}
 
-		auto buildVoxelGroup = [&](uint32_t groupIndex, bool requireBudgetFit) -> bool
+		auto buildVoxelGroup = [&](uint32_t groupIndex, bool requireBudgetFit, bool forceReplaceGroupWithVoxels) -> bool
 		{
 			if (groupIndex >= groupInputs.size())
 			{
@@ -4584,32 +4585,9 @@ namespace
 				}
 				return maxClusterCubeCount;
 			};
-			VoxelFallbackGroupBuildInput coverageBuildInput;
-			VoxelSourceTriangleBVH groupCoverageSourceTriangles;
-			const VoxelSourceTriangleBVH* voxelCoverageSourceTriangles = nullptr;
-			if (BuildVoxelFallbackCoverageSourceGeometry(state, groupIndex, vertexStrideBytes, coverageBuildInput) &&
-				!coverageBuildInput.voxelVertices.empty() && !coverageBuildInput.voxelTriangleIndices.empty())
+			const VoxelSourceTriangleBVH* voxelCoverageSourceTriangles = coverageSourceTriangles;
+			if (voxelCoverageSourceTriangles != nullptr)
 			{
-				LogVoxelTriangleTagHistogram("coverage", groupIndex, group.depth, coverageBuildInput);
-				const auto coverageBvhStart = std::chrono::steady_clock::now();
-				groupCoverageSourceTriangles.Build(
-					&coverageBuildInput.voxelVertices,
-					vertexStrideBytes,
-					&coverageBuildInput.voxelTriangleIndices,
-					coverageBuildInput.voxelSkinningVertices.empty() ? nullptr : &coverageBuildInput.voxelSkinningVertices,
-					skinningVertexStrideBytes,
-					coverageBuildInput.voxelTriangleRefinedGroupIds.empty() ? nullptr : &coverageBuildInput.voxelTriangleRefinedGroupIds,
-					settings.doubleSidedVoxelSourceNormals);
-				stats.coverageBvhUs += elapsedUsSince(coverageBvhStart);
-				stats.coverageBvhBuilds++;
-				if (groupCoverageSourceTriangles.IsValid())
-				{
-					voxelCoverageSourceTriangles = &groupCoverageSourceTriangles;
-				}
-			}
-			if (voxelCoverageSourceTriangles == nullptr && coverageSourceTriangles != nullptr)
-			{
-				voxelCoverageSourceTriangles = coverageSourceTriangles;
 				stats.coverageBvhReuses++;
 			}
 
@@ -4851,7 +4829,7 @@ namespace
 
 			const float triangleError = group.bounds.error;
 			const bool terminalErrorSentinel = triangleError >= std::numeric_limits<float>::max() * 0.5f;
-			const bool replaceGroupWithVoxels = forceAllVoxels || group.terminalSegmentCount == 0u;
+			const bool replaceGroupWithVoxels = forceAllVoxels || forceReplaceGroupWithVoxels || group.terminalSegmentCount == 0u;
 			group.representationError = packedVoxelRepresentationError;
 			if (replaceGroupWithVoxels)
 			{
@@ -4910,72 +4888,115 @@ namespace
 			return true;
 		};
 
-		for (uint32_t depth = 0; depth <= maxDepth; ++depth)
+		std::vector<uint8_t> buildVoxelGroupMask(originalGroupCount, 0u);
+		std::vector<uint8_t> seedVoxelGroupMask(originalGroupCount, 0u);
+		if (forceAllVoxels)
+		{
+			std::fill(buildVoxelGroupMask.begin(), buildVoxelGroupMask.end(), 1u);
+		}
+		else if (autoMode)
 		{
 			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 			{
-				ClusterLODGroup& group = state.groups[groupIndex];
-				if (static_cast<uint32_t>(std::max(group.depth, 0)) != depth || (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
+				if (groupInputs[groupIndex].autoWouldFitBudget)
 				{
-					continue;
+					buildVoxelGroupMask[groupIndex] = 1u;
+					seedVoxelGroupMask[groupIndex] = 1u;
 				}
+			}
 
-				const bool acceptSeed = autoMode && groupInputs[groupIndex].autoWouldFitBudget;
-				if (forceAllVoxels)
+			bool propagatedAny = true;
+			while (propagatedAny)
+			{
+				propagatedAny = false;
+				for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 				{
-					if (buildVoxelGroup(groupIndex, false))
+					if (buildVoxelGroupMask[groupIndex] != 0u)
 					{
-						stats.forcedGroups++;
+						continue;
 					}
-				}
-				else if (acceptSeed)
-				{
-					if (buildVoxelGroup(groupIndex, true))
+
+					const ClusterLODGroup& group = state.groups[groupIndex];
+					bool hasVoxelRefinedChild = false;
+					for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
 					{
-						stats.acceptedSeedGroups++;
+						const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+						if (segment.refinedGroup < 0)
+						{
+							continue;
+						}
+
+						const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+						if (childGroupIndex < buildVoxelGroupMask.size() && buildVoxelGroupMask[childGroupIndex] != 0u)
+						{
+							hasVoxelRefinedChild = true;
+							break;
+						}
+					}
+
+					if (hasVoxelRefinedChild)
+					{
+						buildVoxelGroupMask[groupIndex] = 1u;
+						propagatedAny = true;
 					}
 				}
 			}
 		}
 
-		bool propagatedAny = forceAllVoxels;
-		while (propagatedAny)
+		auto hasMarkedVoxelRefinedChild = [&](uint32_t groupIndex) -> bool
 		{
-			propagatedAny = false;
+			if (groupIndex >= originalGroupCount)
+			{
+				return false;
+			}
+
+			const ClusterLODGroup& group = state.groups[groupIndex];
+			for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+			{
+				const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+				if (segment.refinedGroup < 0)
+				{
+					continue;
+				}
+
+				const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+				if (childGroupIndex < buildVoxelGroupMask.size() && buildVoxelGroupMask[childGroupIndex] != 0u)
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+		for (uint32_t depth = 0; depth <= maxDepth; ++depth)
+		{
 			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 			{
 				ClusterLODGroup& group = state.groups[groupIndex];
-				if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
+				if (buildVoxelGroupMask[groupIndex] == 0u ||
+					static_cast<uint32_t>(std::max(group.depth, 0)) != depth ||
+					(group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
 				{
 					continue;
 				}
 
-				bool hasVoxelRefinedChild = false;
-				for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+				const bool inheritedVoxelPath = hasMarkedVoxelRefinedChild(groupIndex);
+				const bool seedVoxelPath = seedVoxelGroupMask[groupIndex] != 0u;
+				const bool requireBudgetFit = seedVoxelPath && !inheritedVoxelPath && !forceAllVoxels;
+				if (buildVoxelGroup(groupIndex, requireBudgetFit, inheritedVoxelPath || forceAllVoxels))
 				{
-					const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
-					if (segment.refinedGroup < 0)
+					if (forceAllVoxels)
 					{
-						continue;
+						stats.forcedGroups++;
 					}
-
-					const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
-					if (childGroupIndex < state.groups.size() && (state.groups[childGroupIndex].flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
+					else if (inheritedVoxelPath)
 					{
-						hasVoxelRefinedChild = true;
-						break;
+						stats.propagatedGroups++;
 					}
-				}
-
-				if (!hasVoxelRefinedChild)
-				{
-					continue;
-				}
-
-				if (buildVoxelGroup(groupIndex, false))
-				{
-					stats.propagatedGroups++;
-					propagatedAny = true;
+					else if (seedVoxelPath)
+					{
+						stats.acceptedSeedGroups++;
+					}
 				}
 			}
 		}
@@ -5193,6 +5214,13 @@ namespace
 		{
 			const uint32_t leafCount = uint32_t(leavesByDepth[depth].size());
 
+			if (leafCount == 1u)
+			{
+				state.lodNodeRanges[depth].offset = state.lodLevelRoots[depth];
+				state.lodNodeRanges[depth].count = 1u;
+				continue;
+			}
+
 			uint32_t nodeCount = leafCount;
 			uint32_t iterCount = leafCount;
 
@@ -5289,8 +5317,13 @@ namespace
 				node.traversalMetric.maxQuadricError = grp.bounds.error;
 			}
 
-			if (leafCount == 1) {
-				writeOffset++;
+			if (leafCount == 1)
+			{
+				if (range.offset != state.lodLevelRoots[depth] || range.count != 1u)
+				{
+					throw std::runtime_error("Cluster LOD: single-leaf traversal range mismatch.");
+				}
+				continue;
 			}
 
 			uint32_t iterCount = leafCount;

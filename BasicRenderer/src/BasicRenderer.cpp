@@ -472,7 +472,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto robot = LoadModel("models/robot.usdz");
 
-	auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
+	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
 
 	//auto island = LoadModel("models/island/usd/elements/isMountainB/instance.usda");
 
@@ -482,7 +482,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto cherry = LoadModel("models/Trees/CherryTree.usd");
 
-    //auto pine = LoadModel("models/Trees/branch.usdz");
+    auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
     //auto needles = LoadModel("models/Trees/PineTree.usd");
@@ -495,7 +495,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
+	renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
     	//renderer.AppendScene(cubes->Clone());
@@ -508,7 +508,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(island->Clone());
 
-	renderer.GetCurrentScene()->AppendScene(zorah->Clone());
+	//renderer.GetCurrentScene()->AppendScene(zorah->Clone());
 
     //mountainScene = LoadModel("models/terrain.glb");
  //   mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });

@@ -184,6 +184,7 @@ namespace USDLoader {
         std::unordered_map<std::string, std::shared_ptr<Material>> resolvedMaterialCache;
 		std::unordered_map<std::string, std::vector<std::shared_ptr<Mesh>>> meshCache;
 		std::unordered_map<std::string, PreprocessedMeshRecord> preprocessedMeshCache;
+		std::unordered_map<std::string, std::string> skippedPreprocessedMeshReasons;
 		std::unordered_map<std::string, std::shared_ptr<TextureAsset>> textureCache;
 		std::unordered_set<std::string> unresolvedTextureCache;
 		std::vector<std::string> textureSearchRoots;
@@ -199,6 +200,7 @@ namespace USDLoader {
             resolvedMaterialCache.clear();
 			meshCache.clear();
 			preprocessedMeshCache.clear();
+			skippedPreprocessedMeshReasons.clear();
 			textureCache.clear();
 			unresolvedTextureCache.clear();
 			textureSearchRoots.clear();
@@ -2180,10 +2182,16 @@ namespace USDLoader {
 		};
 
 		loadingCache.preprocessedMeshCache.clear();
+		loadingCache.skippedPreprocessedMeshReasons.clear();
 
 		const UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
 		UsdSkelCache preprocessSkelCache;
 		std::vector<MeshPreprocessWorkItem> workItems;
+		auto markSkippedMesh = [](const std::string& meshPath, std::string reason) {
+			if (!meshPath.empty()) {
+				loadingCache.skippedPreprocessedMeshReasons.emplace(meshPath, std::move(reason));
+			}
+		};
 
 		std::function<void(const UsdPrim&)> gatherMeshJobs = [&](const UsdPrim& prim) {
 			if (prim.IsA<UsdGeomImageable>()) {
@@ -2195,15 +2203,18 @@ namespace USDLoader {
 
 			UsdGeomMesh mesh(prim);
 			if (mesh) {
+				const std::string meshPath = mesh.GetPrim().GetPath().GetString();
 				if (IsBrNiflyCollisionMesh(mesh)) {
-					spdlog::info("Skipping BRNifly collision mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+					spdlog::info("Skipping BRNifly collision mesh '{}'.", meshPath);
+					markSkippedMesh(meshPath, "collision mesh");
 					return;
 				}
 
 				if (IsUnsupportedBrNiflySkinnedMesh(mesh)) {
 					spdlog::info(
 						"Skipping BRNifly skinned mesh '{}' until NIF skeleton pose updates are supported.",
-						mesh.GetPrim().GetPath().GetString());
+						meshPath);
+					markSkippedMesh(meshPath, "unsupported skinned mesh");
 					return;
 				}
 
@@ -2234,7 +2245,6 @@ namespace USDLoader {
 					gprim.GetDoubleSidedAttr().Get(&authoredDoubleSided, geomTimeCode);
 				}
 
-				const std::string meshPath = mesh.GetPrim().GetPath().GetString();
 				UsdShadeMaterialBindingAPI bindAPI(mesh);
 				auto subsets = bindAPI.GetMaterialBindSubsets();
 
@@ -2261,6 +2271,7 @@ namespace USDLoader {
 							extractOptions.brniflyDecal,
 							extractOptions.brniflyDynamicDecal,
 							extractOptions.vertexAlphaCutoff.value());
+						markSkippedMesh(meshPath, "temporary BRNifly vertex-alpha overlay block");
 						return;
 					}
 					const bool inferredDoubleSided = ShouldForceDoubleSidedByName(mat, std::nullopt, importSettings);
@@ -2279,6 +2290,7 @@ namespace USDLoader {
 						});
 				}
 				else {
+					const std::size_t meshWorkItemBegin = workItems.size();
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
@@ -2315,6 +2327,9 @@ namespace USDLoader {
 								subset.GetPrim().GetName().GetString(),
 								mat ? mat.GetPrim().GetName().GetString() : std::string("<unbound>"));
 						}
+					}
+					if (workItems.size() == meshWorkItemBegin) {
+						markSkippedMesh(meshPath, "all subsets temporarily skipped");
 					}
 				}
 			}
@@ -2398,7 +2413,16 @@ namespace USDLoader {
 		std::vector<std::shared_ptr<Mesh>> outMeshes;
 		auto preprocessedIt = loadingCache.preprocessedMeshCache.find(cacheKey);
 		if (preprocessedIt == loadingCache.preprocessedMeshCache.end()) {
-			spdlog::warn("USD mesh '{}' was not present in the preprocessed mesh cache.", cacheKey);
+			if (auto skippedIt = loadingCache.skippedPreprocessedMeshReasons.find(cacheKey);
+				skippedIt != loadingCache.skippedPreprocessedMeshReasons.end()) {
+				spdlog::debug(
+					"USD mesh '{}' was intentionally skipped during preprocessing: {}.",
+					cacheKey,
+					skippedIt->second);
+			}
+			else {
+				spdlog::warn("USD mesh '{}' was not present in the preprocessed mesh cache.", cacheKey);
+			}
 			loadingCache.meshCache[cacheKey] = outMeshes;
 			return outMeshes;
 		}

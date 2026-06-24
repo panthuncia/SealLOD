@@ -1,7 +1,6 @@
 #include "Import/BRNiflyClient.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
@@ -450,49 +449,6 @@ std::optional<json> RunJsonCommand(
 #endif
 }
 
-std::optional<json> RunJsonFileCommand(
-    const ClientOptions& options,
-    const std::string& nifPath,
-    std::string* executablePath,
-    std::string* errorMessage)
-{
-    static std::atomic<std::uint64_t> responseCounter{ 0 };
-    const fs::path responsePath = fs::temp_directory_path() /
-        ("brnifly_response_" +
-            std::to_string(GetCurrentProcessId()) + "_" +
-            std::to_string(GetCurrentThreadId()) + "_" +
-            std::to_string(responseCounter.fetch_add(1, std::memory_order_relaxed)) + ".json");
-
-    const std::string resolvedNifPath = ResolveInputFilePath(nifPath);
-    auto envelope = RunJsonCommand(options, { "--convert-usd-json-file", resolvedNifPath, responsePath.string() }, executablePath, errorMessage);
-    if (!envelope) {
-        return std::nullopt;
-    }
-
-    std::ifstream input(responsePath, std::ios::binary);
-    if (!input) {
-        if (errorMessage) {
-            *errorMessage = "BRNifly did not write its response file: " + responsePath.string();
-        }
-        return std::nullopt;
-    }
-
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    std::error_code ec;
-    fs::remove(responsePath, ec);
-
-    try {
-        return json::parse(contents.str());
-    }
-    catch (const std::exception& ex) {
-        if (errorMessage) {
-            *errorMessage = std::string("BRNifly response file contained invalid JSON: ") + ex.what();
-        }
-        return std::nullopt;
-    }
-}
-
 } // namespace
 
 std::optional<std::string> DiscoverExecutable(const ClientOptions& options)
@@ -606,7 +562,8 @@ std::optional<UsdAssetPackage> ConvertNifToUsd(const std::string& nifPath, const
 
     std::string executablePath;
     const auto convertBegin = std::chrono::steady_clock::now();
-    auto response = RunJsonFileCommand(options, nifPath, &executablePath, errorMessage);
+    const std::string resolvedNifPath = ResolveInputFilePath(nifPath);
+    auto response = RunJsonCommand(options, { "--convert-usd-json", resolvedNifPath }, &executablePath, errorMessage);
     if (timingStats) {
         timingStats->convertProcessMs += ElapsedMs(convertBegin);
     }

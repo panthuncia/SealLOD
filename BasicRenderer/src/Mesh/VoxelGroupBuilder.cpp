@@ -1881,13 +1881,22 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 	}
 
 	const EmbreeScene::RefinedGroupScene* scene = nullptr;
+	const EmbreeScene::RefinedGroupScene* unfilteredScene = nullptr;
 	for (const EmbreeScene::RefinedGroupScene& candidateScene : m_embreeScene->refinedGroupScenes)
 	{
+		if (candidateScene.refinedGroup == -1)
+		{
+			unfilteredScene = &candidateScene;
+		}
 		if (candidateScene.refinedGroup == refinedGroupFilter)
 		{
 			scene = &candidateScene;
 			break;
 		}
+	}
+	if (scene == nullptr)
+	{
+		scene = unfilteredScene;
 	}
 	if (scene == nullptr || scene->scene == nullptr)
 	{

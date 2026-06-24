@@ -614,6 +614,12 @@ static void WriteClusterLODReport(
 }
 
 static bool TryConsumeOption(const std::string& arg) {
+    if (arg == "--debug") {
+        spdlog::set_level(spdlog::level::debug);
+        spdlog::flush_on(spdlog::level::debug);
+        return true;
+    }
+
     constexpr const char* reportPrefix = "--clod-report=";
     constexpr const char* tessellationPrefix = "--usd-tessellation-factor=";
     constexpr const char* modePrefix = "--clod-voxel-mode=";
