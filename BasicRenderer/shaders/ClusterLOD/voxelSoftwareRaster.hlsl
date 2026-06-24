@@ -37,6 +37,10 @@
 #define CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT 1
 #endif
 
+#ifndef CLOD_VOXEL_RASTER_MAX_PROJECTED_FOOTPRINT_PIXELS
+#define CLOD_VOXEL_RASTER_MAX_PROJECTED_FOOTPRINT_PIXELS 64.0f
+#endif
+
 #if CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
 #ifndef CLOD_VOXEL_RASTER_THREADS_PER_GROUP
 #define CLOD_VOXEL_RASTER_THREADS_PER_GROUP 64u
@@ -80,6 +84,7 @@ static const uint VOXEL_RASTER_TRACE_NON_POSITIVE_DEPTH = 2u;
 static const uint VOXEL_RASTER_PROJECT_OK = 0u;
 static const uint VOXEL_RASTER_PROJECT_REJECTED = 1u;
 static const uint VOXEL_RASTER_PROJECT_SCISSOR_REJECTED = 2u;
+static const uint VOXEL_RASTER_PROJECT_FOOTPRINT_REJECTED = 3u;
 
 #ifndef CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
 #define CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST 1
@@ -334,6 +339,12 @@ uint VoxelRasterClampProjectedPixels(
     uint2 targetDims,
     out VoxelRasterProjectedCube projected)
 {
+    const float2 projectedFootprintPixels = max(screenMax - screenMin, float2(0.0f, 0.0f));
+    if (max(projectedFootprintPixels.x, projectedFootprintPixels.y) > CLOD_VOXEL_RASTER_MAX_PROJECTED_FOOTPRINT_PIXELS)
+    {
+        return VOXEL_RASTER_PROJECT_FOOTPRINT_REJECTED;
+    }
+
     int2 minPx = int2(floor(screenMin));
     int2 maxPx = int2(floor(screenMax));
     minPx = max(minPx, int2(rasterInfo.scissorMinX, rasterInfo.scissorMinY));
