@@ -126,6 +126,8 @@ private:
     void RunStreamingServiceWork();
     bool EnsureParallelSortResources();
     void DestroyParallelSortResources();
+    void ClearStreamingUploadFunction(MeshManager* meshManager);
+    void InstallStreamingUploadFunction(MeshManager* meshManager);
 
     // Page-level LRU helpers
     void InitializePageLru(MeshManager* meshManager);

@@ -903,6 +903,13 @@ void CLodStreamingSystem::Shutdown() {
             slot.fenceValue = 0;
         }
     }
+
+    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+        ClearStreamingUploadFunction(meshManager);
+    }
+    if (m_uploadInstance) {
+        m_uploadInstance->Cleanup();
+    }
 }
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
@@ -934,17 +941,17 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
         releaseBufferBacking(m_parallelSortState->countScatterArgs);
         releaseBufferBacking(m_parallelSortState->reduceScanArgs);
     }
-    if (m_uploadInstance) {
-        m_uploadInstance->Cleanup();
-    }
-
     MeshManager* meshManager = nullptr;
     if (m_getMeshManager) {
         meshManager = m_getMeshManager();
     }
 
     if (meshManager != nullptr) {
+        ClearStreamingUploadFunction(meshManager);
         meshManager->InvalidateCLodDiskStreamingPipeline();
+    }
+    if (m_uploadInstance) {
+        m_uploadInstance->Cleanup();
     }
 
     // Evict ALL resident groups so MeshManager clears groupResidentFlags,
@@ -1056,6 +1063,14 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
 }
 
 void CLodStreamingSystem::Initialize(RenderGraph& rg) {
+    std::lock_guard serviceLock(m_streamingServiceMutex);
+    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+        ClearStreamingUploadFunction(meshManager);
+    }
+    if (m_uploadInstance) {
+        m_uploadInstance->Cleanup();
+    }
+
     // Create a dedicated copy queue for async CLod streaming uploads.
     m_uploadQueueSlot = rg.CreateQueue(
         QueueKind::Copy,
@@ -1068,6 +1083,41 @@ void CLodStreamingSystem::Initialize(RenderGraph& rg) {
     m_uploadInstance = std::make_unique<UploadInstance>(numFramesInFlight);
 
     EnsureParallelSortResources();
+}
+
+void CLodStreamingSystem::ClearStreamingUploadFunction(MeshManager* meshManager) {
+    if (meshManager == nullptr) {
+        return;
+    }
+
+    meshManager->SetCLodStreamingUploadFunction({});
+    if (PagePool* pool = meshManager->GetCLodPagePool()) {
+        pool->SetUploadFunction({});
+    }
+}
+
+void CLodStreamingSystem::InstallStreamingUploadFunction(MeshManager* meshManager) {
+    if (meshManager == nullptr || m_uploadInstance == nullptr) {
+        return;
+    }
+
+    PagePool* pool = meshManager->GetCLodPagePool();
+    if (pool == nullptr) {
+        return;
+    }
+
+    auto uploadFn = [inst = m_uploadInstance.get()](
+        const void* data, size_t size,
+        rg::runtime::UploadTarget target, size_t offset) {
+        if (target.kind == rg::runtime::UploadTarget::Kind::PinnedShared) {
+            if (auto dynamicBuffer = std::dynamic_pointer_cast<DynamicBuffer>(target.pinned)) {
+                dynamicBuffer->RetainExternalUpload(data, size, offset);
+            }
+        }
+        inst->UploadData(data, size, target, offset);
+    };
+    pool->SetUploadFunction(uploadFn);
+    meshManager->SetCLodStreamingUploadFunction(std::move(uploadFn));
 }
 
 void CLodStreamingSystem::RequestStreamingFrameWork() {
@@ -1849,20 +1899,7 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
     m_pageLruInitialized = true;
 
     // Route PagePool uploads through our dedicated UploadInstance.
-    if (m_uploadInstance) {
-        auto uploadFn = [inst = m_uploadInstance.get()](
-            const void* data, size_t size,
-            rg::runtime::UploadTarget target, size_t offset) {
-            if (target.kind == rg::runtime::UploadTarget::Kind::PinnedShared) {
-                if (auto dynamicBuffer = std::dynamic_pointer_cast<DynamicBuffer>(target.pinned)) {
-                    dynamicBuffer->RetainExternalUpload(data, size, offset);
-                }
-            }
-            inst->UploadData(data, size, target, offset);
-        };
-        pool->SetUploadFunction(uploadFn);
-        meshManager->SetCLodStreamingUploadFunction(std::move(uploadFn));
-    }
+    InstallStreamingUploadFunction(meshManager);
     meshManager->SetCLodPageMapWriteCallback(
         [this](const MeshManager::CLodPageMapWriteEvent& event) {
             RecordPageMapWrite(event);

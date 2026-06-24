@@ -2282,7 +2282,7 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
                     waitTimeouts);
             }
         }
-        spdlog::info(
+        spdlog::debug(
             "Renderer::WaitForFrame completed frameIndex={} target={} completed={}",
             currentFrameIndex,
             targetValue,

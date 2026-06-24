@@ -415,51 +415,15 @@ void LoadAssetManifestLocked(AssetCacheIndex& index)
 
             std::string pathHash = line.substr(0, tab);
             fs::path path(line.substr(tab + 1));
-            std::error_code ec;
             if (!pathHash.empty() &&
                 HasAssetCacheSuffix(path) &&
-                ExtractPathHashFromFileName(path) == pathHash &&
-                fs::is_regular_file(path, ec)) {
+                ExtractPathHashFromFileName(path) == pathHash) {
                 loaded[std::move(pathHash)].push_back(std::move(path));
             }
         }
     }
 
     index.byPathHash = std::move(loaded);
-}
-
-std::vector<fs::path> ScanCachedAssetsByPathHash(const std::string& pathHash)
-{
-    std::vector<fs::path> paths;
-    if (pathHash.empty()) {
-        return paths;
-    }
-
-    const fs::path cacheRoot = CLodCacheRoot();
-    std::error_code ec;
-    if (!fs::exists(cacheRoot, ec)) {
-        return paths;
-    }
-
-    for (fs::recursive_directory_iterator it(
-             cacheRoot,
-             fs::directory_options::skip_permission_denied,
-             ec);
-         !ec && it != fs::recursive_directory_iterator();
-         it.increment(ec)) {
-        std::error_code entryEc;
-        if (!it->is_regular_file(entryEc)) {
-            continue;
-        }
-
-        const fs::path path = it->path();
-        if (HasAssetCacheSuffix(path) && ExtractPathHashFromFileName(path) == pathHash) {
-            paths.push_back(path);
-        }
-    }
-
-    SortNewestFirst(paths);
-    return paths;
 }
 
 std::vector<fs::path> FindCachedAssets(const std::string& pathHash)
@@ -471,17 +435,6 @@ std::vector<fs::path> FindCachedAssets(const std::string& pathHash)
         auto it = index.byPathHash.find(pathHash);
         if (it != index.byPathHash.end()) {
             return it->second;
-        }
-
-        auto scanned = ScanCachedAssetsByPathHash(pathHash);
-        if (!scanned.empty()) {
-            index.byPathHash[pathHash] = scanned;
-            StoreAssetManifest(index.byPathHash);
-            spdlog::info(
-                "nif_meta_cache=index_recovered path_hash='{}' candidates={}",
-                pathHash,
-                scanned.size());
-            return scanned;
         }
     }
     return {};
@@ -931,6 +884,7 @@ bool ReadTextureBinding(
     const std::vector<std::string>& textureSearchRoots,
     bool loadMaterialTextures)
 {
+    ZoneScopedN("NifLoader::ReadTextureBinding");
     bool hadTexture = false;
     std::string texturePath;
     float factor = 1.0f;
@@ -950,11 +904,18 @@ bool ReadTextureBinding(
     }
     binding.factor = factor;
     binding.sourcePath = texturePath;
+    if (!texturePath.empty()) {
+        ZoneText(texturePath.data(), texturePath.size());
+    }
     if (!hadTexture || !loadMaterialTextures) {
         return true;
     }
 
-    const auto resolvedTexturePath = ResolveCachedTexturePath(texturePath, textureSearchRoots);
+    std::optional<fs::path> resolvedTexturePath;
+    {
+        ZoneScopedN("NifLoader::ReadTextureBinding::ResolveCachedTexturePath");
+        resolvedTexturePath = ResolveCachedTexturePath(texturePath, textureSearchRoots);
+    }
     if (resolvedTexturePath) {
         try {
             const bool texturePreferSRGB = processing.isParticipatingMaterialTexture
@@ -965,12 +926,19 @@ bool ReadTextureBinding(
             cacheProbeMeta.preferSRGB = texturePreferSRGB;
             cacheProbeMeta.processing = processing;
 
-            const std::wstring conditionedCachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
+            std::wstring conditionedCachePath;
+            {
+                ZoneScopedN("NifLoader::ReadTextureBinding::GetExistingTextureCachePath");
+                conditionedCachePath = TextureProcessingManager::GetInstance().GetExistingCachePathForFile(cacheProbeMeta);
+            }
             if (!conditionedCachePath.empty()) {
                 TextureFileMeta deferredMeta = cacheProbeMeta;
                 deferredMeta.filePath = ws2s(conditionedCachePath);
                 deferredMeta.isProcessingCacheArtifact = true;
-                binding.texture = LoadTextureFromFileDeferred(conditionedCachePath, nullptr, texturePreferSRGB, std::addressof(deferredMeta));
+                {
+                    ZoneScopedN("NifLoader::ReadTextureBinding::LoadDeferredConditionedTexture");
+                    binding.texture = LoadTextureFromFileDeferred(conditionedCachePath, nullptr, texturePreferSRGB, std::addressof(deferredMeta));
+                }
                 if (binding.texture) {
                     binding.texture->Meta().filePath = texturePath;
                     binding.texture->Meta().isProcessingCacheArtifact = true;
@@ -978,7 +946,10 @@ bool ReadTextureBinding(
             } else {
                 TextureFileMeta deferredMeta = cacheProbeMeta;
                 deferredMeta.filePath = resolvedTexturePath->string();
-                binding.texture = LoadTextureFromFileDeferred(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB, std::addressof(deferredMeta));
+                {
+                    ZoneScopedN("NifLoader::ReadTextureBinding::LoadDeferredSourceTexture");
+                    binding.texture = LoadTextureFromFileDeferred(resolvedTexturePath->wstring(), nullptr, texturePreferSRGB, std::addressof(deferredMeta));
+                }
                 if (binding.texture) {
                     binding.texture->Meta().filePath = texturePath;
                 }

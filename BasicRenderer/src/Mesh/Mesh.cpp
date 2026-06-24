@@ -460,6 +460,15 @@ Mesh::Mesh(std::unique_ptr<std::vector<std::byte>> vertices, unsigned int vertex
 
 	if (!deferResourceCreation) {
 		CreateBuffers(indices);
+		if (cpuDataPolicy == MeshCpuDataPolicy::ReleaseAfterUpload && m_prebuiltClusterLOD.has_value()) {
+			const auto& prebuilt = *m_prebuiltClusterLOD;
+			const bool needsCloneableDiskMetadata =
+				!prebuilt.pageDiskLocators.empty() &&
+				!prebuilt.cacheSource.containerFileName.empty();
+			if (!needsCloneableDiskMetadata) {
+				m_prebuiltClusterLOD.reset();
+			}
+		}
 
 		m_globalMeshID = GetNextGlobalIndex();
 	}
@@ -587,6 +596,16 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 	m_clodVoxelPageBase = data.voxelPageBase;
 	m_clodVoxelPageCount = data.voxelPageCount;
 	m_clodCacheSource = data.cacheSource;
+	if (m_prebuiltClusterLOD.has_value()) {
+		m_prebuiltClusterLOD->groupDiskLocators = data.groupDiskLocators;
+		m_prebuiltClusterLOD->pageDiskLocators = data.pageDiskLocators;
+		m_prebuiltClusterLOD->groupPageReferences = data.groupPageReferences;
+		m_prebuiltClusterLOD->groupPageReferenceOffsets = data.groupPageReferenceOffsets;
+		m_prebuiltClusterLOD->trianglePageCount = data.trianglePageCount;
+		m_prebuiltClusterLOD->voxelPageBase = data.voxelPageBase;
+		m_prebuiltClusterLOD->voxelPageCount = data.voxelPageCount;
+		m_prebuiltClusterLOD->cacheSource = data.cacheSource;
+	}
 
 	if (m_clodGroupChunks.size() != m_clodGroups.size()) {
 		m_clodGroupChunks.assign(m_clodGroups.size(), {});
@@ -603,11 +622,17 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 
 ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 {
-	ClusterLODPrebuiltData out{};
-	out.groups = m_clodGroups;
-	out.segments = m_clodSegments;
+	ClusterLODPrebuiltData out = m_prebuiltClusterLOD.value_or(ClusterLODPrebuiltData{});
+	if (!m_clodGroups.empty()) {
+		out.groups = m_clodGroups;
+	}
+	if (!m_clodSegments.empty()) {
+		out.segments = m_clodSegments;
+	}
 	out.objectBoundingSphere = m_perMeshBufferData.boundingSphere;
-	out.groupChunks = m_clodGroupChunks;
+	if (!m_clodGroupChunks.empty()) {
+		out.groupChunks = m_clodGroupChunks;
+	}
 	out.groupDiskLocators = m_clodGroupDiskLocators;
 	out.pageDiskLocators = m_clodPageDiskLocators;
 	out.groupPageReferences = m_clodGroupPageReferences;
@@ -616,9 +641,15 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	out.voxelPageBase = m_clodVoxelPageBase;
 	out.voxelPageCount = m_clodVoxelPageCount;
 	out.cacheSource = m_clodCacheSource;
-	out.nodes = m_clodNodes;
-	out.lodNodeRanges = m_clodLodNodeRanges;
-	out.lodLevelRoots = m_clodLodLevelRoots;
+	if (!m_clodNodes.empty()) {
+		out.nodes = m_clodNodes;
+	}
+	if (!m_clodLodNodeRanges.empty()) {
+		out.lodNodeRanges = m_clodLodNodeRanges;
+	}
+	if (!m_clodLodLevelRoots.empty()) {
+		out.lodLevelRoots = m_clodLodLevelRoots;
+	}
 	out.maxDepth = m_clodMaxDepth;
 	out.maxTraversalDepth = m_clodMaxTraversalDepth;
 	return out;
@@ -652,8 +683,9 @@ ClusterLODCacheBuildOwnedData Mesh::GetClusterLODCacheBuildOwnedData() const
 
 void Mesh::CreateBuffers(const std::vector<UINT32>& indices) {
 	if (m_prebuiltClusterLOD.has_value()) {
-		ApplyPrebuiltClusterLODData(m_prebuiltClusterLOD.value());
-		m_prebuiltClusterLOD.reset();
+		if (m_clodGroups.empty() || m_clodSegments.empty() || m_clodNodes.empty()) {
+			ApplyPrebuiltClusterLODData(m_prebuiltClusterLOD.value());
+		}
 	} else {
 		throw std::runtime_error("Mesh was created without prebuilt ClusterLOD data");
 	}
