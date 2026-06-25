@@ -21,6 +21,13 @@
 #include <boost/container_hash/hash.hpp>
 #include <spdlog/spdlog.h>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 #if BASICRENDERER_HAS_DIRECTSTORAGE
 #include "Managers/Singletons/DirectStorageManager.h"
 #endif
@@ -255,6 +262,123 @@ namespace CLodCache {
 			uint32_t reserved = 0;
 			uint32_t pageCount = 0;
 		};
+
+#ifdef _WIN32
+		class MappedContainerFile
+		{
+		public:
+			~MappedContainerFile()
+			{
+				Close();
+			}
+
+			bool Open(const std::wstring& path)
+			{
+				if (valid && filePath == path) {
+					return true;
+				}
+
+				Close();
+				filePath = path;
+				if (filePath.empty()) {
+					return false;
+				}
+
+				fileHandle = CreateFileW(
+					filePath.c_str(),
+					GENERIC_READ,
+					FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+					nullptr,
+					OPEN_EXISTING,
+					FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+					nullptr);
+				if (fileHandle == INVALID_HANDLE_VALUE) {
+					return false;
+				}
+
+				LARGE_INTEGER fileSizeLarge{};
+				if (!GetFileSizeEx(fileHandle, &fileSizeLarge) || fileSizeLarge.QuadPart < static_cast<LONGLONG>(sizeof(ContainerHeader))) {
+					Close();
+					return false;
+				}
+				fileSize = static_cast<uint64_t>(fileSizeLarge.QuadPart);
+
+				mappingHandle = CreateFileMappingW(fileHandle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+				if (mappingHandle == nullptr) {
+					Close();
+					return false;
+				}
+
+				const void* mappedView = MapViewOfFile(mappingHandle, FILE_MAP_READ, 0, 0, 0);
+				if (mappedView == nullptr) {
+					Close();
+					return false;
+				}
+				data = static_cast<const std::byte*>(mappedView);
+
+				ContainerHeader header{};
+				std::memcpy(&header, data, sizeof(header));
+				if (header.magic != kContainerMagic || header.version != 4u) {
+					Close();
+					return false;
+				}
+
+				pageCount = header.pageCount;
+				valid = true;
+				return true;
+			}
+
+			void Close()
+			{
+				if (data != nullptr) {
+					UnmapViewOfFile(data);
+					data = nullptr;
+				}
+				if (mappingHandle != nullptr) {
+					CloseHandle(mappingHandle);
+					mappingHandle = nullptr;
+				}
+				if (fileHandle != INVALID_HANDLE_VALUE) {
+					CloseHandle(fileHandle);
+					fileHandle = INVALID_HANDLE_VALUE;
+				}
+				fileSize = 0;
+				pageCount = 0;
+				valid = false;
+			}
+
+			bool ReadBlob(const ClusterLODGroupDiskLocator& locator, std::vector<std::byte>& outBlob) const
+			{
+				if (!valid || data == nullptr) {
+					return false;
+				}
+				const uint64_t blobEnd = locator.blobOffset + static_cast<uint64_t>(locator.blobSizeBytes);
+				if (blobEnd < locator.blobOffset || blobEnd > fileSize) {
+					return false;
+				}
+
+				outBlob.resize(locator.blobSizeBytes);
+				if (locator.blobSizeBytes != 0u) {
+					std::memcpy(outBlob.data(), data + locator.blobOffset, locator.blobSizeBytes);
+				}
+				return true;
+			}
+
+			uint32_t PageCount() const
+			{
+				return pageCount;
+			}
+
+		private:
+			std::wstring filePath;
+			HANDLE fileHandle = INVALID_HANDLE_VALUE;
+			HANDLE mappingHandle = nullptr;
+			const std::byte* data = nullptr;
+			uint64_t fileSize = 0;
+			uint32_t pageCount = 0;
+			bool valid = false;
+		};
+#endif
 
 		bool ReadPageBlobDirect(std::ifstream& file,
 			const ClusterLODGroupDiskLocator& locator,
@@ -819,6 +943,84 @@ namespace CLodCache {
 			}
 		}
 		return true;
+	}
+
+	bool LoadMeshPagesSelectiveMapped(
+		const std::wstring& containerPath,
+		std::span<const ClusterLODGroupDiskLocator> pageLocators,
+		uint32_t firstPage,
+		uint32_t pageCount,
+		const std::vector<bool>& pageNeedsFetch,
+		LoadedGroupPayload& outPayload)
+	{
+#ifndef _WIN32
+		(void)containerPath;
+		(void)pageLocators;
+		(void)firstPage;
+		(void)pageCount;
+		(void)pageNeedsFetch;
+		(void)outPayload;
+		return false;
+#else
+		thread_local MappedContainerFile mappedContainer;
+		if (!mappedContainer.Open(containerPath) || mappedContainer.PageCount() != pageLocators.size()) {
+			return false;
+		}
+
+		outPayload.pageBlobs.assign(pageCount, {});
+		const uint64_t endPage = static_cast<uint64_t>(firstPage) + static_cast<uint64_t>(pageCount);
+		if (endPage > pageLocators.size()) {
+			return false;
+		}
+		for (uint32_t pageOffset = 0; pageOffset < pageCount; ++pageOffset) {
+			if (!pageNeedsFetch.empty() &&
+				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
+				!pageNeedsFetch[pageOffset]) {
+				continue;
+			}
+			if (!mappedContainer.ReadBlob(pageLocators[firstPage + pageOffset], outPayload.pageBlobs[pageOffset])) {
+				return false;
+			}
+		}
+		return true;
+#endif
+	}
+
+	bool LoadMeshPagesSelectiveMapped(
+		const std::wstring& containerPath,
+		std::span<const ClusterLODGroupDiskLocator> pageLocators,
+		std::span<const uint32_t> meshPageIndices,
+		const std::vector<bool>& pageNeedsFetch,
+		LoadedGroupPayload& outPayload)
+	{
+#ifndef _WIN32
+		(void)containerPath;
+		(void)pageLocators;
+		(void)meshPageIndices;
+		(void)pageNeedsFetch;
+		(void)outPayload;
+		return false;
+#else
+		thread_local MappedContainerFile mappedContainer;
+		if (!mappedContainer.Open(containerPath) || mappedContainer.PageCount() != pageLocators.size()) {
+			return false;
+		}
+
+		outPayload.pageBlobs.assign(meshPageIndices.size(), {});
+		for (uint32_t pageOffset = 0; pageOffset < static_cast<uint32_t>(meshPageIndices.size()); ++pageOffset) {
+			if (!pageNeedsFetch.empty() &&
+				pageOffset < static_cast<uint32_t>(pageNeedsFetch.size()) &&
+				!pageNeedsFetch[pageOffset]) {
+				continue;
+			}
+			const uint32_t meshPageIndex = meshPageIndices[pageOffset];
+			if (meshPageIndex >= pageLocators.size() ||
+				!mappedContainer.ReadBlob(pageLocators[meshPageIndex], outPayload.pageBlobs[pageOffset])) {
+				return false;
+			}
+		}
+		return true;
+#endif
 	}
 
 	bool GetMeshPagePayloadLayout(std::span<const ClusterLODGroupDiskLocator> pageLocators,

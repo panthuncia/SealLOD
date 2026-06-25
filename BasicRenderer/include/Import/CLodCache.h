@@ -84,6 +84,21 @@ bool LoadMeshPagesSelective(std::ifstream& file,
 	const std::vector<bool>& pageNeedsFetch,
 	LoadedGroupPayload& outPayload);
 
+bool LoadMeshPagesSelectiveMapped(
+	const std::wstring& containerPath,
+	std::span<const ClusterLODGroupDiskLocator> pageLocators,
+	uint32_t firstPage,
+	uint32_t pageCount,
+	const std::vector<bool>& pageNeedsFetch,
+	LoadedGroupPayload& outPayload);
+
+bool LoadMeshPagesSelectiveMapped(
+	const std::wstring& containerPath,
+	std::span<const ClusterLODGroupDiskLocator> pageLocators,
+	std::span<const uint32_t> meshPageIndices,
+	const std::vector<bool>& pageNeedsFetch,
+	LoadedGroupPayload& outPayload);
+
 bool GetMeshPagePayloadLayout(std::span<const ClusterLODGroupDiskLocator> pageLocators,
 	uint32_t firstPage,
 	uint32_t pageCount,

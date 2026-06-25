@@ -1585,7 +1585,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
     settingsManager.registerSetting<float>("terrainRvtSourceTexelsPerWorld", 24.0f);
     settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
-    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
+    settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
     settingsManager.registerSetting<float>("terrainReyesDisplacementGlobalScale", 1.0f);
     settingsManager.registerSetting<float>("objectReyesDisplacementScale", 1.0f);
@@ -1700,8 +1700,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
-    settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, false);
-    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, true);
+    settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
+    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
 	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName, CLodVirtualShadowDefaultPhysicalPageCount);
@@ -2252,7 +2252,7 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
 	auto completedValue = m_frameFence->GetCompletedValue();
     const UINT64 targetValue = m_frameFenceValues[currentFrameIndex];
     if (completedValue < targetValue) {
-        spdlog::info(
+        spdlog::trace(
             "Renderer::WaitForFrame waiting frameIndex={} target={} completed={}",
             currentFrameIndex,
             targetValue,

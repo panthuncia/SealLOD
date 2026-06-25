@@ -287,8 +287,20 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 				}
 			}
 
+			if (!loaded && !containerPath.empty()) {
+				ZoneScopedN("CLodDiskStreaming::LoadMappedCpu");
+				loaded = CLodCache::LoadMeshPagesSelectiveMapped(
+					containerPath,
+					std::span<const ClusterLODGroupDiskLocator>(request.pageDiskLocators.data(), request.pageDiskLocators.size()),
+					std::span<const uint32_t>(request.meshPageIndices.data(), request.meshPageIndices.size()),
+					request.segmentNeedsFetch,
+					payload);
+				if (loaded) {
+					result.uploadPathLabel = "MemoryMappedCpuReadThenCpuUpload";
+				}
+			}
+
 			if (!loaded && clodDirectStorageEnabled && DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::SystemMemory)) {
-				const std::wstring containerPath = CLodCache::ResolveContainerPath(request.cacheSource);
 				if (!containerPath.empty()) {
 					std::string directStorageMessage;
 					loaded = CLodCache::LoadMeshPagesSelectiveDirectStorage(

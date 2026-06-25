@@ -1397,6 +1397,9 @@ namespace {
 			if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
 				std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
 			}
+			if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u) {
+				std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
+			}
 			if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0u) {
 				DirectX::XMFLOAT3 color{};
 				std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
