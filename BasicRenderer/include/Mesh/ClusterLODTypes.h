@@ -482,6 +482,14 @@ public:
 		return m_vertexSize;
 	}
 
+	unsigned int GetSkinningVertexSize() const {
+		return m_skinningVertexSize;
+	}
+
+	unsigned int GetFlags() const {
+		return m_flags;
+	}
+
 	// GPU-side: creates a Mesh object with buffer views.
 	// Only implemented in the renderer (Mesh.cpp); not available in headless builds.
 	std::shared_ptr<Mesh> Build(

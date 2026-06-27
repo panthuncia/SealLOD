@@ -521,7 +521,12 @@ struct MaterialInfo {
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
     float2 reyesUvDensity;
-    uint2 padReyesUvDensity;
+    float objectSurfaceTexelDensity;
+    uint objectSurfaceSamplingMode;
+    uint objectBlendMaterialIndex0;
+    uint objectBlendMaterialIndex1;
+    uint objectBlendWeightUvSetIndex;
+    uint padObjectBlend;
     float4 glintParameters;
     uint glintEnabled;
     uint3 padGlint;
@@ -592,7 +597,12 @@ struct MaterialEvalInfo {
     uint heightStreamingTextureID;
     uint opacityStreamingTextureID;
     float2 reyesUvDensity;
-    uint2 padReyesUvDensity;
+    float objectSurfaceTexelDensity;
+    uint objectSurfaceSamplingMode;
+    uint objectBlendMaterialIndex0;
+    uint objectBlendMaterialIndex1;
+    uint objectBlendWeightUvSetIndex;
+    uint padObjectBlend;
     float4 glintParameters;
     uint glintEnabled;
     uint3 padGlint;

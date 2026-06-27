@@ -709,7 +709,7 @@ static bool HasMultipleAuthoredTimeSamples(const UsdAttribute& attr)
 
 // LoadGeom
 // Extracts raw vertex + index arrays from a UsdGeomMesh (optionally
-// limited to a subset).  Handles face-varying expansion, optional
+// limited to one or more subsets).  Handles face-varying expansion, optional
 // normals, texture coordinates, and skinning vertex streams.
 
 static void LoadGeom(
@@ -721,7 +721,7 @@ static void LoadGeom(
 	unsigned int& vertexFlags,
     std::vector<MeshUvSetData>& uvSets,
 	const UsdGeomMesh& mesh,
-	const std::optional<UsdGeomSubset> subset,
+	const std::vector<UsdGeomSubset>& subsets,
 	UsdTimeCode geomTimeCode,
 	double metersPerUnit,
 	const std::vector<std::string>& requiredUvSetNames,
@@ -784,9 +784,10 @@ static void LoadGeom(
 
 	// subset face mask
 	std::vector<uint8_t> useFace(faceVertCounts.size(), 0);
-	if (subset) {
+	const bool limitToSubsetFaces = !subsets.empty();
+	for (const UsdGeomSubset& subset : subsets) {
 		VtArray<int> subsetFaceIndices;
-		subset->GetIndicesAttr().Get(&subsetFaceIndices);
+		subset.GetIndicesAttr().Get(&subsetFaceIndices);
 		for (int fi : subsetFaceIndices)
 			if (fi >= 0 && (size_t)fi < useFace.size()) useFace[fi] = 1;
 	}
@@ -829,7 +830,7 @@ static void LoadGeom(
 	// Count output corners
 	size_t cornerCount = 0;
 	for (size_t faceIndex = 0; faceIndex < faceVertCounts.size(); ++faceIndex) {
-		if ((subset && !useFace[faceIndex]) || holedFaces[faceIndex]) continue;
+		if ((limitToSubsetFaces && !useFace[faceIndex]) || holedFaces[faceIndex]) continue;
 		const int fvCount = faceVertCounts[faceIndex];
 		if (fvCount == 3)
 			cornerCount += 3;
@@ -912,7 +913,7 @@ static void LoadGeom(
 				faceVertIndices,
 				useFace,
 				holedFaces,
-				subset.has_value(),
+				limitToSubsetFaces,
 				reverseMeshWinding);
 			if (!smoothNormals.empty()) {
 				rawNormals = std::move(smoothNormals);
@@ -1273,7 +1274,7 @@ static void LoadGeom(
 	size_t outVertex = 0;
 	for (size_t f = 0; f < faceVertCounts.size(); ++f) {
 		int fc = faceVertCounts[f];
-		if ((!subset || useFace[f]) && !holedFaces[f]) {
+		if ((!limitToSubsetFaces || useFace[f]) && !holedFaces[f]) {
 			for (int i = 1; i + 1 < fc; ++i) {
 				int cornerIdxs[3] = { 0, reverseMeshWinding ? (i + 1) : i, reverseMeshWinding ? i : (i + 1) };
 				uint32_t triVertIdxs[3] = {};
@@ -1460,6 +1461,89 @@ namespace {
 		return geometry;
 	}
 
+	float MedianPositive(std::vector<float> values)
+	{
+		values.erase(
+			std::remove_if(values.begin(), values.end(), [](float v) { return !std::isfinite(v) || v <= 0.0f; }),
+			values.end());
+		if (values.empty()) {
+			return 0.0f;
+		}
+		const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2u);
+		std::nth_element(values.begin(), middle, values.end());
+		return *middle;
+	}
+
+	float EstimateObjectSurfaceTexelDensity(
+		const std::vector<std::byte>& vertices,
+		unsigned int vertexStrideBytes,
+		const std::vector<UINT32>& indices,
+		const std::vector<MeshUvSetData>& uvSets)
+	{
+		if (vertexStrideBytes == 0u || uvSets.empty()) {
+			return 1.0f;
+		}
+
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexStrideBytes);
+		if (uvSets.front().values.size() < vertexCount) {
+			return 1.0f;
+		}
+
+		auto readPosition = [&](std::uint32_t index) {
+			DirectX::XMFLOAT3 position{};
+			std::memcpy(
+				std::addressof(position),
+				vertices.data() + static_cast<std::size_t>(index) * vertexStrideBytes + MeshVertexLayout::PositionOffset,
+				sizeof(position));
+			return position;
+		};
+		auto sub3 = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b) {
+			return DirectX::XMFLOAT3{ a.x - b.x, a.y - b.y, a.z - b.z };
+		};
+		auto lengthCross = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b) {
+			const float x = a.y * b.z - a.z * b.y;
+			const float y = a.z * b.x - a.x * b.z;
+			const float z = a.x * b.y - a.y * b.x;
+			return std::sqrt(x * x + y * y + z * z);
+		};
+
+		std::vector<float> densities;
+		densities.reserve(indices.size() / 3u);
+		for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+			const std::uint32_t i0 = indices[i + 0u];
+			const std::uint32_t i1 = indices[i + 1u];
+			const std::uint32_t i2 = indices[i + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT3 p0 = readPosition(i0);
+			const DirectX::XMFLOAT3 p1 = readPosition(i1);
+			const DirectX::XMFLOAT3 p2 = readPosition(i2);
+			const float objectArea = 0.5f * lengthCross(sub3(p1, p0), sub3(p2, p0));
+			if (!std::isfinite(objectArea) || objectArea <= 1.0e-12f) {
+				continue;
+			}
+
+			const DirectX::XMFLOAT2 uv0 = uvSets.front().values[i0];
+			const DirectX::XMFLOAT2 uv1 = uvSets.front().values[i1];
+			const DirectX::XMFLOAT2 uv2 = uvSets.front().values[i2];
+			const float du1 = uv1.x - uv0.x;
+			const float dv1 = uv1.y - uv0.y;
+			const float du2 = uv2.x - uv0.x;
+			const float dv2 = uv2.y - uv0.y;
+			const float uvArea = 0.5f * std::abs(du1 * dv2 - dv1 * du2);
+			if (!std::isfinite(uvArea) || uvArea <= 1.0e-12f) {
+				continue;
+			}
+
+			densities.push_back(std::sqrt(uvArea / objectArea));
+		}
+
+		const float density = MedianPositive(std::move(densities));
+		return density > 0.0f ? density : 1.0f;
+	}
+
 	std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 	{
 		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count());
@@ -1523,9 +1607,9 @@ std::optional<UsdSkelSkinningQuery> GetSkinningQuery(
 	return skinQ;
 }
 
-MeshPreprocessResult ExtractSubMesh(
+MeshPreprocessResult ExtractSubMeshGroup(
 	const UsdGeomMesh& mesh,
-	const std::optional<UsdGeomSubset>& subset,
+	const std::vector<UsdGeomSubset>& subsets,
 	const UsdStageRefPtr& stage,
 	UsdTimeCode geomTimeCode,
 	double metersPerUnit,
@@ -1538,11 +1622,20 @@ MeshPreprocessResult ExtractSubMesh(
 	std::uint32_t tessellationFactor,
 	const ExtractOptions& options)
 {
-	std::string subsetName = subset
-		? subset->GetPrim().GetName().GetString()
-		: std::string{};
+	std::string subsetName;
+	if (!subsets.empty()) {
+		for (const UsdGeomSubset& subset : subsets) {
+			if (!subsetName.empty()) {
+				subsetName += "+";
+			}
+			subsetName += subset.GetPrim().GetName().GetString();
+		}
+	}
 
 	auto cacheIdentity = CLodCacheLoader::BuildIdentity(mesh, stage, subsetName, geomTimeCode, sourceIdentifierOverride);
+	if (subsets.size() > 1u) {
+		cacheIdentity.sourceIdentifier += "#combined_usd_subsets=" + std::to_string(subsets.size());
+	}
 	if (tessellationFactor > 1u) {
 		cacheIdentity.sourceIdentifier += "#usd_tessellation_factor=" + std::to_string(tessellationFactor);
 	}
@@ -1573,6 +1666,11 @@ MeshPreprocessResult ExtractSubMesh(
 			(options.materialUvRemapSourceSetName.empty()
 				? std::to_string(options.materialUvRemapSourceSetIndex)
 				: options.materialUvRemapSourceSetName);
+	}
+	if (options.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling=" +
+			std::to_string(static_cast<std::uint32_t>(options.objectSurfaceSamplingMode));
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
 	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
@@ -1609,7 +1707,7 @@ MeshPreprocessResult ExtractSubMesh(
     std::vector<MeshUvSetData> uvSets;
 	const auto loadGeomBegin = std::chrono::steady_clock::now();
 	LoadGeom(rawData, skinningData, vertexSize, skinningVertexSize,
-		indices, vertexFlags, uvSets, mesh, subset, geomTimeCode, metersPerUnit, requiredUvSetNames,
+		indices, vertexFlags, uvSets, mesh, subsets, geomTimeCode, metersPerUnit, requiredUvSetNames,
 		skinQ, skelJointOrderRaw, skelJointOrderMapped, options);
 	TessellateExtractedTriangles(
 		rawData,
@@ -1622,6 +1720,26 @@ MeshPreprocessResult ExtractSubMesh(
 		tessellationFactor,
 		mesh.GetPrim().GetPath().GetString());
 	AddMs(g_benchmarkStats.loadGeomMs, loadGeomBegin);
+
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = options.objectSurfaceSamplingMode;
+	float objectSurfaceTexelDensity = 1.0f;
+	if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+		objectSurfaceTexelDensity = rawData
+			? EstimateObjectSurfaceTexelDensity(*rawData, vertexSize, indices, uvSets)
+			: 1.0f;
+		if (!std::isfinite(objectSurfaceTexelDensity) || objectSurfaceTexelDensity <= 0.0f) {
+			objectSurfaceTexelDensity = 1.0f;
+			spdlog::warn(
+				"Object Reyes tri-planar stochastic sampling for prim='{}' subset='{}' could not estimate texel density; using 1.0.",
+				cacheIdentity.primPath,
+				subsetName);
+		}
+		spdlog::info(
+			"Object Reyes tri-planar stochastic sampling enabled for prim='{}' subset='{}' density={}.",
+			cacheIdentity.primPath,
+			subsetName,
+			objectSurfaceTexelDensity);
+	}
 
 	bool materialUvRemapRequired = options.materialUvRemapRequired;
 	bool materialUvRemapSucceeded = false;
@@ -1799,7 +1917,44 @@ MeshPreprocessResult ExtractSubMesh(
 	result.geometricHeightRemapSucceeded = materialUvRemapSucceeded;
 	result.geometricHeightRemapUvSetIndex = materialUvRemapUvSetIndex;
 	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
+	result.objectSurfaceSamplingMode = objectSurfaceSamplingMode;
+	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;
 	return result;
+}
+
+MeshPreprocessResult ExtractSubMesh(
+	const UsdGeomMesh& mesh,
+	const std::optional<UsdGeomSubset>& subset,
+	const UsdStageRefPtr& stage,
+	UsdTimeCode geomTimeCode,
+	double metersPerUnit,
+	const std::vector<std::string>& requiredUvSetNames,
+	const std::optional<UsdSkelSkinningQuery>& skinQ,
+	const VtTokenArray& skelJointOrderRaw,
+	const VtTokenArray& skelJointOrderMapped,
+	bool doubleSidedVoxelSourceNormals,
+	const std::string& sourceIdentifierOverride,
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options)
+{
+	std::vector<UsdGeomSubset> subsets;
+	if (subset) {
+		subsets.push_back(*subset);
+	}
+	return ExtractSubMeshGroup(
+		mesh,
+		subsets,
+		stage,
+		geomTimeCode,
+		metersPerUnit,
+		requiredUvSetNames,
+		skinQ,
+		skelJointOrderRaw,
+		skelJointOrderMapped,
+		doubleSidedVoxelSourceNormals,
+		sourceIdentifierOverride,
+		tessellationFactor,
+		options);
 }
 
 StageExtractionResult ExtractAllFromStage(

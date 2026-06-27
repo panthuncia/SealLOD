@@ -14,6 +14,7 @@
 #include <pxr/base/tf/token.h>
 
 #include "Import/MeshPreprocessData.h"
+#include "Materials/MaterialDescription.h"
 
 namespace USDGeometryExtractor {
 
@@ -41,6 +42,8 @@ struct ExtractOptions {
 	std::string materialUvRemapSourceSetName;
 	std::string materialUvRemapReason;
 	std::string materialUvRemapConfigHash;
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	std::string objectSurfaceSamplingConfigHash;
 };
 
 void ResetBenchmarkStats();
@@ -51,6 +54,21 @@ BenchmarkStats GetBenchmarkStats();
 MeshPreprocessResult ExtractSubMesh(
 	const pxr::UsdGeomMesh& mesh,
 	const std::optional<pxr::UsdGeomSubset>& subset,
+	const pxr::UsdStageRefPtr& stage,
+	pxr::UsdTimeCode geomTimeCode,
+	double metersPerUnit,
+	const std::vector<std::string>& requiredUvSetNames,
+	const std::optional<pxr::UsdSkelSkinningQuery>& skinQ,
+	const pxr::VtTokenArray& skelJointOrderRaw,
+	const pxr::VtTokenArray& skelJointOrderMapped,
+	bool doubleSidedVoxelSourceNormals = false,
+	const std::string& sourceIdentifierOverride = {},
+	std::uint32_t tessellationFactor = 1,
+	const ExtractOptions& options = {});
+
+MeshPreprocessResult ExtractSubMeshGroup(
+	const pxr::UsdGeomMesh& mesh,
+	const std::vector<pxr::UsdGeomSubset>& subsets,
 	const pxr::UsdStageRefPtr& stage,
 	pxr::UsdTimeCode geomTimeCode,
 	double metersPerUnit,

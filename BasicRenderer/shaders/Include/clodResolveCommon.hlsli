@@ -1763,7 +1763,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         materialFlags &= ~MATERIAL_NORMAL_MAP;
         materialInfo.materialFlags = materialFlags;
     }
-
     float4x4 viewProj = mul(cam.view, cam.projection);
     float4x4 objectToClip = mul(obj.model, viewProj);
     float4 clip0 = mul(float4(p0, 1.0f), objectToClip);
@@ -1930,6 +1929,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             InterpolateWithDeriv(bary, c0.y, c1.y, c2.y).x,
             InterpolateWithDeriv(bary, c0.z, c1.z, c2.z).x);
     }
+    float objectBlendWeight = 0.0f;
+    if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+    {
+        const float2 blendUv0 = DecodeCompressedUV(triIdx.x, materialInfo.objectBlendWeightUvSetIndex, md);
+        const float2 blendUv1 = DecodeCompressedUV(triIdx.y, materialInfo.objectBlendWeightUvSetIndex, md);
+        const float2 blendUv2 = DecodeCompressedUV(triIdx.z, materialInfo.objectBlendWeightUvSetIndex, md);
+        objectBlendWeight = saturate(InterpolateWithDeriv(bary, blendUv0.x, blendUv1.x, blendUv2.x).x);
+    }
 
     StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
     float3x3 normalMatrix = (float3x3)normalMatrixBuffer[obj.normalMatrixBufferIndex].value;
@@ -2016,30 +2023,94 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             length(uvCache.samples[0].dUVdy));
     }
 #if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL)
-    SampleMaterialEvalFromUvCache(
-        uvCache,
-        uvBindings,
-        worldNormal,
-        worldPosition,
-        vertexColor,
-        materialInfo,
-        materialFlags,
-        dpdx,
-        dpdy,
-        materialInputs);
+    if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+    {
+        SampleObjectTriplanarStochasticBlendMaterial(
+            worldNormal,
+            normalOS,
+            posOS,
+            vertexColor,
+            dpdxOS,
+            dpdyOS,
+            normalMatrix,
+            materialInfo,
+            materialFlags,
+            objectBlendWeight,
+            materialInputs);
+    }
+    else if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        SampleObjectTriplanarStochasticMaterial(
+            worldNormal,
+            normalOS,
+            posOS,
+            vertexColor,
+            dpdxOS,
+            dpdyOS,
+            normalMatrix,
+            materialInfo,
+            materialFlags,
+            materialInputs);
+    }
+    else
+    {
+        SampleMaterialEvalFromUvCache(
+            uvCache,
+            uvBindings,
+            worldNormal,
+            worldPosition,
+            vertexColor,
+            materialInfo,
+            materialFlags,
+            dpdx,
+            dpdy,
+            materialInputs);
+    }
 #else
-    SampleMaterialFromUvCacheRuntimeWithVertexTangent(
-        uvCache,
-        uvBindings,
-        worldNormal,
-        tangentWS,
-        worldPosition,
-        vertexColor,
-        materialInfo,
-        materialFlags,
-        dpdx,
-        dpdy,
-        materialInputs);
+    if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+    {
+        SampleObjectTriplanarStochasticBlendMaterial(
+            worldNormal,
+            normalOS,
+            posOS,
+            vertexColor,
+            dpdxOS,
+            dpdyOS,
+            normalMatrix,
+            materialInfo,
+            materialFlags,
+            objectBlendWeight,
+            materialInputs);
+    }
+    else if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    {
+        SampleObjectTriplanarStochasticMaterial(
+            worldNormal,
+            normalOS,
+            posOS,
+            vertexColor,
+            dpdxOS,
+            dpdyOS,
+            normalMatrix,
+            materialInfo,
+            materialFlags,
+            materialInputs);
+    }
+    else
+    {
+        SampleMaterialFromUvCacheRuntimeWithVertexTangent(
+            uvCache,
+            uvBindings,
+            worldNormal,
+            tangentWS,
+            worldPosition,
+            vertexColor,
+            materialInfo,
+            materialFlags,
+            dpdx,
+            dpdy,
+            materialInputs);
+    }
     #endif
 #endif
 

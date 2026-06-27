@@ -884,10 +884,101 @@ float ReyesSampleDisplacementOffset(
         : ReyesSampleMaterialDisplacementOffset(materialInfo, uv, camera, depth);
 }
 
+void ReyesObjectSurfaceDerivativeBasis(float3 normalOS, out float3 dpdxOS, out float3 dpdyOS)
+{
+    const float3 n = normalize(normalOS);
+    const float3 up = abs(n.z) < 0.9f ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+    dpdxOS = normalize(cross(up, n));
+    dpdyOS = normalize(cross(n, dpdxOS));
+}
+
+float ReyesSampleObjectSurfaceDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    float3 dpdxOS;
+    float3 dpdyOS;
+    ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
+    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
+    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
+    const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        positionOS,
+        normalOS,
+        dpdxOS,
+        dpdyOS,
+        max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
+        unusedMaterialInputs));
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    Texture2D<float> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+    float3 dpdxOS;
+    float3 dpdyOS;
+    ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
+    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
+    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
+    const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
+        heightTexture,
+        heightSampler,
+        materialInfo.heightStreamingTextureID,
+        positionOS,
+        normalOS,
+        dpdxOS,
+        dpdyOS,
+        max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
+        unusedMaterialInputs));
+    return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
+}
+
+float ReyesSampleObjectSurfaceBlendDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float blendWeight)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    MaterialInfo material0 = materialDataBuffer[materialInfo.objectBlendMaterialIndex0];
+    MaterialInfo material1 = materialDataBuffer[materialInfo.objectBlendMaterialIndex1];
+    const float offset0 = ReyesSampleObjectSurfaceDisplacementOffset(material0, positionOS, normalOS);
+    const float offset1 = ReyesSampleObjectSurfaceDisplacementOffset(material1, positionOS, normalOS);
+    return lerp(offset0, offset1, saturate(blendWeight));
+}
+
+float ReyesSampleObjectSurfaceBlendDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float blendWeight)
+{
+    if (!ReyesGeometricDisplacementEnabled(materialInfo))
+    {
+        return 0.0f;
+    }
+    StructuredBuffer<MaterialEvalInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
+    MaterialEvalInfo material0 = materialDataBuffer[materialInfo.objectBlendMaterialIndex0];
+    MaterialEvalInfo material1 = materialDataBuffer[materialInfo.objectBlendMaterialIndex1];
+    const float offset0 = ReyesSampleObjectSurfaceDisplacementOffset(material0, positionOS, normalOS);
+    const float offset1 = ReyesSampleObjectSurfaceDisplacementOffset(material1, positionOS, normalOS);
+    return lerp(offset0, offset1, saturate(blendWeight));
+}
+
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    const float displacementOffset =
-        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
@@ -903,7 +994,11 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeStartDistance,
     float reyesFadeEndDistance)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
@@ -923,7 +1018,11 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeStartDistance,
     float reyesFadeEndDistance)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(
         materialInfo,
         positionOS,
         uv,
@@ -931,7 +1030,7 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useUvDerivatives,
         dUVdx,
-        dUVdy) *
+        dUVdy)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
@@ -948,7 +1047,11 @@ float3 ReyesApplyGeometricDisplacement(
     float2 dUVdx,
     float2 dUVdy)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(
         materialInfo,
         positionOS,
         uv,
@@ -956,15 +1059,18 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useUvDerivatives,
         dUVdx,
-        dUVdy) *
+        dUVdy)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
 
 float3 ReyesApplyGeometricDisplacement(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
-    const float displacementOffset =
-        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
@@ -980,7 +1086,11 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeStartDistance,
     float reyesFadeEndDistance)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth) *
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
@@ -1000,7 +1110,11 @@ float3 ReyesApplyGeometricDisplacement(
     float reyesFadeStartDistance,
     float reyesFadeEndDistance)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(
         materialInfo,
         positionOS,
         uv,
@@ -1008,7 +1122,7 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useUvDerivatives,
         dUVdx,
-        dUVdy) *
+        dUVdy)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo) *
         CLodReyesDisplacementFade(reyesFadeStartDistance, reyesFadeEndDistance, camera, positionWS);
     return positionOS + normalize(normalOS) * displacementOffset;
@@ -1025,7 +1139,11 @@ float3 ReyesApplyGeometricDisplacement(
     float2 dUVdx,
     float2 dUVdy)
 {
-    const float displacementOffset = ReyesSampleDisplacementOffset(
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(
         materialInfo,
         positionOS,
         uv,
@@ -1033,7 +1151,7 @@ float3 ReyesApplyGeometricDisplacement(
         depth,
         useUvDerivatives,
         dUVdx,
-        dUVdy) *
+        dUVdy)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }
@@ -1148,8 +1266,9 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset =
-        ReyesSampleDisplacementOffset(materialInfo, positionOS, uv) *
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+        ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
+        : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);
     return positionOS + normalize(normalOS) * displacementOffset;
 }

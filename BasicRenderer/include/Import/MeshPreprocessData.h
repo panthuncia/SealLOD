@@ -10,6 +10,7 @@
 
 #include "Import/CLodCacheLoader.h"
 #include "Import/RenderablePrototypeGeometry.h"
+#include "Materials/MaterialDescription.h"
 #include "Mesh/ClusterLODTypes.h"
 
 struct MeshPreprocessResult {
@@ -22,6 +23,8 @@ struct MeshPreprocessResult {
 	bool geometricHeightRemapRequired = false;
 	bool geometricHeightRemapSucceeded = false;
 	std::uint32_t geometricHeightRemapUvSetIndex = 0;
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	float objectSurfaceTexelDensity = 1.0f;
 
 	MeshPreprocessResult(
 		MeshIngestBuilder&& ingestData,

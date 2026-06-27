@@ -18,6 +18,11 @@ enum class MaterialModel : uint32_t {
     OpenPBR = 1,
 };
 
+enum class ObjectSurfaceSamplingMode : uint32_t {
+    None = 0,
+    TriplanarStochastic = 1,
+};
+
 struct TextureAndConstant {
 	TextureAndConstant() = default;
     TextureAndConstant(std::shared_ptr<TextureAsset> tex, float f) : texture(tex), factor(f) {
@@ -113,6 +118,10 @@ struct MaterialDescription {
 	bool heightMapFromBaseColorAlpha = false;
 	bool geometricHeightRemapRequired = false;
 	bool geometricHeightRemapSucceeded = false;
+	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	float objectSurfaceTexelDensity = 1.0f;
+	bool objectTriplanarBlendMaterial = false;
+	uint32_t objectBlendWeightUvSetIndex = 0;
 	bool forceVoxelMaterial = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};

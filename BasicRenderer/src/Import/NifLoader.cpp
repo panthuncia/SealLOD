@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -20,6 +21,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -43,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "4";
+constexpr std::string_view kObjectReyesConfigVersion = "8";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -150,6 +156,12 @@ struct ObjectReyesConfig
 {
     std::unordered_set<std::string> nifPaths;
     std::unordered_set<std::string> texturePaths;
+    std::unordered_set<std::string> surfaceSamplingNifPaths;
+    std::unordered_set<std::string> surfaceSamplingTexturePaths;
+    std::string surfaceSamplingMode;
+    bool surfaceSamplingIncludeSelected = false;
+    bool boundaryBlendingEnabled = false;
+    float boundaryBlendStripWidthObjectUnits = 8.0f;
     std::unordered_set<std::string> uvRemapNifPaths;
     std::unordered_set<std::string> uvRemapTexturePaths;
     bool uvRemapEnabled = true;
@@ -161,20 +173,51 @@ struct ObjectReyesConfig
 std::optional<fs::path> FindObjectReyesConfigPath()
 {
     std::error_code ec;
-    fs::path current = fs::current_path(ec);
-    if (ec) {
-        return std::nullopt;
-    }
 
-    for (;;) {
-        const fs::path candidate = current / "config" / "object_reyes.json";
+    auto findFromRoot = [&](fs::path current) -> std::optional<fs::path> {
+        for (;;) {
+            const fs::path candidate = current / "config" / "object_reyes.json";
+            if (fs::exists(candidate, ec) && !ec) {
+                return candidate;
+            }
+            const fs::path flatCandidate = current / "object_reyes.json";
+            if (fs::exists(flatCandidate, ec) && !ec) {
+                return flatCandidate;
+            }
+            if (!current.has_parent_path() || current.parent_path() == current) {
+                break;
+            }
+            current = current.parent_path();
+        }
+        return std::nullopt;
+    };
+
+    if (const char* overridePath = std::getenv("SARP_OBJECT_REYES_CONFIG"); overridePath && overridePath[0] != '\0') {
+        fs::path candidate = fs::path(overridePath);
+        if (candidate.is_relative()) {
+            if (auto current = fs::current_path(ec); !ec) {
+                candidate = current / candidate;
+            }
+        }
         if (fs::exists(candidate, ec) && !ec) {
             return candidate;
         }
-        if (!current.has_parent_path() || current.parent_path() == current) {
-            break;
+        spdlog::warn("SARP_OBJECT_REYES_CONFIG='{}' does not point to an existing Object Reyes config.", overridePath);
+    }
+
+    if (auto current = fs::current_path(ec); !ec) {
+        if (auto found = findFromRoot(current)) {
+            return found;
         }
-        current = current.parent_path();
+    }
+
+    std::array<wchar_t, MAX_PATH> modulePath{};
+    const DWORD moduleLength = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    if (moduleLength > 0 && moduleLength < modulePath.size()) {
+        const fs::path moduleDir = fs::path(modulePath.data()).parent_path();
+        if (auto found = findFromRoot(moduleDir)) {
+            return found;
+        }
     }
 
     return std::nullopt;
@@ -228,6 +271,28 @@ ObjectReyesConfig LoadObjectReyesConfig()
             readNifPathArray(*nifPaths, config.nifPaths);
         }
         readTexturePathArray(doc.value("texturePaths", json::array()), config.texturePaths);
+        if (const auto surfaceSampling = doc.find("surfaceSampling"); surfaceSampling != doc.end() && surfaceSampling->is_object()) {
+            config.surfaceSamplingMode = surfaceSampling->value("mode", std::string{});
+            config.surfaceSamplingIncludeSelected = surfaceSampling->value("includeSelected", config.surfaceSamplingIncludeSelected);
+            if (const auto nifPaths = surfaceSampling->find("nifPaths"); nifPaths != surfaceSampling->end()) {
+                readNifPathArray(*nifPaths, config.surfaceSamplingNifPaths);
+            }
+            readTexturePathArray(surfaceSampling->value("texturePaths", json::array()), config.surfaceSamplingTexturePaths);
+            if (const auto boundaryBlending = surfaceSampling->find("boundaryBlending");
+                boundaryBlending != surfaceSampling->end() && boundaryBlending->is_object()) {
+                config.boundaryBlendingEnabled = boundaryBlending->value("enabled", config.boundaryBlendingEnabled);
+                config.boundaryBlendStripWidthObjectUnits = boundaryBlending->value(
+                    "stripWidthObjectUnits",
+                    config.boundaryBlendStripWidthObjectUnits);
+                if (!std::isfinite(config.boundaryBlendStripWidthObjectUnits) ||
+                    config.boundaryBlendStripWidthObjectUnits <= 0.0f) {
+                    spdlog::warn(
+                        "Object Reyes boundaryBlending.stripWidthObjectUnits={} is invalid; using 8.0.",
+                        config.boundaryBlendStripWidthObjectUnits);
+                    config.boundaryBlendStripWidthObjectUnits = 8.0f;
+                }
+            }
+        }
         if (const auto uvRemap = doc.find("uvRemap"); uvRemap != doc.end() && uvRemap->is_object()) {
             config.uvRemapEnabled = uvRemap->value("enabled", config.uvRemapEnabled);
             config.uvRemapIncludeSelected = uvRemap->value("includeSelected", config.uvRemapIncludeSelected);
@@ -239,10 +304,16 @@ ObjectReyesConfig LoadObjectReyesConfig()
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), uvRemap enabled={}, includeSelected={}, {} remap nif path(s), {} remap texture path(s), hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), boundaryBlending enabled={}, stripWidthObjectUnits={}, uvRemap enabled={}, includeSelected={}, {} remap nif path(s), {} remap texture path(s), hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
+            config.surfaceSamplingMode,
+            config.surfaceSamplingIncludeSelected,
+            config.surfaceSamplingNifPaths.size(),
+            config.surfaceSamplingTexturePaths.size(),
+            config.boundaryBlendingEnabled,
+            config.boundaryBlendStripWidthObjectUnits,
             config.uvRemapEnabled,
             config.uvRemapIncludeSelected,
             config.uvRemapNifPaths.size(),
@@ -263,8 +334,10 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
     }
     const std::string normalizedSlashKey = NormalizeObjectReyesNifWhitelistPath(normalizedNifCacheKey);
     return config.nifPaths.contains(normalizedSlashKey) ||
+        config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
         config.uvRemapNifPaths.contains(normalizedSlashKey) ||
         !config.texturePaths.empty() ||
+        !config.surfaceSamplingTexturePaths.empty() ||
         !config.uvRemapTexturePaths.empty();
 }
 
@@ -489,6 +562,10 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.heightMapFromBaseColorAlpha);
     HashPod(hash, desc.geometricHeightRemapRequired);
     HashPod(hash, desc.geometricHeightRemapSucceeded);
+    HashPod(hash, desc.objectSurfaceSamplingMode);
+    HashPod(hash, desc.objectSurfaceTexelDensity);
+    HashPod(hash, desc.objectTriplanarBlendMaterial);
+    HashPod(hash, desc.objectBlendWeightUvSetIndex);
     HashPod(hash, desc.blendState);
     HashBinding(hash, desc.baseColor);
     HashBinding(hash, desc.metallic);
@@ -664,6 +741,10 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.texturePaths.begin(),
         objectReyesConfig.texturePaths.end());
     std::sort(options.objectReyesTexturePaths.begin(), options.objectReyesTexturePaths.end());
+    options.objectReyesSurfaceSamplingTexturePaths.assign(
+        objectReyesConfig.surfaceSamplingTexturePaths.begin(),
+        objectReyesConfig.surfaceSamplingTexturePaths.end());
+    std::sort(options.objectReyesSurfaceSamplingTexturePaths.begin(), options.objectReyesSurfaceSamplingTexturePaths.end());
     options.objectReyesUvRemapTexturePaths.assign(
         objectReyesConfig.uvRemapTexturePaths.begin(),
         objectReyesConfig.uvRemapTexturePaths.end());
@@ -671,6 +752,15 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     options.objectReyesNifMatched =
         objectReyesConfig.loaded &&
         objectReyesConfig.nifPaths.contains(options.objectReyesNifPath);
+    options.objectReyesSurfaceSamplingEnabled =
+        objectReyesConfig.loaded &&
+        objectReyesConfig.surfaceSamplingMode == "triplanarStochastic";
+    options.objectReyesSurfaceSamplingIncludeSelected = objectReyesConfig.surfaceSamplingIncludeSelected;
+    options.objectReyesSurfaceSamplingNifMatched =
+        options.objectReyesSurfaceSamplingEnabled &&
+        objectReyesConfig.surfaceSamplingNifPaths.contains(options.objectReyesNifPath);
+    options.objectReyesBoundaryBlendingEnabled = objectReyesConfig.boundaryBlendingEnabled;
+    options.objectReyesBoundaryBlendStripWidthObjectUnits = objectReyesConfig.boundaryBlendStripWidthObjectUnits;
     options.objectReyesUvRemapEnabled = objectReyesConfig.uvRemapEnabled;
     options.objectReyesUvRemapIncludeSelected = objectReyesConfig.uvRemapIncludeSelected;
     options.objectReyesUvRemapNifMatched =
@@ -1202,6 +1292,10 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.heightMapFromBaseColorAlpha);
     writer.Pod(desc.geometricHeightRemapRequired);
     writer.Pod(desc.geometricHeightRemapSucceeded);
+    writer.Pod(static_cast<std::uint32_t>(desc.objectSurfaceSamplingMode));
+    writer.Pod(desc.objectSurfaceTexelDensity);
+    writer.Pod(desc.objectTriplanarBlendMaterial);
+    writer.Pod(desc.objectBlendWeightUvSetIndex);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor, TextureSemantic::BaseColor, true);
     WriteTextureBinding(writer, desc.metallic, TextureSemantic::Metallic, false);
@@ -1231,6 +1325,7 @@ bool ReadMaterialDescription(
     ZoneScopedN("NifLoader::ReadMaterialDescription");
     std::uint32_t model = 0;
     std::uint32_t blend = 0;
+    std::uint32_t objectSurfaceSamplingMode = 0;
     if (!reader.Pod(model) ||
         !reader.String(desc.name) ||
         !reader.Pod(desc.diffuseColor) ||
@@ -1252,10 +1347,15 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.heightMapFromBaseColorAlpha) ||
         !reader.Pod(desc.geometricHeightRemapRequired) ||
         !reader.Pod(desc.geometricHeightRemapSucceeded) ||
+        !reader.Pod(objectSurfaceSamplingMode) ||
+        !reader.Pod(desc.objectSurfaceTexelDensity) ||
+        !reader.Pod(desc.objectTriplanarBlendMaterial) ||
+        !reader.Pod(desc.objectBlendWeightUvSetIndex) ||
         !reader.Pod(blend)) {
         return false;
     }
     desc.materialModel = static_cast<MaterialModel>(model);
+    desc.objectSurfaceSamplingMode = static_cast<ObjectSurfaceSamplingMode>(objectSurfaceSamplingMode);
     desc.blendState = static_cast<BlendState>(blend);
     return ReadTextureBinding(reader, desc.baseColor, TextureSemantic::BaseColor, true, textureSearchRoots, loadMaterialTextures) &&
         ReadTextureBinding(reader, desc.metallic, TextureSemantic::Metallic, false, textureSearchRoots, loadMaterialTextures) &&

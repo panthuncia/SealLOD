@@ -77,6 +77,9 @@
 #include "Import/USDLoader.h"
 #include "Import/CLodCacheLoader.h"
 #include "Import/USDGeometryExtractor.h"
+#include "Mesh/DefaultCLodSettings.h"
+#include "Mesh/VertexLayout.h"
+#include "Mesh/VertexLayout.h"
 
 namespace USDLoader {
 
@@ -167,16 +170,40 @@ namespace USDLoader {
 
 	struct PreprocessedMeshSubset {
 		UsdShadeMaterial material;
+		UsdShadeMaterial blendMaterial0;
+		UsdShadeMaterial blendMaterial1;
 		MeshPreprocessResult result;
 		bool inferredDoubleSided = false;
+		bool objectTriplanarBlendStrip = false;
 
 		PreprocessedMeshSubset(UsdShadeMaterial m, MeshPreprocessResult&& r, bool inferred)
 			: material(std::move(m)), result(std::move(r)), inferredDoubleSided(inferred) {}
+
+		PreprocessedMeshSubset(UsdShadeMaterial m0, UsdShadeMaterial m1, MeshPreprocessResult&& r, bool inferred)
+			: blendMaterial0(std::move(m0))
+			, blendMaterial1(std::move(m1))
+			, result(std::move(r))
+			, inferredDoubleSided(inferred)
+			, objectTriplanarBlendStrip(true) {}
 	};
 
 	struct PreprocessedMeshRecord {
 		bool authoredDoubleSided = false;
 		std::vector<PreprocessedMeshSubset> subsets;
+	};
+
+	struct MeshPreprocessWorkItem {
+		std::string meshPath;
+		UsdGeomMesh mesh;
+		std::vector<UsdGeomSubset> subsets;
+		UsdShadeMaterial material;
+		std::vector<std::string> requiredUvSetNames;
+		std::optional<UsdSkelSkinningQuery> skinQ;
+		VtTokenArray skelJointOrderRaw;
+		VtTokenArray skelJointOrderMapped;
+		USDGeometryExtractor::ExtractOptions extractOptions;
+		bool authoredDoubleSided = false;
+		bool inferredDoubleSided = false;
 	};
 
 	struct LoadingCaches {
@@ -641,6 +668,13 @@ namespace USDLoader {
 				(desc.heightMap.channels.empty() || desc.heightMap.channels[0] == 0u);
 		}
 
+		bool SupportsPotentialObjectReyesHeightSidecar(const MaterialDescription& desc)
+		{
+			return !desc.heightMapFromBaseColorAlpha &&
+				(desc.heightMap.channels.empty() || desc.heightMap.channels[0] == 0u) &&
+				(!desc.baseColor.sourcePath.empty() || desc.baseColor.texture != nullptr);
+		}
+
 		std::optional<std::string> GetSingleActiveTextureUvSetName(const MaterialDescription& desc)
 		{
 			std::optional<std::string> firstName;
@@ -672,6 +706,35 @@ namespace USDLoader {
 					binding.uvSetIndex = uvSetIndex;
 				}
 			});
+		}
+
+		void AppendTextureBindingSignature(
+			std::string& signature,
+			const char* slotName,
+			const TextureAndConstant& binding)
+		{
+			signature += slotName;
+			signature += '=';
+			signature += NormalizeObjectReyesWhitelistPath(binding.sourcePath);
+			signature += ";ch=";
+			for (std::uint32_t channel : binding.channels) {
+				signature += std::to_string(channel);
+				signature += ',';
+			}
+			signature += '|';
+		}
+
+		std::string BuildMaterialTextureSignature(const MaterialDescription& desc)
+		{
+			std::string signature;
+			signature.reserve(512);
+			for (const auto& entry : kMaterialTextureBindings) {
+				AppendTextureBindingSignature(signature, entry.inputName, desc.*(entry.binding));
+			}
+			for (const auto& entry : kOpenPBRTextureBindings) {
+				AppendTextureBindingSignature(signature, entry.inputName, desc.openPBRTextures.*(entry.binding));
+			}
+			return signature;
 		}
 
 	std::string NormalizeUsdIdentifier(std::string value) {
@@ -1959,7 +2022,11 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.geometricDisplacementOptIn ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.geometricHeightRemapRequired ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.geometricHeightRemapSucceeded ? 1 : 0);
+			std::to_string(resolvedDesc.geometricHeightRemapSucceeded ? 1 : 0) + "|" +
+			std::to_string(static_cast<std::uint32_t>(resolvedDesc.objectSurfaceSamplingMode)) + "|" +
+			std::to_string(resolvedDesc.objectSurfaceTexelDensity) + "|" +
+			std::to_string(resolvedDesc.objectTriplanarBlendMaterial ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.objectBlendWeightUvSetIndex);
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {
@@ -2336,6 +2403,10 @@ namespace USDLoader {
 				AssignAllActiveTextureBindingsToUvSet(resolvedDesc, preprocessResult->geometricHeightRemapUvSetIndex);
 			}
 		}
+		if (preprocessResult && preprocessResult->objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
+			resolvedDesc.objectSurfaceSamplingMode = preprocessResult->objectSurfaceSamplingMode;
+			resolvedDesc.objectSurfaceTexelDensity = preprocessResult->objectSurfaceTexelDensity;
+		}
         resolvedDesc.forceDoubleSided = resolvedDesc.forceDoubleSided || forceDoubleSided;
 
         const std::string cacheKey = BuildResolvedMaterialCacheKey(materialPath, resolvedDesc);
@@ -2348,6 +2419,47 @@ namespace USDLoader {
         loadingCache.resolvedMaterialCache[cacheKey] = runtimeMaterial;
         return runtimeMaterial;
     }
+
+	std::shared_ptr<Material> ResolveObjectTriplanarBlendMaterialForMesh(
+		const UsdShadeMaterial& material0,
+		const UsdShadeMaterial& material1,
+		const std::vector<MeshUvSetData>& uvSets,
+		bool forceDoubleSided,
+		const UsdPrim& meshPrim,
+		const MeshPreprocessResult* preprocessResult)
+	{
+		auto child0 = ResolveMaterialForMesh(material0, uvSets, forceDoubleSided, meshPrim, preprocessResult);
+		auto child1 = ResolveMaterialForMesh(material1, uvSets, forceDoubleSided, meshPrim, preprocessResult);
+		if (!child0 || !child1) {
+			return ResolveDefaultUsdMaterial(forceDoubleSided);
+		}
+
+		MaterialDescription desc = child0->ToCacheDescription();
+		desc.name += "_ObjectTriplanarBlend";
+		desc.objectTriplanarBlendMaterial = true;
+		desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+		desc.objectBlendWeightUvSetIndex = preprocessResult ? preprocessResult->geometricHeightRemapUvSetIndex : 0u;
+		desc.heightMap.uvSetIndex = desc.objectBlendWeightUvSetIndex;
+		desc.geometricDisplacementOptIn = true;
+		desc.enableGeometricDisplacement = true;
+
+		const std::string cacheKey =
+			std::string("object-triplanar-blend|") +
+			(material0 ? material0.GetPrim().GetPath().GetString() : std::string("<null>")) +
+			"|" +
+			(material1 ? material1.GetPrim().GetPath().GetString() : std::string("<null>")) +
+			"|uv=" + std::to_string(desc.objectBlendWeightUvSetIndex) +
+			"|" + BuildResolvedMaterialCacheKey(desc.name, desc);
+		auto it = loadingCache.resolvedMaterialCache.find(cacheKey);
+		if (it != loadingCache.resolvedMaterialCache.end()) {
+			return it->second;
+		}
+
+		auto material = Material::CreateShared(desc);
+		material->SetObjectBlendChildren(child0, child1, desc.objectBlendWeightUvSetIndex);
+		loadingCache.resolvedMaterialCache[cacheKey] = material;
+		return material;
+	}
 
 	USDGeometryExtractor::ExtractOptions BuildGeometryExtractOptions(
 		const UsdGeomMesh& mesh,
@@ -2385,8 +2497,31 @@ namespace USDLoader {
 			((stageOptions.objectReyesUvRemapIncludeSelected && objectReyesSelected) ||
 			 stageOptions.objectReyesUvRemapNifMatched ||
 			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesUvRemapTexturePaths));
-		options.geometricDisplacementOptIn = objectReyesSelected && SupportsObjectReyesGeometricDisplacementCandidate(desc);
-		if (uvRemapSelected && options.geometricDisplacementOptIn) {
+		const bool surfaceSamplingSelected =
+			stageOptions.objectReyesSurfaceSamplingEnabled &&
+			((stageOptions.objectReyesSurfaceSamplingIncludeSelected && objectReyesSelected) ||
+			 stageOptions.objectReyesSurfaceSamplingNifMatched ||
+			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesSurfaceSamplingTexturePaths));
+		const bool explicitHeightCandidate = SupportsObjectReyesGeometricDisplacementCandidate(desc);
+		const bool potentialStaticHeightSidecar =
+			(objectReyesSelected || surfaceSamplingSelected || uvRemapSelected) &&
+			!explicitHeightCandidate &&
+			SupportsPotentialObjectReyesHeightSidecar(desc);
+		options.geometricDisplacementOptIn = (objectReyesSelected || surfaceSamplingSelected) &&
+			(explicitHeightCandidate || potentialStaticHeightSidecar);
+		if (surfaceSamplingSelected && options.geometricDisplacementOptIn) {
+			if (desc.brniflyModelSpaceNormals) {
+				spdlog::warn(
+					"Object Reyes tri-planar stochastic sampling skipped for mesh '{}' material '{}' because model-space normal maps are not supported by v1.",
+					mesh ? mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
+					material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>"));
+			}
+			else {
+				options.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+				options.objectSurfaceSamplingConfigHash = stageOptions.objectReyesConfigHash;
+			}
+		}
+		if (!surfaceSamplingSelected && uvRemapSelected && options.geometricDisplacementOptIn) {
 			options.materialUvRemapRequired = true;
 			options.materialUvRemapConfigHash = stageOptions.objectReyesConfigHash;
 			options.materialUvRemapReason = stageOptions.objectReyesUvRemapNifMatched || stageOptions.objectReyesNifMatched
@@ -2400,19 +2535,21 @@ namespace USDLoader {
 				options.materialUvRemapReason += "; material uses multiple active texture UV sets";
 			}
 		}
-		else if (objectReyesSelected || uvRemapSelected) {
+		else if ((objectReyesSelected || uvRemapSelected || surfaceSamplingSelected) && !options.geometricDisplacementOptIn) {
 			spdlog::info(
-				"Object Reyes opt-in matched mesh '{}' material '{}' but material is not eligible for geometric Reyes/remap: selected={}, uvRemapSelected={}, baseSource='{}', geometric={}, heightTexture={}, heightSource='{}', baseAlphaHeight={}, firstHeightChannel={}.",
+				"Object Reyes opt-in matched mesh '{}' material '{}' but material is not eligible for geometric Reyes/remap/surface sampling: selected={}, uvRemapSelected={}, surfaceSamplingSelected={}, baseSource='{}', geometric={}, heightTexture={}, heightSource='{}', baseAlphaHeight={}, firstHeightChannel={}, potentialStaticHeightSidecar={}.",
 				mesh ? mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
 				material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>"),
 				objectReyesSelected,
 				uvRemapSelected,
+				surfaceSamplingSelected,
 				desc.baseColor.sourcePath,
 				desc.enableGeometricDisplacement,
 				desc.heightMap.texture != nullptr,
 				desc.heightMap.sourcePath,
 				desc.heightMapFromBaseColorAlpha,
-				desc.heightMap.channels.empty() ? -1 : static_cast<int>(desc.heightMap.channels[0]));
+				desc.heightMap.channels.empty() ? -1 : static_cast<int>(desc.heightMap.channels[0]),
+				potentialStaticHeightSidecar);
 		}
 		return options;
 	}
@@ -2422,6 +2559,767 @@ namespace USDLoader {
 		return options.vertexAlphaCutoff.has_value() &&
 			options.brniflyVertexAlpha &&
 			(options.brniflyDecal || options.brniflyDynamicDecal);
+	}
+
+	std::string BuildTriplanarSubsetCombineKey(const MeshPreprocessWorkItem& workItem)
+	{
+		if (workItem.skinQ ||
+			workItem.extractOptions.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::TriplanarStochastic) {
+			return {};
+		}
+
+		MaterialDescription desc{};
+		if (workItem.material) {
+			const std::string materialPath = workItem.material.GetPrim().GetPath().GetString();
+			const auto templateIt = loadingCache.materialTemplateCache.find(materialPath);
+			if (templateIt != loadingCache.materialTemplateCache.end()) {
+				desc = templateIt->second.desc;
+			}
+			ApplyBrniflyMaterialMetadata(desc, workItem.material.GetPrim());
+		}
+		if (workItem.mesh) {
+			ApplyBrniflyMaterialMetadata(desc, workItem.mesh.GetPrim());
+		}
+
+		spdlog::debug(
+			"Object Reyes tri-planar combine candidate mesh='{}' material='{}' base='{}' normal='{}' roughness='{}' metallic='{}' ao='{}' height='{}' heightFromBaseAlpha={}.",
+			workItem.mesh ? workItem.mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
+			workItem.material ? workItem.material.GetPrim().GetPath().GetString() : std::string("<unbound>"),
+			desc.baseColor.sourcePath,
+			desc.normal.sourcePath,
+			desc.roughness.sourcePath,
+			desc.metallic.sourcePath,
+			desc.aoMap.sourcePath,
+			desc.heightMap.sourcePath,
+			desc.heightMapFromBaseColorAlpha);
+
+		std::string key = BuildMaterialTextureSignature(desc);
+		key += "optin=" + std::to_string(workItem.extractOptions.geometricDisplacementOptIn ? 1 : 0);
+		key += "|surface=" + std::to_string(static_cast<std::uint32_t>(workItem.extractOptions.objectSurfaceSamplingMode));
+		key += "|vtxalpha=" + std::to_string(workItem.extractOptions.brniflyVertexAlpha ? 1 : 0);
+		key += "|zwrite=" + std::to_string(workItem.extractOptions.brniflyZBufferWrite ? 1 : 0);
+		key += "|decal=" + std::to_string(workItem.extractOptions.brniflyDecal ? 1 : 0);
+		key += "|dynamicDecal=" + std::to_string(workItem.extractOptions.brniflyDynamicDecal ? 1 : 0);
+		key += "|modelNormals=" + std::to_string(workItem.extractOptions.brniflyModelSpaceNormals ? 1 : 0);
+		key += "|alphaCutoff=";
+		key += workItem.extractOptions.vertexAlphaCutoff
+			? std::to_string(*workItem.extractOptions.vertexAlphaCutoff)
+			: std::string("none");
+		return key;
+	}
+
+	void AppendUniqueUvSetNames(std::vector<std::string>& dst, const std::vector<std::string>& src)
+	{
+		for (const std::string& name : src) {
+			if (std::find(dst.begin(), dst.end(), name) == dst.end()) {
+				dst.push_back(name);
+			}
+		}
+	}
+
+	std::vector<MeshPreprocessWorkItem> CombineCompatibleTriplanarSubsetWorkItems(
+		std::vector<MeshPreprocessWorkItem>&& input)
+	{
+		std::vector<MeshPreprocessWorkItem> output;
+		output.reserve(input.size());
+		std::unordered_map<std::string, std::size_t> combinedByKey;
+		for (MeshPreprocessWorkItem& item : input) {
+			std::string key = BuildTriplanarSubsetCombineKey(item);
+			if (key.empty()) {
+				output.push_back(std::move(item));
+				continue;
+			}
+
+			auto [it, inserted] = combinedByKey.emplace(key, output.size());
+			if (inserted) {
+				output.push_back(std::move(item));
+				continue;
+			}
+
+			MeshPreprocessWorkItem& combined = output[it->second];
+			combined.subsets.insert(
+				combined.subsets.end(),
+				std::make_move_iterator(item.subsets.begin()),
+				std::make_move_iterator(item.subsets.end()));
+			AppendUniqueUvSetNames(combined.requiredUvSetNames, item.requiredUvSetNames);
+			combined.inferredDoubleSided = combined.inferredDoubleSided || item.inferredDoubleSided;
+		}
+
+		for (const MeshPreprocessWorkItem& item : output) {
+			if (item.subsets.size() > 1u) {
+				spdlog::info(
+					"Object Reyes tri-planar preprocessing combined {} same-texture subset(s) for mesh '{}' material '{}'.",
+					item.subsets.size(),
+					item.meshPath,
+					item.material ? item.material.GetPrim().GetPath().GetString() : std::string("<unbound>"));
+			}
+		}
+		return output;
+	}
+
+	std::string ParentPrimPath(std::string path)
+	{
+		const std::size_t slash = path.find_last_of('/');
+		if (slash == std::string::npos || slash == 0u) {
+			return {};
+		}
+		return path.substr(0u, slash);
+	}
+
+	struct XMFLOAT3ExactKey
+	{
+		std::uint32_t x = 0;
+		std::uint32_t y = 0;
+		std::uint32_t z = 0;
+
+		bool operator==(const XMFLOAT3ExactKey& other) const
+		{
+			return x == other.x && y == other.y && z == other.z;
+		}
+	};
+
+	struct XMFLOAT3ExactKeyHash
+	{
+		std::size_t operator()(const XMFLOAT3ExactKey& key) const
+		{
+			std::size_t h = static_cast<std::size_t>(key.x);
+			h ^= static_cast<std::size_t>(key.y) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+			h ^= static_cast<std::size_t>(key.z) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+			return h;
+		}
+	};
+
+	XMFLOAT3ExactKey MakeExactPositionKey(const std::byte* vertex)
+	{
+		DirectX::XMFLOAT3 p{};
+		std::memcpy(std::addressof(p), vertex + MeshVertexLayout::PositionOffset, sizeof(p));
+		XMFLOAT3ExactKey key{};
+		std::memcpy(std::addressof(key.x), std::addressof(p.x), sizeof(key.x));
+		std::memcpy(std::addressof(key.y), std::addressof(p.y), sizeof(key.y));
+		std::memcpy(std::addressof(key.z), std::addressof(p.z), sizeof(key.z));
+		return key;
+	}
+
+	DirectX::XMFLOAT3 ReadPosition(const std::vector<std::byte>& vertices, unsigned int vertexSize, std::uint32_t index)
+	{
+		DirectX::XMFLOAT3 p{};
+		std::memcpy(
+			std::addressof(p),
+			vertices.data() + static_cast<std::size_t>(index) * vertexSize + MeshVertexLayout::PositionOffset,
+			sizeof(p));
+		return p;
+	}
+
+	void AddNormal(DirectX::XMFLOAT3& dst, const DirectX::XMFLOAT3& n)
+	{
+		dst.x += n.x;
+		dst.y += n.y;
+		dst.z += n.z;
+	}
+
+	DirectX::XMFLOAT3 NormalizeOrFallback(const DirectX::XMFLOAT3& n)
+	{
+		const float lenSq = n.x * n.x + n.y * n.y + n.z * n.z;
+		if (!std::isfinite(lenSq) || lenSq <= 1.0e-20f) {
+			return { 0.0f, 0.0f, 1.0f };
+		}
+		const float invLen = 1.0f / std::sqrt(lenSq);
+		return { n.x * invLen, n.y * invLen, n.z * invLen };
+	}
+
+	void RecomputeExactPositionWeldedNormals(
+		std::vector<std::byte>& vertices,
+		unsigned int vertexSize,
+		unsigned int vertexFlags,
+		const std::vector<std::uint32_t>& indices)
+	{
+		if (vertexSize == 0u || (vertexFlags & VertexFlags::VERTEX_NORMALS) == 0u) {
+			return;
+		}
+
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		std::unordered_map<XMFLOAT3ExactKey, std::uint32_t, XMFLOAT3ExactKeyHash> weldMap;
+		weldMap.reserve(vertexCount);
+		std::vector<std::uint32_t> vertexToWeld(vertexCount, 0u);
+		std::vector<DirectX::XMFLOAT3> weldedNormals;
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			auto [it, inserted] = weldMap.try_emplace(MakeExactPositionKey(vertex), static_cast<std::uint32_t>(weldedNormals.size()));
+			if (inserted) {
+				weldedNormals.push_back({});
+			}
+			vertexToWeld[vertexIndex] = it->second;
+		}
+
+		for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+			const std::uint32_t i0 = indices[i + 0u];
+			const std::uint32_t i1 = indices[i + 1u];
+			const std::uint32_t i2 = indices[i + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+			const DirectX::XMFLOAT3 p0 = ReadPosition(vertices, vertexSize, i0);
+			const DirectX::XMFLOAT3 p1 = ReadPosition(vertices, vertexSize, i1);
+			const DirectX::XMFLOAT3 p2 = ReadPosition(vertices, vertexSize, i2);
+			const DirectX::XMFLOAT3 e1{ p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
+			const DirectX::XMFLOAT3 e2{ p2.x - p0.x, p2.y - p0.y, p2.z - p0.z };
+			const DirectX::XMFLOAT3 n{
+				e1.y * e2.z - e1.z * e2.y,
+				e1.z * e2.x - e1.x * e2.z,
+				e1.x * e2.y - e1.y * e2.x
+			};
+			AddNormal(weldedNormals[vertexToWeld[i0]], n);
+			AddNormal(weldedNormals[vertexToWeld[i1]], n);
+			AddNormal(weldedNormals[vertexToWeld[i2]], n);
+		}
+
+		for (DirectX::XMFLOAT3& n : weldedNormals) {
+			n = NormalizeOrFallback(n);
+		}
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const DirectX::XMFLOAT3 n = weldedNormals[vertexToWeld[vertexIndex]];
+			std::memcpy(
+				vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize) + MeshVertexLayout::NormalOffset,
+				std::addressof(n),
+				sizeof(n));
+		}
+	}
+
+	std::optional<MeshPreprocessResult> TryCombinePreprocessedMeshGroup(
+		const std::vector<std::size_t>& group,
+		const std::vector<MeshPreprocessWorkItem>& workItems,
+		std::vector<std::optional<MeshPreprocessResult>>& preprocessed)
+	{
+		if (group.size() < 2u) {
+			return std::nullopt;
+		}
+
+		MeshPreprocessResult& first = preprocessed[group.front()].value();
+		const unsigned int vertexSize = first.ingest.GetVertexSize();
+		const unsigned int skinningVertexSize = first.ingest.GetSkinningVertexSize();
+		const unsigned int vertexFlags = first.ingest.GetFlags();
+		if (skinningVertexSize != 0u) {
+			return std::nullopt;
+		}
+
+		std::vector<std::byte> vertices;
+		std::vector<std::uint32_t> indices;
+		std::vector<MeshUvSetData> uvSets = first.ingest.GetUvSets();
+		std::size_t totalVertexCount = 0;
+		std::size_t totalIndexCount = 0;
+		for (std::size_t index : group) {
+			const MeshPreprocessResult& result = preprocessed[index].value();
+			if (result.ingest.GetVertexSize() != vertexSize ||
+				result.ingest.GetSkinningVertexSize() != skinningVertexSize ||
+				result.ingest.GetFlags() != vertexFlags ||
+				result.ingest.GetUvSets().size() != uvSets.size()) {
+				return std::nullopt;
+			}
+			totalVertexCount += result.ingest.GetVertices().size() / static_cast<std::size_t>(vertexSize);
+			totalIndexCount += result.ingest.GetIndices().size();
+		}
+		vertices.reserve(totalVertexCount * static_cast<std::size_t>(vertexSize));
+		indices.reserve(totalIndexCount);
+		for (MeshUvSetData& uvSet : uvSets) {
+			uvSet.values.clear();
+			uvSet.values.reserve(totalVertexCount);
+		}
+
+		std::uint32_t vertexBase = 0u;
+		for (std::size_t index : group) {
+			const MeshPreprocessResult& result = preprocessed[index].value();
+			const std::vector<std::byte>& srcVertices = result.ingest.GetVertices();
+			const std::vector<std::uint32_t>& srcIndices = result.ingest.GetIndices();
+			const std::vector<MeshUvSetData>& srcUvSets = result.ingest.GetUvSets();
+			vertices.insert(vertices.end(), srcVertices.begin(), srcVertices.end());
+			for (std::uint32_t srcIndex : srcIndices) {
+				indices.push_back(vertexBase + srcIndex);
+			}
+			for (std::size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+				uvSets[uvSetIndex].values.insert(
+					uvSets[uvSetIndex].values.end(),
+					srcUvSets[uvSetIndex].values.begin(),
+					srcUvSets[uvSetIndex].values.end());
+			}
+			vertexBase += static_cast<std::uint32_t>(srcVertices.size() / static_cast<std::size_t>(vertexSize));
+		}
+
+		RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
+
+		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+		builderSettings.doubleSidedVoxelSourceNormals = false;
+		for (std::size_t index : group) {
+			const MeshPreprocessWorkItem& item = workItems[index];
+			builderSettings.doubleSidedVoxelSourceNormals =
+				builderSettings.doubleSidedVoxelSourceNormals || item.authoredDoubleSided || item.inferredDoubleSided;
+		}
+
+		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, builderSettings);
+		ingest.SetUvSets(std::move(uvSets));
+		ingest.ReserveVertices(totalVertexCount);
+		for (std::size_t vertexIndex = 0; vertexIndex < totalVertexCount; ++vertexIndex) {
+			ingest.AppendVertexBytes(vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize), vertexSize);
+		}
+		ingest.ReserveIndices(indices.size());
+		ingest.AppendIndices(indices.data(), indices.size());
+
+		CLodCacheLoader::MeshCacheIdentity identity = first.cacheIdentity;
+		identity.subsetName = "combined-same-texture-meshes";
+		identity.sourceIdentifier += "#combined_same_texture_meshes=" + std::to_string(group.size());
+		for (std::size_t index : group) {
+			identity.sourceIdentifier += "#combined_mesh=" + workItems[index].mesh.GetPrim().GetPath().GetString();
+		}
+
+		spdlog::info(
+			"Object Reyes tri-planar preprocessing combining {} sibling mesh prim(s) under '{}' into one CLod mesh.",
+			group.size(),
+			ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
+		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+		ClusterLODPrebuiltData savedPrebuiltData;
+		std::optional<ClusterLODPrebuiltData> prebuiltData;
+		if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {
+			prebuiltData = std::move(savedPrebuiltData);
+		}
+		else {
+			spdlog::warn("Object Reyes tri-planar combined CLod cache save failed; using in-memory combined artifacts.");
+			prebuiltData = std::move(artifacts.prebuiltData);
+		}
+
+		MeshPreprocessResult result(
+			std::move(ingest),
+			std::move(identity),
+			std::move(prebuiltData),
+			first.forceDoubleSidedPreview,
+			std::move(first.prototypeGeometry));
+		result.geometricDisplacementOptIn = first.geometricDisplacementOptIn;
+		result.geometricHeightRemapRequired = first.geometricHeightRemapRequired;
+		result.geometricHeightRemapSucceeded = first.geometricHeightRemapSucceeded;
+		result.geometricHeightRemapUvSetIndex = first.geometricHeightRemapUvSetIndex;
+		result.objectSurfaceSamplingMode = first.objectSurfaceSamplingMode;
+		result.objectSurfaceTexelDensity = first.objectSurfaceTexelDensity;
+		return result;
+	}
+
+	struct ObjectBoundaryEdgeKey {
+		std::array<std::uint32_t, 3> a{};
+		std::array<std::uint32_t, 3> b{};
+
+		bool operator==(const ObjectBoundaryEdgeKey& rhs) const noexcept {
+			return a == rhs.a && b == rhs.b;
+		}
+	};
+
+	struct ObjectBoundaryEdgeKeyHash {
+		std::size_t operator()(const ObjectBoundaryEdgeKey& key) const noexcept {
+			std::size_t h = 1469598103934665603ull;
+			auto mix = [&](std::uint32_t value) {
+				h ^= static_cast<std::size_t>(value);
+				h *= 1099511628211ull;
+			};
+			for (std::uint32_t value : key.a) mix(value);
+			for (std::uint32_t value : key.b) mix(value);
+			return h;
+		}
+	};
+
+	struct ObjectBoundaryIncident {
+		std::size_t workIndex = 0;
+		std::uint32_t triangle = 0;
+		std::uint32_t localEdge = 0;
+		std::string materialKey;
+	};
+
+	struct ObjectBoundaryCut {
+		std::size_t otherWorkIndex = 0;
+		std::string pairKey;
+		std::uint32_t localEdge = 0;
+		bool firstMaterialSide = true;
+	};
+
+	struct BoundaryBuildVertex {
+		std::vector<std::byte> bytes;
+		float blendWeight = 0.0f;
+	};
+
+	std::array<std::uint32_t, 3> PositionKey(const std::byte* vertex)
+	{
+		std::array<std::uint32_t, 3> key{};
+		std::memcpy(key.data(), vertex + MeshVertexLayout::PositionOffset, sizeof(float) * 3u);
+		return key;
+	}
+
+	ObjectBoundaryEdgeKey MakeBoundaryEdgeKey(std::array<std::uint32_t, 3> a, std::array<std::uint32_t, 3> b)
+	{
+		if (b < a) {
+			std::swap(a, b);
+		}
+		return ObjectBoundaryEdgeKey{ a, b };
+	}
+
+	DirectX::XMFLOAT3 LoadVertexPosition(const std::byte* vertex)
+	{
+		DirectX::XMFLOAT3 p{};
+		std::memcpy(&p, vertex + MeshVertexLayout::PositionOffset, sizeof(p));
+		return p;
+	}
+
+	float Distance(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+	{
+		const float dx = a.x - b.x;
+		const float dy = a.y - b.y;
+		const float dz = a.z - b.z;
+		return std::sqrt(dx * dx + dy * dy + dz * dz);
+	}
+
+	void NormalizeVertexFloat3(std::byte* vertex, std::size_t offset)
+	{
+		float* f = reinterpret_cast<float*>(vertex + offset);
+		const float lenSq = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
+		if (lenSq > 1.0e-20f) {
+			const float invLen = 1.0f / std::sqrt(lenSq);
+			f[0] *= invLen;
+			f[1] *= invLen;
+			f[2] *= invLen;
+		}
+	}
+
+	BoundaryBuildVertex InterpolateBoundaryVertex(
+		const std::byte* a,
+		const std::byte* b,
+		float t,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags,
+		float weightA,
+		float weightB)
+	{
+		t = std::clamp(t, 0.0f, 1.0f);
+		BoundaryBuildVertex result{};
+		result.bytes.resize(vertexSize);
+		const std::byte* nearest = t < 0.5f ? a : b;
+		std::memcpy(result.bytes.data(), nearest, vertexSize);
+		auto interp = [&](std::size_t offset, std::size_t count) {
+			float* dst = reinterpret_cast<float*>(result.bytes.data() + offset);
+			const float* fa = reinterpret_cast<const float*>(a + offset);
+			const float* fb = reinterpret_cast<const float*>(b + offset);
+			for (std::size_t i = 0; i < count; ++i) {
+				dst[i] = std::lerp(fa[i], fb[i], t);
+			}
+		};
+		interp(MeshVertexLayout::PositionOffset, 3);
+		if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u) {
+			interp(MeshVertexLayout::NormalOffset, 3);
+			NormalizeVertexFloat3(result.bytes.data(), MeshVertexLayout::NormalOffset);
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u) {
+			const std::size_t tangentOffset = MeshVertexLayout::TangentOffset(vertexFlags);
+			interp(tangentOffset, 3);
+			NormalizeVertexFloat3(result.bytes.data(), tangentOffset);
+			reinterpret_cast<float*>(result.bytes.data() + tangentOffset)[3] =
+				reinterpret_cast<const float*>(nearest + tangentOffset)[3];
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
+			interp(MeshVertexLayout::TexcoordOffset(vertexFlags), 2);
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0u) {
+			interp(MeshVertexLayout::ColorOffset(vertexFlags), 3);
+		}
+		result.blendWeight = std::lerp(weightA, weightB, t);
+		return result;
+	}
+
+	BoundaryBuildVertex CopyBoundaryVertex(const std::byte* vertex, std::uint32_t vertexSize, float blendWeight)
+	{
+		BoundaryBuildVertex result{};
+		result.bytes.assign(vertex, vertex + vertexSize);
+		result.blendWeight = blendWeight;
+		return result;
+	}
+
+	void AppendBoundaryTriangle(
+		std::vector<std::byte>& vertices,
+		std::vector<std::uint32_t>& indices,
+		std::vector<DirectX::XMFLOAT2>* blendWeights,
+		const BoundaryBuildVertex& a,
+		const BoundaryBuildVertex& b,
+		const BoundaryBuildVertex& c)
+	{
+		const auto base = static_cast<std::uint32_t>(vertices.size() / a.bytes.size());
+		vertices.insert(vertices.end(), a.bytes.begin(), a.bytes.end());
+		vertices.insert(vertices.end(), b.bytes.begin(), b.bytes.end());
+		vertices.insert(vertices.end(), c.bytes.begin(), c.bytes.end());
+		indices.push_back(base + 0u);
+		indices.push_back(base + 1u);
+		indices.push_back(base + 2u);
+		if (blendWeights) {
+			blendWeights->push_back({ a.blendWeight, 0.0f });
+			blendWeights->push_back({ b.blendWeight, 0.0f });
+			blendWeights->push_back({ c.blendWeight, 0.0f });
+		}
+	}
+
+	MeshPreprocessResult BuildBoundaryResult(
+		std::vector<std::byte>&& vertices,
+		std::vector<std::uint32_t>&& indices,
+		std::vector<MeshUvSetData>&& uvSets,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags,
+		const CLodCacheLoader::MeshCacheIdentity& sourceIdentity,
+		std::string sourceSuffix,
+		ObjectSurfaceSamplingMode samplingMode,
+		float texelDensity,
+		bool geometricOptIn,
+		std::uint32_t blendWeightUvSetIndex = 0u)
+	{
+		RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		for (MeshUvSetData& uvSet : uvSets) {
+			if (uvSet.values.size() != vertexCount) {
+				uvSet.values.resize(vertexCount, DirectX::XMFLOAT2{ 0.0f, 0.0f });
+			}
+		}
+		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, GetDefaultBuilderSettings());
+		ingest.SetUvSets(std::move(uvSets));
+		ingest.ReserveVertices(vertexCount);
+		for (std::size_t v = 0; v < vertexCount; ++v) {
+			ingest.AppendVertexBytes(vertices.data() + v * static_cast<std::size_t>(vertexSize), vertexSize);
+		}
+		ingest.ReserveIndices(indices.size());
+		ingest.AppendIndices(indices.data(), indices.size());
+
+		CLodCacheLoader::MeshCacheIdentity identity = sourceIdentity;
+		identity.sourceIdentifier += std::move(sourceSuffix);
+		identity.subsetName += "#object_boundary_blend";
+		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+		std::optional<ClusterLODPrebuiltData> prebuiltData = std::move(artifacts.prebuiltData);
+		MeshPreprocessResult result(std::move(ingest), std::move(identity), std::move(prebuiltData));
+		result.geometricDisplacementOptIn = geometricOptIn;
+		result.objectSurfaceSamplingMode = samplingMode;
+		result.objectSurfaceTexelDensity = texelDensity;
+		result.geometricHeightRemapUvSetIndex = blendWeightUvSetIndex;
+		return result;
+	}
+
+	void DisableObjectReyesForGroup(
+		const std::vector<std::size_t>& group,
+		std::vector<std::optional<MeshPreprocessResult>>& preprocessed)
+	{
+		for (std::size_t index : group) {
+			if (!preprocessed[index]) {
+				continue;
+			}
+			preprocessed[index]->geometricDisplacementOptIn = false;
+			preprocessed[index]->objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+		}
+	}
+
+	bool TryApplyObjectBoundaryBlendingForParentGroup(
+		const std::vector<std::size_t>& group,
+		const std::vector<MeshPreprocessWorkItem>& workItems,
+		std::vector<std::optional<MeshPreprocessResult>>& preprocessed,
+		PreprocessedMeshRecord& ownerRecord,
+		std::vector<bool>& consumed,
+		float stripWidthObjectUnits)
+	{
+		if (group.size() < 2u || stripWidthObjectUnits <= 0.0f) {
+			return false;
+		}
+		const float halfWidth = stripWidthObjectUnits * 0.5f;
+		std::unordered_map<ObjectBoundaryEdgeKey, std::vector<ObjectBoundaryIncident>, ObjectBoundaryEdgeKeyHash> edgeIncidents;
+		std::unordered_map<std::size_t, std::unordered_map<std::uint32_t, ObjectBoundaryCut>> cutsByWorkAndTriangle;
+		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
+			const std::size_t workIndex = group[groupEntry];
+			const MeshPreprocessWorkItem& item = workItems[workIndex];
+			const MeshPreprocessResult& result = preprocessed[workIndex].value();
+			if (item.skinQ ||
+				result.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::TriplanarStochastic ||
+				result.ingest.GetSkinningVertexSize() != 0u) {
+				return false;
+			}
+			const std::string materialKey = BuildTriplanarSubsetCombineKey(item);
+			const auto& vertices = result.ingest.GetVertices();
+			const auto& indices = result.ingest.GetIndices();
+			const std::uint32_t vertexSize = result.ingest.GetVertexSize();
+			for (std::uint32_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+				for (std::uint32_t edge = 0; edge < 3u; ++edge) {
+					const std::uint32_t i0 = indices[tri + edge];
+					const std::uint32_t i1 = indices[tri + ((edge + 1u) % 3u)];
+					const std::byte* v0 = vertices.data() + static_cast<std::size_t>(i0) * vertexSize;
+					const std::byte* v1 = vertices.data() + static_cast<std::size_t>(i1) * vertexSize;
+					edgeIncidents[MakeBoundaryEdgeKey(PositionKey(v0), PositionKey(v1))].push_back({
+						workIndex,
+						tri,
+						edge,
+						materialKey
+					});
+				}
+			}
+		}
+
+		std::size_t boundaryEdgeCount = 0;
+		for (const auto& [edgeKey, incidents] : edgeIncidents) {
+			if (incidents.size() == 1u) {
+				continue;
+			}
+			if (incidents.size() != 2u) {
+				spdlog::warn("Object Reyes boundary blending failed: non-manifold shared edge with {} incident triangles.", incidents.size());
+				return false;
+			}
+			const ObjectBoundaryIncident& a = incidents[0];
+			const ObjectBoundaryIncident& b = incidents[1];
+			if (a.materialKey == b.materialKey) {
+				continue;
+			}
+			const std::string pairKey = std::to_string(std::min(a.workIndex, b.workIndex)) + "|" + std::to_string(std::max(a.workIndex, b.workIndex));
+			auto addCut = [&](const ObjectBoundaryIncident& self, const ObjectBoundaryIncident& other, bool firstSide) {
+				auto& byTri = cutsByWorkAndTriangle[self.workIndex];
+				if (byTri.contains(self.triangle)) {
+					return false;
+				}
+				byTri[self.triangle] = ObjectBoundaryCut{
+					.otherWorkIndex = other.workIndex,
+					.pairKey = pairKey,
+					.localEdge = self.localEdge,
+					.firstMaterialSide = firstSide
+				};
+				return true;
+			};
+			if (!addCut(a, b, true) || !addCut(b, a, false)) {
+				spdlog::warn("Object Reyes boundary blending failed: triangle touches multiple different-material boundary edges.");
+				return false;
+			}
+			++boundaryEdgeCount;
+		}
+		if (boundaryEdgeCount == 0u) {
+			return false;
+		}
+
+		struct StripBuild {
+			std::size_t material0Work = 0;
+			std::size_t material1Work = 0;
+			std::vector<std::byte> vertices;
+			std::vector<std::uint32_t> indices;
+			std::vector<DirectX::XMFLOAT2> blendWeights;
+		};
+		std::unordered_map<std::string, StripBuild> strips;
+		std::unordered_map<std::size_t, std::pair<std::vector<std::byte>, std::vector<std::uint32_t>>> rebuilt;
+		for (std::size_t workIndex : group) {
+			const MeshPreprocessResult& result = preprocessed[workIndex].value();
+			const auto& sourceVertices = result.ingest.GetVertices();
+			const auto& sourceIndices = result.ingest.GetIndices();
+			const std::uint32_t vertexSize = result.ingest.GetVertexSize();
+			const std::uint32_t vertexFlags = result.ingest.GetFlags();
+			auto& [dstVertices, dstIndices] = rebuilt[workIndex];
+			for (std::uint32_t tri = 0; tri + 2u < sourceIndices.size(); tri += 3u) {
+				const auto cutIt = cutsByWorkAndTriangle[workIndex].find(tri);
+				if (cutIt == cutsByWorkAndTriangle[workIndex].end()) {
+					for (std::uint32_t c = 0; c < 3u; ++c) {
+						const std::byte* src = sourceVertices.data() + static_cast<std::size_t>(sourceIndices[tri + c]) * vertexSize;
+						BoundaryBuildVertex v = CopyBoundaryVertex(src, vertexSize, 0.0f);
+						if (c == 0u) {
+							const auto base = static_cast<std::uint32_t>(dstVertices.size() / vertexSize);
+							dstIndices.push_back(base + 0u);
+							dstIndices.push_back(base + 1u);
+							dstIndices.push_back(base + 2u);
+						}
+						dstVertices.insert(dstVertices.end(), v.bytes.begin(), v.bytes.end());
+					}
+					continue;
+				}
+
+				const ObjectBoundaryCut& cut = cutIt->second;
+				const std::uint32_t ia = sourceIndices[tri + cut.localEdge];
+				const std::uint32_t ib = sourceIndices[tri + ((cut.localEdge + 1u) % 3u)];
+				const std::uint32_t ic = sourceIndices[tri + ((cut.localEdge + 2u) % 3u)];
+				const std::byte* va = sourceVertices.data() + static_cast<std::size_t>(ia) * vertexSize;
+				const std::byte* vb = sourceVertices.data() + static_cast<std::size_t>(ib) * vertexSize;
+				const std::byte* vc = sourceVertices.data() + static_cast<std::size_t>(ic) * vertexSize;
+				const float ac = Distance(LoadVertexPosition(va), LoadVertexPosition(vc));
+				const float bc = Distance(LoadVertexPosition(vb), LoadVertexPosition(vc));
+				if (ac <= 1.0e-5f || bc <= 1.0e-5f) {
+					spdlog::warn("Object Reyes boundary blending failed: degenerate boundary-adjacent triangle.");
+					return false;
+				}
+				const float ta = std::min(halfWidth / ac, 0.49f);
+				const float tb = std::min(halfWidth / bc, 0.49f);
+				const float boundaryWeight = 0.5f;
+				const float innerWeight = cut.firstMaterialSide ? 0.0f : 1.0f;
+				const BoundaryBuildVertex a = CopyBoundaryVertex(va, vertexSize, boundaryWeight);
+				const BoundaryBuildVertex b = CopyBoundaryVertex(vb, vertexSize, boundaryWeight);
+				const BoundaryBuildVertex c = CopyBoundaryVertex(vc, vertexSize, innerWeight);
+				const BoundaryBuildVertex d = InterpolateBoundaryVertex(va, vc, ta, vertexSize, vertexFlags, boundaryWeight, innerWeight);
+				const BoundaryBuildVertex e = InterpolateBoundaryVertex(vb, vc, tb, vertexSize, vertexFlags, boundaryWeight, innerWeight);
+				AppendBoundaryTriangle(dstVertices, dstIndices, nullptr, d, e, c);
+
+				auto& strip = strips[cut.pairKey];
+				if (strip.indices.empty()) {
+					strip.material0Work = cut.firstMaterialSide ? workIndex : cut.otherWorkIndex;
+					strip.material1Work = cut.firstMaterialSide ? cut.otherWorkIndex : workIndex;
+				}
+				AppendBoundaryTriangle(strip.vertices, strip.indices, &strip.blendWeights, a, b, e);
+				AppendBoundaryTriangle(strip.vertices, strip.indices, &strip.blendWeights, a, e, d);
+			}
+		}
+
+		for (std::size_t workIndex : group) {
+			auto rebuiltIt = rebuilt.find(workIndex);
+			if (rebuiltIt == rebuilt.end()) {
+				continue;
+			}
+			const MeshPreprocessResult& oldResult = preprocessed[workIndex].value();
+			preprocessed[workIndex] = BuildBoundaryResult(
+				std::move(rebuiltIt->second.first),
+				std::move(rebuiltIt->second.second),
+				std::vector<MeshUvSetData>(oldResult.ingest.GetUvSets()),
+				oldResult.ingest.GetVertexSize(),
+				oldResult.ingest.GetFlags(),
+				oldResult.cacheIdentity,
+				"#object_boundary_blend_interior",
+				oldResult.objectSurfaceSamplingMode,
+				oldResult.objectSurfaceTexelDensity,
+				oldResult.geometricDisplacementOptIn);
+		}
+
+		for (const auto& [pairKey, strip] : strips) {
+			if (strip.indices.empty()) {
+				continue;
+			}
+			const MeshPreprocessResult& source = preprocessed[strip.material0Work].value();
+			std::vector<MeshUvSetData> uvSets = source.ingest.GetUvSets();
+			const std::uint32_t weightUvSetIndex = static_cast<std::uint32_t>(uvSets.size());
+			MeshUvSetData weightUv{};
+			weightUv.name = "__object_boundary_blend_weight";
+			weightUv.values = strip.blendWeights;
+			uvSets.push_back(std::move(weightUv));
+			auto stripResult = BuildBoundaryResult(
+				std::vector<std::byte>(strip.vertices),
+				std::vector<std::uint32_t>(strip.indices),
+				std::move(uvSets),
+				source.ingest.GetVertexSize(),
+				source.ingest.GetFlags(),
+				source.cacheIdentity,
+				"#object_boundary_blend_strip_" + pairKey,
+				ObjectSurfaceSamplingMode::TriplanarStochastic,
+				source.objectSurfaceTexelDensity,
+				true,
+				weightUvSetIndex);
+			ownerRecord.subsets.emplace_back(
+				workItems[strip.material0Work].material,
+				workItems[strip.material1Work].material,
+				std::move(stripResult),
+				workItems[strip.material0Work].inferredDoubleSided || workItems[strip.material1Work].inferredDoubleSided);
+		}
+
+		for (std::size_t workIndex : group) {
+			const MeshPreprocessWorkItem& item = workItems[workIndex];
+			ownerRecord.subsets.emplace_back(item.material, std::move(preprocessed[workIndex].value()), item.inferredDoubleSided);
+			consumed[workIndex] = true;
+		}
+		spdlog::info(
+			"Object Reyes boundary blending generated {} transition strip material pair(s) across {} shared edge(s) under '{}'.",
+			strips.size(),
+			boundaryEdgeCount,
+			ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
+		return true;
 	}
 
 	void PreprocessAllMeshes(
@@ -2435,20 +3333,6 @@ namespace USDLoader {
 	{
 		ZoneScopedN("USDLoader::PreprocessAllMeshes");
 		ZoneText(sourceIdentifierOverride.data(), sourceIdentifierOverride.size());
-		struct MeshPreprocessWorkItem {
-			std::string meshPath;
-			UsdGeomMesh mesh;
-			std::optional<UsdGeomSubset> subset;
-			UsdShadeMaterial material;
-			std::vector<std::string> requiredUvSetNames;
-			std::optional<UsdSkelSkinningQuery> skinQ;
-			VtTokenArray skelJointOrderRaw;
-			VtTokenArray skelJointOrderMapped;
-			USDGeometryExtractor::ExtractOptions extractOptions;
-			bool authoredDoubleSided = false;
-			bool inferredDoubleSided = false;
-		};
-
 		loadingCache.preprocessedMeshCache.clear();
 		loadingCache.skippedPreprocessedMeshReasons.clear();
 
@@ -2550,7 +3434,7 @@ namespace USDLoader {
 					workItems.push_back(MeshPreprocessWorkItem{
 						.meshPath = meshPath,
 						.mesh = mesh,
-						.subset = std::nullopt,
+						.subsets = {},
 						.material = mat,
 						.requiredUvSetNames = getRequiredUvSetNames(mat),
 						.skinQ = skinQ,
@@ -2562,7 +3446,8 @@ namespace USDLoader {
 						});
 				}
 				else {
-					const std::size_t meshWorkItemBegin = workItems.size();
+					std::vector<MeshPreprocessWorkItem> subsetWorkItems;
+					subsetWorkItems.reserve(subsets.size());
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
@@ -2584,10 +3469,10 @@ namespace USDLoader {
 							continue;
 						}
 						const bool inferredDoubleSided = ShouldForceDoubleSidedByName(mat, subset, importSettings);
-						workItems.push_back(MeshPreprocessWorkItem{
+						subsetWorkItems.push_back(MeshPreprocessWorkItem{
 							.meshPath = meshPath,
 							.mesh = mesh,
-							.subset = subset,
+							.subsets = { subset },
 							.material = mat,
 							.requiredUvSetNames = getRequiredUvSetNames(mat),
 							.skinQ = skinQ,
@@ -2604,8 +3489,15 @@ namespace USDLoader {
 								mat ? mat.GetPrim().GetName().GetString() : std::string("<unbound>"));
 						}
 					}
-					if (workItems.size() == meshWorkItemBegin) {
+					if (subsetWorkItems.empty()) {
 						markSkippedMesh(meshPath, "all subsets temporarily skipped");
+					}
+					else {
+						auto combinedSubsetWorkItems = CombineCompatibleTriplanarSubsetWorkItems(std::move(subsetWorkItems));
+						workItems.insert(
+							workItems.end(),
+							std::make_move_iterator(combinedSubsetWorkItems.begin()),
+							std::make_move_iterator(combinedSubsetWorkItems.end()));
 					}
 				}
 			}
@@ -2626,9 +3518,9 @@ namespace USDLoader {
 			ZoneScopedN("USDLoader::PreprocessAllMeshes::ExtractSubMesh");
 			const MeshPreprocessWorkItem& workItem = workItems[workIndex];
 			ZoneText(workItem.meshPath.data(), workItem.meshPath.size());
-			preprocessed[workIndex] = USDGeometryExtractor::ExtractSubMesh(
+			preprocessed[workIndex] = USDGeometryExtractor::ExtractSubMeshGroup(
 				workItem.mesh,
-				workItem.subset,
+				workItem.subsets,
 				stage,
 				geomTimeCode,
 				metersPerUnit,
@@ -2644,7 +3536,97 @@ namespace USDLoader {
 
 		{
 			ZoneScopedN("USDLoader::PreprocessAllMeshes::PublishPreprocessedResults");
+			std::vector<bool> consumed(workItems.size(), false);
+			std::unordered_map<std::string, std::vector<std::size_t>> meshCombineGroups;
+			for (std::size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+				if (!preprocessed[workIndex].has_value()) {
+					throw std::runtime_error("Missing preprocessed USD mesh data");
+				}
+				const MeshPreprocessWorkItem& workItem = workItems[workIndex];
+				if (!workItem.subsets.empty()) {
+					continue;
+				}
+				const std::string combineKey = BuildTriplanarSubsetCombineKey(workItem);
+				if (combineKey.empty()) {
+					continue;
+				}
+				const std::string parentPath = ParentPrimPath(workItem.mesh.GetPrim().GetPath().GetString());
+				meshCombineGroups[parentPath + "|" + combineKey].push_back(workIndex);
+			}
+			for (const auto& [_, group] : meshCombineGroups) {
+				if (group.size() < 2u) {
+					continue;
+				}
+				auto combined = TryCombinePreprocessedMeshGroup(group, workItems, preprocessed);
+				if (!combined) {
+					continue;
+				}
+
+				const std::size_t ownerIndex = group.front();
+				const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
+				auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
+				ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
+				ownerRecord.subsets.emplace_back(ownerItem.material, std::move(*combined), ownerItem.inferredDoubleSided);
+				consumed[ownerIndex] = true;
+
+				for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
+					const std::size_t index = group[groupEntry];
+					const MeshPreprocessWorkItem& item = workItems[index];
+					auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
+					emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
+					consumed[index] = true;
+				}
+			}
+
+			if (stageOptions.objectReyesBoundaryBlendingEnabled) {
+				std::unordered_map<std::string, std::vector<std::size_t>> boundaryGroups;
+				for (std::size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+					if (consumed[workIndex] || !preprocessed[workIndex].has_value()) {
+						continue;
+					}
+					const MeshPreprocessWorkItem& workItem = workItems[workIndex];
+					if (!workItem.subsets.empty() ||
+						workItem.skinQ ||
+						workItem.extractOptions.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::TriplanarStochastic) {
+						continue;
+					}
+					const std::string parentPath = ParentPrimPath(workItem.mesh.GetPrim().GetPath().GetString());
+					boundaryGroups[parentPath].push_back(workIndex);
+				}
+				for (const auto& [parentPath, group] : boundaryGroups) {
+					if (group.size() < 2u) {
+						continue;
+					}
+					const std::size_t ownerIndex = group.front();
+					const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
+					auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
+					ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
+					if (TryApplyObjectBoundaryBlendingForParentGroup(
+						group,
+						workItems,
+						preprocessed,
+						ownerRecord,
+						consumed,
+						stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits)) {
+						for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
+							const MeshPreprocessWorkItem& item = workItems[group[groupEntry]];
+							auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
+							emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
+						}
+					}
+					else {
+						spdlog::warn(
+							"Object Reyes boundary blending failed or found no blendable boundary under '{}'; disabling Object Reyes geometric displacement for that parent.",
+							parentPath);
+						DisableObjectReyesForGroup(group, preprocessed);
+					}
+				}
+			}
+
 			for (size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+				if (consumed[workIndex]) {
+					continue;
+				}
 				if (!preprocessed[workIndex].has_value()) {
 					throw std::runtime_error("Missing preprocessed USD mesh data");
 				}
@@ -2712,12 +3694,23 @@ namespace USDLoader {
 			std::shared_ptr<Material> material;
 			{
 				ZoneScopedN("USDLoader::ProcessMesh::Subset::ResolveMaterialForMesh");
-				material = ResolveMaterialForMesh(
-					subset.material,
-					result.ingest.GetUvSets(),
-					record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
-					mesh.GetPrim(),
-					std::addressof(result));
+				if (subset.objectTriplanarBlendStrip) {
+					material = ResolveObjectTriplanarBlendMaterialForMesh(
+						subset.blendMaterial0,
+						subset.blendMaterial1,
+						result.ingest.GetUvSets(),
+						record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
+						mesh.GetPrim(),
+						std::addressof(result));
+				}
+				else {
+					material = ResolveMaterialForMesh(
+						subset.material,
+						result.ingest.GetUvSets(),
+						record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
+						mesh.GetPrim(),
+						std::addressof(result));
+				}
 			}
 			std::shared_ptr<Mesh> mPtr;
 			{

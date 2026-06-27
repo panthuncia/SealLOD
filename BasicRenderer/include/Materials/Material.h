@@ -42,9 +42,10 @@ inline bool PickDescriptionDoubleSided(const MaterialDescription& d) {
 }
 
 inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& d) {
+    const bool usesObjectSurfaceSampling = d.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None;
     return d.enableGeometricDisplacement &&
         d.geometricDisplacementOptIn &&
-        (!d.geometricHeightRemapRequired || d.geometricHeightRemapSucceeded) &&
+        (usesObjectSurfaceSampling || !d.geometricHeightRemapRequired || d.geometricHeightRemapSucceeded) &&
         d.heightMap.texture &&
         !d.heightMapFromBaseColorAlpha &&
         (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
@@ -189,6 +190,12 @@ public:
         if (SupportsObjectReyesGeometricDisplacement(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         }
+        if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+            materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC;
+        }
+        if (desc.objectTriplanarBlendMaterial) {
+            materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND;
+        }
         auto diffuseColor = desc.diffuseColor;
         auto emissiveColor = desc.emissiveColor;
         if (desc.opacity.texture) { // TODO: How can we tell if this should be used as a mask or as a blend?
@@ -272,6 +279,9 @@ public:
         material->m_geometricDisplacementOptIn = desc.geometricDisplacementOptIn;
         material->m_geometricHeightRemapRequired = desc.geometricHeightRemapRequired;
         material->m_geometricHeightRemapSucceeded = desc.geometricHeightRemapSucceeded;
+        material->m_materialData.objectSurfaceSamplingMode = static_cast<uint32_t>(desc.objectSurfaceSamplingMode);
+        material->m_materialData.objectSurfaceTexelDensity = std::max(desc.objectSurfaceTexelDensity, 1.0e-6f);
+        material->m_materialData.objectBlendWeightUvSetIndex = desc.objectBlendWeightUvSetIndex;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }
@@ -292,6 +302,9 @@ public:
     TechniqueDescriptor const& Technique() const { return m_technique; }
     OpenPBRMaterialParameters const& GetOpenPBRMaterial() const { return m_openPBRMaterial; }
     OpenPBRTextureBindings const& GetOpenPBRTextures() const { return m_openPBRTextures; }
+    void SetObjectBlendChildren(std::shared_ptr<Material> material0, std::shared_ptr<Material> material1, uint32_t weightUvSetIndex);
+    Material* GetObjectBlendMaterial0() const { return m_objectBlendMaterial0.get(); }
+    Material* GetObjectBlendMaterial1() const { return m_objectBlendMaterial1.get(); }
     bool BrniflyVertexAlpha() const { return m_brniflyVertexAlpha; }
     bool BrniflyZBufferWrite() const { return m_brniflyZBufferWrite; }
     bool BrniflyDecal() const { return m_brniflyDecal; }
@@ -361,6 +374,8 @@ private:
     bool m_geometricDisplacementOptIn = false;
     bool m_geometricHeightRemapRequired = false;
     bool m_geometricHeightRemapSucceeded = false;
+    std::shared_ptr<Material> m_objectBlendMaterial0;
+    std::shared_ptr<Material> m_objectBlendMaterial1;
 
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);
