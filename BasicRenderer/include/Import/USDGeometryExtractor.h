@@ -34,6 +34,13 @@ struct ExtractOptions {
 	bool brniflyDecal = false;
 	bool brniflyDynamicDecal = false;
 	bool brniflyModelSpaceNormals = false;
+	bool geometricDisplacementOptIn = false;
+	bool materialUvRemapRequired = false;
+	bool materialUvRemapKnownFailure = false;
+	std::uint32_t materialUvRemapSourceSetIndex = 0;
+	std::string materialUvRemapSourceSetName;
+	std::string materialUvRemapReason;
+	std::string materialUvRemapConfigHash;
 };
 
 void ResetBenchmarkStats();

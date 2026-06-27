@@ -241,7 +241,7 @@ struct PerFrameBuffer {
     uint terrainRvtTelemetryEnabled;
     float terrainReyesDisplacementScale;
     float objectReyesDisplacementScale;
-    uint reyesDisplacementScalePad;
+    float objectParallaxHeightScale;
 };
 
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;

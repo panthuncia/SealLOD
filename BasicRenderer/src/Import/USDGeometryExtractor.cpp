@@ -33,6 +33,7 @@
 #include <spdlog/spdlog.h>
 
 #include "Import/CLodCacheLoader.h"
+#include "Import/MaterialUvRemapper.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/ClusterLODTypes.h"
 #include "Mesh/VertexLayout.h"
@@ -176,6 +177,43 @@ static std::vector<float> ComputeFacetedNormals(
 	return normals;
 }
 
+struct ControlPointPositionKey
+{
+	uint32_t x;
+	uint32_t y;
+	uint32_t z;
+
+	bool operator==(const ControlPointPositionKey&) const = default;
+};
+
+struct ControlPointPositionKeyHash
+{
+	size_t operator()(const ControlPointPositionKey& key) const noexcept
+	{
+		size_t h = static_cast<size_t>(key.x);
+		h ^= static_cast<size_t>(key.y) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+		h ^= static_cast<size_t>(key.z) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+		return h;
+	}
+};
+
+static uint32_t FloatBits(float value)
+{
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+static ControlPointPositionKey MakeControlPointPositionKey(const std::vector<float>& ctrlPos, size_t index)
+{
+	const size_t base = index * 3u;
+	return ControlPointPositionKey{
+		FloatBits(ctrlPos[base + 0u]),
+		FloatBits(ctrlPos[base + 1u]),
+		FloatBits(ctrlPos[base + 2u])
+	};
+}
+
 static std::vector<float> ComputeSmoothControlPointNormals(
 	const std::vector<float>& ctrlPos,
 	const VtArray<int>& faceVertCounts,
@@ -234,8 +272,20 @@ static std::vector<float> ComputeSmoothControlPointNormals(
 		fvOffset += fvCount;
 	}
 
+	std::unordered_map<ControlPointPositionKey, GfVec3f, ControlPointPositionKeyHash> coincidentNormalSums;
+	coincidentNormalSums.reserve(controlPointCount);
 	for (size_t index = 0; index < controlPointCount; ++index) {
-		GfVec3f n(normals[index * 3u + 0u], normals[index * 3u + 1u], normals[index * 3u + 2u]);
+		const GfVec3f n(normals[index * 3u + 0u], normals[index * 3u + 1u], normals[index * 3u + 2u]);
+		auto [it, inserted] = coincidentNormalSums.try_emplace(
+			MakeControlPointPositionKey(ctrlPos, index),
+			0.0f,
+			0.0f,
+			0.0f);
+		it->second += n;
+	}
+
+	for (size_t index = 0; index < controlPointCount; ++index) {
+		GfVec3f n = coincidentNormalSums[MakeControlPointPositionKey(ctrlPos, index)];
 		const float len2 = GfDot(n, n);
 		if (len2 > 1e-20f) {
 			n *= (1.0f / std::sqrt(len2));
@@ -1514,6 +1564,16 @@ MeshPreprocessResult ExtractSubMesh(
 	if (options.brniflyModelSpaceNormals) {
 		cacheIdentity.sourceIdentifier += "#brnifly_model_space_normals=1";
 	}
+	const bool deferPrebuiltCacheLookup = options.materialUvRemapRequired;
+	if (options.materialUvRemapRequired) {
+		cacheIdentity.sourceIdentifier += "#material_uv_remap_required=1";
+		cacheIdentity.sourceIdentifier += "#material_uv_remap_version=3";
+		cacheIdentity.sourceIdentifier += "#material_uv_remap_config=" + options.materialUvRemapConfigHash;
+		cacheIdentity.sourceIdentifier += "#material_uv_remap_set=" +
+			(options.materialUvRemapSourceSetName.empty()
+				? std::to_string(options.materialUvRemapSourceSetIndex)
+				: options.materialUvRemapSourceSetName);
+	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
 		cacheIdentity.primPath, subsetName, cacheIdentity.sourceIdentifier);
@@ -1523,7 +1583,10 @@ MeshPreprocessResult ExtractSubMesh(
 
 	g_benchmarkStats.submeshes.fetch_add(1, std::memory_order_relaxed);
 	const auto cacheLoadBegin = std::chrono::steady_clock::now();
-	auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+	std::optional<ClusterLODPrebuiltData> prebuiltData;
+	if (!deferPrebuiltCacheLookup) {
+		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+	}
 	AddMs(g_benchmarkStats.clodReloadMs, cacheLoadBegin);
 	if (prebuiltData.has_value()) {
 		g_benchmarkStats.clodCacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -1559,6 +1622,95 @@ MeshPreprocessResult ExtractSubMesh(
 		tessellationFactor,
 		mesh.GetPrim().GetPath().GetString());
 	AddMs(g_benchmarkStats.loadGeomMs, loadGeomBegin);
+
+	bool materialUvRemapRequired = options.materialUvRemapRequired;
+	bool materialUvRemapSucceeded = false;
+	std::uint32_t materialUvRemapUvSetIndex = options.materialUvRemapSourceSetIndex;
+	if (materialUvRemapRequired) {
+		if (options.materialUvRemapKnownFailure) {
+			spdlog::warn(
+				"Object Reyes UV remap skipped for prim='{}' subset='{}': {}.",
+				cacheIdentity.primPath,
+				subsetName,
+				options.materialUvRemapReason);
+		}
+		else {
+			bool sourceUvResolved = true;
+			if (!options.materialUvRemapSourceSetName.empty()) {
+				bool foundUvSet = false;
+				for (std::uint32_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+					if (uvSets[uvSetIndex].name == options.materialUvRemapSourceSetName) {
+						materialUvRemapUvSetIndex = uvSetIndex;
+						foundUvSet = true;
+						break;
+					}
+				}
+				if (!foundUvSet) {
+					sourceUvResolved = false;
+					spdlog::warn(
+						"Object Reyes UV remap failed for prim='{}' subset='{}': missing source UV set '{}'.",
+						cacheIdentity.primPath,
+						subsetName,
+						options.materialUvRemapSourceSetName);
+				}
+			}
+
+			if (sourceUvResolved && materialUvRemapUvSetIndex < uvSets.size()) {
+				spdlog::info(
+					"Object Reyes UV remap attempting prim='{}' subset='{}' uvSet={} reason='{}'.",
+					cacheIdentity.primPath,
+					subsetName,
+					materialUvRemapUvSetIndex,
+					options.materialUvRemapReason);
+				auto remapResult = br::import::RemapMaterialUvSet(
+					*rawData,
+					vertexSize,
+					vertexFlags,
+					indices,
+					uvSets,
+					br::import::MaterialUvRemapRequest{
+						materialUvRemapUvSetIndex,
+						cacheIdentity.primPath + (subsetName.empty() ? std::string{} : ("/" + subsetName))
+					});
+				materialUvRemapSucceeded = remapResult.succeeded;
+				if (remapResult.succeeded) {
+					spdlog::info(
+						"Object Reyes UV remap succeeded for prim='{}' subset='{}': {} welded vertices, {} components, {} valid triangles.",
+						cacheIdentity.primPath,
+						subsetName,
+						remapResult.weldedVertexCount,
+						remapResult.componentCount,
+						remapResult.validTriangleCount);
+				}
+				else {
+					spdlog::warn(
+						"Object Reyes UV remap failed for prim='{}' subset='{}': {}.",
+						cacheIdentity.primPath,
+						subsetName,
+						remapResult.message);
+				}
+			}
+			else {
+				spdlog::warn(
+					"Object Reyes UV remap failed for prim='{}' subset='{}': UV set index {} is unavailable.",
+					cacheIdentity.primPath,
+					subsetName,
+					materialUvRemapUvSetIndex);
+			}
+		}
+
+		cacheIdentity.sourceIdentifier += std::string("#material_uv_remap_succeeded=") + (materialUvRemapSucceeded ? "1" : "0");
+		cacheIdentity.sourceIdentifier += "#material_uv_remap_uv_index=" + std::to_string(materialUvRemapUvSetIndex);
+		const auto deferredCacheLoadBegin = std::chrono::steady_clock::now();
+		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+		AddMs(g_benchmarkStats.clodReloadMs, deferredCacheLoadBegin);
+		if (prebuiltData.has_value()) {
+			spdlog::debug("    Cache HIT for remapped prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
+		}
+		else {
+			spdlog::debug("    Cache MISS for remapped prim='{}' subset='{}' - will build", cacheIdentity.primPath, subsetName);
+		}
+	}
 
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;
 	spdlog::info("    LoadGeom done: {} verts, {} indices, vertexSize={}, flags=0x{:X}",
@@ -1637,12 +1789,17 @@ MeshPreprocessResult ExtractSubMesh(
 		HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexIndicesAttr()) ||
 		HasMultipleAuthoredTimeSamples(mesh.GetHoleIndicesAttr());
 
-	return MeshPreprocessResult(
+	MeshPreprocessResult result(
 		std::move(ingest),
 		std::move(cacheIdentity),
 		std::move(prebuiltData),
 		previewSubdiv || previewTopology,
 		std::move(prototypeGeometry));
+	result.geometricHeightRemapRequired = materialUvRemapRequired;
+	result.geometricHeightRemapSucceeded = materialUvRemapSucceeded;
+	result.geometricHeightRemapUvSetIndex = materialUvRemapUvSetIndex;
+	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
+	return result;
 }
 
 StageExtractionResult ExtractAllFromStage(

@@ -143,6 +143,8 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		SettingsManager::GetInstance().getSettingGetter<float>("terrainReyesDisplacementGlobalScale")();
 	perFrameCBData.objectReyesDisplacementScale =
 		SettingsManager::GetInstance().getSettingGetter<float>("objectReyesDisplacementScale")();
+	perFrameCBData.objectParallaxHeightScale =
+		SettingsManager::GetInstance().getSettingGetter<float>("objectParallaxHeightScale")();
 	if (TerrainParallaxDiagnosticsEnabled()) {
 		static std::atomic_bool logged{ false };
 		bool expected = false;

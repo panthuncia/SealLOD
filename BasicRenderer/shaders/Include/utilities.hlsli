@@ -1933,7 +1933,7 @@ void SampleMaterialFromUvCache(
                     TBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -1948,7 +1948,7 @@ void SampleMaterialFromUvCache(
                     TBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -2175,7 +2175,7 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -2190,7 +2190,7 @@ void SampleMaterialEvalFromUvCache(
                     parallaxTBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -2469,7 +2469,7 @@ void SampleMaterialFromUvCacheRuntime(
                     TBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -2484,7 +2484,7 @@ void SampleMaterialFromUvCacheRuntime(
                     TBN,
                     heightUv.uv,
                     viewDir,
-                    materialInfo.heightMapScale,
+                    materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
                     16u,
                     heightUv.dUVdx,
                     heightUv.dUVdy);
@@ -2712,7 +2712,7 @@ void SampleMaterialCorePrecompiled(
         TBN,
         localUV,
         viewDir,
-        materialInfo.heightMapScale,
+        materialInfo.heightMapScale * perFrameBuffer.objectParallaxHeightScale,
         16u,
         localDUdx,
         localDUdy

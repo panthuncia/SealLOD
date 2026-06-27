@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -20,6 +21,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -39,7 +41,9 @@ namespace NifLoader {
 namespace {
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
+constexpr std::string_view kObjectReyesConfigVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -82,6 +86,186 @@ std::string NormalizeNifCacheKey(std::string_view cacheKey)
         normalized.erase(normalized.begin());
     }
     return normalized;
+}
+
+std::vector<std::string> MergeTextureSearchRoots(
+    const std::vector<std::string>& packageRoots,
+    const std::vector<std::string>& additionalRoots)
+{
+    std::vector<std::string> roots;
+    roots.reserve(packageRoots.size() + additionalRoots.size());
+    auto append = [&](const std::string& root) {
+        if (!root.empty() && std::find(roots.begin(), roots.end(), root) == roots.end()) {
+            roots.push_back(root);
+        }
+    };
+    for (const std::string& root : packageRoots) {
+        append(root);
+    }
+    for (const std::string& root : additionalRoots) {
+        append(root);
+    }
+    return roots;
+}
+
+std::string TextureSearchRootsHash(const std::vector<std::string>& roots)
+{
+    std::string key = "texture-roots:";
+    for (const std::string& root : roots) {
+        key.append(root);
+        key.push_back('\n');
+    }
+    return Hex64(Fnv1a64(key));
+}
+
+std::string NormalizeObjectReyesWhitelistPath(std::string_view path)
+{
+    std::string normalized;
+    normalized.reserve(path.size());
+    for (unsigned char ch : path) {
+        char out = static_cast<char>(std::tolower(ch));
+        if (out == '\\') {
+            out = '/';
+        }
+        normalized.push_back(out);
+    }
+
+    while (!normalized.empty() && normalized.front() == '/') {
+        normalized.erase(normalized.begin());
+    }
+    return normalized;
+}
+
+std::string NormalizeObjectReyesNifWhitelistPath(std::string_view path)
+{
+    std::string normalized = NormalizeObjectReyesWhitelistPath(path);
+    constexpr std::string_view meshesPrefix = "meshes/";
+    if (normalized.starts_with(meshesPrefix)) {
+        normalized.erase(0, meshesPrefix.size());
+    }
+    return normalized;
+}
+
+struct ObjectReyesConfig
+{
+    std::unordered_set<std::string> nifPaths;
+    std::unordered_set<std::string> texturePaths;
+    std::unordered_set<std::string> uvRemapNifPaths;
+    std::unordered_set<std::string> uvRemapTexturePaths;
+    bool uvRemapEnabled = true;
+    bool uvRemapIncludeSelected = true;
+    std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
+    bool loaded = false;
+};
+
+std::optional<fs::path> FindObjectReyesConfigPath()
+{
+    std::error_code ec;
+    fs::path current = fs::current_path(ec);
+    if (ec) {
+        return std::nullopt;
+    }
+
+    for (;;) {
+        const fs::path candidate = current / "config" / "object_reyes.json";
+        if (fs::exists(candidate, ec) && !ec) {
+            return candidate;
+        }
+        if (!current.has_parent_path() || current.parent_path() == current) {
+            break;
+        }
+        current = current.parent_path();
+    }
+
+    return std::nullopt;
+}
+
+ObjectReyesConfig LoadObjectReyesConfig()
+{
+    ObjectReyesConfig config;
+    const auto path = FindObjectReyesConfigPath();
+    if (!path) {
+        return config;
+    }
+
+    std::ifstream in(*path);
+    if (!in) {
+        spdlog::warn("Object Reyes config '{}' could not be opened.", path->string());
+        return config;
+    }
+
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    try {
+        const json doc = json::parse(text);
+        auto readTexturePathArray = [](const json& node, std::unordered_set<std::string>& out) {
+            if (!node.is_array()) {
+                return;
+            }
+            for (const auto& value : node) {
+                if (value.is_string()) {
+                    const std::string normalized = NormalizeObjectReyesWhitelistPath(value.get<std::string>());
+                    if (!normalized.empty()) {
+                        out.insert(normalized);
+                    }
+                }
+            }
+        };
+        auto readNifPathArray = [](const json& node, std::unordered_set<std::string>& out) {
+            if (!node.is_array()) {
+                return;
+            }
+            for (const auto& value : node) {
+                if (value.is_string()) {
+                    const std::string normalized = NormalizeObjectReyesNifWhitelistPath(value.get<std::string>());
+                    if (!normalized.empty()) {
+                        out.insert(normalized);
+                    }
+                }
+            }
+        };
+
+        if (const auto nifPaths = doc.find("nifPaths"); nifPaths != doc.end()) {
+            readNifPathArray(*nifPaths, config.nifPaths);
+        }
+        readTexturePathArray(doc.value("texturePaths", json::array()), config.texturePaths);
+        if (const auto uvRemap = doc.find("uvRemap"); uvRemap != doc.end() && uvRemap->is_object()) {
+            config.uvRemapEnabled = uvRemap->value("enabled", config.uvRemapEnabled);
+            config.uvRemapIncludeSelected = uvRemap->value("includeSelected", config.uvRemapIncludeSelected);
+            if (const auto nifPaths = uvRemap->find("nifPaths"); nifPaths != uvRemap->end()) {
+                readNifPathArray(*nifPaths, config.uvRemapNifPaths);
+            }
+            readTexturePathArray(uvRemap->value("texturePaths", json::array()), config.uvRemapTexturePaths);
+        }
+        config.loaded = true;
+        config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
+        spdlog::info(
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), uvRemap enabled={}, includeSelected={}, {} remap nif path(s), {} remap texture path(s), hash={}).",
+            path->string(),
+            config.nifPaths.size(),
+            config.texturePaths.size(),
+            config.uvRemapEnabled,
+            config.uvRemapIncludeSelected,
+            config.uvRemapNifPaths.size(),
+            config.uvRemapTexturePaths.size(),
+            config.contentHash);
+    }
+    catch (const std::exception& e) {
+        spdlog::warn("Object Reyes config '{}' is invalid JSON: {}", path->string(), e.what());
+    }
+
+    return config;
+}
+
+bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, const std::string& normalizedNifCacheKey)
+{
+    if (!config.loaded) {
+        return false;
+    }
+    const std::string normalizedSlashKey = NormalizeObjectReyesNifWhitelistPath(normalizedNifCacheKey);
+    return config.nifPaths.contains(normalizedSlashKey) ||
+        config.uvRemapNifPaths.contains(normalizedSlashKey) ||
+        !config.texturePaths.empty() ||
+        !config.uvRemapTexturePaths.empty();
 }
 
 std::string SanitizeFileStem(std::string_view value)
@@ -191,7 +375,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 23u;
+constexpr std::uint32_t kPayloadCacheVersion = 26u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -296,12 +480,15 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.invertNormalGreen);
     HashPod(hash, desc.forceDoubleSided);
     HashPod(hash, desc.enableGeometricDisplacement);
+    HashPod(hash, desc.geometricDisplacementOptIn);
     HashPod(hash, desc.brniflyVertexAlpha);
     HashPod(hash, desc.brniflyZBufferWrite);
     HashPod(hash, desc.brniflyDecal);
     HashPod(hash, desc.brniflyDynamicDecal);
     HashPod(hash, desc.brniflyModelSpaceNormals);
     HashPod(hash, desc.heightMapFromBaseColorAlpha);
+    HashPod(hash, desc.geometricHeightRemapRequired);
+    HashPod(hash, desc.geometricHeightRemapSucceeded);
     HashPod(hash, desc.blendState);
     HashBinding(hash, desc.baseColor);
     HashBinding(hash, desc.metallic);
@@ -462,13 +649,33 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     const std::string& sourceIdentifier,
     const std::string& sourceDirectory,
     const std::vector<std::string>& textureSearchRoots,
-    const std::string& layerIdentifierHint)
+    const std::string& layerIdentifierHint,
+    const ObjectReyesConfig& objectReyesConfig,
+    const std::string& normalizedCacheKey)
 {
     USDLoader::InMemoryStageOptions options{};
     options.sourceIdentifier = sourceIdentifier;
     options.sourceDirectory = sourceDirectory;
     options.textureSearchRoots = textureSearchRoots;
     options.layerIdentifierHint = layerIdentifierHint;
+    options.objectReyesNifPath = NormalizeObjectReyesNifWhitelistPath(normalizedCacheKey);
+    options.objectReyesConfigHash = objectReyesConfig.contentHash;
+    options.objectReyesTexturePaths.assign(
+        objectReyesConfig.texturePaths.begin(),
+        objectReyesConfig.texturePaths.end());
+    std::sort(options.objectReyesTexturePaths.begin(), options.objectReyesTexturePaths.end());
+    options.objectReyesUvRemapTexturePaths.assign(
+        objectReyesConfig.uvRemapTexturePaths.begin(),
+        objectReyesConfig.uvRemapTexturePaths.end());
+    std::sort(options.objectReyesUvRemapTexturePaths.begin(), options.objectReyesUvRemapTexturePaths.end());
+    options.objectReyesNifMatched =
+        objectReyesConfig.loaded &&
+        objectReyesConfig.nifPaths.contains(options.objectReyesNifPath);
+    options.objectReyesUvRemapEnabled = objectReyesConfig.uvRemapEnabled;
+    options.objectReyesUvRemapIncludeSelected = objectReyesConfig.uvRemapIncludeSelected;
+    options.objectReyesUvRemapNifMatched =
+        objectReyesConfig.loaded &&
+        objectReyesConfig.uvRemapNifPaths.contains(options.objectReyesNifPath);
     options.isUsdPackage = false;
     return options;
 }
@@ -986,12 +1193,15 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.invertNormalGreen);
     writer.Pod(desc.forceDoubleSided);
     writer.Pod(desc.enableGeometricDisplacement);
+    writer.Pod(desc.geometricDisplacementOptIn);
     writer.Pod(desc.brniflyVertexAlpha);
     writer.Pod(desc.brniflyZBufferWrite);
     writer.Pod(desc.brniflyDecal);
     writer.Pod(desc.brniflyDynamicDecal);
     writer.Pod(desc.brniflyModelSpaceNormals);
     writer.Pod(desc.heightMapFromBaseColorAlpha);
+    writer.Pod(desc.geometricHeightRemapRequired);
+    writer.Pod(desc.geometricHeightRemapSucceeded);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor, TextureSemantic::BaseColor, true);
     WriteTextureBinding(writer, desc.metallic, TextureSemantic::Metallic, false);
@@ -1033,12 +1243,15 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.invertNormalGreen) ||
         !reader.Pod(desc.forceDoubleSided) ||
         !reader.Pod(desc.enableGeometricDisplacement) ||
+        !reader.Pod(desc.geometricDisplacementOptIn) ||
         !reader.Pod(desc.brniflyVertexAlpha) ||
         !reader.Pod(desc.brniflyZBufferWrite) ||
         !reader.Pod(desc.brniflyDecal) ||
         !reader.Pod(desc.brniflyDynamicDecal) ||
         !reader.Pod(desc.brniflyModelSpaceNormals) ||
         !reader.Pod(desc.heightMapFromBaseColorAlpha) ||
+        !reader.Pod(desc.geometricHeightRemapRequired) ||
+        !reader.Pod(desc.geometricHeightRemapSucceeded) ||
         !reader.Pod(blend)) {
         return false;
     }
@@ -1421,6 +1634,17 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         }
         return std::nullopt;
     }
+    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    if (ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey)) {
+        spdlog::debug(
+            "nif_meta_cache=skip game='{}' reason='object Reyes config hash {} may affect payload'",
+            normalizedCacheKey,
+            objectReyesConfig.contentHash);
+        if (stats) {
+            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
+        }
+        return std::nullopt;
+    }
 
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     std::vector<fs::path> candidates;
@@ -1515,13 +1739,21 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         }
     }
 
-    const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, package->contentHash);
+    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const std::vector<std::string> textureSearchRoots =
+        MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
+    const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
+        std::string(kObjectReyesConfigVersion) + "_" + objectReyesConfig.contentHash +
+        "_texroots_" + TextureSearchRootsHash(textureSearchRoots);
+    const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, effectiveContentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
-        package->textureSearchRoots,
-        "brnifly_" + package->contentHash + ".usda");
+        textureSearchRoots,
+        "brnifly_" + package->contentHash + ".usda",
+        objectReyesConfig,
+        normalizedCacheKey);
     const auto extractBegin = std::chrono::steady_clock::now();
     std::optional<USDLoader::ImportedAssetPayload> payload;
     {
@@ -1540,12 +1772,12 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             EnsurePayloadMaterialHashes(*payload);
         }
         const fs::path cachePath = CLodCache::GetCacheFilePathForSource(
-            s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, package->contentHash)),
+            s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, effectiveContentHash)),
             stableSourceIdentifier);
         const auto cacheWriteBegin = std::chrono::steady_clock::now();
         bool wrote = false;
         bool reusedExisting = false;
-        if (auto existingPayload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, package->contentHash, settings.loadMaterialTextures)) {
+        if (auto existingPayload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, effectiveContentHash, settings.loadMaterialTextures)) {
             payload = std::move(existingPayload);
             reusedExisting = true;
             RegisterCachedAsset(pathHash, cachePath);
@@ -1553,14 +1785,14 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
                 "nif_meta_cache=existing game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
                 cachePath.string(),
-                package->contentHash);
+                effectiveContentHash);
         } else {
             wrote = WritePayloadCache(
                 cachePath,
                 normalizedCacheKey,
                 pathHash,
-                package->contentHash,
-                package->textureSearchRoots,
+                effectiveContentHash,
+                textureSearchRoots,
                 *payload);
         }
         if (stats) {
@@ -1569,7 +1801,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             stats->assetCacheWritten = wrote;
             stats->cachePath = cachePath;
             stats->sourceIdentifier = stableSourceIdentifier;
-            stats->contentHash = package->contentHash;
+            stats->contentHash = effectiveContentHash;
         }
         if (wrote) {
             RegisterCachedAsset(pathHash, cachePath);
@@ -1577,7 +1809,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
                 "nif_meta_cache=write game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
                 cachePath.string(),
-                package->contentHash);
+                effectiveContentHash);
         }
     }
     return payload;
@@ -1626,6 +1858,23 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     }
 
     result.submeshes = payload->meshes.size();
+    for (const auto& mesh : payload->meshes) {
+        const auto material = mesh ? mesh->material : nullptr;
+        if (!material) {
+            continue;
+        }
+        const MaterialDescription desc = material->ToCacheDescription();
+        if (!desc.geometricHeightRemapRequired) {
+            continue;
+        }
+        ++result.objectReyesUvRemapRequired;
+        if (desc.geometricHeightRemapSucceeded) {
+            ++result.objectReyesUvRemapSucceeded;
+        }
+        else {
+            ++result.objectReyesUvRemapFailed;
+        }
+    }
     result.success = true;
     return result;
 }
@@ -1664,13 +1913,21 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
         }
     }
 
-    const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, package->contentHash);
+    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const std::vector<std::string> textureSearchRoots =
+        MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
+    const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
+        std::string(kObjectReyesConfigVersion) + "_" + objectReyesConfig.contentHash +
+        "_texroots_" + TextureSearchRootsHash(textureSearchRoots);
+    const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, effectiveContentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
     auto options = MakeStageOptions(
         stableSourceIdentifier,
         sourceDirectory,
-        package->textureSearchRoots,
-        "brnifly_" + package->contentHash + ".usda");
+        textureSearchRoots,
+        "brnifly_" + package->contentHash + ".usda",
+        objectReyesConfig,
+        normalizedCacheKey);
     const auto usdLoadBegin = std::chrono::steady_clock::now();
     auto scene = USDLoader::LoadModelFromUsdBytes(package->rootLayerText, options, settings);
     if (stats) {

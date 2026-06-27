@@ -43,6 +43,8 @@ inline bool PickDescriptionDoubleSided(const MaterialDescription& d) {
 
 inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& d) {
     return d.enableGeometricDisplacement &&
+        d.geometricDisplacementOptIn &&
+        (!d.geometricHeightRemapRequired || d.geometricHeightRemapSucceeded) &&
         d.heightMap.texture &&
         !d.heightMapFromBaseColorAlpha &&
         (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
@@ -267,6 +269,9 @@ public:
         material->m_materialModel = desc.materialModel;
         material->m_materialData.glintEnabled = desc.glintEnabled ? 1u : 0u;
         material->m_materialData.glintParameters = desc.glintParameters;
+        material->m_geometricDisplacementOptIn = desc.geometricDisplacementOptIn;
+        material->m_geometricHeightRemapRequired = desc.geometricHeightRemapRequired;
+        material->m_geometricHeightRemapSucceeded = desc.geometricHeightRemapSucceeded;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }
@@ -353,6 +358,9 @@ private:
     bool m_brniflyDecal = false;
     bool m_brniflyDynamicDecal = false;
     bool m_brniflyModelSpaceNormals = false;
+    bool m_geometricDisplacementOptIn = false;
+    bool m_geometricHeightRemapRequired = false;
+    bool m_geometricHeightRemapSucceeded = false;
 
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);

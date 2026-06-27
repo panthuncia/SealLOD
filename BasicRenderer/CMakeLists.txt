@@ -115,6 +115,7 @@ find_package(embree CONFIG REQUIRED)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
+find_package(Eigen3 CONFIG REQUIRED)
 find_package(implot CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS container_hash)
 find_package(Tracy REQUIRED CONFIG)
@@ -252,6 +253,8 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
     ARCHIVE_OUTPUT_NAME ${BASICRENDERER_DEMO_TARGET}
 )
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
+add_executable(MaterialUvRemapperTests "tests/MaterialUvRemapperTests.cpp")
+target_compile_features(MaterialUvRemapperTests PRIVATE cxx_std_23)
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -1057,6 +1060,7 @@ PRIVATE
     Microsoft::DirectXTex 
     imgui::imgui 
     meshoptimizer
+    Eigen3::Eigen
     embree
     assimp::assimp 
     flecs::flecs 
@@ -1258,5 +1262,11 @@ PRIVATE
     "${BASICRENDERER_SOURCE_ROOT}/hlsl_parser.lib"
 )
 
+target_link_libraries(MaterialUvRemapperTests
+PRIVATE
+    BasicRenderer::BasicRenderer
+)
+
 enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
+add_test(NAME MaterialUvRemapperTests COMMAND MaterialUvRemapperTests)

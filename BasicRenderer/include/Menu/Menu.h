@@ -769,6 +769,9 @@ private:
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
+    float m_objectParallaxHeightScale = 1.0f;
+    std::function<float()> getObjectParallaxHeightScale;
+    std::function<void(float)> setObjectParallaxHeightScale;
     uint32_t m_terrainParallaxMaxSteps = 16u;
     std::function<uint32_t()> getTerrainParallaxMaxSteps;
     std::function<void(uint32_t)> setTerrainParallaxMaxSteps;
@@ -1426,6 +1429,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getTerrainParallaxHeightScale = settingsManager.getSettingGetter<float>("terrainParallaxHeightScale");
     m_terrainParallaxHeightScale = getTerrainParallaxHeightScale();
     observerSetting(m_terrainParallaxHeightScale, "terrainParallaxHeightScale");
+    setObjectParallaxHeightScale = settingsManager.getSettingSetter<float>("objectParallaxHeightScale");
+    getObjectParallaxHeightScale = settingsManager.getSettingGetter<float>("objectParallaxHeightScale");
+    m_objectParallaxHeightScale = getObjectParallaxHeightScale();
+    observerSetting(m_objectParallaxHeightScale, "objectParallaxHeightScale");
     setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
     getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
     m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
@@ -2169,6 +2176,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::SliderFloat("Terrain Parallax Height Scale", &m_terrainParallaxHeightScale, 0.0f, 0.20f, "%.3f")) {
             setTerrainParallaxHeightScale(m_terrainParallaxHeightScale);
+        }
+        if (ImGui::SliderFloat("Object Parallax Height Scale", &m_objectParallaxHeightScale, 0.0f, 16.0f, "%.2f")) {
+            m_objectParallaxHeightScale = std::max(0.0f, m_objectParallaxHeightScale);
+            setObjectParallaxHeightScale(m_objectParallaxHeightScale);
         }
         int terrainParallaxMaxSteps = static_cast<int>(m_terrainParallaxMaxSteps);
         if (ImGui::SliderInt("Terrain Parallax Max Steps", &terrainParallaxMaxSteps, 4, 32)) {

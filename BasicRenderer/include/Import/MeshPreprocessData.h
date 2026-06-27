@@ -18,6 +18,10 @@ struct MeshPreprocessResult {
 	std::optional<ClusterLODPrebuiltData> prebuiltData;
 	br::import::RenderablePrototypeGeometry prototypeGeometry;
 	bool forceDoubleSidedPreview = false;
+	bool geometricDisplacementOptIn = false;
+	bool geometricHeightRemapRequired = false;
+	bool geometricHeightRemapSucceeded = false;
+	std::uint32_t geometricHeightRemapUvSetIndex = 0;
 
 	MeshPreprocessResult(
 		MeshIngestBuilder&& ingestData,

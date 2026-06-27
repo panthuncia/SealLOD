@@ -104,12 +104,15 @@ struct MaterialDescription {
 	bool invertNormalGreen = false; // For OpenGL compatibility
 	bool forceDoubleSided = false;
     bool enableGeometricDisplacement = false;
+	bool geometricDisplacementOptIn = false;
 	bool brniflyVertexAlpha = false;
 	bool brniflyZBufferWrite = true;
 	bool brniflyDecal = false;
 	bool brniflyDynamicDecal = false;
 	bool brniflyModelSpaceNormals = false;
-    bool heightMapFromBaseColorAlpha = false;
+	bool heightMapFromBaseColorAlpha = false;
+	bool geometricHeightRemapRequired = false;
+	bool geometricHeightRemapSucceeded = false;
 	bool forceVoxelMaterial = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};

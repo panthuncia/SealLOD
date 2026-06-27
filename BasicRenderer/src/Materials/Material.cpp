@@ -245,6 +245,7 @@ MaterialDescription Material::ToCacheDescription() const
     desc.geometricDisplacementMax = m_materialData.geometricDisplacementMax;
     desc.enableGeometricDisplacement =
         (m_materialData.materialFlags & MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
+    desc.geometricDisplacementOptIn = m_geometricDisplacementOptIn;
     desc.forceDoubleSided = (m_materialData.materialFlags & MaterialFlags::MATERIAL_DOUBLE_SIDED) != 0u;
     desc.negateNormals = (m_materialData.materialFlags & MaterialFlags::MATERIAL_NEGATE_NORMALS) != 0u;
     desc.invertNormalGreen = (m_materialData.materialFlags & MaterialFlags::MATERIAL_INVERT_NORMAL_GREEN) != 0u;
@@ -296,6 +297,8 @@ MaterialDescription Material::ToCacheDescription() const
     desc.brniflyDynamicDecal = m_brniflyDynamicDecal;
     desc.brniflyModelSpaceNormals = m_brniflyModelSpaceNormals;
     desc.materialModel = m_materialModel;
+    desc.geometricHeightRemapRequired = m_geometricHeightRemapRequired;
+    desc.geometricHeightRemapSucceeded = m_geometricHeightRemapSucceeded;
     return desc;
 }
 

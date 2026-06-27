@@ -592,6 +592,88 @@ namespace USDLoader {
 			}
 		}
 
+		std::string NormalizeObjectReyesWhitelistPath(std::string_view path)
+		{
+			std::string normalized;
+			normalized.reserve(path.size());
+			for (unsigned char ch : path) {
+				char out = static_cast<char>(std::tolower(ch));
+				if (out == '\\') {
+					out = '/';
+				}
+				normalized.push_back(out);
+			}
+			while (!normalized.empty() && normalized.front() == '/') {
+				normalized.erase(normalized.begin());
+			}
+			return normalized;
+		}
+
+		bool IsActiveTextureBinding(const TextureAndConstant& binding)
+		{
+			return binding.texture != nullptr || !binding.sourcePath.empty();
+		}
+
+		bool MaterialUsesWhitelistedTexture(
+			const MaterialDescription& desc,
+			const std::vector<std::string>& textureWhitelist)
+		{
+			if (textureWhitelist.empty()) {
+				return false;
+			}
+
+			bool matched = false;
+			ForEachMaterialTextureBinding(desc, [&](const TextureAndConstant& binding) {
+				if (matched || binding.sourcePath.empty()) {
+					return;
+				}
+				const std::string normalized = NormalizeObjectReyesWhitelistPath(binding.sourcePath);
+				matched = std::find(textureWhitelist.begin(), textureWhitelist.end(), normalized) != textureWhitelist.end();
+			});
+			return matched;
+		}
+
+		bool SupportsObjectReyesGeometricDisplacementCandidate(const MaterialDescription& desc)
+		{
+			return desc.enableGeometricDisplacement &&
+				!desc.heightMapFromBaseColorAlpha &&
+				(desc.heightMap.texture != nullptr || !desc.heightMap.sourcePath.empty()) &&
+				(desc.heightMap.channels.empty() || desc.heightMap.channels[0] == 0u);
+		}
+
+		std::optional<std::string> GetSingleActiveTextureUvSetName(const MaterialDescription& desc)
+		{
+			std::optional<std::string> firstName;
+			bool multiple = false;
+			ForEachMaterialTextureBinding(desc, [&](const TextureAndConstant& binding) {
+				if (!IsActiveTextureBinding(binding)) {
+					return;
+				}
+				std::string name = binding.uvSetName.empty() ? std::string("st") : binding.uvSetName;
+				if (!firstName) {
+					firstName = std::move(name);
+					return;
+				}
+				if (*firstName != name) {
+					multiple = true;
+				}
+			});
+
+			if (multiple) {
+				return std::nullopt;
+			}
+			return firstName.value_or("st");
+		}
+
+		void AssignAllActiveTextureBindingsToUvSet(MaterialDescription& desc, std::uint32_t uvSetIndex)
+		{
+			ForEachMaterialTextureBinding(desc, [&](TextureAndConstant& binding) {
+				if (IsActiveTextureBinding(binding)) {
+					binding.uvSetIndex = uvSetIndex;
+				}
+			});
+		}
+
 	std::string NormalizeUsdIdentifier(std::string value) {
 		std::string normalized;
 		normalized.reserve(value.size());
@@ -697,6 +779,87 @@ namespace USDLoader {
 			path.erase(path.begin());
 		}
 		return path;
+	}
+
+	bool HasTextureExtension(std::string_view path)
+	{
+		const auto dot = path.find_last_of('.');
+		const auto slash = path.find_last_of("\\/");
+		if (dot == std::string_view::npos || (slash != std::string_view::npos && dot < slash)) {
+			return false;
+		}
+
+		std::string extension(path.substr(dot));
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		return extension == ".dds" || extension == ".png" || extension == ".tga" ||
+			extension == ".jpg" || extension == ".jpeg" || extension == ".bmp";
+	}
+
+	std::optional<std::string> MakeParallaxHeightSiblingPath(std::string_view diffusePath)
+	{
+		std::string normalized = NormalizeBrniflyTexturePath(std::string(diffusePath));
+		if (!HasTextureExtension(normalized)) {
+			return std::nullopt;
+		}
+
+		const auto slash = normalized.find_last_of("\\/");
+		const auto dot = normalized.find_last_of('.');
+		if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+			return std::nullopt;
+		}
+
+		std::string stem = normalized.substr(0, dot);
+		std::string lowerStem = stem;
+		std::transform(lowerStem.begin(), lowerStem.end(), lowerStem.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (lowerStem.ends_with("_p")) {
+			return std::nullopt;
+		}
+
+		return stem + "_p" + normalized.substr(dot);
+	}
+
+	std::optional<std::string> MakeCommunityShadersPbrDisplacementPath(std::string_view diffusePath)
+	{
+		std::string normalized = NormalizeBrniflyTexturePath(std::string(diffusePath));
+		if (!HasTextureExtension(normalized)) {
+			return std::nullopt;
+		}
+
+		std::string lower = normalized;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		if (lower.rfind("textures\\pbr\\", 0) == 0) {
+			return MakeParallaxHeightSiblingPath(normalized);
+		}
+
+		const std::string texturePrefix = "textures\\";
+		if (lower.rfind(texturePrefix, 0) == 0) {
+			normalized.erase(0, texturePrefix.size());
+			lower.erase(0, texturePrefix.size());
+		}
+
+		const auto slash = normalized.find_last_of("\\/");
+		const auto dot = normalized.find_last_of('.');
+		if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+			return std::nullopt;
+		}
+
+		std::string stem = normalized.substr(0, dot);
+		std::string lowerStem = lower.substr(0, dot);
+		for (const std::string_view suffix : { "_d", "_diffuse", "_color" }) {
+			if (lowerStem.size() > suffix.size() &&
+				lowerStem.compare(lowerStem.size() - suffix.size(), suffix.size(), suffix) == 0) {
+				stem.resize(stem.size() - suffix.size());
+				break;
+			}
+		}
+
+		return "textures\\pbr\\" + stem + "_p" + normalized.substr(dot);
 	}
 
 	std::optional<std::filesystem::path> ResolveTexturePathFromSearchRoots(const std::string& texturePath)
@@ -1421,6 +1584,57 @@ namespace USDLoader {
 		}
 	}
 
+	bool PromoteParallaxHeightSourceFromBaseColor(MaterialDescription& result, const UsdStageRefPtr& stage, bool loadMaterialTextures)
+	{
+		if (result.baseColor.sourcePath.empty() ||
+			(result.heightMap.texture && !result.heightMapFromBaseColorAlpha) ||
+			(!result.heightMap.sourcePath.empty() && !result.heightMapFromBaseColorAlpha)) {
+			return false;
+		}
+
+		std::vector<std::string> candidates;
+		auto appendCandidate = [&](std::optional<std::string> candidate) {
+			if (!candidate || candidate->empty()) {
+				return;
+			}
+			const std::string normalized = NormalizeBrniflyTexturePath(*candidate);
+			if (std::find(candidates.begin(), candidates.end(), normalized) == candidates.end()) {
+				candidates.push_back(normalized);
+			}
+		};
+		appendCandidate(MakeCommunityShadersPbrDisplacementPath(result.baseColor.sourcePath));
+		appendCandidate(MakeParallaxHeightSiblingPath(result.baseColor.sourcePath));
+
+		for (const std::string& candidate : candidates) {
+			if (!ResolveTexturePathFromSearchRoots(candidate)) {
+				continue;
+			}
+
+			result.heightMap.sourcePath = candidate;
+			result.heightMap.channels = { 0 };
+			result.heightMap.uvSetIndex = result.baseColor.uvSetIndex;
+			result.heightMap.uvSetName = result.baseColor.uvSetName;
+			result.heightMapFromBaseColorAlpha = false;
+			MarkDisplacementEnabled(result, result.heightMapScale);
+			if (loadMaterialTextures) {
+				result.heightMap.texture = LoadUsdTextureAsset(
+					candidate,
+					stage,
+					TextureSemantic::Height,
+					false,
+					NormalMapConvention::DirectX);
+			}
+
+			spdlog::info(
+				"USDLoader: promoted parallax height '{}' from base color '{}'.",
+				candidate,
+				result.baseColor.sourcePath);
+			return true;
+		}
+
+		return false;
+	}
+
 	void ProcessDisplacementTerminal(
 		MaterialDescription& result,
 		const pxr::UsdShadeMaterial& material,
@@ -1647,6 +1861,7 @@ namespace USDLoader {
 		});
 
 		ApplyBrniflyMaterialMetadata(result, material.GetPrim());
+		PromoteParallaxHeightSourceFromBaseColor(result, stage, loadMaterialTextures);
 		LoadSourcePathTextures(result, stage, loadMaterialTextures);
 
 		ForEachMaterialTextureBinding(result, [](TextureAndConstant& binding) {
@@ -1741,7 +1956,10 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.brniflyZBufferWrite ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.brniflyDecal ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.brniflyDynamicDecal ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0);
+			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.geometricDisplacementOptIn ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.geometricHeightRemapRequired ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.geometricHeightRemapSucceeded ? 1 : 0);
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {
@@ -2078,7 +2296,8 @@ namespace USDLoader {
 		const UsdShadeMaterial& material,
 		const std::vector<MeshUvSetData>& uvSets,
 		bool forceDoubleSided = false,
-		const UsdPrim& meshPrim = UsdPrim()) {
+		const UsdPrim& meshPrim = UsdPrim(),
+		const MeshPreprocessResult* preprocessResult = nullptr) {
         if (!material) {
             return ResolveDefaultUsdMaterial(forceDoubleSided);
         }
@@ -2107,6 +2326,16 @@ namespace USDLoader {
         if (meshPrim) {
             ApplyBrniflyMaterialMetadata(resolvedDesc, meshPrim);
         }
+		if (preprocessResult && preprocessResult->geometricDisplacementOptIn) {
+			resolvedDesc.geometricDisplacementOptIn = true;
+		}
+		if (preprocessResult && preprocessResult->geometricHeightRemapRequired) {
+			resolvedDesc.geometricHeightRemapRequired = true;
+			resolvedDesc.geometricHeightRemapSucceeded = preprocessResult->geometricHeightRemapSucceeded;
+			if (preprocessResult->geometricHeightRemapSucceeded) {
+				AssignAllActiveTextureBindingsToUvSet(resolvedDesc, preprocessResult->geometricHeightRemapUvSetIndex);
+			}
+		}
         resolvedDesc.forceDoubleSided = resolvedDesc.forceDoubleSided || forceDoubleSided;
 
         const std::string cacheKey = BuildResolvedMaterialCacheKey(materialPath, resolvedDesc);
@@ -2122,7 +2351,8 @@ namespace USDLoader {
 
 	USDGeometryExtractor::ExtractOptions BuildGeometryExtractOptions(
 		const UsdGeomMesh& mesh,
-		const UsdShadeMaterial& material)
+		const UsdShadeMaterial& material,
+		const InMemoryStageOptions& stageOptions)
 	{
 		MaterialDescription desc{};
 		if (material) {
@@ -2147,6 +2377,43 @@ namespace USDLoader {
 		if (desc.brniflyVertexAlpha && desc.blendState == BlendState::BLEND_STATE_MASK && temporaryBlockedOverlay) {
 			options.vertexAlphaCutoff = std::clamp(desc.alphaCutoff, 0.0f, 1.0f);
 		}
+		const bool objectReyesSelected =
+			stageOptions.objectReyesNifMatched ||
+			MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesTexturePaths);
+		const bool uvRemapSelected =
+			stageOptions.objectReyesUvRemapEnabled &&
+			((stageOptions.objectReyesUvRemapIncludeSelected && objectReyesSelected) ||
+			 stageOptions.objectReyesUvRemapNifMatched ||
+			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesUvRemapTexturePaths));
+		options.geometricDisplacementOptIn = objectReyesSelected && SupportsObjectReyesGeometricDisplacementCandidate(desc);
+		if (uvRemapSelected && options.geometricDisplacementOptIn) {
+			options.materialUvRemapRequired = true;
+			options.materialUvRemapConfigHash = stageOptions.objectReyesConfigHash;
+			options.materialUvRemapReason = stageOptions.objectReyesUvRemapNifMatched || stageOptions.objectReyesNifMatched
+				? "nif-path object Reyes opt-in"
+				: "texture-path object Reyes opt-in";
+			if (auto uvSetName = GetSingleActiveTextureUvSetName(desc)) {
+				options.materialUvRemapSourceSetName = *uvSetName;
+			}
+			else {
+				options.materialUvRemapKnownFailure = true;
+				options.materialUvRemapReason += "; material uses multiple active texture UV sets";
+			}
+		}
+		else if (objectReyesSelected || uvRemapSelected) {
+			spdlog::info(
+				"Object Reyes opt-in matched mesh '{}' material '{}' but material is not eligible for geometric Reyes/remap: selected={}, uvRemapSelected={}, baseSource='{}', geometric={}, heightTexture={}, heightSource='{}', baseAlphaHeight={}, firstHeightChannel={}.",
+				mesh ? mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
+				material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>"),
+				objectReyesSelected,
+				uvRemapSelected,
+				desc.baseColor.sourcePath,
+				desc.enableGeometricDisplacement,
+				desc.heightMap.texture != nullptr,
+				desc.heightMap.sourcePath,
+				desc.heightMapFromBaseColorAlpha,
+				desc.heightMap.channels.empty() ? -1 : static_cast<int>(desc.heightMap.channels[0]));
+		}
 		return options;
 	}
 
@@ -2163,6 +2430,7 @@ namespace USDLoader {
 		const std::string& directory,
 		bool isUSDZ,
 		const ImportSettings& importSettings,
+		const InMemoryStageOptions& stageOptions,
 		const std::string& sourceIdentifierOverride = {})
 	{
 		ZoneScopedN("USDLoader::PreprocessAllMeshes");
@@ -2261,7 +2529,11 @@ namespace USDLoader {
 				if (subsets.empty()) {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
 					ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
-					const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
+					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
+					if (extractOptions.materialUvRemapRequired && skinQ) {
+						extractOptions.materialUvRemapKnownFailure = true;
+						extractOptions.materialUvRemapReason += "; skinned meshes are not supported by v1 remapping";
+					}
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
 							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -2294,7 +2566,11 @@ namespace USDLoader {
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
-						const auto extractOptions = BuildGeometryExtractOptions(mesh, mat);
+						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
+						if (extractOptions.materialUvRemapRequired && skinQ) {
+							extractOptions.materialUvRemapKnownFailure = true;
+							extractOptions.materialUvRemapReason += "; skinned meshes are not supported by v1 remapping";
+						}
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
 								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -2440,7 +2716,8 @@ namespace USDLoader {
 					subset.material,
 					result.ingest.GetUvSets(),
 					record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
-					mesh.GetPrim());
+					mesh.GetPrim(),
+					std::addressof(result));
 			}
 			std::shared_ptr<Mesh> mPtr;
 			{
@@ -3237,7 +3514,7 @@ namespace USDLoader {
 
 		UsdSkelCache skelCache;
 
-		PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options.sourceIdentifier);
+		PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
 
 		ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
 
@@ -3270,7 +3547,7 @@ namespace USDLoader {
 		try {
 			UsdSkelCache skelCache;
 
-			PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options.sourceIdentifier);
+			PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
 			auto payload = ParseImportedAssetPayload(stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
 			{
 				ZoneScopedN("USDLoader::LoadImportedAssetFromStage::ClearLoadingCache");

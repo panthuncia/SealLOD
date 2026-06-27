@@ -20,6 +20,7 @@ namespace USDLoader {
 		bool enableDoubleSidedNameHeuristic = true;
 		bool loadMaterialTextures = true;
 		std::uint32_t nifTessellationFactor = 1;
+		std::vector<std::string> additionalTextureSearchRoots;
 	};
 
 	struct InMemoryStageOptions {
@@ -27,6 +28,14 @@ namespace USDLoader {
 		std::string sourceDirectory;
 		std::vector<std::string> textureSearchRoots;
 		std::string layerIdentifierHint = "in_memory.usda";
+		std::string objectReyesNifPath;
+		std::string objectReyesConfigHash;
+		std::vector<std::string> objectReyesTexturePaths;
+		std::vector<std::string> objectReyesUvRemapTexturePaths;
+		bool objectReyesNifMatched = false;
+		bool objectReyesUvRemapEnabled = true;
+		bool objectReyesUvRemapIncludeSelected = true;
+		bool objectReyesUvRemapNifMatched = false;
 		bool isUsdPackage = false;
 	};
 

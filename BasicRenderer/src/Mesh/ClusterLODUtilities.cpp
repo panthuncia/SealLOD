@@ -775,6 +775,42 @@ namespace
 		return true;
 	}
 
+	struct VertexPositionKey
+	{
+		uint32_t x;
+		uint32_t y;
+		uint32_t z;
+
+		bool operator==(const VertexPositionKey&) const = default;
+	};
+
+	struct VertexPositionKeyHash
+	{
+		size_t operator()(const VertexPositionKey& key) const noexcept
+		{
+			size_t h = static_cast<size_t>(key.x);
+			h ^= static_cast<size_t>(key.y) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+			h ^= static_cast<size_t>(key.z) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+			return h;
+		}
+	};
+
+	uint32_t FloatBits(float value)
+	{
+		uint32_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return bits;
+	}
+
+	VertexPositionKey MakeVertexPositionKey(DirectX::XMFLOAT3 position)
+	{
+		return VertexPositionKey{
+			FloatBits(position.x),
+			FloatBits(position.y),
+			FloatBits(position.z)
+		};
+	}
+
 	std::vector<DirectX::XMFLOAT3> RecalculateGroupNormals(
 		const std::vector<uint32_t>& groupLocalToGlobal,
 		const std::vector<meshopt_Meshlet>& meshlets,
@@ -842,18 +878,45 @@ namespace
 			}
 		}
 
+		std::unordered_map<VertexPositionKey, DirectX::XMFLOAT3, VertexPositionKeyHash> coincidentNormalSums;
+		coincidentNormalSums.reserve(groupLocalToGlobal.size());
+		for (size_t groupVertex = 0; groupVertex < groupLocalToGlobal.size(); ++groupVertex)
+		{
+			const DirectX::XMFLOAT3 position = ReadVertexFloat3(
+				vertices,
+				vertexStrideBytes,
+				groupLocalToGlobal[groupVertex],
+				PositionByteOffset);
+			auto [it, inserted] = coincidentNormalSums.try_emplace(
+				MakeVertexPositionKey(position),
+				0.0f,
+				0.0f,
+				0.0f);
+			DirectX::XMFLOAT3& sum = it->second;
+			sum.x += accumulatedNormals[groupVertex].x;
+			sum.y += accumulatedNormals[groupVertex].y;
+			sum.z += accumulatedNormals[groupVertex].z;
+		}
+
 		std::vector<DirectX::XMFLOAT3> result;
 		result.resize(groupLocalToGlobal.size());
 
 		for (size_t groupVertex = 0; groupVertex < groupLocalToGlobal.size(); ++groupVertex)
 		{
+			const DirectX::XMFLOAT3 position = ReadVertexFloat3(
+				vertices,
+				vertexStrideBytes,
+				groupLocalToGlobal[groupVertex],
+				PositionByteOffset);
 			const DirectX::XMFLOAT3 sourceNormal = ReadVertexFloat3(
 				vertices,
 				vertexStrideBytes,
 				groupLocalToGlobal[groupVertex],
 				NormalByteOffset);
 
-			result[groupVertex] = NormalizeOrFallback(accumulatedNormals[groupVertex], sourceNormal);
+			const auto sumIt = coincidentNormalSums.find(MakeVertexPositionKey(position));
+			const DirectX::XMFLOAT3 normalSum = sumIt != coincidentNormalSums.end() ? sumIt->second : accumulatedNormals[groupVertex];
+			result[groupVertex] = NormalizeOrFallback(normalSum, sourceNormal);
 		}
 
 		return result;

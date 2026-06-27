@@ -83,7 +83,9 @@ float3 getParallaxOcclusionMappingCoordsAndHeight(
     float2 dUVdy)
 {
     float3 viewDirTS = ParallaxViewDirectionTS(TBN, viewDir);
-    float2 parallaxDirection = viewDirTS.xy;
+    // Object-space material UV parallax uses the inverse of the fragment-to-camera
+    // tangent-space XY direction. Terrain has its own parallax path and basis.
+    float2 parallaxDirection = -viewDirTS.xy;
 
     float maxHeight = max(heightmapScale, 0.0f);
     if (maxHeight <= 1.0e-5f)
@@ -173,7 +175,9 @@ float3 getParallaxOcclusionMappingCoordsAndHeight(
     float2 dUVdy)
 {
     float3 viewDirTS = ParallaxViewDirectionTS(TBN, viewDir);
-    float2 parallaxDirection = viewDirTS.xy;
+    // Object-space material UV parallax uses the inverse of the fragment-to-camera
+    // tangent-space XY direction. Terrain has its own parallax path and basis.
+    float2 parallaxDirection = -viewDirTS.xy;
 
     float maxHeight = max(heightmapScale, 0.0f);
     if (maxHeight <= 1.0e-5f)

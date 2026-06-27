@@ -1588,7 +1588,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", true);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
     settingsManager.registerSetting<float>("terrainReyesDisplacementGlobalScale", 1.0f);
-    settingsManager.registerSetting<float>("objectReyesDisplacementScale", 1.0f);
+    settingsManager.registerSetting<float>("objectReyesDisplacementScale", 500.0f);
+    settingsManager.registerSetting<float>("objectParallaxHeightScale", 1.0f);
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.06f);
     settingsManager.registerSetting<float>("terrainParallaxHeightScale", 0.10f);
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 25u);
