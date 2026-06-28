@@ -6030,7 +6030,10 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	uint32_t simplifyProtectMask = 0;
 	std::vector<DirectX::XMFLOAT4> tangentAttributeStream;
 
-	if (enableNormalAttributeSimplification && hasNormalStreamInSource && hasTexcoordStreamInSource)
+	if (enableNormalAttributeSimplification &&
+		(tangentAttributeWeight > 0.0f || tangentSignAttributeWeight > 0.0f) &&
+		hasNormalStreamInSource &&
+		hasTexcoordStreamInSource)
 	{
 		if (!GenerateMikkTangents(vertices, vertexStrideBytes, indices, tangentAttributeStream))
 		{

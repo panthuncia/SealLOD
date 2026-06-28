@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "8";
+constexpr std::string_view kObjectReyesConfigVersion = "16";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -448,7 +448,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 26u;
+constexpr std::uint32_t kPayloadCacheVersion = 28u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -566,6 +566,7 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.objectSurfaceTexelDensity);
     HashPod(hash, desc.objectTriplanarBlendMaterial);
     HashPod(hash, desc.objectBlendWeightUvSetIndex);
+    HashString(hash, desc.staticTextureOverrideSourceName);
     HashPod(hash, desc.blendState);
     HashBinding(hash, desc.baseColor);
     HashBinding(hash, desc.metallic);
@@ -587,6 +588,22 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     return hash;
 }
 
+std::uint64_t ComputeMaterialHash(const Material& material)
+{
+    std::uint64_t hash = ComputeMaterialHash(material.ToCacheDescription());
+    const auto* blend0 = material.GetObjectBlendMaterial0();
+    const auto* blend1 = material.GetObjectBlendMaterial1();
+    HashPod(hash, blend0 != nullptr);
+    if (blend0) {
+        HashPod(hash, ComputeMaterialHash(*blend0));
+    }
+    HashPod(hash, blend1 != nullptr);
+    if (blend1) {
+        HashPod(hash, ComputeMaterialHash(*blend1));
+    }
+    return hash;
+}
+
 void EnsurePayloadMaterialHashes(USDLoader::ImportedAssetPayload& payload)
 {
     if (payload.meshMaterialHashes.size() == payload.meshes.size()) {
@@ -600,7 +617,7 @@ void EnsurePayloadMaterialHashes(USDLoader::ImportedAssetPayload& payload)
             payload.meshMaterialHashes.push_back(0);
             continue;
         }
-        payload.meshMaterialHashes.push_back(ComputeMaterialHash(mesh->material->ToCacheDescription()));
+        payload.meshMaterialHashes.push_back(ComputeMaterialHash(*mesh->material));
     }
 }
 
@@ -1296,6 +1313,7 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.objectSurfaceTexelDensity);
     writer.Pod(desc.objectTriplanarBlendMaterial);
     writer.Pod(desc.objectBlendWeightUvSetIndex);
+    writer.String(desc.staticTextureOverrideSourceName);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor, TextureSemantic::BaseColor, true);
     WriteTextureBinding(writer, desc.metallic, TextureSemantic::Metallic, false);
@@ -1351,6 +1369,7 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.objectSurfaceTexelDensity) ||
         !reader.Pod(desc.objectTriplanarBlendMaterial) ||
         !reader.Pod(desc.objectBlendWeightUvSetIndex) ||
+        !reader.String(desc.staticTextureOverrideSourceName) ||
         !reader.Pod(blend)) {
         return false;
     }
@@ -1374,6 +1393,49 @@ bool ReadMaterialDescription(
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots, loadMaterialTextures) &&
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots, loadMaterialTextures) &&
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false, textureSearchRoots, loadMaterialTextures);
+}
+
+void WriteMaterialWithObjectBlendChildren(BinaryWriter& writer, const Material& material)
+{
+    WriteMaterialDescription(writer, material.ToCacheDescription());
+    const auto* blend0 = material.GetObjectBlendMaterial0();
+    const auto* blend1 = material.GetObjectBlendMaterial1();
+    const std::uint8_t hasBlendChildren = blend0 && blend1 ? 1u : 0u;
+    writer.Pod(hasBlendChildren);
+    if (hasBlendChildren) {
+        WriteMaterialDescription(writer, blend0->ToCacheDescription());
+        WriteMaterialDescription(writer, blend1->ToCacheDescription());
+    }
+}
+
+bool ReadMaterialWithObjectBlendChildren(
+    BinaryReader& reader,
+    MaterialDescription& desc,
+    std::optional<MaterialDescription>& blend0,
+    std::optional<MaterialDescription>& blend1,
+    const std::vector<std::string>& textureSearchRoots,
+    bool loadMaterialTextures)
+{
+    if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures)) {
+        return false;
+    }
+    std::uint8_t hasBlendChildren = 0u;
+    if (!reader.Pod(hasBlendChildren)) {
+        return false;
+    }
+    if (hasBlendChildren == 0u) {
+        return true;
+    }
+
+    MaterialDescription child0{};
+    MaterialDescription child1{};
+    if (!ReadMaterialDescription(reader, child0, textureSearchRoots, loadMaterialTextures) ||
+        !ReadMaterialDescription(reader, child1, textureSearchRoots, loadMaterialTextures)) {
+        return false;
+    }
+    blend0 = std::move(child0);
+    blend1 = std::move(child1);
+    return true;
 }
 
 void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
@@ -1486,9 +1548,9 @@ bool WritePayloadCache(
         std::uint64_t materialHash = 0;
         {
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::ComputeMaterialHash");
-            materialHash = ComputeMaterialHash(desc);
+            materialHash = ComputeMaterialHash(*mesh->material);
         }
-        WriteMaterialDescription(writer, desc);
+        WriteMaterialWithObjectBlendChildren(writer, *mesh->material);
         {
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
             writer.Pod(materialHash);
@@ -1593,11 +1655,15 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     for (std::uint64_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
         ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh");
         MaterialDescription desc{};
+        std::optional<MaterialDescription> blendDesc0;
+        std::optional<MaterialDescription> blendDesc1;
         ClusterLODPrebuiltData prebuilt{};
         std::uint64_t materialHash = 0;
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
-            if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures) || !reader.Pod(materialHash) || !ReadPrebuilt(reader, prebuilt)) {
+            if (!ReadMaterialWithObjectBlendChildren(reader, desc, blendDesc0, blendDesc1, textureSearchRoots, loadMaterialTextures) ||
+                !reader.Pod(materialHash) ||
+                !ReadPrebuilt(reader, prebuilt)) {
                 return std::nullopt;
             }
         }
@@ -1612,6 +1678,12 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::CreateMesh");
             auto material = Material::CreateShared(desc);
+            if (blendDesc0 && blendDesc1) {
+                material->SetObjectBlendChildren(
+                    Material::CreateShared(*blendDesc0),
+                    Material::CreateShared(*blendDesc1),
+                    desc.objectBlendWeightUvSetIndex);
+            }
             auto vertices = std::make_unique<std::vector<std::byte>>();
             std::vector<UINT32> indices;
             std::vector<MeshUvSetData> uvSets;

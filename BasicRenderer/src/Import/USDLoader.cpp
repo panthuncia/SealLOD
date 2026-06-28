@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <unordered_set>
 #include <cmath>
+#include <queue>
 
 #include <nlohmann/json.hpp>
 #include <tracy/Tracy.hpp>
@@ -172,19 +173,42 @@ namespace USDLoader {
 		UsdShadeMaterial material;
 		UsdShadeMaterial blendMaterial0;
 		UsdShadeMaterial blendMaterial1;
+		std::string staticTextureOverrideSourceName;
+		std::string blendMaterial0StaticTextureOverrideSourceName;
+		std::string blendMaterial1StaticTextureOverrideSourceName;
 		MeshPreprocessResult result;
 		bool inferredDoubleSided = false;
 		bool objectTriplanarBlendStrip = false;
+		bool blendMaterial0ObjectReyes = false;
+		bool blendMaterial1ObjectReyes = false;
 
 		PreprocessedMeshSubset(UsdShadeMaterial m, MeshPreprocessResult&& r, bool inferred)
 			: material(std::move(m)), result(std::move(r)), inferredDoubleSided(inferred) {}
 
-		PreprocessedMeshSubset(UsdShadeMaterial m0, UsdShadeMaterial m1, MeshPreprocessResult&& r, bool inferred)
+		PreprocessedMeshSubset(UsdShadeMaterial m, MeshPreprocessResult&& r, bool inferred, std::string sourceName)
+			: material(std::move(m))
+			, staticTextureOverrideSourceName(std::move(sourceName))
+			, result(std::move(r))
+			, inferredDoubleSided(inferred) {}
+
+		PreprocessedMeshSubset(
+			UsdShadeMaterial m0,
+			UsdShadeMaterial m1,
+			MeshPreprocessResult&& r,
+			bool inferred,
+			std::string sourceName0,
+			std::string sourceName1,
+			bool material0ObjectReyes = true,
+			bool material1ObjectReyes = true)
 			: blendMaterial0(std::move(m0))
 			, blendMaterial1(std::move(m1))
+			, blendMaterial0StaticTextureOverrideSourceName(std::move(sourceName0))
+			, blendMaterial1StaticTextureOverrideSourceName(std::move(sourceName1))
 			, result(std::move(r))
 			, inferredDoubleSided(inferred)
-			, objectTriplanarBlendStrip(true) {}
+			, objectTriplanarBlendStrip(true)
+			, blendMaterial0ObjectReyes(material0ObjectReyes)
+			, blendMaterial1ObjectReyes(material1ObjectReyes) {}
 	};
 
 	struct PreprocessedMeshRecord {
@@ -2026,7 +2050,8 @@ namespace USDLoader {
 			std::to_string(static_cast<std::uint32_t>(resolvedDesc.objectSurfaceSamplingMode)) + "|" +
 			std::to_string(resolvedDesc.objectSurfaceTexelDensity) + "|" +
 			std::to_string(resolvedDesc.objectTriplanarBlendMaterial ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.objectBlendWeightUvSetIndex);
+			std::to_string(resolvedDesc.objectBlendWeightUvSetIndex) + "|" +
+			resolvedDesc.staticTextureOverrideSourceName;
     }
 
     std::shared_ptr<Material> ResolveDefaultUsdMaterial(bool forceDoubleSided) {
@@ -2364,7 +2389,8 @@ namespace USDLoader {
 		const std::vector<MeshUvSetData>& uvSets,
 		bool forceDoubleSided = false,
 		const UsdPrim& meshPrim = UsdPrim(),
-		const MeshPreprocessResult* preprocessResult = nullptr) {
+		const MeshPreprocessResult* preprocessResult = nullptr,
+		std::string_view staticTextureOverrideSourceName = {}) {
         if (!material) {
             return ResolveDefaultUsdMaterial(forceDoubleSided);
         }
@@ -2393,6 +2419,12 @@ namespace USDLoader {
         if (meshPrim) {
             ApplyBrniflyMaterialMetadata(resolvedDesc, meshPrim);
         }
+		if (!staticTextureOverrideSourceName.empty()) {
+			resolvedDesc.staticTextureOverrideSourceName = std::string(staticTextureOverrideSourceName);
+		}
+		else if (meshPrim) {
+			resolvedDesc.staticTextureOverrideSourceName = meshPrim.GetName().GetString();
+		}
 		if (preprocessResult && preprocessResult->geometricDisplacementOptIn) {
 			resolvedDesc.geometricDisplacementOptIn = true;
 		}
@@ -2426,15 +2458,42 @@ namespace USDLoader {
 		const std::vector<MeshUvSetData>& uvSets,
 		bool forceDoubleSided,
 		const UsdPrim& meshPrim,
+		bool material0ObjectReyes,
+		bool material1ObjectReyes,
+		std::string_view material0StaticTextureOverrideSourceName,
+		std::string_view material1StaticTextureOverrideSourceName,
 		const MeshPreprocessResult* preprocessResult)
 	{
-		auto child0 = ResolveMaterialForMesh(material0, uvSets, forceDoubleSided, meshPrim, preprocessResult);
-		auto child1 = ResolveMaterialForMesh(material1, uvSets, forceDoubleSided, meshPrim, preprocessResult);
+		// Blend strips are generated under a single owner mesh, but their child
+		// materials come from two different source mesh prims. Do not apply the
+		// owner mesh prim's BrNifly texture metadata to both children.
+		auto child0 = ResolveMaterialForMesh(material0, uvSets, forceDoubleSided, UsdPrim(), nullptr);
+		auto child1 = ResolveMaterialForMesh(material1, uvSets, forceDoubleSided, UsdPrim(), nullptr);
 		if (!child0 || !child1) {
 			return ResolveDefaultUsdMaterial(forceDoubleSided);
 		}
 
-		MaterialDescription desc = child0->ToCacheDescription();
+		MaterialDescription childDesc0 = child0->ToCacheDescription();
+		MaterialDescription childDesc1 = child1->ToCacheDescription();
+		childDesc0.staticTextureOverrideSourceName = std::string(material0StaticTextureOverrideSourceName);
+		childDesc1.staticTextureOverrideSourceName = std::string(material1StaticTextureOverrideSourceName);
+		auto applyObjectReyesChildState = [&](MaterialDescription& desc, bool enabled) {
+			if (enabled) {
+				desc.geometricDisplacementOptIn = true;
+				desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+				desc.objectSurfaceTexelDensity = preprocessResult ? preprocessResult->objectSurfaceTexelDensity : desc.objectSurfaceTexelDensity;
+				return;
+			}
+			desc.geometricDisplacementOptIn = false;
+			desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+		};
+		applyObjectReyesChildState(childDesc0, material0ObjectReyes);
+		applyObjectReyesChildState(childDesc1, material1ObjectReyes);
+		child0 = Material::CreateShared(childDesc0);
+		child1 = Material::CreateShared(childDesc1);
+		const bool child0SupportsReyes = SupportsObjectReyesGeometricDisplacement(childDesc0);
+		const bool child1SupportsReyes = SupportsObjectReyesGeometricDisplacement(childDesc1);
+		MaterialDescription desc = child0SupportsReyes || !child1SupportsReyes ? childDesc0 : childDesc1;
 		desc.name += "_ObjectTriplanarBlend";
 		desc.objectTriplanarBlendMaterial = true;
 		desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
@@ -2442,13 +2501,25 @@ namespace USDLoader {
 		desc.heightMap.uvSetIndex = desc.objectBlendWeightUvSetIndex;
 		desc.geometricDisplacementOptIn = true;
 		desc.enableGeometricDisplacement = true;
+		desc.objectSurfaceTexelDensity = preprocessResult ? preprocessResult->objectSurfaceTexelDensity : desc.objectSurfaceTexelDensity;
+
+		const std::string childKey0 = BuildResolvedMaterialCacheKey(
+			(material0 ? material0.GetPrim().GetPath().GetString() : std::string("<null0>")) + "#object-triplanar-blend-child",
+			childDesc0);
+		const std::string childKey1 = BuildResolvedMaterialCacheKey(
+			(material1 ? material1.GetPrim().GetPath().GetString() : std::string("<null1>")) + "#object-triplanar-blend-child",
+			childDesc1);
 
 		const std::string cacheKey =
 			std::string("object-triplanar-blend|") +
 			(material0 ? material0.GetPrim().GetPath().GetString() : std::string("<null>")) +
 			"|" +
 			(material1 ? material1.GetPrim().GetPath().GetString() : std::string("<null>")) +
+			"|child0Reyes=" + std::to_string(material0ObjectReyes ? 1 : 0) +
+			"|child1Reyes=" + std::to_string(material1ObjectReyes ? 1 : 0) +
 			"|uv=" + std::to_string(desc.objectBlendWeightUvSetIndex) +
+			"|child0=" + childKey0 +
+			"|child1=" + childKey1 +
 			"|" + BuildResolvedMaterialCacheKey(desc.name, desc);
 		auto it = loadingCache.resolvedMaterialCache.find(cacheKey);
 		if (it != loadingCache.resolvedMaterialCache.end()) {
@@ -2592,6 +2663,60 @@ namespace USDLoader {
 			desc.aoMap.sourcePath,
 			desc.heightMap.sourcePath,
 			desc.heightMapFromBaseColorAlpha);
+
+		std::string key = BuildMaterialTextureSignature(desc);
+		key += "optin=" + std::to_string(workItem.extractOptions.geometricDisplacementOptIn ? 1 : 0);
+		key += "|surface=" + std::to_string(static_cast<std::uint32_t>(workItem.extractOptions.objectSurfaceSamplingMode));
+		key += "|vtxalpha=" + std::to_string(workItem.extractOptions.brniflyVertexAlpha ? 1 : 0);
+		key += "|zwrite=" + std::to_string(workItem.extractOptions.brniflyZBufferWrite ? 1 : 0);
+		key += "|decal=" + std::to_string(workItem.extractOptions.brniflyDecal ? 1 : 0);
+		key += "|dynamicDecal=" + std::to_string(workItem.extractOptions.brniflyDynamicDecal ? 1 : 0);
+		key += "|modelNormals=" + std::to_string(workItem.extractOptions.brniflyModelSpaceNormals ? 1 : 0);
+		key += "|alphaCutoff=";
+		key += workItem.extractOptions.vertexAlphaCutoff
+			? std::to_string(*workItem.extractOptions.vertexAlphaCutoff)
+			: std::string("none");
+		return key;
+	}
+
+	std::string BuildTriplanarSubsetDebugLabel(const MeshPreprocessWorkItem& workItem)
+	{
+		MaterialDescription desc{};
+		if (workItem.material) {
+			const std::string materialPath = workItem.material.GetPrim().GetPath().GetString();
+			const auto templateIt = loadingCache.materialTemplateCache.find(materialPath);
+			if (templateIt != loadingCache.materialTemplateCache.end()) {
+				desc = templateIt->second.desc;
+			}
+			ApplyBrniflyMaterialMetadata(desc, workItem.material.GetPrim());
+		}
+		if (workItem.mesh) {
+			ApplyBrniflyMaterialMetadata(desc, workItem.mesh.GetPrim());
+		}
+
+		return fmt::format(
+			"mesh='{}' material='{}' base='{}' normal='{}' height='{}'",
+			workItem.mesh ? workItem.mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
+			workItem.material ? workItem.material.GetPrim().GetPath().GetString() : std::string("<unbound>"),
+			desc.baseColor.sourcePath,
+			desc.normal.sourcePath,
+			desc.heightMap.sourcePath);
+	}
+
+	std::string BuildBoundarySubsetMaterialKey(const MeshPreprocessWorkItem& workItem)
+	{
+		MaterialDescription desc{};
+		if (workItem.material) {
+			const std::string materialPath = workItem.material.GetPrim().GetPath().GetString();
+			const auto templateIt = loadingCache.materialTemplateCache.find(materialPath);
+			if (templateIt != loadingCache.materialTemplateCache.end()) {
+				desc = templateIt->second.desc;
+			}
+			ApplyBrniflyMaterialMetadata(desc, workItem.material.GetPrim());
+		}
+		if (workItem.mesh) {
+			ApplyBrniflyMaterialMetadata(desc, workItem.mesh.GetPrim());
+		}
 
 		std::string key = BuildMaterialTextureSignature(desc);
 		key += "optin=" + std::to_string(workItem.extractOptions.geometricDisplacementOptIn ? 1 : 0);
@@ -2926,19 +3051,41 @@ namespace USDLoader {
 		std::size_t workIndex = 0;
 		std::uint32_t triangle = 0;
 		std::uint32_t localEdge = 0;
+		std::uint32_t vertex0 = 0;
+		std::uint32_t vertex1 = 0;
 		std::string materialKey;
+		std::string materialLabel;
 	};
 
 	struct ObjectBoundaryCut {
 		std::size_t otherWorkIndex = 0;
 		std::string pairKey;
+		std::string otherMaterialLabel;
 		std::uint32_t localEdge = 0;
 		bool firstMaterialSide = true;
+	};
+
+	struct ObjectBoundaryStripBuild {
+		std::size_t material0Work = 0;
+		std::size_t material1Work = 0;
+		std::vector<std::byte> vertices;
+		std::vector<std::uint32_t> indices;
+		std::vector<DirectX::XMFLOAT2> blendWeights;
+	};
+
+	struct ObjectBoundaryPairInfo {
+		std::size_t material0Work = 0;
+		std::size_t material1Work = 0;
+		std::unordered_map<std::size_t, std::vector<std::uint32_t>> seedVerticesByWork;
 	};
 
 	struct BoundaryBuildVertex {
 		std::vector<std::byte> bytes;
 		float blendWeight = 0.0f;
+	};
+
+	struct BoundaryBaryVertex {
+		std::array<float, 3> bary{};
 	};
 
 	std::array<std::uint32_t, 3> PositionKey(const std::byte* vertex)
@@ -2971,6 +3118,28 @@ namespace USDLoader {
 		return std::sqrt(dx * dx + dy * dy + dz * dz);
 	}
 
+	bool IsFinite(const DirectX::XMFLOAT2& v)
+	{
+		return std::isfinite(v.x) && std::isfinite(v.y);
+	}
+
+	bool IsFinite(const DirectX::XMFLOAT3& v)
+	{
+		return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+	}
+
+	float TriangleAreaSq4(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, const DirectX::XMFLOAT3& c)
+	{
+		const DirectX::XMFLOAT3 e1{ b.x - a.x, b.y - a.y, b.z - a.z };
+		const DirectX::XMFLOAT3 e2{ c.x - a.x, c.y - a.y, c.z - a.z };
+		const DirectX::XMFLOAT3 cross{
+			e1.y * e2.z - e1.z * e2.y,
+			e1.z * e2.x - e1.x * e2.z,
+			e1.x * e2.y - e1.y * e2.x
+		};
+		return cross.x * cross.x + cross.y * cross.y + cross.z * cross.z;
+	}
+
 	void NormalizeVertexFloat3(std::byte* vertex, std::size_t offset)
 	{
 		float* f = reinterpret_cast<float*>(vertex + offset);
@@ -2981,6 +3150,93 @@ namespace USDLoader {
 			f[1] *= invLen;
 			f[2] *= invLen;
 		}
+	}
+
+	void SanitizeGeneratedBoundaryVertices(
+		std::vector<std::byte>& vertices,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags)
+	{
+		if (vertexSize == 0u) {
+			return;
+		}
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			DirectX::XMFLOAT3 position = LoadVertexPosition(vertex);
+			if (!IsFinite(position)) {
+				position = {};
+				std::memcpy(vertex + MeshVertexLayout::PositionOffset, std::addressof(position), sizeof(position));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u) {
+				DirectX::XMFLOAT3 normal{};
+				std::memcpy(std::addressof(normal), vertex + MeshVertexLayout::NormalOffset, sizeof(normal));
+				normal = NormalizeOrFallback(normal);
+				std::memcpy(vertex + MeshVertexLayout::NormalOffset, std::addressof(normal), sizeof(normal));
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u) {
+				const std::size_t tangentOffset = MeshVertexLayout::TangentOffset(vertexFlags);
+				DirectX::XMFLOAT3 tangent{};
+				std::memcpy(std::addressof(tangent), vertex + tangentOffset, sizeof(tangent));
+				tangent = NormalizeOrFallback(tangent);
+				std::memcpy(vertex + tangentOffset, std::addressof(tangent), sizeof(tangent));
+				float sign = 1.0f;
+				std::memcpy(std::addressof(sign), vertex + tangentOffset + sizeof(float) * 3u, sizeof(sign));
+				if (!std::isfinite(sign) || sign == 0.0f) {
+					sign = 1.0f;
+					std::memcpy(vertex + tangentOffset + sizeof(float) * 3u, std::addressof(sign), sizeof(sign));
+				}
+			}
+			if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
+				const std::size_t texcoordOffset = MeshVertexLayout::TexcoordOffset(vertexFlags);
+				DirectX::XMFLOAT2 uv{};
+				std::memcpy(std::addressof(uv), vertex + texcoordOffset, sizeof(uv));
+				if (!IsFinite(uv)) {
+					uv = {};
+					std::memcpy(vertex + texcoordOffset, std::addressof(uv), sizeof(uv));
+				}
+			}
+		}
+	}
+
+	std::size_t DropInvalidGeneratedBoundaryTriangles(
+		const std::vector<std::byte>& vertices,
+		std::vector<std::uint32_t>& indices,
+		std::uint32_t vertexSize)
+	{
+		if (vertexSize == 0u) {
+			indices.clear();
+			return 0u;
+		}
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		std::vector<std::uint32_t> filtered;
+		filtered.reserve(indices.size());
+		std::size_t dropped = 0u;
+		for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+			const std::uint32_t i0 = indices[i + 0u];
+			const std::uint32_t i1 = indices[i + 1u];
+			const std::uint32_t i2 = indices[i + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount || i0 == i1 || i1 == i2 || i2 == i0) {
+				++dropped;
+				continue;
+			}
+			const DirectX::XMFLOAT3 p0 = ReadPosition(vertices, vertexSize, i0);
+			const DirectX::XMFLOAT3 p1 = ReadPosition(vertices, vertexSize, i1);
+			const DirectX::XMFLOAT3 p2 = ReadPosition(vertices, vertexSize, i2);
+			const float areaSq4 = TriangleAreaSq4(p0, p1, p2);
+			if (!IsFinite(p0) || !IsFinite(p1) || !IsFinite(p2) || !std::isfinite(areaSq4) || areaSq4 <= 1.0e-12f) {
+				++dropped;
+				continue;
+			}
+			filtered.push_back(i0);
+			filtered.push_back(i1);
+			filtered.push_back(i2);
+		}
+		if (indices.size() % 3u != 0u) {
+			++dropped;
+		}
+		indices = std::move(filtered);
+		return dropped;
 	}
 
 	BoundaryBuildVertex InterpolateBoundaryVertex(
@@ -3035,6 +3291,56 @@ namespace USDLoader {
 		return result;
 	}
 
+	BoundaryBuildVertex InterpolateBoundaryTriangleVertex(
+		const std::byte* a,
+		const std::byte* b,
+		const std::byte* c,
+		const std::array<float, 3>& bary,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags,
+		float blendWeight)
+	{
+		BoundaryBuildVertex result{};
+		result.bytes.resize(vertexSize);
+		const std::byte* nearest = a;
+		if (bary[1] >= bary[0] && bary[1] >= bary[2]) {
+			nearest = b;
+		}
+		else if (bary[2] >= bary[0] && bary[2] >= bary[1]) {
+			nearest = c;
+		}
+		std::memcpy(result.bytes.data(), nearest, vertexSize);
+		auto interp = [&](std::size_t offset, std::size_t count) {
+			float* dst = reinterpret_cast<float*>(result.bytes.data() + offset);
+			const float* fa = reinterpret_cast<const float*>(a + offset);
+			const float* fb = reinterpret_cast<const float*>(b + offset);
+			const float* fc = reinterpret_cast<const float*>(c + offset);
+			for (std::size_t i = 0; i < count; ++i) {
+				dst[i] = fa[i] * bary[0] + fb[i] * bary[1] + fc[i] * bary[2];
+			}
+		};
+		interp(MeshVertexLayout::PositionOffset, 3);
+		if ((vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u) {
+			interp(MeshVertexLayout::NormalOffset, 3);
+			NormalizeVertexFloat3(result.bytes.data(), MeshVertexLayout::NormalOffset);
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u) {
+			const std::size_t tangentOffset = MeshVertexLayout::TangentOffset(vertexFlags);
+			interp(tangentOffset, 3);
+			NormalizeVertexFloat3(result.bytes.data(), tangentOffset);
+			reinterpret_cast<float*>(result.bytes.data() + tangentOffset)[3] =
+				reinterpret_cast<const float*>(nearest + tangentOffset)[3];
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u) {
+			interp(MeshVertexLayout::TexcoordOffset(vertexFlags), 2);
+		}
+		if ((vertexFlags & VertexFlags::VERTEX_COLORS) != 0u) {
+			interp(MeshVertexLayout::ColorOffset(vertexFlags), 3);
+		}
+		result.blendWeight = blendWeight;
+		return result;
+	}
+
 	void AppendBoundaryTriangle(
 		std::vector<std::byte>& vertices,
 		std::vector<std::uint32_t>& indices,
@@ -3057,6 +3363,286 @@ namespace USDLoader {
 		}
 	}
 
+	float BoundaryBaryArea2(
+		const std::array<float, 3>& a,
+		const std::array<float, 3>& b,
+		const std::array<float, 3>& c)
+	{
+		const float ax = a[1];
+		const float ay = a[2];
+		const float bx = b[1];
+		const float by = b[2];
+		const float cx = c[1];
+		const float cy = c[2];
+		return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+	}
+
+	bool AppendBoundaryBaryPolygon(
+		std::vector<std::byte>& vertices,
+		std::vector<std::uint32_t>& indices,
+		std::vector<DirectX::XMFLOAT2>* blendWeights,
+		const std::vector<BoundaryBaryVertex>& polygon,
+		const std::byte* a,
+		const std::byte* b,
+		const std::byte* c,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags,
+		float innerWeight,
+		const std::array<float, 3>& vertexDistanceScalars,
+		float stripHalfWidth)
+	{
+		if (polygon.size() < 3u) {
+			return false;
+		}
+
+		auto blendWeightForBary = [&](const std::array<float, 3>& bary) {
+			if (!blendWeights) {
+				return innerWeight;
+			}
+			const float distance =
+				bary[0] * vertexDistanceScalars[0] +
+				bary[1] * vertexDistanceScalars[1] +
+				bary[2] * vertexDistanceScalars[2];
+			const float normalizedDistance = stripHalfWidth > 1.0e-6f
+				? std::clamp(distance / stripHalfWidth, 0.0f, 1.0f)
+				: 1.0f;
+			return std::lerp(0.5f, innerWeight, normalizedDistance);
+		};
+
+		bool appended = false;
+		const BoundaryBaryVertex& first = polygon.front();
+		for (std::size_t i = 1; i + 1u < polygon.size(); ++i) {
+			const BoundaryBaryVertex& v1 = polygon[i];
+			const BoundaryBaryVertex& v2 = polygon[i + 1u];
+			if (std::abs(BoundaryBaryArea2(first.bary, v1.bary, v2.bary)) <= 1.0e-8f) {
+				continue;
+			}
+			const BoundaryBuildVertex bv0 = InterpolateBoundaryTriangleVertex(
+				a,
+				b,
+				c,
+				first.bary,
+				vertexSize,
+				vertexFlags,
+				blendWeightForBary(first.bary));
+			const BoundaryBuildVertex bv1 = InterpolateBoundaryTriangleVertex(
+				a,
+				b,
+				c,
+				v1.bary,
+				vertexSize,
+				vertexFlags,
+				blendWeightForBary(v1.bary));
+			const BoundaryBuildVertex bv2 = InterpolateBoundaryTriangleVertex(
+				a,
+				b,
+				c,
+				v2.bary,
+				vertexSize,
+				vertexFlags,
+				blendWeightForBary(v2.bary));
+			AppendBoundaryTriangle(vertices, indices, blendWeights, bv0, bv1, bv2);
+			appended = true;
+		}
+		return appended;
+	}
+
+	std::vector<BoundaryBaryVertex> ClipBoundaryBaryPolygon(
+		const std::vector<BoundaryBaryVertex>& polygon,
+		std::uint32_t component,
+		float threshold,
+		bool keepLessOrEqual)
+	{
+		std::vector<BoundaryBaryVertex> output;
+		if (polygon.empty()) {
+			return output;
+		}
+
+		auto inside = [&](const BoundaryBaryVertex& v) {
+			return keepLessOrEqual
+				? v.bary[component] <= threshold + 1.0e-6f
+				: v.bary[component] >= threshold - 1.0e-6f;
+		};
+		auto intersect = [&](const BoundaryBaryVertex& a, const BoundaryBaryVertex& b) {
+			const float da = a.bary[component] - threshold;
+			const float db = b.bary[component] - threshold;
+			const float denom = da - db;
+			float t = std::abs(denom) > 1.0e-12f ? da / denom : 0.0f;
+			t = std::clamp(t, 0.0f, 1.0f);
+			BoundaryBaryVertex result{};
+			for (std::size_t i = 0; i < 3u; ++i) {
+				result.bary[i] = std::lerp(a.bary[i], b.bary[i], t);
+			}
+			const float sum = result.bary[0] + result.bary[1] + result.bary[2];
+			if (std::abs(sum) > 1.0e-12f) {
+				result.bary[0] /= sum;
+				result.bary[1] /= sum;
+				result.bary[2] /= sum;
+			}
+			return result;
+		};
+
+		BoundaryBaryVertex previous = polygon.back();
+		bool previousInside = inside(previous);
+		for (const BoundaryBaryVertex& current : polygon) {
+			const bool currentInside = inside(current);
+			if (currentInside != previousInside) {
+				output.push_back(intersect(previous, current));
+			}
+			if (currentInside) {
+				output.push_back(current);
+			}
+			previous = current;
+			previousInside = currentInside;
+		}
+		return output;
+	}
+
+	std::vector<BoundaryBaryVertex> ClipBoundaryBaryPolygonByVertexScalars(
+		const std::vector<BoundaryBaryVertex>& polygon,
+		const std::array<float, 3>& scalars,
+		float threshold,
+		bool keepLessOrEqual)
+	{
+		std::vector<BoundaryBaryVertex> output;
+		if (polygon.empty()) {
+			return output;
+		}
+
+		auto value = [&](const BoundaryBaryVertex& v) {
+			return v.bary[0] * scalars[0] + v.bary[1] * scalars[1] + v.bary[2] * scalars[2];
+		};
+		auto inside = [&](const BoundaryBaryVertex& v) {
+			const float d = value(v);
+			return keepLessOrEqual
+				? d <= threshold + 1.0e-5f
+				: d >= threshold - 1.0e-5f;
+		};
+		auto intersect = [&](const BoundaryBaryVertex& a, const BoundaryBaryVertex& b) {
+			const float da = value(a) - threshold;
+			const float db = value(b) - threshold;
+			const float denom = da - db;
+			float t = std::abs(denom) > 1.0e-12f ? da / denom : 0.0f;
+			t = std::clamp(t, 0.0f, 1.0f);
+			BoundaryBaryVertex result{};
+			for (std::size_t i = 0; i < 3u; ++i) {
+				result.bary[i] = std::lerp(a.bary[i], b.bary[i], t);
+			}
+			const float sum = result.bary[0] + result.bary[1] + result.bary[2];
+			if (std::abs(sum) > 1.0e-12f) {
+				result.bary[0] /= sum;
+				result.bary[1] /= sum;
+				result.bary[2] /= sum;
+			}
+			return result;
+		};
+
+		BoundaryBaryVertex previous = polygon.back();
+		bool previousInside = inside(previous);
+		for (const BoundaryBaryVertex& current : polygon) {
+			const bool currentInside = inside(current);
+			if (currentInside != previousInside) {
+				output.push_back(intersect(previous, current));
+			}
+			if (currentInside) {
+				output.push_back(current);
+			}
+			previous = current;
+			previousInside = currentInside;
+		}
+		return output;
+	}
+
+	struct BoundaryDistanceField {
+		std::vector<float> distanceByWeld;
+		std::vector<std::uint32_t> vertexToWeld;
+	};
+
+	BoundaryDistanceField BuildBoundaryDistanceFieldForWork(
+		const MeshPreprocessResult& result,
+		const std::vector<std::uint32_t>& seedVertices,
+		float maxDistance)
+	{
+		BoundaryDistanceField field{};
+		const auto& vertices = result.ingest.GetVertices();
+		const auto& indices = result.ingest.GetIndices();
+		const std::uint32_t vertexSize = result.ingest.GetVertexSize();
+		const std::size_t vertexCount = vertexSize > 0u ? vertices.size() / static_cast<std::size_t>(vertexSize) : 0u;
+		field.vertexToWeld.resize(vertexCount, 0u);
+		if (vertexCount == 0u) {
+			return field;
+		}
+
+		std::unordered_map<XMFLOAT3ExactKey, std::uint32_t, XMFLOAT3ExactKeyHash> weldMap;
+		std::vector<DirectX::XMFLOAT3> weldedPositions;
+		weldedPositions.reserve(vertexCount);
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			auto [it, inserted] = weldMap.try_emplace(MakeExactPositionKey(vertex), static_cast<std::uint32_t>(weldedPositions.size()));
+			if (inserted) {
+				weldedPositions.push_back(LoadVertexPosition(vertex));
+			}
+			field.vertexToWeld[vertexIndex] = it->second;
+		}
+
+		std::vector<std::vector<std::pair<std::uint32_t, float>>> adjacency(weldedPositions.size());
+		auto addEdge = [&](std::uint32_t aVertex, std::uint32_t bVertex) {
+			if (aVertex >= field.vertexToWeld.size() || bVertex >= field.vertexToWeld.size()) {
+				return;
+			}
+			const std::uint32_t a = field.vertexToWeld[aVertex];
+			const std::uint32_t b = field.vertexToWeld[bVertex];
+			if (a == b) {
+				return;
+			}
+			const float len = Distance(weldedPositions[a], weldedPositions[b]);
+			if (!std::isfinite(len) || len <= 1.0e-7f) {
+				return;
+			}
+			adjacency[a].push_back({ b, len });
+			adjacency[b].push_back({ a, len });
+		};
+		for (std::size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+			addEdge(indices[tri + 0u], indices[tri + 1u]);
+			addEdge(indices[tri + 1u], indices[tri + 2u]);
+			addEdge(indices[tri + 2u], indices[tri + 0u]);
+		}
+
+		field.distanceByWeld.assign(weldedPositions.size(), std::numeric_limits<float>::infinity());
+		using QueueItem = std::pair<float, std::uint32_t>;
+		std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<QueueItem>> queue;
+		for (const std::uint32_t seedVertex : seedVertices) {
+			if (seedVertex >= field.vertexToWeld.size()) {
+				continue;
+			}
+			const std::uint32_t seedWeld = field.vertexToWeld[seedVertex];
+			if (field.distanceByWeld[seedWeld] == 0.0f) {
+				continue;
+			}
+			field.distanceByWeld[seedWeld] = 0.0f;
+			queue.push({ 0.0f, seedWeld });
+		}
+
+		const float searchLimit = std::max(maxDistance, 0.0f);
+		while (!queue.empty()) {
+			const auto [distance, weld] = queue.top();
+			queue.pop();
+			if (distance != field.distanceByWeld[weld] || distance > searchLimit) {
+				continue;
+			}
+			for (const auto& [next, edgeLength] : adjacency[weld]) {
+				const float nextDistance = distance + edgeLength;
+				if (nextDistance < field.distanceByWeld[next]) {
+					field.distanceByWeld[next] = nextDistance;
+					if (nextDistance <= searchLimit) {
+						queue.push({ nextDistance, next });
+					}
+				}
+			}
+		}
+		return field;
+	}
+
 	MeshPreprocessResult BuildBoundaryResult(
 		std::vector<std::byte>&& vertices,
 		std::vector<std::uint32_t>&& indices,
@@ -3068,16 +3654,45 @@ namespace USDLoader {
 		ObjectSurfaceSamplingMode samplingMode,
 		float texelDensity,
 		bool geometricOptIn,
-		std::uint32_t blendWeightUvSetIndex = 0u)
+		std::uint32_t blendWeightUvSetIndex = 0u,
+		bool recomputeWeldedNormals = true)
 	{
-		RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
+		if (recomputeWeldedNormals) {
+			RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
+		}
 		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
-		for (MeshUvSetData& uvSet : uvSets) {
-			if (uvSet.values.size() != vertexCount) {
+		const bool hasEmbeddedTexcoords =
+			(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
+			vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(float) * 2u;
+		for (std::size_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
+			MeshUvSetData& uvSet = uvSets[uvSetIndex];
+			const bool isBlendWeightUv = uvSet.name == "__object_boundary_blend_weight";
+			if (isBlendWeightUv) {
+				if (uvSet.values.size() != vertexCount) {
+					uvSet.values.resize(vertexCount, DirectX::XMFLOAT2{ 0.0f, 0.0f });
+				}
+				continue;
+			}
+			if (hasEmbeddedTexcoords) {
+				uvSet.values.resize(vertexCount, DirectX::XMFLOAT2{ 0.0f, 0.0f });
+				const std::size_t texcoordOffset = MeshVertexLayout::TexcoordOffset(vertexFlags);
+				for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+					std::memcpy(
+						std::addressof(uvSet.values[vertexIndex]),
+						vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize) + texcoordOffset,
+						sizeof(DirectX::XMFLOAT2));
+				}
+			}
+			else if (uvSet.values.size() != vertexCount) {
 				uvSet.values.resize(vertexCount, DirectX::XMFLOAT2{ 0.0f, 0.0f });
 			}
 		}
-		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, GetDefaultBuilderSettings());
+		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+		if (samplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+			builderSettings.simplifyTangentWeight = 0.0f;
+			builderSettings.simplifyTangentSignWeight = 0.0f;
+		}
+		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, builderSettings);
 		ingest.SetUvSets(std::move(uvSets));
 		ingest.ReserveVertices(vertexCount);
 		for (std::size_t v = 0; v < vertexCount; ++v) {
@@ -3090,13 +3705,102 @@ namespace USDLoader {
 		identity.sourceIdentifier += std::move(sourceSuffix);
 		identity.subsetName += "#object_boundary_blend";
 		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
-		std::optional<ClusterLODPrebuiltData> prebuiltData = std::move(artifacts.prebuiltData);
+		ClusterLODPrebuiltData savedPrebuiltData;
+		std::optional<ClusterLODPrebuiltData> prebuiltData;
+		if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {
+			prebuiltData = std::move(savedPrebuiltData);
+		}
+		else {
+			spdlog::warn("Object Reyes boundary blend CLod cache save failed; using in-memory generated artifacts.");
+			prebuiltData = std::move(artifacts.prebuiltData);
+		}
 		MeshPreprocessResult result(std::move(ingest), std::move(identity), std::move(prebuiltData));
 		result.geometricDisplacementOptIn = geometricOptIn;
 		result.objectSurfaceSamplingMode = samplingMode;
 		result.objectSurfaceTexelDensity = texelDensity;
 		result.geometricHeightRemapUvSetIndex = blendWeightUvSetIndex;
 		return result;
+	}
+
+	void RecomputeBoundaryOutputWeldedNormals(
+		std::unordered_map<std::size_t, std::pair<std::vector<std::byte>, std::vector<std::uint32_t>>>& rebuilt,
+		std::unordered_map<std::string, ObjectBoundaryStripBuild>& strips,
+		std::uint32_t vertexSize,
+		std::uint32_t vertexFlags)
+	{
+		if (vertexSize == 0u || (vertexFlags & VertexFlags::VERTEX_NORMALS) == 0u) {
+			return;
+		}
+
+		std::unordered_map<XMFLOAT3ExactKey, std::uint32_t, XMFLOAT3ExactKeyHash> weldMap;
+		std::vector<DirectX::XMFLOAT3> weldedNormals;
+		std::vector<std::vector<std::uint32_t>> meshVertexToWeld;
+
+		auto registerVertices = [&](std::vector<std::byte>& vertices) {
+			const std::size_t meshIndex = meshVertexToWeld.size();
+			const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+			auto& vertexToWeld = meshVertexToWeld.emplace_back(vertexCount, 0u);
+			for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+				const std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+				auto [it, inserted] = weldMap.try_emplace(MakeExactPositionKey(vertex), static_cast<std::uint32_t>(weldedNormals.size()));
+				if (inserted) {
+					weldedNormals.push_back({});
+				}
+				vertexToWeld[vertexIndex] = it->second;
+			}
+			return meshIndex;
+		};
+
+		struct MeshRef {
+			std::vector<std::byte>* vertices = nullptr;
+			const std::vector<std::uint32_t>* indices = nullptr;
+			std::size_t vertexToWeldIndex = 0;
+		};
+		std::vector<MeshRef> meshes;
+		for (auto& [_, mesh] : rebuilt) {
+			meshes.push_back(MeshRef{
+				std::addressof(mesh.first),
+				std::addressof(mesh.second),
+				registerVertices(mesh.first)
+			});
+		}
+		for (auto& [_, strip] : strips) {
+			meshes.push_back(MeshRef{
+				std::addressof(strip.vertices),
+				std::addressof(strip.indices),
+				registerVertices(strip.vertices)
+			});
+		}
+
+		for (const MeshRef& mesh : meshes) {
+			const auto& vertices = *mesh.vertices;
+			const auto& vertexToWeld = meshVertexToWeld[mesh.vertexToWeldIndex];
+			const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+			for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+				DirectX::XMFLOAT3 n{};
+				std::memcpy(
+					std::addressof(n),
+					vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize) + MeshVertexLayout::NormalOffset,
+					sizeof(n));
+				AddNormal(weldedNormals[vertexToWeld[vertexIndex]], NormalizeOrFallback(n));
+			}
+		}
+
+		for (DirectX::XMFLOAT3& n : weldedNormals) {
+			n = NormalizeOrFallback(n);
+		}
+		for (const MeshRef& mesh : meshes) {
+			auto& vertices = *mesh.vertices;
+			const auto& vertexToWeld = meshVertexToWeld[mesh.vertexToWeldIndex];
+			const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+			for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+				const DirectX::XMFLOAT3 n = weldedNormals[vertexToWeld[vertexIndex]];
+				std::memcpy(
+					vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize) + MeshVertexLayout::NormalOffset,
+					std::addressof(n),
+					sizeof(n));
+			}
+		}
 	}
 
 	void DisableObjectReyesForGroup(
@@ -3112,7 +3816,13 @@ namespace USDLoader {
 		}
 	}
 
-	bool TryApplyObjectBoundaryBlendingForParentGroup(
+	enum class ObjectBoundaryBlendResult {
+		Failed,
+		NoBoundary,
+		Generated
+	};
+
+	ObjectBoundaryBlendResult TryApplyObjectBoundaryBlendingForParentGroup(
 		const std::vector<std::size_t>& group,
 		const std::vector<MeshPreprocessWorkItem>& workItems,
 		std::vector<std::optional<MeshPreprocessResult>>& preprocessed,
@@ -3121,21 +3831,21 @@ namespace USDLoader {
 		float stripWidthObjectUnits)
 	{
 		if (group.size() < 2u || stripWidthObjectUnits <= 0.0f) {
-			return false;
+			return ObjectBoundaryBlendResult::NoBoundary;
 		}
 		const float halfWidth = stripWidthObjectUnits * 0.5f;
 		std::unordered_map<ObjectBoundaryEdgeKey, std::vector<ObjectBoundaryIncident>, ObjectBoundaryEdgeKeyHash> edgeIncidents;
-		std::unordered_map<std::size_t, std::unordered_map<std::uint32_t, ObjectBoundaryCut>> cutsByWorkAndTriangle;
+		std::unordered_map<std::size_t, std::unordered_map<std::uint32_t, std::vector<ObjectBoundaryCut>>> cutsByWorkAndTriangle;
 		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
 			const std::size_t workIndex = group[groupEntry];
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			const MeshPreprocessResult& result = preprocessed[workIndex].value();
 			if (item.skinQ ||
-				result.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::TriplanarStochastic ||
 				result.ingest.GetSkinningVertexSize() != 0u) {
-				return false;
+				return ObjectBoundaryBlendResult::Failed;
 			}
-			const std::string materialKey = BuildTriplanarSubsetCombineKey(item);
+			const std::string materialKey = BuildBoundarySubsetMaterialKey(item);
+			const std::string materialLabel = BuildTriplanarSubsetDebugLabel(item);
 			const auto& vertices = result.ingest.GetVertices();
 			const auto& indices = result.ingest.GetIndices();
 			const std::uint32_t vertexSize = result.ingest.GetVertexSize();
@@ -3149,69 +3859,204 @@ namespace USDLoader {
 						workIndex,
 						tri,
 						edge,
-						materialKey
+						i0,
+						i1,
+						materialKey,
+						materialLabel
 					});
 				}
 			}
 		}
 
 		std::size_t boundaryEdgeCount = 0;
+		std::size_t sharedEdgeCount = 0;
+		std::size_t sameMaterialSharedEdgeCount = 0;
+		std::size_t nonManifoldSharedEdgeCount = 0;
+		std::unordered_map<std::string, ObjectBoundaryPairInfo> pairInfos;
+		auto isObjectReyesWork = [&](std::size_t workIndex) {
+			return preprocessed[workIndex] &&
+				preprocessed[workIndex]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic &&
+				preprocessed[workIndex]->geometricDisplacementOptIn;
+		};
 		for (const auto& [edgeKey, incidents] : edgeIncidents) {
 			if (incidents.size() == 1u) {
 				continue;
 			}
+			++sharedEdgeCount;
 			if (incidents.size() != 2u) {
-				spdlog::warn("Object Reyes boundary blending failed: non-manifold shared edge with {} incident triangles.", incidents.size());
-				return false;
+				++nonManifoldSharedEdgeCount;
+				std::unordered_set<std::string> incidentMaterialKeys;
+				incidentMaterialKeys.reserve(incidents.size());
+				for (const ObjectBoundaryIncident& incident : incidents) {
+					incidentMaterialKeys.insert(incident.materialKey);
+				}
+				if (incidentMaterialKeys.size() == 1u) {
+					++sameMaterialSharedEdgeCount;
+					continue;
+				}
+				bool hasObjectReyesIncident = false;
+				for (const ObjectBoundaryIncident& incident : incidents) {
+					hasObjectReyesIncident = hasObjectReyesIncident || isObjectReyesWork(incident.workIndex);
+				}
+				if (!hasObjectReyesIncident) {
+					continue;
+				}
+				std::string labels;
+				for (std::size_t i = 0; i < incidents.size() && i < 8u; ++i) {
+					if (!labels.empty()) {
+						labels += " | ";
+					}
+					labels += fmt::format(
+						"incident{}: {} triIndex={} localEdge={}",
+						i,
+						incidents[i].materialLabel,
+						incidents[i].triangle / 3u,
+						incidents[i].localEdge);
+				}
+				spdlog::warn(
+					"Object Reyes boundary blending failed: non-manifold shared edge with {} incident triangles under '{}'. "
+					"sharedEdgesSeen={} nonManifoldEdgesSeen={}. {}",
+					incidents.size(),
+					ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()),
+					sharedEdgeCount,
+					nonManifoldSharedEdgeCount,
+					labels);
+				return ObjectBoundaryBlendResult::Failed;
 			}
 			const ObjectBoundaryIncident& a = incidents[0];
 			const ObjectBoundaryIncident& b = incidents[1];
 			if (a.materialKey == b.materialKey) {
+				++sameMaterialSharedEdgeCount;
+				continue;
+			}
+			if (!isObjectReyesWork(a.workIndex) && !isObjectReyesWork(b.workIndex)) {
 				continue;
 			}
 			const std::string pairKey = std::to_string(std::min(a.workIndex, b.workIndex)) + "|" + std::to_string(std::max(a.workIndex, b.workIndex));
+			auto& pairInfo = pairInfos[pairKey];
+			pairInfo.material0Work = std::min(a.workIndex, b.workIndex);
+			pairInfo.material1Work = std::max(a.workIndex, b.workIndex);
+			pairInfo.seedVerticesByWork[a.workIndex].push_back(a.vertex0);
+			pairInfo.seedVerticesByWork[a.workIndex].push_back(a.vertex1);
+			pairInfo.seedVerticesByWork[b.workIndex].push_back(b.vertex0);
+			pairInfo.seedVerticesByWork[b.workIndex].push_back(b.vertex1);
 			auto addCut = [&](const ObjectBoundaryIncident& self, const ObjectBoundaryIncident& other, bool firstSide) {
 				auto& byTri = cutsByWorkAndTriangle[self.workIndex];
-				if (byTri.contains(self.triangle)) {
-					return false;
+				auto& cuts = byTri[self.triangle];
+				for (const ObjectBoundaryCut& existing : cuts) {
+					if (existing.localEdge == self.localEdge) {
+						return true;
+					}
+					if (existing.pairKey != pairKey || existing.firstMaterialSide != firstSide) {
+						spdlog::warn(
+							"Object Reyes boundary blending failed: triangle touches incompatible material-boundary edges. "
+							"self={} triIndex={} existingLocalEdge={} newLocalEdge={} existingOther={} newOther={} "
+							"otherWorkIndex={} newOtherWorkIndex={} firstMaterialSide={} newFirstMaterialSide={}.",
+							self.materialLabel,
+							self.triangle / 3u,
+							existing.localEdge,
+							self.localEdge,
+							existing.otherMaterialLabel,
+							other.materialLabel,
+							existing.otherWorkIndex,
+							other.workIndex,
+							existing.firstMaterialSide,
+							firstSide);
+						return false;
+					}
 				}
-				byTri[self.triangle] = ObjectBoundaryCut{
+				cuts.push_back(ObjectBoundaryCut{
 					.otherWorkIndex = other.workIndex,
 					.pairKey = pairKey,
+					.otherMaterialLabel = other.materialLabel,
 					.localEdge = self.localEdge,
 					.firstMaterialSide = firstSide
-				};
+				});
 				return true;
 			};
-			if (!addCut(a, b, true) || !addCut(b, a, false)) {
-				spdlog::warn("Object Reyes boundary blending failed: triangle touches multiple different-material boundary edges.");
-				return false;
+			if (!addCut(a, b, a.workIndex == pairInfo.material0Work) ||
+				!addCut(b, a, b.workIndex == pairInfo.material0Work)) {
+				spdlog::warn("Object Reyes boundary blending failed: triangle touches incompatible material-boundary edges.");
+				return ObjectBoundaryBlendResult::Failed;
 			}
 			++boundaryEdgeCount;
 		}
 		if (boundaryEdgeCount == 0u) {
-			return false;
+			std::string labels;
+			for (std::size_t groupEntry = 0; groupEntry < group.size() && groupEntry < 8u; ++groupEntry) {
+				if (!labels.empty()) {
+					labels += " | ";
+				}
+				labels += BuildTriplanarSubsetDebugLabel(workItems[group[groupEntry]]);
+			}
+			spdlog::warn(
+				"Object Reyes boundary blending found no exact mixed-material shared edges under '{}': groupMeshes={} sharedEdges={} sameMaterialSharedEdges={} nonManifoldSharedEdges={}. {}",
+				ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()),
+				group.size(),
+				sharedEdgeCount,
+				sameMaterialSharedEdgeCount,
+				nonManifoldSharedEdgeCount,
+				labels);
+			return ObjectBoundaryBlendResult::NoBoundary;
+		}
+		if (pairInfos.size() != 1u) {
+			spdlog::warn(
+				"Object Reyes boundary blending failed: parent '{}' has {} material boundary pair(s); V1 conforming strip supports one pair.",
+				ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()),
+				pairInfos.size());
+			return ObjectBoundaryBlendResult::Failed;
 		}
 
-		struct StripBuild {
-			std::size_t material0Work = 0;
-			std::size_t material1Work = 0;
-			std::vector<std::byte> vertices;
-			std::vector<std::uint32_t> indices;
-			std::vector<DirectX::XMFLOAT2> blendWeights;
-		};
-		std::unordered_map<std::string, StripBuild> strips;
+		std::unordered_map<std::string, ObjectBoundaryStripBuild> strips;
 		std::unordered_map<std::size_t, std::pair<std::vector<std::byte>, std::vector<std::uint32_t>>> rebuilt;
+		const auto& [activePairKey, activePairInfo] = *pairInfos.begin();
+		std::unordered_map<std::size_t, BoundaryDistanceField> distanceFields;
+		for (const auto& [workIndex, seeds] : activePairInfo.seedVerticesByWork) {
+			if (!preprocessed[workIndex]) {
+				continue;
+			}
+			distanceFields.emplace(workIndex, BuildBoundaryDistanceFieldForWork(*preprocessed[workIndex], seeds, halfWidth));
+		}
 		for (std::size_t workIndex : group) {
 			const MeshPreprocessResult& result = preprocessed[workIndex].value();
+			auto distanceIt = distanceFields.find(workIndex);
+			if (distanceIt == distanceFields.end()) {
+				continue;
+			}
+			const BoundaryDistanceField& distanceField = distanceIt->second;
 			const auto& sourceVertices = result.ingest.GetVertices();
 			const auto& sourceIndices = result.ingest.GetIndices();
 			const std::uint32_t vertexSize = result.ingest.GetVertexSize();
 			const std::uint32_t vertexFlags = result.ingest.GetFlags();
 			auto& [dstVertices, dstIndices] = rebuilt[workIndex];
 			for (std::uint32_t tri = 0; tri + 2u < sourceIndices.size(); tri += 3u) {
-				const auto cutIt = cutsByWorkAndTriangle[workIndex].find(tri);
-				if (cutIt == cutsByWorkAndTriangle[workIndex].end()) {
+				const std::uint32_t ia = sourceIndices[tri + 0u];
+				const std::uint32_t ib = sourceIndices[tri + 1u];
+				const std::uint32_t ic = sourceIndices[tri + 2u];
+				auto vertexDistance = [&](std::uint32_t vertexIndex) {
+					if (vertexIndex >= distanceField.vertexToWeld.size()) {
+						return std::numeric_limits<float>::infinity();
+					}
+					const std::uint32_t weld = distanceField.vertexToWeld[vertexIndex];
+					return weld < distanceField.distanceByWeld.size()
+						? distanceField.distanceByWeld[weld]
+						: std::numeric_limits<float>::infinity();
+				};
+				std::array<float, 3> distances{
+					vertexDistance(ia),
+					vertexDistance(ib),
+					vertexDistance(ic)
+				};
+				for (float& distance : distances) {
+					if (!std::isfinite(distance)) {
+						distance = halfWidth + 1.0f;
+					}
+				}
+				const bool anyInside =
+					distances[0] < halfWidth - 1.0e-5f ||
+					distances[1] < halfWidth - 1.0e-5f ||
+					distances[2] < halfWidth - 1.0e-5f;
+				if (!anyInside) {
 					for (std::uint32_t c = 0; c < 3u; ++c) {
 						const std::byte* src = sourceVertices.data() + static_cast<std::size_t>(sourceIndices[tri + c]) * vertexSize;
 						BoundaryBuildVertex v = CopyBoundaryVertex(src, vertexSize, 0.0f);
@@ -3226,38 +4071,98 @@ namespace USDLoader {
 					continue;
 				}
 
-				const ObjectBoundaryCut& cut = cutIt->second;
-				const std::uint32_t ia = sourceIndices[tri + cut.localEdge];
-				const std::uint32_t ib = sourceIndices[tri + ((cut.localEdge + 1u) % 3u)];
-				const std::uint32_t ic = sourceIndices[tri + ((cut.localEdge + 2u) % 3u)];
 				const std::byte* va = sourceVertices.data() + static_cast<std::size_t>(ia) * vertexSize;
 				const std::byte* vb = sourceVertices.data() + static_cast<std::size_t>(ib) * vertexSize;
 				const std::byte* vc = sourceVertices.data() + static_cast<std::size_t>(ic) * vertexSize;
-				const float ac = Distance(LoadVertexPosition(va), LoadVertexPosition(vc));
-				const float bc = Distance(LoadVertexPosition(vb), LoadVertexPosition(vc));
-				if (ac <= 1.0e-5f || bc <= 1.0e-5f) {
-					spdlog::warn("Object Reyes boundary blending failed: degenerate boundary-adjacent triangle.");
-					return false;
-				}
-				const float ta = std::min(halfWidth / ac, 0.49f);
-				const float tb = std::min(halfWidth / bc, 0.49f);
-				const float boundaryWeight = 0.5f;
-				const float innerWeight = cut.firstMaterialSide ? 0.0f : 1.0f;
-				const BoundaryBuildVertex a = CopyBoundaryVertex(va, vertexSize, boundaryWeight);
-				const BoundaryBuildVertex b = CopyBoundaryVertex(vb, vertexSize, boundaryWeight);
-				const BoundaryBuildVertex c = CopyBoundaryVertex(vc, vertexSize, innerWeight);
-				const BoundaryBuildVertex d = InterpolateBoundaryVertex(va, vc, ta, vertexSize, vertexFlags, boundaryWeight, innerWeight);
-				const BoundaryBuildVertex e = InterpolateBoundaryVertex(vb, vc, tb, vertexSize, vertexFlags, boundaryWeight, innerWeight);
-				AppendBoundaryTriangle(dstVertices, dstIndices, nullptr, d, e, c);
+				std::vector<BoundaryBaryVertex> remaining{
+					BoundaryBaryVertex{ { 1.0f, 0.0f, 0.0f } },
+					BoundaryBaryVertex{ { 0.0f, 1.0f, 0.0f } },
+					BoundaryBaryVertex{ { 0.0f, 0.0f, 1.0f } }
+				};
 
-				auto& strip = strips[cut.pairKey];
+				auto& strip = strips[activePairKey];
 				if (strip.indices.empty()) {
-					strip.material0Work = cut.firstMaterialSide ? workIndex : cut.otherWorkIndex;
-					strip.material1Work = cut.firstMaterialSide ? cut.otherWorkIndex : workIndex;
+					strip.material0Work = activePairInfo.material0Work;
+					strip.material1Work = activePairInfo.material1Work;
 				}
-				AppendBoundaryTriangle(strip.vertices, strip.indices, &strip.blendWeights, a, b, e);
-				AppendBoundaryTriangle(strip.vertices, strip.indices, &strip.blendWeights, a, e, d);
+				const float innerWeight = workIndex == activePairInfo.material0Work ? 0.0f : 1.0f;
+				std::vector<BoundaryBaryVertex> stripPart =
+					ClipBoundaryBaryPolygonByVertexScalars(remaining, distances, halfWidth, true);
+				if (!stripPart.empty()) {
+					AppendBoundaryBaryPolygon(
+						strip.vertices,
+						strip.indices,
+						&strip.blendWeights,
+						stripPart,
+						va,
+						vb,
+						vc,
+						vertexSize,
+						vertexFlags,
+						innerWeight,
+						distances,
+						halfWidth);
+				}
+				remaining = ClipBoundaryBaryPolygonByVertexScalars(remaining, distances, halfWidth, false);
+				if (!remaining.empty()) {
+					AppendBoundaryBaryPolygon(
+						dstVertices,
+						dstIndices,
+						nullptr,
+						remaining,
+						va,
+						vb,
+						vc,
+						vertexSize,
+						vertexFlags,
+						innerWeight,
+						distances,
+						halfWidth);
+				}
 			}
+		}
+
+		const MeshPreprocessResult& firstResult = preprocessed[group.front()].value();
+		std::size_t droppedGeneratedTriangles = 0u;
+		for (auto& [workIndex, mesh] : rebuilt) {
+			SanitizeGeneratedBoundaryVertices(mesh.first, firstResult.ingest.GetVertexSize(), firstResult.ingest.GetFlags());
+			droppedGeneratedTriangles += DropInvalidGeneratedBoundaryTriangles(
+				mesh.first,
+				mesh.second,
+				firstResult.ingest.GetVertexSize());
+			if (mesh.second.empty()) {
+				spdlog::warn(
+					"Object Reyes boundary blending failed: generated interior mesh for work item {} has no valid triangles.",
+					workIndex);
+				return ObjectBoundaryBlendResult::Failed;
+			}
+		}
+		for (auto& [pairKey, strip] : strips) {
+			SanitizeGeneratedBoundaryVertices(strip.vertices, firstResult.ingest.GetVertexSize(), firstResult.ingest.GetFlags());
+			droppedGeneratedTriangles += DropInvalidGeneratedBoundaryTriangles(
+				strip.vertices,
+				strip.indices,
+				firstResult.ingest.GetVertexSize());
+			if (strip.indices.empty()) {
+				spdlog::warn(
+					"Object Reyes boundary blending failed: generated strip '{}' has no valid triangles.",
+					pairKey);
+				return ObjectBoundaryBlendResult::Failed;
+			}
+		}
+		if (droppedGeneratedTriangles > 0u) {
+			spdlog::warn(
+				"Object Reyes boundary blending dropped {} degenerate generated triangle(s) under '{}'.",
+				droppedGeneratedTriangles,
+				ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
+		}
+
+		if (!rebuilt.empty() || !strips.empty()) {
+			RecomputeBoundaryOutputWeldedNormals(
+				rebuilt,
+				strips,
+				firstResult.ingest.GetVertexSize(),
+				firstResult.ingest.GetFlags());
 		}
 
 		for (std::size_t workIndex : group) {
@@ -3276,14 +4181,19 @@ namespace USDLoader {
 				"#object_boundary_blend_interior",
 				oldResult.objectSurfaceSamplingMode,
 				oldResult.objectSurfaceTexelDensity,
-				oldResult.geometricDisplacementOptIn);
+				oldResult.geometricDisplacementOptIn,
+				0u,
+				false);
 		}
 
 		for (const auto& [pairKey, strip] : strips) {
 			if (strip.indices.empty()) {
 				continue;
 			}
-			const MeshPreprocessResult& source = preprocessed[strip.material0Work].value();
+			const std::size_t sourceWork = preprocessed[strip.material0Work]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic
+				? strip.material0Work
+				: strip.material1Work;
+			const MeshPreprocessResult& source = preprocessed[sourceWork].value();
 			std::vector<MeshUvSetData> uvSets = source.ingest.GetUvSets();
 			const std::uint32_t weightUvSetIndex = static_cast<std::uint32_t>(uvSets.size());
 			MeshUvSetData weightUv{};
@@ -3301,17 +4211,28 @@ namespace USDLoader {
 				ObjectSurfaceSamplingMode::TriplanarStochastic,
 				source.objectSurfaceTexelDensity,
 				true,
-				weightUvSetIndex);
+				weightUvSetIndex,
+				false);
 			ownerRecord.subsets.emplace_back(
 				workItems[strip.material0Work].material,
 				workItems[strip.material1Work].material,
 				std::move(stripResult),
-				workItems[strip.material0Work].inferredDoubleSided || workItems[strip.material1Work].inferredDoubleSided);
+				workItems[strip.material0Work].inferredDoubleSided || workItems[strip.material1Work].inferredDoubleSided,
+				workItems[strip.material0Work].mesh.GetPrim().GetName().GetString(),
+				workItems[strip.material1Work].mesh.GetPrim().GetName().GetString(),
+				preprocessed[strip.material0Work]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic &&
+					preprocessed[strip.material0Work]->geometricDisplacementOptIn,
+				preprocessed[strip.material1Work]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic &&
+					preprocessed[strip.material1Work]->geometricDisplacementOptIn);
 		}
 
 		for (std::size_t workIndex : group) {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
-			ownerRecord.subsets.emplace_back(item.material, std::move(preprocessed[workIndex].value()), item.inferredDoubleSided);
+			ownerRecord.subsets.emplace_back(
+				item.material,
+				std::move(preprocessed[workIndex].value()),
+				item.inferredDoubleSided,
+				item.mesh.GetPrim().GetName().GetString());
 			consumed[workIndex] = true;
 		}
 		spdlog::info(
@@ -3319,7 +4240,7 @@ namespace USDLoader {
 			strips.size(),
 			boundaryEdgeCount,
 			ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
-		return true;
+		return ObjectBoundaryBlendResult::Generated;
 	}
 
 	void PreprocessAllMeshes(
@@ -3566,7 +4487,11 @@ namespace USDLoader {
 				const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
 				auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
 				ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
-				ownerRecord.subsets.emplace_back(ownerItem.material, std::move(*combined), ownerItem.inferredDoubleSided);
+				ownerRecord.subsets.emplace_back(
+					ownerItem.material,
+					std::move(*combined),
+					ownerItem.inferredDoubleSided,
+					ownerItem.mesh.GetPrim().GetName().GetString());
 				consumed[ownerIndex] = true;
 
 				for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
@@ -3580,43 +4505,47 @@ namespace USDLoader {
 
 			if (stageOptions.objectReyesBoundaryBlendingEnabled) {
 				std::unordered_map<std::string, std::vector<std::size_t>> boundaryGroups;
+				std::unordered_map<std::string, bool> boundaryGroupHasTriplanar;
 				for (std::size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
 					if (consumed[workIndex] || !preprocessed[workIndex].has_value()) {
 						continue;
 					}
 					const MeshPreprocessWorkItem& workItem = workItems[workIndex];
 					if (!workItem.subsets.empty() ||
-						workItem.skinQ ||
-						workItem.extractOptions.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::TriplanarStochastic) {
+						workItem.skinQ) {
 						continue;
 					}
 					const std::string parentPath = ParentPrimPath(workItem.mesh.GetPrim().GetPath().GetString());
 					boundaryGroups[parentPath].push_back(workIndex);
+					if (workItem.extractOptions.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+						boundaryGroupHasTriplanar[parentPath] = true;
+					}
 				}
 				for (const auto& [parentPath, group] : boundaryGroups) {
-					if (group.size() < 2u) {
+					if (group.size() < 2u || !boundaryGroupHasTriplanar[parentPath]) {
 						continue;
 					}
 					const std::size_t ownerIndex = group.front();
 					const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
 					auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
 					ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
-					if (TryApplyObjectBoundaryBlendingForParentGroup(
+					const ObjectBoundaryBlendResult blendResult = TryApplyObjectBoundaryBlendingForParentGroup(
 						group,
 						workItems,
 						preprocessed,
 						ownerRecord,
 						consumed,
-						stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits)) {
+						stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits);
+					if (blendResult == ObjectBoundaryBlendResult::Generated) {
 						for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
 							const MeshPreprocessWorkItem& item = workItems[group[groupEntry]];
 							auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
 							emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
 						}
 					}
-					else {
+					else if (blendResult == ObjectBoundaryBlendResult::Failed) {
 						spdlog::warn(
-							"Object Reyes boundary blending failed or found no blendable boundary under '{}'; disabling Object Reyes geometric displacement for that parent.",
+							"Object Reyes boundary blending failed under '{}'; disabling Object Reyes geometric displacement for that parent.",
 							parentPath);
 						DisableObjectReyesForGroup(group, preprocessed);
 					}
@@ -3634,7 +4563,11 @@ namespace USDLoader {
 				const MeshPreprocessWorkItem& workItem = workItems[workIndex];
 				auto& record = loadingCache.preprocessedMeshCache[workItem.meshPath];
 				record.authoredDoubleSided = workItem.authoredDoubleSided;
-				record.subsets.emplace_back(workItem.material, std::move(preprocessed[workIndex].value()), workItem.inferredDoubleSided);
+				record.subsets.emplace_back(
+					workItem.material,
+					std::move(preprocessed[workIndex].value()),
+					workItem.inferredDoubleSided,
+					workItem.mesh.GetPrim().GetName().GetString());
 			}
 		}
 	}
@@ -3701,15 +4634,23 @@ namespace USDLoader {
 						result.ingest.GetUvSets(),
 						record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
 						mesh.GetPrim(),
+						subset.blendMaterial0ObjectReyes,
+						subset.blendMaterial1ObjectReyes,
+						subset.blendMaterial0StaticTextureOverrideSourceName,
+						subset.blendMaterial1StaticTextureOverrideSourceName,
 						std::addressof(result));
 				}
 				else {
+					const bool subsetCameFromOwnerMesh =
+						subset.staticTextureOverrideSourceName.empty() ||
+						subset.staticTextureOverrideSourceName == mesh.GetPrim().GetName().GetString();
 					material = ResolveMaterialForMesh(
 						subset.material,
 						result.ingest.GetUvSets(),
 						record.authoredDoubleSided || subset.inferredDoubleSided || result.forceDoubleSidedPreview,
-						mesh.GetPrim(),
-						std::addressof(result));
+						subsetCameFromOwnerMesh ? mesh.GetPrim() : UsdPrim(),
+						std::addressof(result),
+						subset.staticTextureOverrideSourceName);
 				}
 			}
 			std::shared_ptr<Mesh> mPtr;

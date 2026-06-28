@@ -541,6 +541,8 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Eval");
 			evalData = BuildMaterialEvalData(material);
+			evalData.objectBlendMaterialIndex0 = materialData.objectBlendMaterialIndex0;
+			evalData.objectBlendMaterialIndex1 = materialData.objectBlendMaterialIndex1;
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::OpenPBR");

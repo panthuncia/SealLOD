@@ -282,6 +282,7 @@ public:
         material->m_materialData.objectSurfaceSamplingMode = static_cast<uint32_t>(desc.objectSurfaceSamplingMode);
         material->m_materialData.objectSurfaceTexelDensity = std::max(desc.objectSurfaceTexelDensity, 1.0e-6f);
         material->m_materialData.objectBlendWeightUvSetIndex = desc.objectBlendWeightUvSetIndex;
+        material->m_staticTextureOverrideSourceName = desc.staticTextureOverrideSourceName;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }
@@ -374,6 +375,7 @@ private:
     bool m_geometricDisplacementOptIn = false;
     bool m_geometricHeightRemapRequired = false;
     bool m_geometricHeightRemapSucceeded = false;
+    std::string m_staticTextureOverrideSourceName;
     std::shared_ptr<Material> m_objectBlendMaterial0;
     std::shared_ptr<Material> m_objectBlendMaterial1;
 

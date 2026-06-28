@@ -715,7 +715,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed meshlet vertex index bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // mesh quantization heuristic version
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // UV quantization heuristic version
-		boost::hash_combine(seed, static_cast<uint32_t>(8));  // USD compliance layout + inherited primvar card isolation + object Reyes UV remap
+		boost::hash_combine(seed, static_cast<uint32_t>(10));  // USD compliance layout + inherited primvar card isolation + mixed Reyes boundary output cleanup
 		boost::hash_combine(seed, static_cast<uint32_t>(27));  // voxel page descriptors use local segment addressing and SGGX voxel attributes
 		boost::hash_combine(seed, static_cast<uint32_t>(5));  // traversal leaves use owner group error; sloppy fallback error factor defaults to 2
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering

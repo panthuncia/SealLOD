@@ -303,6 +303,7 @@ MaterialDescription Material::ToCacheDescription() const
     desc.objectTriplanarBlendMaterial =
         (m_materialData.materialFlags & MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u;
     desc.objectBlendWeightUvSetIndex = m_materialData.objectBlendWeightUvSetIndex;
+    desc.staticTextureOverrideSourceName = m_staticTextureOverrideSourceName;
     desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
     desc.brniflyZBufferWrite = m_brniflyZBufferWrite;
     desc.brniflyDecal = m_brniflyDecal;

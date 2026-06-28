@@ -122,6 +122,7 @@ struct MaterialDescription {
 	float objectSurfaceTexelDensity = 1.0f;
 	bool objectTriplanarBlendMaterial = false;
 	uint32_t objectBlendWeightUvSetIndex = 0;
+	std::string staticTextureOverrideSourceName;
 	bool forceVoxelMaterial = false;
 	BlendState blendState = BlendState::BLEND_STATE_UNKNOWN; // By default, infer from other properties
     TextureAndConstant  baseColor = {};
