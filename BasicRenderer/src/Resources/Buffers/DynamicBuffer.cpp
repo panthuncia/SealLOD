@@ -208,27 +208,72 @@ bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
 }
 
 void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
-    std::lock_guard lock(m_allocationMutex);
-    RequestAsyncReserveBytesLocked(size);
-}
-
-void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
-    const size_t requestedCapacity = ComputeReserveCapacityLocked(size);
-    const size_t desiredBackingCapacity = (std::max)(requestedCapacity, m_capacity);
-    if (desiredBackingCapacity <= static_cast<size_t>(GetBufferSize()) ||
-        (m_pendingResizeValid && m_pendingResizeCapacity >= desiredBackingCapacity)) {
+    ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytes");
+    ZoneText(m_name.data(), m_name.size());
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.RequestBytes", static_cast<int64_t>(size));
+    if (size == 0) {
         return;
     }
 
+    std::unique_lock<std::recursive_mutex> lock(m_allocationMutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytes::DeferredAllocationLockBusy");
+        ZoneText(m_name.data(), m_name.size());
+        RaiseDeferredAsyncReserveBytes(size);
+        TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DeferredLockBusy", int64_t{ 1 });
+        return;
+    }
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DeferredLockBusy", int64_t{ 0 });
+
+    const size_t deferredSize = ConsumeDeferredAsyncReserveBytes();
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DrainedDeferredBytes", static_cast<int64_t>(deferredSize));
+    RequestAsyncReserveBytesLocked((std::max)(size, deferredSize));
+}
+
+void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
+    ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked");
+    ZoneText(m_name.data(), m_name.size());
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.InputBytes", static_cast<int64_t>(size));
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.LogicalCapacityBytes", static_cast<int64_t>(m_capacity));
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.BackingSizeBytes", static_cast<int64_t>(GetBufferSize()));
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.PendingResizeValid", m_pendingResizeValid ? int64_t{ 1 } : int64_t{ 0 });
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.PendingResizeCapacityBytes", static_cast<int64_t>(m_pendingResizeCapacity));
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.RequestedResizeCapacityBytes", static_cast<int64_t>(m_requestedResizeCapacity));
+
+    size_t requestedCapacity = 0;
+    {
+        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::ComputeReserveCapacity");
+        ZoneText(m_name.data(), m_name.size());
+        requestedCapacity = ComputeReserveCapacityLocked(size);
+    }
+    const size_t desiredBackingCapacity = (std::max)(requestedCapacity, m_capacity);
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.ComputedRequestedCapacityBytes", static_cast<int64_t>(requestedCapacity));
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.DesiredBackingCapacityBytes", static_cast<int64_t>(desiredBackingCapacity));
+    if (desiredBackingCapacity <= static_cast<size_t>(GetBufferSize()) ||
+        (m_pendingResizeValid && m_pendingResizeCapacity >= desiredBackingCapacity)) {
+        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::NoResizeNeeded");
+        ZoneText(m_name.data(), m_name.size());
+        TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NoResizeNeeded", int64_t{ 1 });
+        return;
+    }
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NoResizeNeeded", int64_t{ 0 });
+
     if (m_pendingResizeValid) {
+        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest");
+        ZoneText(m_name.data(), m_name.size());
         m_requestedResizeCapacity = (std::max)(m_requestedResizeCapacity, desiredBackingCapacity);
-        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
-            .resourceID = GetGlobalResourceID(),
-            .heapType = rhi::HeapType::DeviceLocal,
-            .byteSize = m_requestedResizeCapacity,
-            .unorderedAccess = m_UAV,
-            .debugName = m_name,
-        });
+        TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.CoalescedResizeCapacityBytes", static_cast<int64_t>(m_requestedResizeCapacity));
+        {
+            ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest::Submit");
+            ZoneText(m_name.data(), m_name.size());
+            m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+                .resourceID = GetGlobalResourceID(),
+                .heapType = rhi::HeapType::DeviceLocal,
+                .byteSize = m_requestedResizeCapacity,
+                .unorderedAccess = m_UAV,
+                .debugName = m_name,
+            });
+        }
         spdlog::debug(
             "DynamicBuffer '{}' id={} async resize request coalesced pendingResizeCapacity={} requestedCapacity={} desiredBackingCapacity={} mutationAllowed={}",
             m_name,
@@ -244,18 +289,46 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     m_pendingResizeCapacity = desiredBackingCapacity;
     m_requestedResizeCapacity = (std::max)(m_requestedResizeCapacity, desiredBackingCapacity);
     m_pendingResizeValid = true;
-    m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
-        .resourceID = resourceID,
-        .heapType = rhi::HeapType::DeviceLocal,
-        .byteSize = desiredBackingCapacity,
-        .unorderedAccess = m_UAV,
-        .debugName = m_name,
-    });
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NewResizeCapacityBytes", static_cast<int64_t>(m_requestedResizeCapacity));
+    {
+        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::SubmitAsyncResizeRequest");
+        ZoneText(m_name.data(), m_name.size());
+        m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
+            .resourceID = resourceID,
+            .heapType = rhi::HeapType::DeviceLocal,
+            .byteSize = desiredBackingCapacity,
+            .unorderedAccess = m_UAV,
+            .debugName = m_name,
+        });
+    }
+}
+
+void DynamicBuffer::RaiseDeferredAsyncReserveBytes(size_t size) {
+    size_t current = m_deferredAsyncReserveBytes.load(std::memory_order_relaxed);
+    while (current < size &&
+           !m_deferredAsyncReserveBytes.compare_exchange_weak(
+               current,
+               size,
+               std::memory_order_release,
+               std::memory_order_relaxed)) {
+    }
+    TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DeferredBytes", static_cast<int64_t>((std::max)(current, size)));
+}
+
+size_t DynamicBuffer::ConsumeDeferredAsyncReserveBytes() {
+    return m_deferredAsyncReserveBytes.exchange(0, std::memory_order_acq_rel);
 }
 
 bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
     ZoneScopedN("DynamicBuffer::PublishReadyAsyncResize");
     std::lock_guard lock(m_allocationMutex);
+    const size_t deferredSize = ConsumeDeferredAsyncReserveBytes();
+    if (deferredSize != 0) {
+        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResize::DrainDeferredReserve");
+        ZoneText(m_name.data(), m_name.size());
+        TracyPlot("DynamicBuffer.PublishReadyAsyncResize.DrainedDeferredBytes", static_cast<int64_t>(deferredSize));
+        RequestAsyncReserveBytesLocked(deferredSize);
+    }
     return PublishReadyAsyncResizeLocked(wait);
 }
 
@@ -358,6 +431,9 @@ bool DynamicBuffer::CanAllocateBytes(size_t size) const {
 }
 
 bool DynamicBuffer::HasPendingBackingResize() const {
+    if (m_deferredAsyncReserveBytes.load(std::memory_order_acquire) != 0) {
+        return true;
+    }
     std::lock_guard lock(m_allocationMutex);
     return m_pendingResizeValid || m_asyncResizeState.HasPending();
 }

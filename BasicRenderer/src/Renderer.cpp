@@ -1702,7 +1702,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
-    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, true);
+    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
 	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName, CLodVirtualShadowDefaultPhysicalPageCount);

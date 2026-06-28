@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -223,6 +224,8 @@ private:
     size_t ComputeReserveCapacityLocked(size_t size) const;
     bool ExtendTrackedCapacityLocked(size_t newCapacity);
     void RequestAsyncReserveBytesLocked(size_t size);
+    void RaiseDeferredAsyncReserveBytes(size_t size);
+    size_t ConsumeDeferredAsyncReserveBytes();
     bool PublishReadyAsyncResizeLocked(bool wait);
     void ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity);
 
@@ -254,6 +257,7 @@ private:
     mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
     mutable std::recursive_mutex m_allocationMutex;
     AsyncBufferBackingResizeState m_asyncResizeState;
+    std::atomic_size_t m_deferredAsyncReserveBytes = 0;
     size_t m_pendingResizeCapacity = 0;
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;

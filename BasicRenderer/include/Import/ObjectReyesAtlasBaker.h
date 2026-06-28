@@ -21,6 +21,7 @@ struct ObjectReyesAtlasSourceMesh {
 struct ObjectReyesAtlasBakeOptions {
 	float texelsPerUnit = 1.0f;
 	std::uint32_t maxAtlasSize = 2048;
+	std::uint32_t resolution = 0;
 	std::uint32_t paddingTexels = 8;
 };
 

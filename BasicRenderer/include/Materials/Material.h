@@ -41,10 +41,18 @@ inline bool PickDescriptionDoubleSided(const MaterialDescription& d) {
         d.opacity.factor.Get() < 1.0f;
 }
 
+inline bool HasMaterialHeightBinding(const MaterialDescription& d) {
+    return d.heightMap.texture != nullptr || !d.heightMap.sourcePath.empty();
+}
+
 inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& d) {
+    const bool hasBakedAtlasHeight =
+        d.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight &&
+        d.heightMap.uvSetName == "__object_reyes_atlas_height";
     return d.enableGeometricDisplacement &&
         d.geometricDisplacementOptIn &&
-        d.heightMap.texture &&
+        hasBakedAtlasHeight &&
+        HasMaterialHeightBinding(d) &&
         !d.heightMapFromBaseColorAlpha &&
         (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
 }
@@ -92,7 +100,7 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
     if (d.opacity.texture) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpacityTexture;
     }
-	if (d.heightMap.texture || (d.heightMapFromBaseColorAlpha && d.baseColor.texture)) {
+	if (HasMaterialHeightBinding(d) || (d.heightMapFromBaseColorAlpha && d.baseColor.texture)) {
         if (d.heightMapFromBaseColorAlpha && d.baseColor.texture) {
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
         }
@@ -182,7 +190,7 @@ public:
         if (desc.heightMapFromBaseColorAlpha && desc.baseColor.texture) {
             materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED | MaterialFlags::MATERIAL_HEIGHT_FROM_BASE_ALPHA;
         }
-        if (desc.heightMap.texture) {
+        if (HasMaterialHeightBinding(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_PARALLAX | MaterialFlags::MATERIAL_TEXTURED;
         }
         if (SupportsObjectReyesGeometricDisplacement(desc)) {

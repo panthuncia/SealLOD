@@ -17,6 +17,11 @@ class Scene;
 class Mesh;
 
 namespace USDLoader {
+	struct ObjectReyesBakedHeightMaterialEntry {
+		std::string nifPath;
+		std::vector<std::string> materialTexturePaths;
+	};
+
 	struct ImportSettings {
 		bool enableDoubleSidedNameHeuristic = true;
 		bool loadMaterialTextures = true;
@@ -40,6 +45,9 @@ namespace USDLoader {
 		bool objectReyesSurfaceSamplingNifMatched = false;
 		bool objectReyesBoundaryBlendingEnabled = false;
 		float objectReyesBoundaryBlendStripWidthObjectUnits = 8.0f;
+		std::uint32_t objectReyesAtlasBakeResolution = 4096;
+		std::uint32_t objectReyesAtlasBakePaddingTexels = 8;
+		std::vector<ObjectReyesBakedHeightMaterialEntry> objectReyesBakedHeightMaterials;
 		bool isUsdPackage = false;
 	};
 

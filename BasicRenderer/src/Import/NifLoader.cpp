@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "19";
+constexpr std::string_view kObjectReyesConfigVersion = "22";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -154,14 +154,23 @@ std::string NormalizeObjectReyesNifWhitelistPath(std::string_view path)
 
 struct ObjectReyesConfig
 {
+    struct BakedHeightMaterialEntry
+    {
+        std::string nifPath;
+        std::vector<std::string> materialTexturePaths;
+    };
+
     std::unordered_set<std::string> nifPaths;
     std::unordered_set<std::string> texturePaths;
     std::unordered_set<std::string> surfaceSamplingNifPaths;
     std::unordered_set<std::string> surfaceSamplingTexturePaths;
+    std::vector<BakedHeightMaterialEntry> bakedHeightMaterials;
     std::string surfaceSamplingMode;
     bool surfaceSamplingIncludeSelected = false;
     bool boundaryBlendingEnabled = false;
     float boundaryBlendStripWidthObjectUnits = 8.0f;
+    std::uint32_t atlasBakeResolution = 4096u;
+    std::uint32_t atlasBakePaddingTexels = 8u;
     std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
     bool loaded = false;
 };
@@ -288,11 +297,50 @@ ObjectReyesConfig LoadObjectReyesConfig()
                     config.boundaryBlendStripWidthObjectUnits = 8.0f;
                 }
             }
+            if (const auto atlasBake = surfaceSampling->find("atlasBake");
+                atlasBake != surfaceSampling->end() && atlasBake->is_object()) {
+                config.atlasBakeResolution = atlasBake->value("resolution", config.atlasBakeResolution);
+                config.atlasBakePaddingTexels = atlasBake->value("paddingTexels", config.atlasBakePaddingTexels);
+                if (config.atlasBakeResolution < 256u || config.atlasBakeResolution > 8192u) {
+                    spdlog::warn(
+                        "Object Reyes surfaceSampling.atlasBake.resolution={} is invalid; using 4096.",
+                        config.atlasBakeResolution);
+                    config.atlasBakeResolution = 4096u;
+                }
+                if (config.atlasBakePaddingTexels > 64u) {
+                    spdlog::warn(
+                        "Object Reyes surfaceSampling.atlasBake.paddingTexels={} is invalid; using 8.",
+                        config.atlasBakePaddingTexels);
+                    config.atlasBakePaddingTexels = 8u;
+                }
+            }
+            if (const auto bakedHeight = surfaceSampling->find("bakedHeight");
+                bakedHeight != surfaceSampling->end() && bakedHeight->is_object()) {
+                if (const auto entries = bakedHeight->find("entries"); entries != bakedHeight->end() && entries->is_array()) {
+                    for (const auto& entryNode : *entries) {
+                        if (!entryNode.is_object()) {
+                            continue;
+                        }
+                        ObjectReyesConfig::BakedHeightMaterialEntry entry{};
+                        entry.nifPath = NormalizeObjectReyesNifWhitelistPath(entryNode.value("nifPath", std::string{}));
+                        const json textureArray = entryNode.contains("materialTexturePaths")
+                            ? entryNode.at("materialTexturePaths")
+                            : entryNode.value("texturePaths", json::array());
+                        std::unordered_set<std::string> uniqueTextures;
+                        readTexturePathArray(textureArray, uniqueTextures);
+                        entry.materialTexturePaths.assign(uniqueTextures.begin(), uniqueTextures.end());
+                        std::sort(entry.materialTexturePaths.begin(), entry.materialTexturePaths.end());
+                        if (!entry.nifPath.empty() && !entry.materialTexturePaths.empty()) {
+                            config.bakedHeightMaterials.push_back(std::move(entry));
+                        }
+                    }
+                }
+            }
         }
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), boundaryBlending enabled={}, stripWidthObjectUnits={}, hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight entries={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
@@ -300,8 +348,11 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.surfaceSamplingIncludeSelected,
             config.surfaceSamplingNifPaths.size(),
             config.surfaceSamplingTexturePaths.size(),
+            config.bakedHeightMaterials.size(),
             config.boundaryBlendingEnabled,
             config.boundaryBlendStripWidthObjectUnits,
+            config.atlasBakeResolution,
+            config.atlasBakePaddingTexels,
             config.contentHash);
     }
     catch (const std::exception& e) {
@@ -317,8 +368,22 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
         return false;
     }
     const std::string normalizedSlashKey = NormalizeObjectReyesNifWhitelistPath(normalizedNifCacheKey);
+    const bool nifListed =
+        config.nifPaths.contains(normalizedSlashKey) ||
+        config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
+        std::any_of(
+            config.bakedHeightMaterials.begin(),
+            config.bakedHeightMaterials.end(),
+            [&](const ObjectReyesConfig::BakedHeightMaterialEntry& entry) { return entry.nifPath == normalizedSlashKey; });
+    if (config.surfaceSamplingMode == "atlasBakedHeight") {
+        return nifListed;
+    }
     return config.nifPaths.contains(normalizedSlashKey) ||
         config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
+        std::any_of(
+            config.bakedHeightMaterials.begin(),
+            config.bakedHeightMaterials.end(),
+            [&](const ObjectReyesConfig::BakedHeightMaterialEntry& entry) { return entry.nifPath == normalizedSlashKey; }) ||
         !config.texturePaths.empty() ||
         !config.surfaceSamplingTexturePaths.empty();
 }
@@ -764,6 +829,15 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.surfaceSamplingNifPaths.contains(options.objectReyesNifPath);
     options.objectReyesBoundaryBlendingEnabled = objectReyesConfig.boundaryBlendingEnabled;
     options.objectReyesBoundaryBlendStripWidthObjectUnits = objectReyesConfig.boundaryBlendStripWidthObjectUnits;
+    options.objectReyesAtlasBakeResolution = objectReyesConfig.atlasBakeResolution;
+    options.objectReyesAtlasBakePaddingTexels = objectReyesConfig.atlasBakePaddingTexels;
+    options.objectReyesBakedHeightMaterials.reserve(objectReyesConfig.bakedHeightMaterials.size());
+    for (const auto& entry : objectReyesConfig.bakedHeightMaterials) {
+        options.objectReyesBakedHeightMaterials.push_back(USDLoader::ObjectReyesBakedHeightMaterialEntry{
+            .nifPath = entry.nifPath,
+            .materialTexturePaths = entry.materialTexturePaths
+        });
+    }
     options.isUsdPackage = false;
     return options;
 }
@@ -1761,6 +1835,20 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::CreateMesh");
             auto material = Material::CreateShared(desc);
+            if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+                const auto materialData = material->GetData();
+                spdlog::info(
+                    "nif_meta_cache=atlas_material game='{}' material='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} geomEnabled={} heightUv={} heightSourcePathOnly={}",
+                    normalizedCacheKey,
+                    desc.name,
+                    desc.heightMap.sourcePath,
+                    materialData.materialFlags,
+                    static_cast<std::uint64_t>(material->Technique().compileFlags),
+                    static_cast<std::uint32_t>(material->Technique().rasterFlags),
+                    materialData.geometricDisplacementEnabled,
+                    materialData.heightUvSetIndex,
+                    desc.heightMap.texture ? 0 : 1);
+            }
             if (blendDesc0 && blendDesc1) {
                 material->SetObjectBlendChildren(
                     Material::CreateShared(*blendDesc0),

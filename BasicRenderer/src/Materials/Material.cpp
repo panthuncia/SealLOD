@@ -281,6 +281,9 @@ MaterialDescription Material::ToCacheDescription() const
         desc.heightMap = TextureAndConstant{ m_heightMap, 1.0f, m_heightChannel };
         desc.heightMap.uvSetIndex = m_heightUvSetIndex;
         desc.heightMap.sourcePath = sourcePathFor(m_heightSourcePath, m_heightMap);
+        if (static_cast<ObjectSurfaceSamplingMode>(m_materialData.objectSurfaceSamplingMode) == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+            desc.heightMap.uvSetName = "__object_reyes_atlas_height";
+        }
     }
     desc.metallic = TextureAndConstant{ m_metallicTexture, m_metallicFactor, m_metallicChannel };
     desc.metallic.uvSetIndex = m_metallicUvSetIndex;
@@ -438,7 +441,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
     }
     if (m_heightMap) {
         const bool hasExplicitObjectReyesAtlasMips =
-            m_heightMap->Meta().filePath.rfind("object_reyes_atlas_baked_height://", 0) == 0;
+            m_materialData.objectSurfaceSamplingMode == static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
         m_heightMap->SetGenerateMipmaps(!hasExplicitObjectReyesAtlasMips);
         const auto heightUploadMode =
             (mode == TextureUploadAdvanceMode::NonBlocking && m_materialData.geometricDisplacementEnabled != 0u)

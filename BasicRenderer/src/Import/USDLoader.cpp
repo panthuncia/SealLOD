@@ -696,6 +696,22 @@ namespace USDLoader {
 			return matched;
 		}
 
+		bool ObjectReyesAtlasBakedHeightNifListed(const InMemoryStageOptions& stageOptions)
+		{
+			if (stageOptions.objectReyesSurfaceSamplingMode != ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+				return true;
+			}
+			if (stageOptions.objectReyesBakedHeightMaterials.empty()) {
+				return false;
+			}
+			return std::any_of(
+				stageOptions.objectReyesBakedHeightMaterials.begin(),
+				stageOptions.objectReyesBakedHeightMaterials.end(),
+				[&](const ObjectReyesBakedHeightMaterialEntry& entry) {
+					return entry.nifPath == stageOptions.objectReyesNifPath;
+				});
+		}
+
 		bool SupportsObjectReyesGeometricDisplacementCandidate(const MaterialDescription& desc)
 		{
 			return desc.enableGeometricDisplacement &&
@@ -2737,6 +2753,19 @@ namespace USDLoader {
         }
 
         auto runtimeMaterial = Material::CreateShared(resolvedDesc);
+		if (resolvedDesc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+			const auto materialData = runtimeMaterial->GetData();
+			spdlog::info(
+				"Object Reyes atlas material created name='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} geomEnabled={} heightUv={} heightSourcePathOnly={}.",
+				resolvedDesc.name,
+				resolvedDesc.heightMap.sourcePath,
+				materialData.materialFlags,
+				static_cast<std::uint64_t>(runtimeMaterial->Technique().compileFlags),
+				static_cast<std::uint32_t>(runtimeMaterial->Technique().rasterFlags),
+				materialData.geometricDisplacementEnabled,
+				materialData.heightUvSetIndex,
+				resolvedDesc.heightMap.texture ? 0 : 1);
+		}
         loadingCache.resolvedMaterialCache[cacheKey] = runtimeMaterial;
         return runtimeMaterial;
     }
@@ -2900,11 +2929,18 @@ namespace USDLoader {
 		if (desc.brniflyVertexAlpha && desc.blendState == BlendState::BLEND_STATE_MASK && temporaryBlockedOverlay) {
 			options.vertexAlphaCutoff = std::clamp(desc.alphaCutoff, 0.0f, 1.0f);
 		}
-		const bool objectReyesSelected =
+		const bool atlasBakedHeightMode =
+			stageOptions.objectReyesSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight;
+		const bool atlasBakedHeightNifListed =
+			!atlasBakedHeightMode || ObjectReyesAtlasBakedHeightNifListed(stageOptions);
+		const bool baseObjectReyesSelected =
 			stageOptions.objectReyesNifMatched ||
 			MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesTexturePaths);
+		const bool objectReyesSelected =
+			atlasBakedHeightMode ? (baseObjectReyesSelected && atlasBakedHeightNifListed) : baseObjectReyesSelected;
 		const bool surfaceSamplingSelected =
 			stageOptions.objectReyesSurfaceSamplingEnabled &&
+			atlasBakedHeightNifListed &&
 			((stageOptions.objectReyesSurfaceSamplingIncludeSelected && objectReyesSelected) ||
 			 stageOptions.objectReyesSurfaceSamplingNifMatched ||
 			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesSurfaceSamplingTexturePaths));
@@ -3211,7 +3247,7 @@ namespace USDLoader {
 			bakeIdentity += "|mat";
 			bakeIdentity += std::to_string(materialIndex);
 			bakeIdentity += "=";
-			bakeIdentity += desc.heightMap.sourcePath;
+			bakeIdentity += BuildMaterialTextureSignature(desc);
 			bakeIdentity += "@scale:";
 			bakeIdentity += std::to_string(desc.heightMapScale);
 			bakeIdentity += "@density:";
@@ -3443,6 +3479,55 @@ namespace USDLoader {
 		return true;
 	}
 
+	std::vector<std::string> BuildObjectReyesAtlasMaterialTextureSet(const std::vector<MaterialDescription>& materials)
+	{
+		std::vector<std::string> paths;
+		paths.reserve(materials.size());
+		for (const MaterialDescription& desc : materials) {
+			const std::string normalized = NormalizeObjectReyesWhitelistPath(desc.baseColor.sourcePath);
+			if (!normalized.empty() && std::find(paths.begin(), paths.end(), normalized) == paths.end()) {
+				paths.push_back(normalized);
+			}
+		}
+		std::sort(paths.begin(), paths.end());
+		return paths;
+	}
+
+	bool ObjectReyesAtlasBakedMaterialCombinationAllowed(
+		const InMemoryStageOptions& stageOptions,
+		const MeshPreprocessResult& result,
+		std::string_view parentPath)
+	{
+		if (stageOptions.objectReyesBakedHeightMaterials.empty()) {
+			return true;
+		}
+
+		const std::vector<std::string> materialTextureSet =
+			BuildObjectReyesAtlasMaterialTextureSet(result.objectAtlasSourceMaterials);
+		for (const auto& entry : stageOptions.objectReyesBakedHeightMaterials) {
+			if (entry.nifPath != stageOptions.objectReyesNifPath) {
+				continue;
+			}
+			if (entry.materialTexturePaths == materialTextureSet) {
+				return true;
+			}
+		}
+
+		std::string found;
+		for (const std::string& path : materialTextureSet) {
+			if (!found.empty()) {
+				found += ", ";
+			}
+			found += path;
+		}
+		spdlog::warn(
+			"Object Reyes atlas bake skipped under '{}': NIF '{}' material base texture set [{}] is not listed as a baked-height combination.",
+			parentPath,
+			stageOptions.objectReyesNifPath,
+			found);
+		return false;
+	}
+
 	void RecomputeExactPositionWeldedNormals(
 		std::vector<std::byte>& vertices,
 		unsigned int vertexSize,
@@ -3617,7 +3702,8 @@ namespace USDLoader {
 	std::optional<MeshPreprocessResult> TryBuildObjectReyesAtlasBakedParentGroup(
 		const std::vector<std::size_t>& group,
 		const std::vector<MeshPreprocessWorkItem>& workItems,
-		std::vector<std::optional<MeshPreprocessResult>>& preprocessed)
+		std::vector<std::optional<MeshPreprocessResult>>& preprocessed,
+		const InMemoryStageOptions& stageOptions)
 	{
 		if (group.empty()) {
 			return std::nullopt;
@@ -3669,11 +3755,15 @@ namespace USDLoader {
 		}
 
 		br::import::ObjectReyesAtlasBakeOptions bakeOptions{};
-		bakeOptions.texelsPerUnit = texelsPerUnitCount > 0u
-			? texelsPerUnitSum / static_cast<float>(texelsPerUnitCount)
-			: 1.0f;
-		bakeOptions.maxAtlasSize = 2048u;
-		bakeOptions.paddingTexels = 8u;
+		bakeOptions.resolution = std::clamp<std::uint32_t>(
+			stageOptions.objectReyesAtlasBakeResolution,
+			256u,
+			8192u);
+		bakeOptions.texelsPerUnit = bakeOptions.resolution > 0u
+			? 0.0f
+			: (texelsPerUnitCount > 0u ? texelsPerUnitSum / static_cast<float>(texelsPerUnitCount) : 1.0f);
+		bakeOptions.maxAtlasSize = bakeOptions.resolution;
+		bakeOptions.paddingTexels = std::min<std::uint32_t>(stageOptions.objectReyesAtlasBakePaddingTexels, 64u);
 
 		const std::string parentPath = ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString());
 		br::import::ObjectReyesAtlasBakeResult atlasResult =
@@ -3708,11 +3798,13 @@ namespace USDLoader {
 
 		CLodCacheLoader::MeshCacheIdentity identity = first.cacheIdentity;
 		identity.subsetName = "object-reyes-atlas-baked-height";
-		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=2";
+		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=3";
 		identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 		identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
 		identity.sourceIdentifier += "#object_reyes_atlas_size=" +
 			std::to_string(atlasResult.atlasWidth) + "x" + std::to_string(atlasResult.atlasHeight);
+		identity.sourceIdentifier += "#object_reyes_atlas_requested_resolution=" + std::to_string(bakeOptions.resolution);
+		identity.sourceIdentifier += "#object_reyes_atlas_padding=" + std::to_string(bakeOptions.paddingTexels);
 		for (std::size_t index : group) {
 			identity.sourceIdentifier += "#atlas_source_mesh=" + workItems[index].mesh.GetPrim().GetPath().GetString();
 		}
@@ -3775,18 +3867,11 @@ namespace USDLoader {
 			}
 			result.objectAtlasSourceMaterials.push_back(std::move(sourceDesc));
 		}
-		if (!BakeObjectReyesAtlasHeightTextureForPreprocess(result, parentPath, result.cacheIdentity.sourceIdentifier)) {
+		if (!ObjectReyesAtlasBakedMaterialCombinationAllowed(stageOptions, result, parentPath)) {
 			return std::nullopt;
 		}
-		for (MaterialDescription& sourceDesc : result.objectAtlasSourceMaterials) {
-			sourceDesc.heightMap.texture.reset();
-			sourceDesc.heightMap.sourcePath = result.objectAtlasBakedHeightSourcePath;
-			sourceDesc.heightMap.channels = { 0u };
-			sourceDesc.heightMap.uvSetIndex = result.objectAtlasHeightUvSetIndex;
-			sourceDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
-			sourceDesc.heightMapFromBaseColorAlpha = false;
-			sourceDesc.geometricDisplacementOptIn = true;
-			sourceDesc.enableGeometricDisplacement = true;
+		if (!BakeObjectReyesAtlasHeightTextureForPreprocess(result, parentPath, result.cacheIdentity.sourceIdentifier)) {
+			return std::nullopt;
 		}
 		return result;
 	}
@@ -5293,7 +5378,7 @@ namespace USDLoader {
 				if (group.empty()) {
 					continue;
 				}
-				auto combined = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed);
+				auto combined = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed, stageOptions);
 				if (!combined) {
 					spdlog::warn(
 						"Object Reyes atlas-baked height failed under '{}'; disabling Object Reyes geometric displacement for that parent.",

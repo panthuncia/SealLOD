@@ -1223,23 +1223,43 @@ ObjectManager::PreparedStaticGroupsBulkPlan ObjectManager::PrepareStaticGroupsBu
 }
 
 void ObjectManager::PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan) {
+	ZoneScopedN("ObjectManager::PrepareStaticGroupCommitResourcesAsync");
 	if (plan.groups.empty()) {
 		return;
 	}
 
 	const size_t transformRows = static_cast<size_t>(plan.transformRows);
 	const size_t drawRecords = static_cast<size_t>(plan.drawRecords);
+	TracyPlot("ObjectManager.StaticCommitResourceRequest.Groups", static_cast<int64_t>(plan.groups.size()));
+	TracyPlot("ObjectManager.StaticCommitResourceRequest.TransformRows", static_cast<int64_t>(transformRows));
+	TracyPlot("ObjectManager.StaticCommitResourceRequest.DrawRecords", static_cast<int64_t>(drawRecords));
 	if (transformRows != 0) {
-		m_perObjectBuffers->RequestAsyncReserveBytes(
-			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerObjectCB), 512ull * 1024ull));
-		m_perInstanceTransformBuffers->RequestAsyncReserveBytes(
-			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerInstanceTransformCB), 512ull * 1024ull));
-		m_normalMatrixBuffer->RequestAsyncReserveBytes(
-			ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(DirectX::XMFLOAT4X4), 512ull * 1024ull));
+		{
+			ZoneScopedN("ObjectManager::PrepareStaticGroupCommitResourcesAsync::RequestPerObject");
+			const auto bytes = ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerObjectCB), 512ull * 1024ull);
+			TracyPlot("ObjectManager.StaticCommitResourceRequest.PerObjectBytes", static_cast<int64_t>(bytes));
+			m_perObjectBuffers->RequestAsyncReserveBytes(bytes);
+		}
+		{
+			ZoneScopedN("ObjectManager::PrepareStaticGroupCommitResourcesAsync::RequestInstanceTransform");
+			const auto bytes = ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(PerInstanceTransformCB), 512ull * 1024ull);
+			TracyPlot("ObjectManager.StaticCommitResourceRequest.InstanceTransformBytes", static_cast<int64_t>(bytes));
+			m_perInstanceTransformBuffers->RequestAsyncReserveBytes(bytes);
+		}
+		{
+			ZoneScopedN("ObjectManager::PrepareStaticGroupCommitResourcesAsync::RequestNormalMatrix");
+			const auto bytes = ReserveBytesWithStaticImportHeadroom(transformRows * sizeof(DirectX::XMFLOAT4X4), 512ull * 1024ull);
+			TracyPlot("ObjectManager.StaticCommitResourceRequest.NormalMatrixBytes", static_cast<int64_t>(bytes));
+			m_normalMatrixBuffer->RequestAsyncReserveBytes(bytes);
+		}
 	}
 	if (drawRecords != 0) {
-		m_instanceDrawRecordBuffers->RequestAsyncReserveBytes(
-			ReserveBytesWithStaticImportHeadroom(drawRecords * sizeof(InstanceDrawRecordCB), 1024ull * 1024ull));
+		{
+			ZoneScopedN("ObjectManager::PrepareStaticGroupCommitResourcesAsync::RequestInstanceDrawRecord");
+			const auto bytes = ReserveBytesWithStaticImportHeadroom(drawRecords * sizeof(InstanceDrawRecordCB), 1024ull * 1024ull);
+			TracyPlot("ObjectManager.StaticCommitResourceRequest.InstanceDrawRecordBytes", static_cast<int64_t>(bytes));
+			m_instanceDrawRecordBuffers->RequestAsyncReserveBytes(bytes);
+		}
 	}
 }
 
@@ -1250,6 +1270,7 @@ ObjectManager::StaticImportPacketPlan ObjectManager::PrepareStaticImportPacketPl
 }
 
 void ObjectManager::RequestStaticImportPacketResources(const StaticImportPacketPlan& plan) {
+	ZoneScopedN("ObjectManager::RequestStaticImportPacketResources");
 	PrepareStaticGroupCommitResourcesAsync(plan.prepared);
 }
 
@@ -1294,6 +1315,7 @@ void ObjectManager::FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build
 }
 
 void ObjectManager::RequestStaticImportTransactionResources(const StaticImportBuildBatch& build) {
+	ZoneScopedN("ObjectManager::RequestStaticImportTransactionResources");
 	PrepareStaticGroupCommitResourcesAsync(build.prepared);
 }
 

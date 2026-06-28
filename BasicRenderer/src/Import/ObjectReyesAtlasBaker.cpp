@@ -271,9 +271,10 @@ ObjectReyesAtlasBakeResult BuildObjectReyesAtlasBakedHeightMesh(
 	packOptions.blockAlign = true;
 	packOptions.padding = options.paddingTexels;
 	packOptions.maxChartSize = options.maxAtlasSize;
+	packOptions.resolution = options.resolution;
 	packOptions.texelsPerUnit = std::isfinite(options.texelsPerUnit) && options.texelsPerUnit > 0.0f
 		? options.texelsPerUnit
-		: 1.0f;
+		: 0.0f;
 	xatlas::Generate(atlas, chartOptions, packOptions);
 
 	if (atlas->meshCount != 1u || atlas->meshes == nullptr) {
