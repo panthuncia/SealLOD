@@ -1266,7 +1266,9 @@ float ReyesSampleDisplacementOffset(MaterialInfo materialInfo, float3 positionOS
 
 float3 ReyesApplyGeometricDisplacement(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv)
 {
-    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    const float displacementOffset = (((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
+        ? ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x)
+        : ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
         ? ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS)
         : ReyesSampleDisplacementOffset(materialInfo, positionOS, uv)) *
         ReyesGeometricDisplacementGlobalScale(materialInfo);

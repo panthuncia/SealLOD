@@ -25,3 +25,6 @@
 [submodule "PyNifly"]
 	path = PyNifly
 	url = git@github.com:panthuncia/PyNifly.git
+[submodule "xatlas"]
+	path = xatlas
+	url = https://github.com/jpcy/xatlas.git

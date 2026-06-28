@@ -21,6 +21,7 @@ enum class MaterialModel : uint32_t {
 enum class ObjectSurfaceSamplingMode : uint32_t {
     None = 0,
     TriplanarStochastic = 1,
+    AtlasBakedHeight = 2,
 };
 
 struct TextureAndConstant {
@@ -116,8 +117,6 @@ struct MaterialDescription {
 	bool brniflyDynamicDecal = false;
 	bool brniflyModelSpaceNormals = false;
 	bool heightMapFromBaseColorAlpha = false;
-	bool geometricHeightRemapRequired = false;
-	bool geometricHeightRemapSucceeded = false;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 	float objectSurfaceTexelDensity = 1.0f;
 	bool objectTriplanarBlendMaterial = false;

@@ -245,6 +245,12 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 set(BASICRENDERER_DEMO_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/BasicRenderer.cpp")
 list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}")
 
+if(EXISTS "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
+    add_library(xatlas STATIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
+    target_include_directories(xatlas PUBLIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas")
+    set_target_properties(xatlas PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
+endif()
+
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
@@ -253,8 +259,6 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
     ARCHIVE_OUTPUT_NAME ${BASICRENDERER_DEMO_TARGET}
 )
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
-add_executable(MaterialUvRemapperTests "tests/MaterialUvRemapperTests.cpp")
-target_compile_features(MaterialUvRemapperTests PRIVATE cxx_std_23)
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -1056,6 +1060,7 @@ endif()
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 
     dxgi.lib 
+    xatlas
     spdlog::spdlog_header_only 
     Microsoft::DirectXTex 
     imgui::imgui 
@@ -1262,11 +1267,5 @@ PRIVATE
     "${BASICRENDERER_SOURCE_ROOT}/hlsl_parser.lib"
 )
 
-target_link_libraries(MaterialUvRemapperTests
-PRIVATE
-    BasicRenderer::BasicRenderer
-)
-
 enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
-add_test(NAME MaterialUvRemapperTests COMMAND MaterialUvRemapperTests)

@@ -103,6 +103,18 @@ struct TextureSourceData {
     bool isBlockCompressed = false;
 };
 
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromConditionedCacheFilePath(
+    const std::string& path,
+    const std::string& reason = {});
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromDDSFilePath(
+    const std::string& path,
+    bool preferSRGB,
+    const std::string& reason = {});
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
+    const std::string& path,
+    bool preferSRGB,
+    const std::string& reason = {});
+
 //enum class ImageFiletype {
 //	UNKNOWN,
 //	HDR,

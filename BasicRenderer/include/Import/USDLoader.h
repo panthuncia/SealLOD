@@ -11,6 +11,7 @@
 #include <pxr/usd/usd/stage.h>
 
 #include "Import/RenderablePrototypeGeometry.h"
+#include "Materials/MaterialDescription.h"
 
 class Scene;
 class Mesh;
@@ -32,16 +33,13 @@ namespace USDLoader {
 		std::string objectReyesConfigHash;
 		std::vector<std::string> objectReyesTexturePaths;
 		std::vector<std::string> objectReyesSurfaceSamplingTexturePaths;
-		std::vector<std::string> objectReyesUvRemapTexturePaths;
 		bool objectReyesNifMatched = false;
 		bool objectReyesSurfaceSamplingEnabled = false;
+		ObjectSurfaceSamplingMode objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 		bool objectReyesSurfaceSamplingIncludeSelected = false;
 		bool objectReyesSurfaceSamplingNifMatched = false;
 		bool objectReyesBoundaryBlendingEnabled = false;
 		float objectReyesBoundaryBlendStripWidthObjectUnits = 8.0f;
-		bool objectReyesUvRemapEnabled = true;
-		bool objectReyesUvRemapIncludeSelected = true;
-		bool objectReyesUvRemapNifMatched = false;
 		bool isUsdPackage = false;
 	};
 

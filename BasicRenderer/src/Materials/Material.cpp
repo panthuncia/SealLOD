@@ -310,8 +310,6 @@ MaterialDescription Material::ToCacheDescription() const
     desc.brniflyDynamicDecal = m_brniflyDynamicDecal;
     desc.brniflyModelSpaceNormals = m_brniflyModelSpaceNormals;
     desc.materialModel = m_materialModel;
-    desc.geometricHeightRemapRequired = m_geometricHeightRemapRequired;
-    desc.geometricHeightRemapSucceeded = m_geometricHeightRemapSucceeded;
     return desc;
 }
 
@@ -439,7 +437,9 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
         m_aoMap->EnsureUploaded(factory, mode);
     }
     if (m_heightMap) {
-        m_heightMap->SetGenerateMipmaps(true);
+        const bool hasExplicitObjectReyesAtlasMips =
+            m_heightMap->Meta().filePath.rfind("object_reyes_atlas_baked_height://", 0) == 0;
+        m_heightMap->SetGenerateMipmaps(!hasExplicitObjectReyesAtlasMips);
         const auto heightUploadMode =
             (mode == TextureUploadAdvanceMode::NonBlocking && m_materialData.geometricDisplacementEnabled != 0u)
             ? TextureUploadAdvanceMode::AllowBlockingFallback

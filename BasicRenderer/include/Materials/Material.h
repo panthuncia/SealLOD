@@ -42,10 +42,8 @@ inline bool PickDescriptionDoubleSided(const MaterialDescription& d) {
 }
 
 inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& d) {
-    const bool usesObjectSurfaceSampling = d.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None;
     return d.enableGeometricDisplacement &&
         d.geometricDisplacementOptIn &&
-        (usesObjectSurfaceSampling || !d.geometricHeightRemapRequired || d.geometricHeightRemapSucceeded) &&
         d.heightMap.texture &&
         !d.heightMapFromBaseColorAlpha &&
         (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
@@ -277,8 +275,6 @@ public:
         material->m_materialData.glintEnabled = desc.glintEnabled ? 1u : 0u;
         material->m_materialData.glintParameters = desc.glintParameters;
         material->m_geometricDisplacementOptIn = desc.geometricDisplacementOptIn;
-        material->m_geometricHeightRemapRequired = desc.geometricHeightRemapRequired;
-        material->m_geometricHeightRemapSucceeded = desc.geometricHeightRemapSucceeded;
         material->m_materialData.objectSurfaceSamplingMode = static_cast<uint32_t>(desc.objectSurfaceSamplingMode);
         material->m_materialData.objectSurfaceTexelDensity = std::max(desc.objectSurfaceTexelDensity, 1.0e-6f);
         material->m_materialData.objectBlendWeightUvSetIndex = desc.objectBlendWeightUvSetIndex;
@@ -373,8 +369,6 @@ private:
     bool m_brniflyDynamicDecal = false;
     bool m_brniflyModelSpaceNormals = false;
     bool m_geometricDisplacementOptIn = false;
-    bool m_geometricHeightRemapRequired = false;
-    bool m_geometricHeightRemapSucceeded = false;
     std::string m_staticTextureOverrideSourceName;
     std::shared_ptr<Material> m_objectBlendMaterial0;
     std::shared_ptr<Material> m_objectBlendMaterial1;

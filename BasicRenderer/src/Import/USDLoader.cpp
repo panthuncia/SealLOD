@@ -1,16 +1,20 @@
 #include <spdlog/spdlog.h>
 #include <DirectXMath.h>
+#include <DirectXTex.h>
 #include <algorithm>
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <fstream>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 #include <cstring>
 #include <cctype>
 #include <cstdlib>
+#include <unordered_map>
 #include <unordered_set>
 #include <cmath>
 #include <queue>
@@ -63,6 +67,7 @@
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
 #include "Resources/Texture.h"
+#include "Resources/CpuTextureSampler.h"
 #include "Resources/Sampler.h"
 #include "Import/Filetypes.h"
 #include "Scene/Scene.h"
@@ -77,6 +82,7 @@
 
 #include "Import/USDLoader.h"
 #include "Import/CLodCacheLoader.h"
+#include "Import/ObjectReyesAtlasBaker.h"
 #include "Import/USDGeometryExtractor.h"
 #include "Mesh/DefaultCLodSettings.h"
 #include "Mesh/VertexLayout.h"
@@ -176,6 +182,8 @@ namespace USDLoader {
 		std::string staticTextureOverrideSourceName;
 		std::string blendMaterial0StaticTextureOverrideSourceName;
 		std::string blendMaterial1StaticTextureOverrideSourceName;
+		float blendMaterial0ObjectSurfaceTexelDensity = 1.0f;
+		float blendMaterial1ObjectSurfaceTexelDensity = 1.0f;
 		MeshPreprocessResult result;
 		bool inferredDoubleSided = false;
 		bool objectTriplanarBlendStrip = false;
@@ -198,12 +206,16 @@ namespace USDLoader {
 			bool inferred,
 			std::string sourceName0,
 			std::string sourceName1,
+			float texelDensity0,
+			float texelDensity1,
 			bool material0ObjectReyes = true,
 			bool material1ObjectReyes = true)
 			: blendMaterial0(std::move(m0))
 			, blendMaterial1(std::move(m1))
 			, blendMaterial0StaticTextureOverrideSourceName(std::move(sourceName0))
 			, blendMaterial1StaticTextureOverrideSourceName(std::move(sourceName1))
+			, blendMaterial0ObjectSurfaceTexelDensity(texelDensity0)
+			, blendMaterial1ObjectSurfaceTexelDensity(texelDensity1)
 			, result(std::move(r))
 			, inferredDoubleSided(inferred)
 			, objectTriplanarBlendStrip(true)
@@ -699,39 +711,6 @@ namespace USDLoader {
 				(!desc.baseColor.sourcePath.empty() || desc.baseColor.texture != nullptr);
 		}
 
-		std::optional<std::string> GetSingleActiveTextureUvSetName(const MaterialDescription& desc)
-		{
-			std::optional<std::string> firstName;
-			bool multiple = false;
-			ForEachMaterialTextureBinding(desc, [&](const TextureAndConstant& binding) {
-				if (!IsActiveTextureBinding(binding)) {
-					return;
-				}
-				std::string name = binding.uvSetName.empty() ? std::string("st") : binding.uvSetName;
-				if (!firstName) {
-					firstName = std::move(name);
-					return;
-				}
-				if (*firstName != name) {
-					multiple = true;
-				}
-			});
-
-			if (multiple) {
-				return std::nullopt;
-			}
-			return firstName.value_or("st");
-		}
-
-		void AssignAllActiveTextureBindingsToUvSet(MaterialDescription& desc, std::uint32_t uvSetIndex)
-		{
-			ForEachMaterialTextureBinding(desc, [&](TextureAndConstant& binding) {
-				if (IsActiveTextureBinding(binding)) {
-					binding.uvSetIndex = uvSetIndex;
-				}
-			});
-		}
-
 		void AppendTextureBindingSignature(
 			std::string& signature,
 			const char* slotName,
@@ -992,6 +971,311 @@ namespace USDLoader {
 		}
 
 		return std::nullopt;
+	}
+
+	using ObjectAtlasHeightSampler = SARP::Resources::CpuTextureSampler;
+
+	struct ObjectAtlasPositionKey
+	{
+		std::uint32_t x = 0u;
+		std::uint32_t y = 0u;
+		std::uint32_t z = 0u;
+
+		bool operator==(const ObjectAtlasPositionKey& other) const noexcept
+		{
+			return x == other.x && y == other.y && z == other.z;
+		}
+	};
+
+	struct ObjectAtlasPositionKeyHash
+	{
+		std::size_t operator()(const ObjectAtlasPositionKey& key) const noexcept
+		{
+			std::uint64_t h = 14695981039346656037ull;
+			auto mix = [&](std::uint32_t value) {
+				h ^= value;
+				h *= 1099511628211ull;
+			};
+			mix(key.x);
+			mix(key.y);
+			mix(key.z);
+			return static_cast<std::size_t>(h);
+		}
+	};
+
+	struct ObjectAtlasEdgeKey
+	{
+		ObjectAtlasPositionKey a;
+		ObjectAtlasPositionKey b;
+
+		bool operator==(const ObjectAtlasEdgeKey& other) const noexcept
+		{
+			return a == other.a && b == other.b;
+		}
+	};
+
+	struct ObjectAtlasEdgeKeyHash
+	{
+		std::size_t operator()(const ObjectAtlasEdgeKey& key) const noexcept
+		{
+			ObjectAtlasPositionKeyHash hash{};
+			std::uint64_t h = hash(key.a);
+			h ^= static_cast<std::uint64_t>(hash(key.b)) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+			return static_cast<std::size_t>(h);
+		}
+	};
+
+	struct ObjectAtlasEdgeSample
+	{
+		DirectX::XMFLOAT2 uv0{};
+		DirectX::XMFLOAT2 uv1{};
+		DirectX::XMFLOAT3 p0{};
+		DirectX::XMFLOAT3 p1{};
+		DirectX::XMFLOAT3 n0{};
+		DirectX::XMFLOAT3 n1{};
+		std::uint32_t materialIndex = 0u;
+	};
+
+	void ObjectAtlasHashString(std::uint64_t& hash, std::string_view value)
+	{
+		for (unsigned char ch : value) {
+			hash ^= static_cast<std::uint64_t>(ch);
+			hash *= 1099511628211ull;
+		}
+	}
+
+	std::string ObjectAtlasHashHex(std::string_view value)
+	{
+		std::uint64_t hash = 14695981039346656037ull;
+		ObjectAtlasHashString(hash, value);
+		std::ostringstream stream;
+		stream << std::hex;
+		stream.width(16);
+		stream.fill('0');
+		stream << hash;
+		return stream.str();
+	}
+
+	ObjectAtlasPositionKey MakeObjectAtlasPositionKey(const DirectX::XMFLOAT3& value)
+	{
+		ObjectAtlasPositionKey key{};
+		std::memcpy(&key.x, &value.x, sizeof(key.x));
+		std::memcpy(&key.y, &value.y, sizeof(key.y));
+		std::memcpy(&key.z, &value.z, sizeof(key.z));
+		return key;
+	}
+
+	ObjectAtlasEdgeKey MakeObjectAtlasEdgeKey(const DirectX::XMFLOAT3& p0, const DirectX::XMFLOAT3& p1)
+	{
+		ObjectAtlasEdgeKey key{ MakeObjectAtlasPositionKey(p0), MakeObjectAtlasPositionKey(p1) };
+		const auto less = [](const ObjectAtlasPositionKey& a, const ObjectAtlasPositionKey& b) {
+			if (a.x != b.x) return a.x < b.x;
+			if (a.y != b.y) return a.y < b.y;
+			return a.z < b.z;
+		};
+		if (less(key.b, key.a)) {
+			std::swap(key.a, key.b);
+		}
+		return key;
+	}
+
+	DirectX::XMFLOAT3 NormalizeObjectAtlasVector(DirectX::XMFLOAT3 n)
+	{
+		const float lenSq = n.x * n.x + n.y * n.y + n.z * n.z;
+		if (lenSq > 1.0e-12f && std::isfinite(lenSq)) {
+			const float invLen = 1.0f / std::sqrt(lenSq);
+			n.x *= invLen;
+			n.y *= invLen;
+			n.z *= invLen;
+		}
+		else {
+			n = { 0.0f, 0.0f, 1.0f };
+		}
+		return n;
+	}
+
+	float ObjectAtlasSampleTriplanarHeight(
+		const ObjectAtlasHeightSampler& sampler,
+		const DirectX::XMFLOAT3& position,
+		const DirectX::XMFLOAT3& normal,
+		float density)
+	{
+		if (!std::isfinite(density) || density <= 0.0f) {
+			density = 1.0f;
+		}
+		const float ax = std::pow(std::abs(normal.x), 4.0f);
+		const float ay = std::pow(std::abs(normal.y), 4.0f);
+		const float az = std::pow(std::abs(normal.z), 4.0f);
+		const float sum = std::max(1.0e-6f, ax + ay + az);
+		const float hx = sampler.Sample(position.y * density, position.z * density).r;
+		const float hy = sampler.Sample(position.z * density, position.x * density).r;
+		const float hz = sampler.Sample(position.x * density, position.y * density).r;
+		return (hx * ax + hy * ay + hz * az) / sum;
+	}
+
+	float ObjectAtlasEdgeFunction(const DirectX::XMFLOAT2& a, const DirectX::XMFLOAT2& b, float x, float y)
+	{
+		return (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
+	}
+
+	std::uint32_t ObjectReyesAtlasMipCount(std::uint32_t width, std::uint32_t height)
+	{
+		std::uint32_t count = 1u;
+		while (width > 1u || height > 1u) {
+			width = std::max(1u, width >> 1u);
+			height = std::max(1u, height >> 1u);
+			++count;
+		}
+		return count;
+	}
+
+	std::vector<std::uint16_t> BuildObjectReyesAtlasMip(
+		const std::vector<std::uint16_t>& parent,
+		std::uint32_t parentWidth,
+		std::uint32_t parentHeight)
+	{
+		const std::uint32_t width = std::max(1u, parentWidth >> 1u);
+		const std::uint32_t height = std::max(1u, parentHeight >> 1u);
+		std::vector<std::uint16_t> mip(static_cast<std::size_t>(width) * height, 32768u);
+		for (std::uint32_t y = 0; y < height; ++y) {
+			for (std::uint32_t x = 0; x < width; ++x) {
+				std::uint32_t sum = 0u;
+				std::uint32_t count = 0u;
+				for (std::uint32_t oy = 0; oy < 2u; ++oy) {
+					for (std::uint32_t ox = 0; ox < 2u; ++ox) {
+						const std::uint32_t px = std::min(parentWidth - 1u, x * 2u + ox);
+						const std::uint32_t py = std::min(parentHeight - 1u, y * 2u + oy);
+						sum += parent[static_cast<std::size_t>(py) * parentWidth + px];
+						++count;
+					}
+				}
+				mip[static_cast<std::size_t>(y) * width + x] = static_cast<std::uint16_t>(sum / std::max(1u, count));
+			}
+		}
+		return mip;
+	}
+
+	void StampObjectReyesAtlasHeightPixel(
+		std::vector<std::uint16_t>& pixels,
+		std::vector<std::uint8_t>& coverage,
+		std::uint32_t width,
+		std::uint32_t height,
+		float u,
+		float v,
+		std::uint16_t value)
+	{
+		const int x = std::clamp(static_cast<int>(std::lround(u * static_cast<float>(width) - 0.5f)), 0, static_cast<int>(width) - 1);
+		const int y = std::clamp(static_cast<int>(std::lround(v * static_cast<float>(height) - 0.5f)), 0, static_cast<int>(height) - 1);
+		for (int oy = -1; oy <= 1; ++oy) {
+			for (int ox = -1; ox <= 1; ++ox) {
+				const int px = x + ox;
+				const int py = y + oy;
+				if (px < 0 || py < 0 || px >= static_cast<int>(width) || py >= static_cast<int>(height)) {
+					continue;
+				}
+				const std::size_t pixelIndex = static_cast<std::size_t>(py) * width + static_cast<std::size_t>(px);
+				pixels[pixelIndex] = value;
+				coverage[pixelIndex] = 1u;
+			}
+		}
+	}
+
+	std::filesystem::path ObjectReyesAtlasHeightCacheRoot()
+	{
+		std::error_code ec;
+		return std::filesystem::current_path(ec) / "cache" / "object_reyes_atlas_height";
+	}
+
+	std::filesystem::path ObjectReyesAtlasHeightDdsCachePath(std::string_view bakeIdentity)
+	{
+		return ObjectReyesAtlasHeightCacheRoot() / (ObjectAtlasHashHex(bakeIdentity) + ".dds");
+	}
+
+	bool WriteObjectReyesAtlasHeightDds(
+		const std::filesystem::path& path,
+		std::uint32_t width,
+		std::uint32_t height,
+		const std::vector<std::vector<std::uint16_t>>& mipPixels)
+	{
+		if (width == 0u || height == 0u || mipPixels.empty()) {
+			return false;
+		}
+		std::error_code ec;
+		std::filesystem::create_directories(path.parent_path(), ec);
+
+		DirectX::ScratchImage image;
+		HRESULT hr = image.Initialize2D(
+			DXGI_FORMAT_R16_UNORM,
+			width,
+			height,
+			1u,
+			mipPixels.size());
+		if (FAILED(hr)) {
+			return false;
+		}
+
+		std::uint32_t mipWidth = width;
+		std::uint32_t mipHeight = height;
+		for (std::size_t mip = 0; mip < mipPixels.size(); ++mip) {
+			const DirectX::Image* mipImage = image.GetImage(mip, 0u, 0u);
+			if (!mipImage || !mipImage->pixels ||
+				mipPixels[mip].size() != static_cast<std::size_t>(mipWidth) * mipHeight) {
+				return false;
+			}
+			for (std::uint32_t y = 0; y < mipHeight; ++y) {
+				std::memcpy(
+					mipImage->pixels + static_cast<std::size_t>(y) * mipImage->rowPitch,
+					mipPixels[mip].data() + static_cast<std::size_t>(y) * mipWidth,
+					static_cast<std::size_t>(mipWidth) * sizeof(std::uint16_t));
+			}
+			mipWidth = std::max(1u, mipWidth >> 1u);
+			mipHeight = std::max(1u, mipHeight >> 1u);
+		}
+
+		hr = DirectX::SaveToDDSFile(
+			image.GetImages(),
+			image.GetImageCount(),
+			image.GetMetadata(),
+			DirectX::DDS_FLAGS_NONE,
+			path.c_str());
+		return SUCCEEDED(hr);
+	}
+
+	bool LoadObjectAtlasHeightSamplerFromDescription(const MaterialDescription& desc, ObjectAtlasHeightSampler& outSampler)
+	{
+		if (desc.heightMapFromBaseColorAlpha) {
+			return false;
+		}
+		if (desc.heightMap.texture) {
+			if (auto sampler = SARP::Resources::CpuTextureSampler::Create(desc.heightMap.texture, "ObjectReyesAtlasPreprocessHeightBake")) {
+				outSampler = std::move(*sampler);
+				return true;
+			}
+		}
+		if (desc.heightMap.sourcePath.empty()) {
+			return false;
+		}
+		const auto resolvedPath = ResolveTexturePathFromSearchRoots(desc.heightMap.sourcePath);
+		if (!resolvedPath) {
+			return false;
+		}
+		try {
+			auto sourceData = LoadTextureSourceDataFromFilePath(
+				resolvedPath->string(),
+				false,
+				"ObjectReyesAtlasPreprocessHeightBake");
+			if (auto sampler = SARP::Resources::CpuTextureSampler::Create(std::move(sourceData))) {
+				outSampler = std::move(*sampler);
+				return true;
+			}
+		}
+		catch (const std::exception& e) {
+			spdlog::warn(
+				"Object Reyes atlas height preprocess bake failed to load '{}': {}",
+				resolvedPath->string(),
+				e.what());
+		}
+		return false;
 	}
 
 	void DisableModelSpaceNormalMap(MaterialDescription& result);
@@ -2045,8 +2329,6 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.brniflyDynamicDecal ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.geometricDisplacementOptIn ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.geometricHeightRemapRequired ? 1 : 0) + "|" +
-			std::to_string(resolvedDesc.geometricHeightRemapSucceeded ? 1 : 0) + "|" +
 			std::to_string(static_cast<std::uint32_t>(resolvedDesc.objectSurfaceSamplingMode)) + "|" +
 			std::to_string(resolvedDesc.objectSurfaceTexelDensity) + "|" +
 			std::to_string(resolvedDesc.objectTriplanarBlendMaterial ? 1 : 0) + "|" +
@@ -2428,15 +2710,22 @@ namespace USDLoader {
 		if (preprocessResult && preprocessResult->geometricDisplacementOptIn) {
 			resolvedDesc.geometricDisplacementOptIn = true;
 		}
-		if (preprocessResult && preprocessResult->geometricHeightRemapRequired) {
-			resolvedDesc.geometricHeightRemapRequired = true;
-			resolvedDesc.geometricHeightRemapSucceeded = preprocessResult->geometricHeightRemapSucceeded;
-			if (preprocessResult->geometricHeightRemapSucceeded) {
-				AssignAllActiveTextureBindingsToUvSet(resolvedDesc, preprocessResult->geometricHeightRemapUvSetIndex);
-			}
-		}
 		if (preprocessResult && preprocessResult->objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
 			resolvedDesc.objectSurfaceSamplingMode = preprocessResult->objectSurfaceSamplingMode;
+		}
+		if (preprocessResult && preprocessResult->objectAtlasBakedHeight) {
+			if (!preprocessResult->objectAtlasBakedHeightSourcePath.empty()) {
+				resolvedDesc.heightMap.texture.reset();
+				resolvedDesc.heightMap.sourcePath = preprocessResult->objectAtlasBakedHeightSourcePath;
+				resolvedDesc.heightMap.channels = { 0u };
+				resolvedDesc.heightMapFromBaseColorAlpha = false;
+				resolvedDesc.geometricDisplacementOptIn = true;
+				resolvedDesc.enableGeometricDisplacement = true;
+			}
+			resolvedDesc.heightMap.uvSetIndex = preprocessResult->objectAtlasHeightUvSetIndex;
+			resolvedDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
+		}
+		if (preprocessResult) {
 			resolvedDesc.objectSurfaceTexelDensity = preprocessResult->objectSurfaceTexelDensity;
 		}
         resolvedDesc.forceDoubleSided = resolvedDesc.forceDoubleSided || forceDoubleSided;
@@ -2462,6 +2751,8 @@ namespace USDLoader {
 		bool material1ObjectReyes,
 		std::string_view material0StaticTextureOverrideSourceName,
 		std::string_view material1StaticTextureOverrideSourceName,
+		float material0ObjectSurfaceTexelDensity,
+		float material1ObjectSurfaceTexelDensity,
 		const MeshPreprocessResult* preprocessResult)
 	{
 		// Blend strips are generated under a single owner mesh, but their child
@@ -2477,18 +2768,20 @@ namespace USDLoader {
 		MaterialDescription childDesc1 = child1->ToCacheDescription();
 		childDesc0.staticTextureOverrideSourceName = std::string(material0StaticTextureOverrideSourceName);
 		childDesc1.staticTextureOverrideSourceName = std::string(material1StaticTextureOverrideSourceName);
-		auto applyObjectReyesChildState = [&](MaterialDescription& desc, bool enabled) {
+		auto applyObjectReyesChildState = [&](MaterialDescription& desc, bool enabled, float texelDensity) {
+			if (std::isfinite(texelDensity) && texelDensity > 0.0f) {
+				desc.objectSurfaceTexelDensity = texelDensity;
+			}
 			if (enabled) {
 				desc.geometricDisplacementOptIn = true;
 				desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
-				desc.objectSurfaceTexelDensity = preprocessResult ? preprocessResult->objectSurfaceTexelDensity : desc.objectSurfaceTexelDensity;
 				return;
 			}
 			desc.geometricDisplacementOptIn = false;
 			desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 		};
-		applyObjectReyesChildState(childDesc0, material0ObjectReyes);
-		applyObjectReyesChildState(childDesc1, material1ObjectReyes);
+		applyObjectReyesChildState(childDesc0, material0ObjectReyes, material0ObjectSurfaceTexelDensity);
+		applyObjectReyesChildState(childDesc1, material1ObjectReyes, material1ObjectSurfaceTexelDensity);
 		child0 = Material::CreateShared(childDesc0);
 		child1 = Material::CreateShared(childDesc1);
 		const bool child0SupportsReyes = SupportsObjectReyesGeometricDisplacement(childDesc0);
@@ -2497,7 +2790,7 @@ namespace USDLoader {
 		desc.name += "_ObjectTriplanarBlend";
 		desc.objectTriplanarBlendMaterial = true;
 		desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
-		desc.objectBlendWeightUvSetIndex = preprocessResult ? preprocessResult->geometricHeightRemapUvSetIndex : 0u;
+		desc.objectBlendWeightUvSetIndex = preprocessResult ? preprocessResult->objectBlendWeightUvSetIndex : 0u;
 		desc.heightMap.uvSetIndex = desc.objectBlendWeightUvSetIndex;
 		desc.geometricDisplacementOptIn = true;
 		desc.enableGeometricDisplacement = true;
@@ -2532,6 +2825,53 @@ namespace USDLoader {
 		return material;
 	}
 
+	std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData> BuildObjectReyesAtlasBakeDataForMesh(
+		const MeshPreprocessResult& result)
+	{
+		if (!result.objectAtlasBakedHeight) {
+			return nullptr;
+		}
+		const std::vector<std::byte>& vertices = result.ingest.GetVertices();
+		const std::vector<std::uint32_t>& indices = result.ingest.GetIndices();
+		const std::vector<MeshUvSetData>& uvSets = result.ingest.GetUvSets();
+		const std::uint32_t vertexSize = result.ingest.GetVertexSize();
+		const std::uint32_t vertexFlags = result.ingest.GetFlags();
+		if (vertexSize == 0u ||
+			result.objectAtlasHeightUvSetIndex >= uvSets.size() ||
+			uvSets[result.objectAtlasHeightUvSetIndex].values.empty()) {
+			return nullptr;
+		}
+		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		if (vertexCount == 0u ||
+			uvSets[result.objectAtlasHeightUvSetIndex].values.size() != vertexCount) {
+			return nullptr;
+		}
+
+		auto data = std::make_shared<Mesh::ObjectReyesAtlasBakeData>();
+		data->atlasWidth = result.objectAtlasWidth;
+		data->atlasHeight = result.objectAtlasHeight;
+		data->atlasUvSetIndex = result.objectAtlasHeightUvSetIndex;
+		data->texelsPerUnit = result.objectSurfaceTexelDensity;
+		data->indices = indices;
+		data->triangleMaterialIndices = result.objectAtlasTriangleMaterialIndices;
+		data->sourceMaterialNames = result.objectAtlasSourceMaterialNames;
+		data->sourceMaterials = result.objectAtlasSourceMaterials;
+		data->positions.resize(vertexCount);
+		data->normals.resize(vertexCount, DirectX::XMFLOAT3{ 0.0f, 0.0f, 1.0f });
+		data->atlasUvs = uvSets[result.objectAtlasHeightUvSetIndex].values;
+		const bool hasNormals =
+			(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+			vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			std::memcpy(std::addressof(data->positions[vertexIndex]), vertex + MeshVertexLayout::PositionOffset, sizeof(DirectX::XMFLOAT3));
+			if (hasNormals) {
+				std::memcpy(std::addressof(data->normals[vertexIndex]), vertex + MeshVertexLayout::NormalOffset, sizeof(DirectX::XMFLOAT3));
+			}
+		}
+		return data;
+	}
+
 	USDGeometryExtractor::ExtractOptions BuildGeometryExtractOptions(
 		const UsdGeomMesh& mesh,
 		const UsdShadeMaterial& material,
@@ -2563,11 +2903,6 @@ namespace USDLoader {
 		const bool objectReyesSelected =
 			stageOptions.objectReyesNifMatched ||
 			MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesTexturePaths);
-		const bool uvRemapSelected =
-			stageOptions.objectReyesUvRemapEnabled &&
-			((stageOptions.objectReyesUvRemapIncludeSelected && objectReyesSelected) ||
-			 stageOptions.objectReyesUvRemapNifMatched ||
-			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesUvRemapTexturePaths));
 		const bool surfaceSamplingSelected =
 			stageOptions.objectReyesSurfaceSamplingEnabled &&
 			((stageOptions.objectReyesSurfaceSamplingIncludeSelected && objectReyesSelected) ||
@@ -2575,7 +2910,7 @@ namespace USDLoader {
 			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesSurfaceSamplingTexturePaths));
 		const bool explicitHeightCandidate = SupportsObjectReyesGeometricDisplacementCandidate(desc);
 		const bool potentialStaticHeightSidecar =
-			(objectReyesSelected || surfaceSamplingSelected || uvRemapSelected) &&
+			(objectReyesSelected || surfaceSamplingSelected) &&
 			!explicitHeightCandidate &&
 			SupportsPotentialObjectReyesHeightSidecar(desc);
 		options.geometricDisplacementOptIn = (objectReyesSelected || surfaceSamplingSelected) &&
@@ -2583,36 +2918,21 @@ namespace USDLoader {
 		if (surfaceSamplingSelected && options.geometricDisplacementOptIn) {
 			if (desc.brniflyModelSpaceNormals) {
 				spdlog::warn(
-					"Object Reyes tri-planar stochastic sampling skipped for mesh '{}' material '{}' because model-space normal maps are not supported by v1.",
+					"Object Reyes surface sampling skipped for mesh '{}' material '{}' because model-space normal maps are not supported by v1.",
 					mesh ? mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
 					material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>"));
 			}
 			else {
-				options.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+				options.objectSurfaceSamplingMode = stageOptions.objectReyesSurfaceSamplingMode;
 				options.objectSurfaceSamplingConfigHash = stageOptions.objectReyesConfigHash;
 			}
 		}
-		if (!surfaceSamplingSelected && uvRemapSelected && options.geometricDisplacementOptIn) {
-			options.materialUvRemapRequired = true;
-			options.materialUvRemapConfigHash = stageOptions.objectReyesConfigHash;
-			options.materialUvRemapReason = stageOptions.objectReyesUvRemapNifMatched || stageOptions.objectReyesNifMatched
-				? "nif-path object Reyes opt-in"
-				: "texture-path object Reyes opt-in";
-			if (auto uvSetName = GetSingleActiveTextureUvSetName(desc)) {
-				options.materialUvRemapSourceSetName = *uvSetName;
-			}
-			else {
-				options.materialUvRemapKnownFailure = true;
-				options.materialUvRemapReason += "; material uses multiple active texture UV sets";
-			}
-		}
-		else if ((objectReyesSelected || uvRemapSelected || surfaceSamplingSelected) && !options.geometricDisplacementOptIn) {
+		if ((objectReyesSelected || surfaceSamplingSelected) && !options.geometricDisplacementOptIn) {
 			spdlog::info(
-				"Object Reyes opt-in matched mesh '{}' material '{}' but material is not eligible for geometric Reyes/remap/surface sampling: selected={}, uvRemapSelected={}, surfaceSamplingSelected={}, baseSource='{}', geometric={}, heightTexture={}, heightSource='{}', baseAlphaHeight={}, firstHeightChannel={}, potentialStaticHeightSidecar={}.",
+				"Object Reyes opt-in matched mesh '{}' material '{}' but material is not eligible for geometric Reyes/surface sampling: selected={}, surfaceSamplingSelected={}, baseSource='{}', geometric={}, heightTexture={}, heightSource='{}', baseAlphaHeight={}, firstHeightChannel={}, potentialStaticHeightSidecar={}.",
 				mesh ? mesh.GetPrim().GetPath().GetString() : std::string("<null>"),
 				material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>"),
 				objectReyesSelected,
-				uvRemapSelected,
 				surfaceSamplingSelected,
 				desc.baseColor.sourcePath,
 				desc.enableGeometricDisplacement,
@@ -2852,6 +3172,277 @@ namespace USDLoader {
 		return { n.x * invLen, n.y * invLen, n.z * invLen };
 	}
 
+	bool BakeObjectReyesAtlasHeightTextureForPreprocess(
+		MeshPreprocessResult& result,
+		std::string_view parentPath,
+		std::string_view sourceIdentifier)
+	{
+		if (!result.objectAtlasBakedHeight ||
+			result.objectAtlasWidth == 0u ||
+			result.objectAtlasHeight == 0u ||
+			result.objectAtlasHeightUvSetIndex >= result.ingest.GetUvSets().size() ||
+			result.objectAtlasSourceMaterials.empty()) {
+			return false;
+		}
+
+		std::vector<ObjectAtlasHeightSampler> samplers(result.objectAtlasSourceMaterials.size());
+		std::string bakeIdentity;
+		bakeIdentity.reserve(1024);
+		bakeIdentity += sourceIdentifier;
+		bakeIdentity += "|parent=";
+		bakeIdentity += parentPath;
+		bakeIdentity += "|atlas=";
+		bakeIdentity += std::to_string(result.objectAtlasWidth);
+		bakeIdentity += "x";
+		bakeIdentity += std::to_string(result.objectAtlasHeight);
+		bakeIdentity += "|uv=";
+		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=1";
+		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
+			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
+			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
+				spdlog::warn(
+					"Object Reyes atlas height preprocess bake failed under '{}': source material '{}' height texture '{}' could not be sampled.",
+					parentPath,
+					materialIndex < result.objectAtlasSourceMaterialNames.size() ? result.objectAtlasSourceMaterialNames[materialIndex] : std::string("<unnamed>"),
+					desc.heightMap.sourcePath);
+				return false;
+			}
+			bakeIdentity += "|mat";
+			bakeIdentity += std::to_string(materialIndex);
+			bakeIdentity += "=";
+			bakeIdentity += desc.heightMap.sourcePath;
+			bakeIdentity += "@scale:";
+			bakeIdentity += std::to_string(desc.heightMapScale);
+			bakeIdentity += "@density:";
+			bakeIdentity += std::to_string(desc.objectSurfaceTexelDensity);
+		}
+
+		const std::filesystem::path cachePath = ObjectReyesAtlasHeightDdsCachePath(bakeIdentity);
+		std::error_code ec;
+		if (std::filesystem::is_regular_file(cachePath, ec)) {
+			result.objectAtlasBakedHeightSourcePath = std::filesystem::weakly_canonical(cachePath, ec).string();
+			if (ec) {
+				result.objectAtlasBakedHeightSourcePath = cachePath.string();
+			}
+			spdlog::info("Object Reyes atlas height preprocess cache hit '{}' for '{}'.", result.objectAtlasBakedHeightSourcePath, parentPath);
+			return true;
+		}
+
+		const std::vector<std::byte>& vertices = result.ingest.GetVertices();
+		const std::vector<std::uint32_t>& indices = result.ingest.GetIndices();
+		const std::vector<MeshUvSetData>& uvSets = result.ingest.GetUvSets();
+		const std::uint32_t vertexSize = result.ingest.GetVertexSize();
+		const std::uint32_t vertexFlags = result.ingest.GetFlags();
+		if (vertexSize == 0u || vertices.size() % vertexSize != 0u || indices.size() < 3u) {
+			return false;
+		}
+		const std::size_t vertexCount = vertices.size() / vertexSize;
+		const MeshUvSetData& atlasUvSet = uvSets[result.objectAtlasHeightUvSetIndex];
+		if (atlasUvSet.values.size() != vertexCount) {
+			return false;
+		}
+		const bool hasNormals =
+			(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+			vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+
+		std::vector<DirectX::XMFLOAT3> positions(vertexCount);
+		std::vector<DirectX::XMFLOAT3> normals(vertexCount, DirectX::XMFLOAT3{ 0.0f, 0.0f, 1.0f });
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			const std::byte* vertex = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			std::memcpy(&positions[vertexIndex], vertex + MeshVertexLayout::PositionOffset, sizeof(DirectX::XMFLOAT3));
+			if (hasNormals) {
+				std::memcpy(&normals[vertexIndex], vertex + MeshVertexLayout::NormalOffset, sizeof(DirectX::XMFLOAT3));
+				normals[vertexIndex] = NormalizeObjectAtlasVector(normals[vertexIndex]);
+			}
+		}
+
+		const std::uint32_t width = std::clamp<std::uint32_t>(result.objectAtlasWidth, 1u, 4096u);
+		const std::uint32_t height = std::clamp<std::uint32_t>(result.objectAtlasHeight, 1u, 4096u);
+		std::vector<std::uint16_t> pixels(static_cast<std::size_t>(width) * height, 32768u);
+		std::vector<std::uint8_t> coverage(pixels.size(), 0u);
+		auto lerp3 = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, const DirectX::XMFLOAT3& c, float wa, float wb, float wc) {
+			return DirectX::XMFLOAT3{
+				a.x * wa + b.x * wb + c.x * wc,
+				a.y * wa + b.y * wb + c.y * wc,
+				a.z * wa + b.z * wb + c.z * wc
+			};
+		};
+
+		std::unordered_map<ObjectAtlasEdgeKey, std::vector<ObjectAtlasEdgeSample>, ObjectAtlasEdgeKeyHash> seamEdges;
+		auto addSeamEdge = [&](std::uint32_t i0, std::uint32_t i1, std::uint32_t materialIndex) {
+			if (i0 >= vertexCount || i1 >= vertexCount) {
+				return;
+			}
+			ObjectAtlasEdgeSample sample{};
+			sample.uv0 = atlasUvSet.values[i0];
+			sample.uv1 = atlasUvSet.values[i1];
+			sample.p0 = positions[i0];
+			sample.p1 = positions[i1];
+			sample.n0 = normals[i0];
+			sample.n1 = normals[i1];
+			sample.materialIndex = materialIndex;
+			seamEdges[MakeObjectAtlasEdgeKey(sample.p0, sample.p1)].push_back(sample);
+		};
+
+		for (std::size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+			const std::uint32_t i0 = indices[tri + 0u];
+			const std::uint32_t i1 = indices[tri + 1u];
+			const std::uint32_t i2 = indices[tri + 2u];
+			if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+				continue;
+			}
+			std::uint32_t materialIndex = 0u;
+			const std::size_t triangleIndex = tri / 3u;
+			if (triangleIndex < result.objectAtlasTriangleMaterialIndices.size()) {
+				materialIndex = result.objectAtlasTriangleMaterialIndices[triangleIndex];
+			}
+			if (materialIndex >= samplers.size()) {
+				continue;
+			}
+			addSeamEdge(i0, i1, materialIndex);
+			addSeamEdge(i1, i2, materialIndex);
+			addSeamEdge(i2, i0, materialIndex);
+
+			const DirectX::XMFLOAT2 uv0{ atlasUvSet.values[i0].x * width, atlasUvSet.values[i0].y * height };
+			const DirectX::XMFLOAT2 uv1{ atlasUvSet.values[i1].x * width, atlasUvSet.values[i1].y * height };
+			const DirectX::XMFLOAT2 uv2{ atlasUvSet.values[i2].x * width, atlasUvSet.values[i2].y * height };
+			const float area = ObjectAtlasEdgeFunction(uv0, uv1, uv2.x, uv2.y);
+			if (std::abs(area) <= 1.0e-6f || !std::isfinite(area)) {
+				continue;
+			}
+			const int minX = std::max(0, static_cast<int>(std::floor(std::min({ uv0.x, uv1.x, uv2.x }))));
+			const int maxX = std::min(static_cast<int>(width) - 1, static_cast<int>(std::ceil(std::max({ uv0.x, uv1.x, uv2.x }))));
+			const int minY = std::max(0, static_cast<int>(std::floor(std::min({ uv0.y, uv1.y, uv2.y }))));
+			const int maxY = std::min(static_cast<int>(height) - 1, static_cast<int>(std::ceil(std::max({ uv0.y, uv1.y, uv2.y }))));
+			for (int y = minY; y <= maxY; ++y) {
+				for (int x = minX; x <= maxX; ++x) {
+					const float px = static_cast<float>(x) + 0.5f;
+					const float py = static_cast<float>(y) + 0.5f;
+					const float w0 = ObjectAtlasEdgeFunction(uv1, uv2, px, py) / area;
+					const float w1 = ObjectAtlasEdgeFunction(uv2, uv0, px, py) / area;
+					const float w2 = ObjectAtlasEdgeFunction(uv0, uv1, px, py) / area;
+					if (w0 < -1.0e-4f || w1 < -1.0e-4f || w2 < -1.0e-4f) {
+						continue;
+					}
+					const auto position = lerp3(positions[i0], positions[i1], positions[i2], w0, w1, w2);
+					const auto normal = NormalizeObjectAtlasVector(lerp3(normals[i0], normals[i1], normals[i2], w0, w1, w2));
+					const float density = result.objectAtlasSourceMaterials[materialIndex].objectSurfaceTexelDensity;
+					const float sample = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[materialIndex], position, normal, density), 0.0f, 1.0f);
+					const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
+					pixels[pixelIndex] = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
+					coverage[pixelIndex] = 1u;
+				}
+			}
+		}
+
+		for (const auto& [edgeKey, samples] : seamEdges) {
+			if (samples.size() < 2u) {
+				continue;
+			}
+			const ObjectAtlasEdgeSample& canonical = samples.front();
+			if (canonical.materialIndex >= samplers.size()) {
+				continue;
+			}
+			float maxLength = 0.0f;
+			for (const ObjectAtlasEdgeSample& sample : samples) {
+				const float dx = (sample.uv1.x - sample.uv0.x) * static_cast<float>(width);
+				const float dy = (sample.uv1.y - sample.uv0.y) * static_cast<float>(height);
+				maxLength = std::max(maxLength, std::sqrt(dx * dx + dy * dy));
+			}
+			const std::uint32_t steps = std::clamp<std::uint32_t>(static_cast<std::uint32_t>(std::ceil(maxLength)) + 1u, 2u, 4096u);
+			const ObjectAtlasPositionKey canonicalStart = MakeObjectAtlasPositionKey(canonical.p0);
+			for (std::uint32_t step = 0; step <= steps; ++step) {
+				const float t = static_cast<float>(step) / static_cast<float>(steps);
+				const DirectX::XMFLOAT3 position{
+					canonical.p0.x * (1.0f - t) + canonical.p1.x * t,
+					canonical.p0.y * (1.0f - t) + canonical.p1.y * t,
+					canonical.p0.z * (1.0f - t) + canonical.p1.z * t
+				};
+				const DirectX::XMFLOAT3 normal = NormalizeObjectAtlasVector(DirectX::XMFLOAT3{
+					canonical.n0.x * (1.0f - t) + canonical.n1.x * t,
+					canonical.n0.y * (1.0f - t) + canonical.n1.y * t,
+					canonical.n0.z * (1.0f - t) + canonical.n1.z * t
+				});
+				const float density = result.objectAtlasSourceMaterials[canonical.materialIndex].objectSurfaceTexelDensity;
+				const float sample = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[canonical.materialIndex], position, normal, density), 0.0f, 1.0f);
+				const std::uint16_t value = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
+				for (const ObjectAtlasEdgeSample& edgeSample : samples) {
+					const bool sameDirection = MakeObjectAtlasPositionKey(edgeSample.p0) == canonicalStart;
+					const float edgeT = sameDirection ? t : (1.0f - t);
+					const float u = edgeSample.uv0.x * (1.0f - edgeT) + edgeSample.uv1.x * edgeT;
+					const float v = edgeSample.uv0.y * (1.0f - edgeT) + edgeSample.uv1.y * edgeT;
+					StampObjectReyesAtlasHeightPixel(pixels, coverage, width, height, u, v, value);
+				}
+			}
+		}
+
+		for (int pass = 0; pass < 4; ++pass) {
+			std::vector<std::uint16_t> nextPixels = pixels;
+			std::vector<std::uint8_t> nextCoverage = coverage;
+			for (std::uint32_t y = 0; y < height; ++y) {
+				for (std::uint32_t x = 0; x < width; ++x) {
+					const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + x;
+					if (coverage[pixelIndex]) {
+						continue;
+					}
+					std::uint32_t sum = 0u;
+					std::uint32_t count = 0u;
+					for (int oy = -1; oy <= 1; ++oy) {
+						for (int ox = -1; ox <= 1; ++ox) {
+							const int nx = static_cast<int>(x) + ox;
+							const int ny = static_cast<int>(y) + oy;
+							if (nx < 0 || ny < 0 || nx >= static_cast<int>(width) || ny >= static_cast<int>(height)) {
+								continue;
+							}
+							const std::size_t neighbor = static_cast<std::size_t>(ny) * width + static_cast<std::size_t>(nx);
+							if (!coverage[neighbor]) {
+								continue;
+							}
+							sum += pixels[neighbor];
+							++count;
+						}
+					}
+					if (count > 0u) {
+						nextPixels[pixelIndex] = static_cast<std::uint16_t>(sum / count);
+						nextCoverage[pixelIndex] = 1u;
+					}
+				}
+			}
+			pixels.swap(nextPixels);
+			coverage.swap(nextCoverage);
+		}
+
+		std::vector<std::vector<std::uint16_t>> mipPixels;
+		mipPixels.reserve(ObjectReyesAtlasMipCount(width, height));
+		mipPixels.push_back(std::move(pixels));
+		std::uint32_t mipWidth = width;
+		std::uint32_t mipHeight = height;
+		while (mipWidth > 1u || mipHeight > 1u) {
+			mipPixels.push_back(BuildObjectReyesAtlasMip(mipPixels.back(), mipWidth, mipHeight));
+			mipWidth = std::max(1u, mipWidth >> 1u);
+			mipHeight = std::max(1u, mipHeight >> 1u);
+		}
+
+		if (!WriteObjectReyesAtlasHeightDds(cachePath, width, height, mipPixels)) {
+			spdlog::warn("Object Reyes atlas height preprocess bake failed under '{}': could not write '{}'.", parentPath, cachePath.string());
+			return false;
+		}
+		result.objectAtlasBakedHeightSourcePath = std::filesystem::weakly_canonical(cachePath, ec).string();
+		if (ec) {
+			result.objectAtlasBakedHeightSourcePath = cachePath.string();
+		}
+		spdlog::info(
+			"Object Reyes atlas height preprocess baked '{}' for '{}' size={}x{} mips={} sourceMaterials={}.",
+			result.objectAtlasBakedHeightSourcePath,
+			parentPath,
+			width,
+			height,
+			mipPixels.size(),
+			result.objectAtlasSourceMaterials.size());
+		return true;
+	}
+
 	void RecomputeExactPositionWeldedNormals(
 		std::vector<std::byte>& vertices,
 		unsigned int vertexSize,
@@ -3017,11 +3608,186 @@ namespace USDLoader {
 			first.forceDoubleSidedPreview,
 			std::move(first.prototypeGeometry));
 		result.geometricDisplacementOptIn = first.geometricDisplacementOptIn;
-		result.geometricHeightRemapRequired = first.geometricHeightRemapRequired;
-		result.geometricHeightRemapSucceeded = first.geometricHeightRemapSucceeded;
-		result.geometricHeightRemapUvSetIndex = first.geometricHeightRemapUvSetIndex;
+		result.objectBlendWeightUvSetIndex = first.objectBlendWeightUvSetIndex;
 		result.objectSurfaceSamplingMode = first.objectSurfaceSamplingMode;
 		result.objectSurfaceTexelDensity = first.objectSurfaceTexelDensity;
+		return result;
+	}
+
+	std::optional<MeshPreprocessResult> TryBuildObjectReyesAtlasBakedParentGroup(
+		const std::vector<std::size_t>& group,
+		const std::vector<MeshPreprocessWorkItem>& workItems,
+		std::vector<std::optional<MeshPreprocessResult>>& preprocessed)
+	{
+		if (group.empty()) {
+			return std::nullopt;
+		}
+
+		MeshPreprocessResult& first = preprocessed[group.front()].value();
+		const unsigned int vertexSize = first.ingest.GetVertexSize();
+		const unsigned int skinningVertexSize = first.ingest.GetSkinningVertexSize();
+		const unsigned int vertexFlags = first.ingest.GetFlags();
+		if (skinningVertexSize != 0u) {
+			spdlog::warn("Object Reyes atlas bake skipped: skinned meshes are not supported.");
+			return std::nullopt;
+		}
+
+		std::vector<br::import::ObjectReyesAtlasSourceMesh> sources;
+		sources.reserve(group.size());
+		float texelsPerUnitSum = 0.0f;
+		std::uint32_t texelsPerUnitCount = 0u;
+		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
+			const std::size_t index = group[groupEntry];
+			const MeshPreprocessWorkItem& item = workItems[index];
+			if (!preprocessed[index] ||
+				!item.subsets.empty() ||
+				item.skinQ ||
+				item.extractOptions.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+				return std::nullopt;
+			}
+			const MeshPreprocessResult& result = preprocessed[index].value();
+			if (result.ingest.GetVertexSize() != vertexSize ||
+				result.ingest.GetSkinningVertexSize() != skinningVertexSize ||
+				result.ingest.GetFlags() != vertexFlags) {
+				spdlog::warn(
+					"Object Reyes atlas bake skipped under '{}': incompatible sibling vertex layout.",
+					ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
+				return std::nullopt;
+			}
+			if (std::isfinite(result.objectSurfaceTexelDensity) && result.objectSurfaceTexelDensity > 0.0f) {
+				texelsPerUnitSum += result.objectSurfaceTexelDensity;
+				++texelsPerUnitCount;
+			}
+			sources.push_back(br::import::ObjectReyesAtlasSourceMesh{
+				.vertices = std::addressof(result.ingest.GetVertices()),
+				.indices = std::addressof(result.ingest.GetIndices()),
+				.uvSets = std::addressof(result.ingest.GetUvSets()),
+				.vertexSize = vertexSize,
+				.vertexFlags = vertexFlags,
+				.materialIndex = static_cast<std::uint32_t>(groupEntry),
+			});
+		}
+
+		br::import::ObjectReyesAtlasBakeOptions bakeOptions{};
+		bakeOptions.texelsPerUnit = texelsPerUnitCount > 0u
+			? texelsPerUnitSum / static_cast<float>(texelsPerUnitCount)
+			: 1.0f;
+		bakeOptions.maxAtlasSize = 2048u;
+		bakeOptions.paddingTexels = 8u;
+
+		const std::string parentPath = ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString());
+		br::import::ObjectReyesAtlasBakeResult atlasResult =
+			br::import::BuildObjectReyesAtlasBakedHeightMesh(sources, bakeOptions, parentPath);
+		if (!atlasResult.success) {
+			spdlog::warn(
+				"Object Reyes atlas bake failed under '{}': {}.",
+				parentPath,
+				atlasResult.error.empty() ? std::string("<unknown>") : atlasResult.error);
+			return std::nullopt;
+		}
+
+		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+		builderSettings.doubleSidedVoxelSourceNormals = false;
+		for (std::size_t index : group) {
+			const MeshPreprocessWorkItem& item = workItems[index];
+			builderSettings.doubleSidedVoxelSourceNormals =
+				builderSettings.doubleSidedVoxelSourceNormals || item.authoredDoubleSided || item.inferredDoubleSided;
+		}
+
+		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, builderSettings);
+		ingest.SetUvSets(std::move(atlasResult.uvSets));
+		const std::size_t vertexCount = atlasResult.vertices.size() / static_cast<std::size_t>(vertexSize);
+		ingest.ReserveVertices(vertexCount);
+		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+			ingest.AppendVertexBytes(
+				atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize),
+				vertexSize);
+		}
+		ingest.ReserveIndices(atlasResult.indices.size());
+		ingest.AppendIndices(atlasResult.indices.data(), atlasResult.indices.size());
+
+		CLodCacheLoader::MeshCacheIdentity identity = first.cacheIdentity;
+		identity.subsetName = "object-reyes-atlas-baked-height";
+		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=2";
+		identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
+		identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
+		identity.sourceIdentifier += "#object_reyes_atlas_size=" +
+			std::to_string(atlasResult.atlasWidth) + "x" + std::to_string(atlasResult.atlasHeight);
+		for (std::size_t index : group) {
+			identity.sourceIdentifier += "#atlas_source_mesh=" + workItems[index].mesh.GetPrim().GetPath().GetString();
+		}
+
+		spdlog::info(
+			"Object Reyes atlas-baked height preprocessing combined {} sibling mesh prim(s) under '{}' into one atlas mesh ({}x{}, uvSet={}, density={}).",
+			group.size(),
+			parentPath,
+			atlasResult.atlasWidth,
+			atlasResult.atlasHeight,
+			atlasResult.atlasUvSetIndex,
+			atlasResult.texelsPerUnit);
+		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+		ClusterLODPrebuiltData savedPrebuiltData;
+		std::optional<ClusterLODPrebuiltData> prebuiltData;
+		if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {
+			prebuiltData = std::move(savedPrebuiltData);
+		}
+		else {
+			spdlog::warn("Object Reyes atlas-baked combined CLod cache save failed; using in-memory combined artifacts.");
+			prebuiltData = std::move(artifacts.prebuiltData);
+		}
+
+		MeshPreprocessResult result(
+			std::move(ingest),
+			std::move(identity),
+			std::move(prebuiltData),
+			first.forceDoubleSidedPreview,
+			std::move(first.prototypeGeometry));
+		result.geometricDisplacementOptIn = true;
+		result.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
+		result.objectSurfaceTexelDensity = atlasResult.texelsPerUnit;
+		result.objectAtlasBakedHeight = true;
+		result.objectAtlasHeightUvSetIndex = atlasResult.atlasUvSetIndex;
+		result.objectAtlasWidth = atlasResult.atlasWidth;
+		result.objectAtlasHeight = atlasResult.atlasHeight;
+		result.objectAtlasTriangleMaterialIndices = std::move(atlasResult.triangleMaterialIndices);
+		result.objectAtlasSourceMaterialNames.reserve(group.size());
+		result.objectAtlasSourceMaterials.reserve(group.size());
+		for (std::size_t index : group) {
+			const MeshPreprocessWorkItem& item = workItems[index];
+			result.objectAtlasSourceMaterialNames.push_back(item.mesh.GetPrim().GetName().GetString());
+			MaterialDescription sourceDesc{};
+			if (item.material) {
+				const std::string materialPath = item.material.GetPrim().GetPath().GetString();
+				if (const auto templateIt = loadingCache.materialTemplateCache.find(materialPath);
+					templateIt != loadingCache.materialTemplateCache.end()) {
+					sourceDesc = templateIt->second.desc;
+				}
+				ApplyBrniflyMaterialMetadata(sourceDesc, item.material.GetPrim());
+			}
+			if (item.mesh) {
+				ApplyBrniflyMaterialMetadata(sourceDesc, item.mesh.GetPrim());
+				sourceDesc.staticTextureOverrideSourceName = item.mesh.GetPrim().GetName().GetString();
+			}
+			sourceDesc.geometricDisplacementOptIn = true;
+			sourceDesc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
+			if (index < preprocessed.size() && preprocessed[index]) {
+				sourceDesc.objectSurfaceTexelDensity = preprocessed[index]->objectSurfaceTexelDensity;
+			}
+			result.objectAtlasSourceMaterials.push_back(std::move(sourceDesc));
+		}
+		if (!BakeObjectReyesAtlasHeightTextureForPreprocess(result, parentPath, result.cacheIdentity.sourceIdentifier)) {
+			return std::nullopt;
+		}
+		for (MaterialDescription& sourceDesc : result.objectAtlasSourceMaterials) {
+			sourceDesc.heightMap.texture.reset();
+			sourceDesc.heightMap.sourcePath = result.objectAtlasBakedHeightSourcePath;
+			sourceDesc.heightMap.channels = { 0u };
+			sourceDesc.heightMap.uvSetIndex = result.objectAtlasHeightUvSetIndex;
+			sourceDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
+			sourceDesc.heightMapFromBaseColorAlpha = false;
+			sourceDesc.geometricDisplacementOptIn = true;
+			sourceDesc.enableGeometricDisplacement = true;
+		}
 		return result;
 	}
 
@@ -3660,7 +4426,45 @@ namespace USDLoader {
 		if (recomputeWeldedNormals) {
 			RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
 		}
+		br::import::RenderablePrototypeGeometry prototypeGeometry;
+		prototypeGeometry.vertexFlags = vertexFlags;
+		prototypeGeometry.indices.assign(indices.begin(), indices.end());
 		const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
+		if (vertexSize != 0u) {
+			prototypeGeometry.vertices.reserve(vertexCount);
+			const bool hasNormals =
+				(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+				vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+			const bool hasTexcoords =
+				(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
+				vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(DirectX::XMFLOAT2);
+			const bool hasTangents =
+				(vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u &&
+				vertexSize >= MeshVertexLayout::TangentOffset(vertexFlags) + sizeof(DirectX::XMFLOAT4);
+			const bool hasColors =
+				(vertexFlags & VertexFlags::VERTEX_COLORS) != 0u &&
+				vertexSize >= MeshVertexLayout::ColorOffset(vertexFlags) + sizeof(DirectX::XMFLOAT3);
+			for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+				const std::byte* vertexBytes = vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+				br::import::RenderablePrototypeVertex vertex{};
+				std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
+				if (hasNormals) {
+					std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
+				}
+				if (hasTexcoords) {
+					std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
+				}
+				if (hasTangents) {
+					std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
+				}
+				if (hasColors) {
+					DirectX::XMFLOAT3 color{};
+					std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
+					vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
+				}
+				prototypeGeometry.vertices.push_back(vertex);
+			}
+		}
 		const bool hasEmbeddedTexcoords =
 			(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
 			vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(float) * 2u;
@@ -3714,11 +4518,16 @@ namespace USDLoader {
 			spdlog::warn("Object Reyes boundary blend CLod cache save failed; using in-memory generated artifacts.");
 			prebuiltData = std::move(artifacts.prebuiltData);
 		}
-		MeshPreprocessResult result(std::move(ingest), std::move(identity), std::move(prebuiltData));
+		MeshPreprocessResult result(
+			std::move(ingest),
+			std::move(identity),
+			std::move(prebuiltData),
+			false,
+			std::move(prototypeGeometry));
 		result.geometricDisplacementOptIn = geometricOptIn;
 		result.objectSurfaceSamplingMode = samplingMode;
 		result.objectSurfaceTexelDensity = texelDensity;
-		result.geometricHeightRemapUvSetIndex = blendWeightUvSetIndex;
+		result.objectBlendWeightUvSetIndex = blendWeightUvSetIndex;
 		return result;
 	}
 
@@ -3774,15 +4583,29 @@ namespace USDLoader {
 
 		for (const MeshRef& mesh : meshes) {
 			const auto& vertices = *mesh.vertices;
+			const auto& indices = *mesh.indices;
 			const auto& vertexToWeld = meshVertexToWeld[mesh.vertexToWeldIndex];
 			const std::size_t vertexCount = vertices.size() / static_cast<std::size_t>(vertexSize);
-			for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
-				DirectX::XMFLOAT3 n{};
-				std::memcpy(
-					std::addressof(n),
-					vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize) + MeshVertexLayout::NormalOffset,
-					sizeof(n));
-				AddNormal(weldedNormals[vertexToWeld[vertexIndex]], NormalizeOrFallback(n));
+			for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+				const std::uint32_t i0 = indices[i + 0u];
+				const std::uint32_t i1 = indices[i + 1u];
+				const std::uint32_t i2 = indices[i + 2u];
+				if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+					continue;
+				}
+				const DirectX::XMFLOAT3 p0 = ReadPosition(vertices, vertexSize, i0);
+				const DirectX::XMFLOAT3 p1 = ReadPosition(vertices, vertexSize, i1);
+				const DirectX::XMFLOAT3 p2 = ReadPosition(vertices, vertexSize, i2);
+				const DirectX::XMFLOAT3 e1{ p1.x - p0.x, p1.y - p0.y, p1.z - p0.z };
+				const DirectX::XMFLOAT3 e2{ p2.x - p0.x, p2.y - p0.y, p2.z - p0.z };
+				const DirectX::XMFLOAT3 n{
+					e1.y * e2.z - e1.z * e2.y,
+					e1.z * e2.x - e1.x * e2.z,
+					e1.x * e2.y - e1.y * e2.x
+				};
+				AddNormal(weldedNormals[vertexToWeld[i0]], n);
+				AddNormal(weldedNormals[vertexToWeld[i1]], n);
+				AddNormal(weldedNormals[vertexToWeld[i2]], n);
 			}
 		}
 
@@ -4220,6 +5043,8 @@ namespace USDLoader {
 				workItems[strip.material0Work].inferredDoubleSided || workItems[strip.material1Work].inferredDoubleSided,
 				workItems[strip.material0Work].mesh.GetPrim().GetName().GetString(),
 				workItems[strip.material1Work].mesh.GetPrim().GetName().GetString(),
+				preprocessed[strip.material0Work]->objectSurfaceTexelDensity,
+				preprocessed[strip.material1Work]->objectSurfaceTexelDensity,
 				preprocessed[strip.material0Work]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic &&
 					preprocessed[strip.material0Work]->geometricDisplacementOptIn,
 				preprocessed[strip.material1Work]->objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic &&
@@ -4335,10 +5160,6 @@ namespace USDLoader {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
 					ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
-					if (extractOptions.materialUvRemapRequired && skinQ) {
-						extractOptions.materialUvRemapKnownFailure = true;
-						extractOptions.materialUvRemapReason += "; skinned meshes are not supported by v1 remapping";
-					}
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
 							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -4373,10 +5194,6 @@ namespace USDLoader {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
-						if (extractOptions.materialUvRemapRequired && skinQ) {
-							extractOptions.materialUvRemapKnownFailure = true;
-							extractOptions.materialUvRemapReason += "; skinned meshes are not supported by v1 remapping";
-						}
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
 								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -4458,8 +5275,58 @@ namespace USDLoader {
 		{
 			ZoneScopedN("USDLoader::PreprocessAllMeshes::PublishPreprocessedResults");
 			std::vector<bool> consumed(workItems.size(), false);
+			std::unordered_map<std::string, std::vector<std::size_t>> atlasBakeGroups;
+			for (std::size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+				if (!preprocessed[workIndex].has_value()) {
+					throw std::runtime_error("Missing preprocessed USD mesh data");
+				}
+				const MeshPreprocessWorkItem& workItem = workItems[workIndex];
+				if (!workItem.subsets.empty() ||
+					workItem.skinQ ||
+					workItem.extractOptions.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+					continue;
+				}
+				const std::string parentPath = ParentPrimPath(workItem.mesh.GetPrim().GetPath().GetString());
+				atlasBakeGroups[parentPath].push_back(workIndex);
+			}
+			for (const auto& [parentPath, group] : atlasBakeGroups) {
+				if (group.empty()) {
+					continue;
+				}
+				auto combined = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed);
+				if (!combined) {
+					spdlog::warn(
+						"Object Reyes atlas-baked height failed under '{}'; disabling Object Reyes geometric displacement for that parent.",
+						parentPath);
+					DisableObjectReyesForGroup(group, preprocessed);
+					continue;
+				}
+
+				const std::size_t ownerIndex = group.front();
+				const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
+				auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
+				ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
+				ownerRecord.subsets.emplace_back(
+					ownerItem.material,
+					std::move(*combined),
+					ownerItem.inferredDoubleSided,
+					ownerItem.mesh.GetPrim().GetName().GetString());
+				consumed[ownerIndex] = true;
+
+				for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
+					const std::size_t index = group[groupEntry];
+					const MeshPreprocessWorkItem& item = workItems[index];
+					auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
+					emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
+					consumed[index] = true;
+				}
+			}
+
 			std::unordered_map<std::string, std::vector<std::size_t>> meshCombineGroups;
 			for (std::size_t workIndex = 0; workIndex < workItems.size(); ++workIndex) {
+				if (consumed[workIndex]) {
+					continue;
+				}
 				if (!preprocessed[workIndex].has_value()) {
 					throw std::runtime_error("Missing preprocessed USD mesh data");
 				}
@@ -4638,6 +5505,8 @@ namespace USDLoader {
 						subset.blendMaterial1ObjectReyes,
 						subset.blendMaterial0StaticTextureOverrideSourceName,
 						subset.blendMaterial1StaticTextureOverrideSourceName,
+						subset.blendMaterial0ObjectSurfaceTexelDensity,
+						subset.blendMaterial1ObjectSurfaceTexelDensity,
 						std::addressof(result));
 				}
 				else {
@@ -4656,7 +5525,11 @@ namespace USDLoader {
 			std::shared_ptr<Mesh> mPtr;
 			{
 				ZoneScopedN("USDLoader::ProcessMesh::Subset::BuildMeshFromIngest");
+				auto atlasBakeData = BuildObjectReyesAtlasBakeDataForMesh(result);
 				mPtr = result.ingest.Build(material, std::move(result.prebuiltData), MeshCpuDataPolicy::ReleaseAfterUpload);
+				if (mPtr && atlasBakeData) {
+					mPtr->SetObjectReyesAtlasBakeData(std::move(atlasBakeData));
+				}
 			}
 			if (mPtr != nullptr) {
 				{

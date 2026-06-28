@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "16";
+constexpr std::string_view kObjectReyesConfigVersion = "19";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -162,10 +162,6 @@ struct ObjectReyesConfig
     bool surfaceSamplingIncludeSelected = false;
     bool boundaryBlendingEnabled = false;
     float boundaryBlendStripWidthObjectUnits = 8.0f;
-    std::unordered_set<std::string> uvRemapNifPaths;
-    std::unordered_set<std::string> uvRemapTexturePaths;
-    bool uvRemapEnabled = true;
-    bool uvRemapIncludeSelected = true;
     std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
     bool loaded = false;
 };
@@ -293,18 +289,10 @@ ObjectReyesConfig LoadObjectReyesConfig()
                 }
             }
         }
-        if (const auto uvRemap = doc.find("uvRemap"); uvRemap != doc.end() && uvRemap->is_object()) {
-            config.uvRemapEnabled = uvRemap->value("enabled", config.uvRemapEnabled);
-            config.uvRemapIncludeSelected = uvRemap->value("includeSelected", config.uvRemapIncludeSelected);
-            if (const auto nifPaths = uvRemap->find("nifPaths"); nifPaths != uvRemap->end()) {
-                readNifPathArray(*nifPaths, config.uvRemapNifPaths);
-            }
-            readTexturePathArray(uvRemap->value("texturePaths", json::array()), config.uvRemapTexturePaths);
-        }
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), boundaryBlending enabled={}, stripWidthObjectUnits={}, uvRemap enabled={}, includeSelected={}, {} remap nif path(s), {} remap texture path(s), hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), boundaryBlending enabled={}, stripWidthObjectUnits={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
@@ -314,10 +302,6 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.surfaceSamplingTexturePaths.size(),
             config.boundaryBlendingEnabled,
             config.boundaryBlendStripWidthObjectUnits,
-            config.uvRemapEnabled,
-            config.uvRemapIncludeSelected,
-            config.uvRemapNifPaths.size(),
-            config.uvRemapTexturePaths.size(),
             config.contentHash);
     }
     catch (const std::exception& e) {
@@ -335,10 +319,8 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
     const std::string normalizedSlashKey = NormalizeObjectReyesNifWhitelistPath(normalizedNifCacheKey);
     return config.nifPaths.contains(normalizedSlashKey) ||
         config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
-        config.uvRemapNifPaths.contains(normalizedSlashKey) ||
         !config.texturePaths.empty() ||
-        !config.surfaceSamplingTexturePaths.empty() ||
-        !config.uvRemapTexturePaths.empty();
+        !config.surfaceSamplingTexturePaths.empty();
 }
 
 std::string SanitizeFileStem(std::string_view value)
@@ -448,7 +430,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 28u;
+constexpr std::uint32_t kPayloadCacheVersion = 34u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -560,8 +542,6 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.brniflyDynamicDecal);
     HashPod(hash, desc.brniflyModelSpaceNormals);
     HashPod(hash, desc.heightMapFromBaseColorAlpha);
-    HashPod(hash, desc.geometricHeightRemapRequired);
-    HashPod(hash, desc.geometricHeightRemapSucceeded);
     HashPod(hash, desc.objectSurfaceSamplingMode);
     HashPod(hash, desc.objectSurfaceTexelDensity);
     HashPod(hash, desc.objectTriplanarBlendMaterial);
@@ -762,27 +742,28 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.surfaceSamplingTexturePaths.begin(),
         objectReyesConfig.surfaceSamplingTexturePaths.end());
     std::sort(options.objectReyesSurfaceSamplingTexturePaths.begin(), options.objectReyesSurfaceSamplingTexturePaths.end());
-    options.objectReyesUvRemapTexturePaths.assign(
-        objectReyesConfig.uvRemapTexturePaths.begin(),
-        objectReyesConfig.uvRemapTexturePaths.end());
-    std::sort(options.objectReyesUvRemapTexturePaths.begin(), options.objectReyesUvRemapTexturePaths.end());
     options.objectReyesNifMatched =
         objectReyesConfig.loaded &&
         objectReyesConfig.nifPaths.contains(options.objectReyesNifPath);
     options.objectReyesSurfaceSamplingEnabled =
         objectReyesConfig.loaded &&
-        objectReyesConfig.surfaceSamplingMode == "triplanarStochastic";
+        (objectReyesConfig.surfaceSamplingMode == "triplanarStochastic" ||
+         objectReyesConfig.surfaceSamplingMode == "atlasBakedHeight");
+    if (objectReyesConfig.surfaceSamplingMode == "atlasBakedHeight") {
+        options.objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
+    }
+    else if (objectReyesConfig.surfaceSamplingMode == "triplanarStochastic") {
+        options.objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+    }
+    else {
+        options.objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+    }
     options.objectReyesSurfaceSamplingIncludeSelected = objectReyesConfig.surfaceSamplingIncludeSelected;
     options.objectReyesSurfaceSamplingNifMatched =
         options.objectReyesSurfaceSamplingEnabled &&
         objectReyesConfig.surfaceSamplingNifPaths.contains(options.objectReyesNifPath);
     options.objectReyesBoundaryBlendingEnabled = objectReyesConfig.boundaryBlendingEnabled;
     options.objectReyesBoundaryBlendStripWidthObjectUnits = objectReyesConfig.boundaryBlendStripWidthObjectUnits;
-    options.objectReyesUvRemapEnabled = objectReyesConfig.uvRemapEnabled;
-    options.objectReyesUvRemapIncludeSelected = objectReyesConfig.uvRemapIncludeSelected;
-    options.objectReyesUvRemapNifMatched =
-        objectReyesConfig.loaded &&
-        objectReyesConfig.uvRemapNifPaths.contains(options.objectReyesNifPath);
     options.isUsdPackage = false;
     return options;
 }
@@ -1307,8 +1288,6 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.brniflyDynamicDecal);
     writer.Pod(desc.brniflyModelSpaceNormals);
     writer.Pod(desc.heightMapFromBaseColorAlpha);
-    writer.Pod(desc.geometricHeightRemapRequired);
-    writer.Pod(desc.geometricHeightRemapSucceeded);
     writer.Pod(static_cast<std::uint32_t>(desc.objectSurfaceSamplingMode));
     writer.Pod(desc.objectSurfaceTexelDensity);
     writer.Pod(desc.objectTriplanarBlendMaterial);
@@ -1363,8 +1342,6 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.brniflyDynamicDecal) ||
         !reader.Pod(desc.brniflyModelSpaceNormals) ||
         !reader.Pod(desc.heightMapFromBaseColorAlpha) ||
-        !reader.Pod(desc.geometricHeightRemapRequired) ||
-        !reader.Pod(desc.geometricHeightRemapSucceeded) ||
         !reader.Pod(objectSurfaceSamplingMode) ||
         !reader.Pod(desc.objectSurfaceTexelDensity) ||
         !reader.Pod(desc.objectTriplanarBlendMaterial) ||
@@ -1393,6 +1370,109 @@ bool ReadMaterialDescription(
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzColor, TextureSemantic::OpenPBRColor, true, textureSearchRoots, loadMaterialTextures) &&
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzWeight, TextureSemantic::OpenPBRScalar, false, textureSearchRoots, loadMaterialTextures) &&
         ReadTextureBinding(reader, desc.openPBRTextures.fuzzRoughness, TextureSemantic::Roughness, false, textureSearchRoots, loadMaterialTextures);
+}
+
+void WriteObjectReyesAtlasBakeData(
+    BinaryWriter& writer,
+    const std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData>& data)
+{
+    const std::uint8_t hasData = data ? 1u : 0u;
+    writer.Pod(hasData);
+    if (!data) {
+        return;
+    }
+
+    writer.Pod(data->atlasWidth);
+    writer.Pod(data->atlasHeight);
+    writer.Pod(data->atlasUvSetIndex);
+    writer.Pod(data->texelsPerUnit);
+    writer.PodVector(data->positions);
+    writer.PodVector(data->normals);
+    writer.PodVector(data->atlasUvs);
+    writer.PodVector(data->indices);
+    writer.PodVector(data->triangleMaterialIndices);
+    WriteStringVector(writer, data->sourceMaterialNames);
+
+    const std::uint64_t sourceMaterialCount = data->sourceMaterials.size();
+    writer.Pod(sourceMaterialCount);
+    for (const MaterialDescription& desc : data->sourceMaterials) {
+        WriteMaterialDescription(writer, desc);
+    }
+}
+
+bool ReadObjectReyesAtlasBakeData(
+    BinaryReader& reader,
+    std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData>& data,
+    const std::vector<std::string>& textureSearchRoots,
+    bool loadMaterialTextures)
+{
+    std::uint8_t hasData = 0u;
+    if (!reader.Pod(hasData)) {
+        return false;
+    }
+    if (hasData == 0u) {
+        data.reset();
+        return true;
+    }
+
+    auto mutableData = std::make_shared<Mesh::ObjectReyesAtlasBakeData>();
+    if (!reader.Pod(mutableData->atlasWidth) ||
+        !reader.Pod(mutableData->atlasHeight) ||
+        !reader.Pod(mutableData->atlasUvSetIndex) ||
+        !reader.Pod(mutableData->texelsPerUnit) ||
+        !reader.PodVector(mutableData->positions) ||
+        !reader.PodVector(mutableData->normals) ||
+        !reader.PodVector(mutableData->atlasUvs) ||
+        !reader.PodVector(mutableData->indices) ||
+        !reader.PodVector(mutableData->triangleMaterialIndices) ||
+        !ReadStringVector(reader, mutableData->sourceMaterialNames)) {
+        return false;
+    }
+
+    std::uint64_t sourceMaterialCount = 0;
+    if (!reader.Pod(sourceMaterialCount) || sourceMaterialCount > 1024u) {
+        return false;
+    }
+    mutableData->sourceMaterials.resize(static_cast<std::size_t>(sourceMaterialCount));
+    for (MaterialDescription& desc : mutableData->sourceMaterials) {
+        if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures)) {
+            return false;
+        }
+    }
+
+    const std::size_t vertexCount = mutableData->positions.size();
+    const std::size_t triangleCount = mutableData->indices.size() / 3u;
+    if (mutableData->atlasWidth == 0u ||
+        mutableData->atlasHeight == 0u ||
+        mutableData->atlasWidth > 16384u ||
+        mutableData->atlasHeight > 16384u ||
+        !std::isfinite(mutableData->texelsPerUnit) ||
+        mutableData->texelsPerUnit <= 0.0f ||
+        mutableData->normals.size() != vertexCount ||
+        mutableData->atlasUvs.size() != vertexCount ||
+        mutableData->indices.empty() ||
+        mutableData->indices.size() % 3u != 0u ||
+        mutableData->triangleMaterialIndices.size() != triangleCount ||
+        mutableData->sourceMaterialNames.size() != mutableData->sourceMaterials.size() ||
+        mutableData->sourceMaterials.empty()) {
+        return false;
+    }
+    if (vertexCount > 10000000u || mutableData->indices.size() > 30000000u) {
+        return false;
+    }
+    for (const std::uint32_t index : mutableData->indices) {
+        if (index >= vertexCount) {
+            return false;
+        }
+    }
+    for (const std::uint32_t materialIndex : mutableData->triangleMaterialIndices) {
+        if (materialIndex >= mutableData->sourceMaterials.size()) {
+            return false;
+        }
+    }
+
+    data = std::move(mutableData);
+    return true;
 }
 
 void WriteMaterialWithObjectBlendChildren(BinaryWriter& writer, const Material& material)
@@ -1555,6 +1635,7 @@ bool WritePayloadCache(
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
             writer.Pod(materialHash);
             WritePrebuilt(writer, mesh->GetClusterLODPrebuiltData());
+            WriteObjectReyesAtlasBakeData(writer, mesh->GetObjectReyesAtlasBakeData());
         }
         const auto& meshCB = mesh->GetPerMeshCBData();
         {
@@ -1658,12 +1739,14 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         std::optional<MaterialDescription> blendDesc0;
         std::optional<MaterialDescription> blendDesc1;
         ClusterLODPrebuiltData prebuilt{};
+        std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData> atlasBakeData;
         std::uint64_t materialHash = 0;
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
             if (!ReadMaterialWithObjectBlendChildren(reader, desc, blendDesc0, blendDesc1, textureSearchRoots, loadMaterialTextures) ||
                 !reader.Pod(materialHash) ||
-                !ReadPrebuilt(reader, prebuilt)) {
+                !ReadPrebuilt(reader, prebuilt) ||
+                !ReadObjectReyesAtlasBakeData(reader, atlasBakeData, textureSearchRoots, loadMaterialTextures)) {
                 return std::nullopt;
             }
         }
@@ -1702,6 +1785,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         if (!mesh) {
             return std::nullopt;
         }
+        mesh->SetObjectReyesAtlasBakeData(std::move(atlasBakeData));
         std::vector<std::string> jointNames;
         std::vector<std::uint32_t> jointSourceIndices;
         if (!ReadStringVector(reader, jointNames) || !reader.PodVector(jointSourceIndices)) {
@@ -2030,23 +2114,6 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     }
 
     result.submeshes = payload->meshes.size();
-    for (const auto& mesh : payload->meshes) {
-        const auto material = mesh ? mesh->material : nullptr;
-        if (!material) {
-            continue;
-        }
-        const MaterialDescription desc = material->ToCacheDescription();
-        if (!desc.geometricHeightRemapRequired) {
-            continue;
-        }
-        ++result.objectReyesUvRemapRequired;
-        if (desc.geometricHeightRemapSucceeded) {
-            ++result.objectReyesUvRemapSucceeded;
-        }
-        else {
-            ++result.objectReyesUvRemapFailed;
-        }
-    }
     result.success = true;
     return result;
 }

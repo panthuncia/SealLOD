@@ -14,6 +14,7 @@
 
 #include "Mesh/ClusterLODTypes.h"
 #include "Import/MeshData.h"
+#include "Materials/MaterialDescription.h"
 #include "ShaderBuffers.h"
 #include "Resources/Buffers/BufferView.h"
 #include "Managers/Singletons/DeletionManager.h"
@@ -25,6 +26,20 @@ class Buffer;
 class Mesh {
 public:
 	using SparseChunkViewTable = std::unordered_map<uint32_t, std::unique_ptr<BufferView>>;
+
+	struct ObjectReyesAtlasBakeData {
+		std::uint32_t atlasWidth = 0;
+		std::uint32_t atlasHeight = 0;
+		std::uint32_t atlasUvSetIndex = 0;
+		float texelsPerUnit = 1.0f;
+		std::vector<DirectX::XMFLOAT3> positions;
+		std::vector<DirectX::XMFLOAT3> normals;
+		std::vector<DirectX::XMFLOAT2> atlasUvs;
+		std::vector<std::uint32_t> indices;
+		std::vector<std::uint32_t> triangleMaterialIndices;
+		std::vector<std::string> sourceMaterialNames;
+		std::vector<MaterialDescription> sourceMaterials;
+	};
 
 	~Mesh()
 	{
@@ -197,6 +212,14 @@ public:
 		return m_uvSets;
 	}
 
+	void SetObjectReyesAtlasBakeData(std::shared_ptr<const ObjectReyesAtlasBakeData> data) {
+		m_objectReyesAtlasBakeData = std::move(data);
+	}
+
+	std::shared_ptr<const ObjectReyesAtlasBakeData> GetObjectReyesAtlasBakeData() const {
+		return m_objectReyesAtlasBakeData;
+	}
+
 	DirectX::XMFLOAT2 EstimateReyesUvDensity(uint32_t uvSetIndex) const;
 
 	ClusterLODPrebuiltData GetClusterLODPrebuiltData() const;
@@ -275,6 +298,7 @@ private:
 	unsigned int m_skinningVertexSize = 0;
 	DirectX::XMFLOAT2 m_reyesUvDensityBySet[8] = {};
 	std::vector<MeshUvSetData> m_uvSets;
+	std::shared_ptr<const ObjectReyesAtlasBakeData> m_objectReyesAtlasBakeData;
 	mutable std::vector<BoundingSphere> m_animationBoundingSpheres;
 	std::unique_ptr<BufferView> m_perMeshBufferView;
 	MeshManager* m_pCurrentMeshManager = nullptr;

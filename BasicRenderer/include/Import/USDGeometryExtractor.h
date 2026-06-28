@@ -36,12 +36,6 @@ struct ExtractOptions {
 	bool brniflyDynamicDecal = false;
 	bool brniflyModelSpaceNormals = false;
 	bool geometricDisplacementOptIn = false;
-	bool materialUvRemapRequired = false;
-	bool materialUvRemapKnownFailure = false;
-	std::uint32_t materialUvRemapSourceSetIndex = 0;
-	std::string materialUvRemapSourceSetName;
-	std::string materialUvRemapReason;
-	std::string materialUvRemapConfigHash;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 	std::string objectSurfaceSamplingConfigHash;
 };

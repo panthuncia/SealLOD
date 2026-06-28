@@ -633,7 +633,7 @@ bool BuildProcessedTextureCacheLayouts(
 	return true;
 }
 
-std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(const std::string& path, const std::string& reason = {}) {
+std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(const std::string& path, const std::string& reason) {
 	ZoneScopedN("TextureAsset::BuildSourceDataFromConditionedCacheFilePath");
 	ZoneText(path.data(), path.size());
 	if (!reason.empty()) {
@@ -997,7 +997,7 @@ std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	return placeholder;
 }
 
-std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::string& path, bool preferSRGB, const std::string& reason = {}) {
+std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::string& path, bool preferSRGB, const std::string& reason) {
 	ZoneScopedN("TextureAsset::BuildSourceDataFromDDSFilePath");
 	ZoneText(path.data(), path.size());
 	if (!reason.empty()) {
@@ -1606,6 +1606,31 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 
 	return handle;
 }
+}
+
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromConditionedCacheFilePath(
+	const std::string& path,
+	const std::string& reason)
+{
+	return BuildSourceDataFromConditionedCacheFilePath(path, reason);
+}
+
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromDDSFilePath(
+	const std::string& path,
+	bool preferSRGB,
+	const std::string& reason)
+{
+	return BuildSourceDataFromDDSFilePath(path, preferSRGB, reason);
+}
+
+std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
+	const std::string& path,
+	bool preferSRGB,
+	const std::string& reason)
+{
+	return IsConditionedCacheFilePath(path)
+		? BuildSourceDataFromConditionedCacheFilePath(path, reason)
+		: BuildSourceDataFromDDSFilePath(path, preferSRGB, reason);
 }
 
 uint32_t TextureAsset::NextStreamingTextureID() {

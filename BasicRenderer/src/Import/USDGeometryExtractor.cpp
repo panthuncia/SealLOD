@@ -33,7 +33,6 @@
 #include <spdlog/spdlog.h>
 
 #include "Import/CLodCacheLoader.h"
-#include "Import/MaterialUvRemapper.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/ClusterLODTypes.h"
 #include "Mesh/VertexLayout.h"
@@ -1657,16 +1656,6 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	if (options.brniflyModelSpaceNormals) {
 		cacheIdentity.sourceIdentifier += "#brnifly_model_space_normals=1";
 	}
-	const bool deferPrebuiltCacheLookup = options.materialUvRemapRequired;
-	if (options.materialUvRemapRequired) {
-		cacheIdentity.sourceIdentifier += "#material_uv_remap_required=1";
-		cacheIdentity.sourceIdentifier += "#material_uv_remap_version=3";
-		cacheIdentity.sourceIdentifier += "#material_uv_remap_config=" + options.materialUvRemapConfigHash;
-		cacheIdentity.sourceIdentifier += "#material_uv_remap_set=" +
-			(options.materialUvRemapSourceSetName.empty()
-				? std::to_string(options.materialUvRemapSourceSetIndex)
-				: options.materialUvRemapSourceSetName);
-	}
 	if (options.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
 		cacheIdentity.sourceIdentifier += "#object_surface_sampling=" +
 			std::to_string(static_cast<std::uint32_t>(options.objectSurfaceSamplingMode));
@@ -1682,9 +1671,7 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	g_benchmarkStats.submeshes.fetch_add(1, std::memory_order_relaxed);
 	const auto cacheLoadBegin = std::chrono::steady_clock::now();
 	std::optional<ClusterLODPrebuiltData> prebuiltData;
-	if (!deferPrebuiltCacheLookup) {
-		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
-	}
+	prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
 	AddMs(g_benchmarkStats.clodReloadMs, cacheLoadBegin);
 	if (prebuiltData.has_value()) {
 		g_benchmarkStats.clodCacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -1722,112 +1709,32 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	AddMs(g_benchmarkStats.loadGeomMs, loadGeomBegin);
 
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = options.objectSurfaceSamplingMode;
-	float objectSurfaceTexelDensity = 1.0f;
-	if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
-		objectSurfaceTexelDensity = rawData
-			? EstimateObjectSurfaceTexelDensity(*rawData, vertexSize, indices, uvSets)
-			: 1.0f;
-		if (!std::isfinite(objectSurfaceTexelDensity) || objectSurfaceTexelDensity <= 0.0f) {
-			objectSurfaceTexelDensity = 1.0f;
+	float objectSurfaceTexelDensity = rawData
+		? EstimateObjectSurfaceTexelDensity(*rawData, vertexSize, indices, uvSets)
+		: 1.0f;
+	if (!std::isfinite(objectSurfaceTexelDensity) || objectSurfaceTexelDensity <= 0.0f) {
+		objectSurfaceTexelDensity = 1.0f;
+		if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic ||
+			objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
 			spdlog::warn(
-				"Object Reyes tri-planar stochastic sampling for prim='{}' subset='{}' could not estimate texel density; using 1.0.",
+				"Object Reyes surface sampling for prim='{}' subset='{}' could not estimate texel density; using 1.0.",
 				cacheIdentity.primPath,
 				subsetName);
 		}
+	}
+	if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
 		spdlog::info(
 			"Object Reyes tri-planar stochastic sampling enabled for prim='{}' subset='{}' density={}.",
 			cacheIdentity.primPath,
 			subsetName,
 			objectSurfaceTexelDensity);
 	}
-
-	bool materialUvRemapRequired = options.materialUvRemapRequired;
-	bool materialUvRemapSucceeded = false;
-	std::uint32_t materialUvRemapUvSetIndex = options.materialUvRemapSourceSetIndex;
-	if (materialUvRemapRequired) {
-		if (options.materialUvRemapKnownFailure) {
-			spdlog::warn(
-				"Object Reyes UV remap skipped for prim='{}' subset='{}': {}.",
-				cacheIdentity.primPath,
-				subsetName,
-				options.materialUvRemapReason);
-		}
-		else {
-			bool sourceUvResolved = true;
-			if (!options.materialUvRemapSourceSetName.empty()) {
-				bool foundUvSet = false;
-				for (std::uint32_t uvSetIndex = 0; uvSetIndex < uvSets.size(); ++uvSetIndex) {
-					if (uvSets[uvSetIndex].name == options.materialUvRemapSourceSetName) {
-						materialUvRemapUvSetIndex = uvSetIndex;
-						foundUvSet = true;
-						break;
-					}
-				}
-				if (!foundUvSet) {
-					sourceUvResolved = false;
-					spdlog::warn(
-						"Object Reyes UV remap failed for prim='{}' subset='{}': missing source UV set '{}'.",
-						cacheIdentity.primPath,
-						subsetName,
-						options.materialUvRemapSourceSetName);
-				}
-			}
-
-			if (sourceUvResolved && materialUvRemapUvSetIndex < uvSets.size()) {
-				spdlog::info(
-					"Object Reyes UV remap attempting prim='{}' subset='{}' uvSet={} reason='{}'.",
-					cacheIdentity.primPath,
-					subsetName,
-					materialUvRemapUvSetIndex,
-					options.materialUvRemapReason);
-				auto remapResult = br::import::RemapMaterialUvSet(
-					*rawData,
-					vertexSize,
-					vertexFlags,
-					indices,
-					uvSets,
-					br::import::MaterialUvRemapRequest{
-						materialUvRemapUvSetIndex,
-						cacheIdentity.primPath + (subsetName.empty() ? std::string{} : ("/" + subsetName))
-					});
-				materialUvRemapSucceeded = remapResult.succeeded;
-				if (remapResult.succeeded) {
-					spdlog::info(
-						"Object Reyes UV remap succeeded for prim='{}' subset='{}': {} welded vertices, {} components, {} valid triangles.",
-						cacheIdentity.primPath,
-						subsetName,
-						remapResult.weldedVertexCount,
-						remapResult.componentCount,
-						remapResult.validTriangleCount);
-				}
-				else {
-					spdlog::warn(
-						"Object Reyes UV remap failed for prim='{}' subset='{}': {}.",
-						cacheIdentity.primPath,
-						subsetName,
-						remapResult.message);
-				}
-			}
-			else {
-				spdlog::warn(
-					"Object Reyes UV remap failed for prim='{}' subset='{}': UV set index {} is unavailable.",
-					cacheIdentity.primPath,
-					subsetName,
-					materialUvRemapUvSetIndex);
-			}
-		}
-
-		cacheIdentity.sourceIdentifier += std::string("#material_uv_remap_succeeded=") + (materialUvRemapSucceeded ? "1" : "0");
-		cacheIdentity.sourceIdentifier += "#material_uv_remap_uv_index=" + std::to_string(materialUvRemapUvSetIndex);
-		const auto deferredCacheLoadBegin = std::chrono::steady_clock::now();
-		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
-		AddMs(g_benchmarkStats.clodReloadMs, deferredCacheLoadBegin);
-		if (prebuiltData.has_value()) {
-			spdlog::debug("    Cache HIT for remapped prim='{}' subset='{}'", cacheIdentity.primPath, subsetName);
-		}
-		else {
-			spdlog::debug("    Cache MISS for remapped prim='{}' subset='{}' - will build", cacheIdentity.primPath, subsetName);
-		}
+	else if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+		spdlog::info(
+			"Object Reyes atlas-baked height sampling enabled for prim='{}' subset='{}' density={}.",
+			cacheIdentity.primPath,
+			subsetName,
+			objectSurfaceTexelDensity);
 	}
 
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;
@@ -1913,9 +1820,6 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		std::move(prebuiltData),
 		previewSubdiv || previewTopology,
 		std::move(prototypeGeometry));
-	result.geometricHeightRemapRequired = materialUvRemapRequired;
-	result.geometricHeightRemapSucceeded = materialUvRemapSucceeded;
-	result.geometricHeightRemapUvSetIndex = materialUvRemapUvSetIndex;
 	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
 	result.objectSurfaceSamplingMode = objectSurfaceSamplingMode;
 	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;

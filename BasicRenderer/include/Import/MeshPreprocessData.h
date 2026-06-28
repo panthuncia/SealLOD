@@ -7,6 +7,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "Import/CLodCacheLoader.h"
 #include "Import/RenderablePrototypeGeometry.h"
@@ -20,11 +21,17 @@ struct MeshPreprocessResult {
 	br::import::RenderablePrototypeGeometry prototypeGeometry;
 	bool forceDoubleSidedPreview = false;
 	bool geometricDisplacementOptIn = false;
-	bool geometricHeightRemapRequired = false;
-	bool geometricHeightRemapSucceeded = false;
-	std::uint32_t geometricHeightRemapUvSetIndex = 0;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 	float objectSurfaceTexelDensity = 1.0f;
+	std::uint32_t objectBlendWeightUvSetIndex = 0;
+	bool objectAtlasBakedHeight = false;
+	std::uint32_t objectAtlasHeightUvSetIndex = 0;
+	std::uint32_t objectAtlasWidth = 0;
+	std::uint32_t objectAtlasHeight = 0;
+	std::string objectAtlasBakedHeightSourcePath;
+	std::vector<std::uint32_t> objectAtlasTriangleMaterialIndices;
+	std::vector<std::string> objectAtlasSourceMaterialNames;
+	std::vector<MaterialDescription> objectAtlasSourceMaterials;
 
 	MeshPreprocessResult(
 		MeshIngestBuilder&& ingestData,
