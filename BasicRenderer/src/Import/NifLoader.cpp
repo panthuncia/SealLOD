@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "25";
+constexpr std::string_view kObjectReyesConfigVersion = "26";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -316,6 +316,18 @@ ObjectReyesConfig LoadObjectReyesConfig()
             }
             if (const auto bakedHeight = surfaceSampling->find("bakedHeight");
                 bakedHeight != surfaceSampling->end() && bakedHeight->is_object()) {
+                if (const auto nifPaths = bakedHeight->find("nifPaths"); nifPaths != bakedHeight->end() && nifPaths->is_array()) {
+                    std::unordered_set<std::string> bakedHeightNifPaths;
+                    readNifPathArray(*nifPaths, bakedHeightNifPaths);
+                    for (std::string nifPath : bakedHeightNifPaths) {
+                        if (!nifPath.empty()) {
+                            config.bakedHeightMaterials.push_back(ObjectReyesConfig::BakedHeightMaterialEntry{
+                                .nifPath = std::move(nifPath),
+                                .materialTexturePaths = {}
+                            });
+                        }
+                    }
+                }
                 if (const auto entries = bakedHeight->find("entries"); entries != bakedHeight->end() && entries->is_array()) {
                     for (const auto& entryNode : *entries) {
                         if (!entryNode.is_object()) {
@@ -330,7 +342,7 @@ ObjectReyesConfig LoadObjectReyesConfig()
                         readTexturePathArray(textureArray, uniqueTextures);
                         entry.materialTexturePaths.assign(uniqueTextures.begin(), uniqueTextures.end());
                         std::sort(entry.materialTexturePaths.begin(), entry.materialTexturePaths.end());
-                        if (!entry.nifPath.empty() && !entry.materialTexturePaths.empty()) {
+                        if (!entry.nifPath.empty()) {
                             config.bakedHeightMaterials.push_back(std::move(entry));
                         }
                     }
@@ -495,7 +507,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 36u;
+constexpr std::uint32_t kPayloadCacheVersion = 37u;
 
 struct AssetCacheIndex {
     std::mutex mutex;

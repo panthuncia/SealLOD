@@ -242,6 +242,11 @@ namespace USDLoader {
 		bool inferredDoubleSided = false;
 	};
 
+	struct ObjectReyesAtlasBakedSubsetResult {
+		std::size_t sourceWorkIndex = 0;
+		MeshPreprocessResult result;
+	};
+
 	struct LoadingCaches {
 		std::unordered_map<std::string, MaterialTemplateRecord> materialTemplateCache;
         std::unordered_map<std::string, std::shared_ptr<Material>> resolvedMaterialCache;
@@ -2896,6 +2901,9 @@ namespace USDLoader {
 		if (!result.objectAtlasBakedHeight) {
 			return nullptr;
 		}
+		if (result.objectAtlasSharedBakeData) {
+			return result.objectAtlasSharedBakeData;
+		}
 		const std::vector<std::byte>& vertices = result.ingest.GetVertices();
 		const std::vector<std::uint32_t>& indices = result.ingest.GetIndices();
 		const std::vector<MeshUvSetData>& uvSets = result.ingest.GetUvSets();
@@ -3533,9 +3541,9 @@ namespace USDLoader {
 		return paths;
 	}
 
-	bool ObjectReyesAtlasBakedMaterialCombinationAllowed(
+	bool ObjectReyesAtlasBakedMaterialCombinationAllowedForMaterials(
 		const InMemoryStageOptions& stageOptions,
-		const MeshPreprocessResult& result,
+		const std::vector<MaterialDescription>& sourceMaterials,
 		std::string_view parentPath)
 	{
 		if (stageOptions.objectReyesBakedHeightMaterials.empty()) {
@@ -3543,10 +3551,13 @@ namespace USDLoader {
 		}
 
 		const std::vector<std::string> materialTextureSet =
-			BuildObjectReyesAtlasMaterialTextureSet(result.objectAtlasSourceMaterials);
+			BuildObjectReyesAtlasMaterialTextureSet(sourceMaterials);
 		for (const auto& entry : stageOptions.objectReyesBakedHeightMaterials) {
 			if (entry.nifPath != stageOptions.objectReyesNifPath) {
 				continue;
+			}
+			if (entry.materialTexturePaths.empty()) {
+				return true;
 			}
 			if (entry.materialTexturePaths == materialTextureSet) {
 				return true;
@@ -3566,6 +3577,17 @@ namespace USDLoader {
 			stageOptions.objectReyesNifPath,
 			found);
 		return false;
+	}
+
+	bool ObjectReyesAtlasBakedMaterialCombinationAllowed(
+		const InMemoryStageOptions& stageOptions,
+		const MeshPreprocessResult& result,
+		std::string_view parentPath)
+	{
+		return ObjectReyesAtlasBakedMaterialCombinationAllowedForMaterials(
+			stageOptions,
+			result.objectAtlasSourceMaterials,
+			parentPath);
 	}
 
 	void RecomputeExactPositionWeldedNormals(
@@ -3739,7 +3761,7 @@ namespace USDLoader {
 		return result;
 	}
 
-	std::optional<MeshPreprocessResult> TryBuildObjectReyesAtlasBakedParentGroup(
+	std::optional<std::vector<ObjectReyesAtlasBakedSubsetResult>> TryBuildObjectReyesAtlasBakedParentGroup(
 		const std::vector<std::size_t>& group,
 		const std::vector<MeshPreprocessWorkItem>& workItems,
 		std::vector<std::optional<MeshPreprocessResult>>& preprocessed,
@@ -3816,47 +3838,7 @@ namespace USDLoader {
 			return std::nullopt;
 		}
 
-		br::import::RenderablePrototypeGeometry prototypeGeometry;
-		prototypeGeometry.vertexFlags = vertexFlags;
-		prototypeGeometry.indices.assign(atlasResult.indices.begin(), atlasResult.indices.end());
 		const std::size_t atlasVertexCount = atlasResult.vertices.size() / static_cast<std::size_t>(vertexSize);
-		if (vertexSize != 0u) {
-			prototypeGeometry.vertices.reserve(atlasVertexCount);
-			const bool hasNormals =
-				(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
-				vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
-			const bool hasTexcoords =
-				(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
-				vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(DirectX::XMFLOAT2);
-			const bool hasTangents =
-				(vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u &&
-				vertexSize >= MeshVertexLayout::TangentOffset(vertexFlags) + sizeof(DirectX::XMFLOAT4);
-			const bool hasColors =
-				(vertexFlags & VertexFlags::VERTEX_COLORS) != 0u &&
-				vertexSize >= MeshVertexLayout::ColorOffset(vertexFlags) + sizeof(DirectX::XMFLOAT3);
-			for (std::size_t vertexIndex = 0; vertexIndex < atlasVertexCount; ++vertexIndex) {
-				const std::byte* vertexBytes =
-					atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
-				br::import::RenderablePrototypeVertex vertex{};
-				std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
-				if (hasNormals) {
-					std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
-				}
-				if (hasTexcoords) {
-					std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
-				}
-				if (hasTangents) {
-					std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
-				}
-				if (hasColors) {
-					DirectX::XMFLOAT3 color{};
-					std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
-					vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
-				}
-				prototypeGeometry.vertices.push_back(vertex);
-			}
-		}
-
 		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
 		builderSettings.doubleSidedVoxelSourceNormals = false;
 		for (std::size_t index : group) {
@@ -3865,77 +3847,13 @@ namespace USDLoader {
 				builderSettings.doubleSidedVoxelSourceNormals || item.authoredDoubleSided || item.inferredDoubleSided;
 		}
 
-		MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, builderSettings);
-		ingest.SetUvSets(std::move(atlasResult.uvSets));
-		const std::size_t vertexCount = atlasResult.vertices.size() / static_cast<std::size_t>(vertexSize);
-		ingest.ReserveVertices(vertexCount);
-		for (std::size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
-			ingest.AppendVertexBytes(
-				atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize),
-				vertexSize);
-		}
-		ingest.ReserveIndices(atlasResult.indices.size());
-		ingest.AppendIndices(atlasResult.indices.data(), atlasResult.indices.size());
-
-		CLodCacheLoader::MeshCacheIdentity identity = first.cacheIdentity;
-		identity.subsetName = "object-reyes-atlas-baked-height";
-		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=8";
-		identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
-		identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
-		identity.sourceIdentifier += "#object_reyes_atlas_size=" +
-			std::to_string(atlasResult.atlasWidth) + "x" + std::to_string(atlasResult.atlasHeight);
-		identity.sourceIdentifier += "#object_reyes_atlas_requested_resolution=" + std::to_string(bakeOptions.resolution);
-		identity.sourceIdentifier += "#object_reyes_atlas_padding=" + std::to_string(bakeOptions.paddingTexels);
-		identity.sourceIdentifier += "#object_reyes_atlas_blend_width=" + std::to_string(stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits);
-		for (std::size_t index : group) {
-			identity.sourceIdentifier += "#atlas_source_mesh=" + workItems[index].mesh.GetPrim().GetPath().GetString();
-		}
-
-		spdlog::info(
-			"Object Reyes atlas-baked height preprocessing combined {} sibling mesh prim(s) under '{}' into one atlas mesh ({}x{}, uvSet={}, density={}).",
-			group.size(),
-			parentPath,
-			atlasResult.atlasWidth,
-			atlasResult.atlasHeight,
-			atlasResult.atlasUvSetIndex,
-			atlasResult.texelsPerUnit);
-		if (!atlasResult.diagnostics.empty()) {
-			spdlog::info(
-				"Object Reyes atlas-baked height diagnostics under '{}': {}.",
-				parentPath,
-				atlasResult.diagnostics);
-		}
-		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
-		ClusterLODPrebuiltData savedPrebuiltData;
-		std::optional<ClusterLODPrebuiltData> prebuiltData;
-		if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {
-			prebuiltData = std::move(savedPrebuiltData);
-		}
-		else {
-			spdlog::warn("Object Reyes atlas-baked combined CLod cache save failed; using in-memory combined artifacts.");
-			prebuiltData = std::move(artifacts.prebuiltData);
-		}
-
-		MeshPreprocessResult result(
-			std::move(ingest),
-			std::move(identity),
-			std::move(prebuiltData),
-			first.forceDoubleSidedPreview,
-			std::move(prototypeGeometry));
-		result.geometricDisplacementOptIn = true;
-		result.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
-		result.objectSurfaceTexelDensity = atlasResult.texelsPerUnit;
-		result.objectAtlasBakedHeight = true;
-		result.objectAtlasHeightUvSetIndex = atlasResult.atlasUvSetIndex;
-		result.objectAtlasWidth = atlasResult.atlasWidth;
-		result.objectAtlasHeight = atlasResult.atlasHeight;
-		result.objectAtlasBlendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
-		result.objectAtlasTriangleMaterialIndices = std::move(atlasResult.triangleMaterialIndices);
-		result.objectAtlasSourceMaterialNames.reserve(group.size());
-		result.objectAtlasSourceMaterials.reserve(group.size());
+		std::vector<std::string> sourceMaterialNames;
+		std::vector<MaterialDescription> sourceMaterials;
+		sourceMaterialNames.reserve(group.size());
+		sourceMaterials.reserve(group.size());
 		for (std::size_t index : group) {
 			const MeshPreprocessWorkItem& item = workItems[index];
-			result.objectAtlasSourceMaterialNames.push_back(item.mesh.GetPrim().GetName().GetString());
+			sourceMaterialNames.push_back(item.mesh.GetPrim().GetName().GetString());
 			MaterialDescription sourceDesc{};
 			if (item.material) {
 				const std::string materialPath = item.material.GetPrim().GetPath().GetString();
@@ -3954,12 +3872,210 @@ namespace USDLoader {
 			if (index < preprocessed.size() && preprocessed[index]) {
 				sourceDesc.objectSurfaceTexelDensity = preprocessed[index]->objectSurfaceTexelDensity;
 			}
-			result.objectAtlasSourceMaterials.push_back(std::move(sourceDesc));
+			sourceMaterials.push_back(std::move(sourceDesc));
 		}
-		if (!ObjectReyesAtlasBakedMaterialCombinationAllowed(stageOptions, result, parentPath)) {
+		if (!ObjectReyesAtlasBakedMaterialCombinationAllowedForMaterials(stageOptions, sourceMaterials, parentPath)) {
 			return std::nullopt;
 		}
-		return result;
+		if (atlasResult.atlasUvSetIndex >= atlasResult.uvSets.size() ||
+			atlasResult.uvSets[atlasResult.atlasUvSetIndex].values.size() != atlasVertexCount) {
+			spdlog::warn(
+				"Object Reyes atlas bake failed under '{}': generated atlas UV set {} is invalid for {} vertices.",
+				parentPath,
+				atlasResult.atlasUvSetIndex,
+				atlasVertexCount);
+			return std::nullopt;
+		}
+
+		auto sharedBakeData = std::make_shared<Mesh::ObjectReyesAtlasBakeData>();
+		sharedBakeData->atlasWidth = atlasResult.atlasWidth;
+		sharedBakeData->atlasHeight = atlasResult.atlasHeight;
+		sharedBakeData->atlasUvSetIndex = atlasResult.atlasUvSetIndex;
+		sharedBakeData->texelsPerUnit = atlasResult.texelsPerUnit;
+		sharedBakeData->blendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
+		sharedBakeData->atlasUvs = atlasResult.uvSets[atlasResult.atlasUvSetIndex].values;
+		sharedBakeData->indices = atlasResult.indices;
+		sharedBakeData->triangleMaterialIndices = atlasResult.triangleMaterialIndices;
+		sharedBakeData->sourceMaterialNames = sourceMaterialNames;
+		sharedBakeData->sourceMaterials = sourceMaterials;
+		sharedBakeData->positions.resize(atlasVertexCount);
+		sharedBakeData->normals.resize(atlasVertexCount, DirectX::XMFLOAT3{ 0.0f, 0.0f, 1.0f });
+		const bool hasSharedNormals =
+			(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+			vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+		for (std::size_t vertexIndex = 0; vertexIndex < atlasVertexCount; ++vertexIndex) {
+			const std::byte* vertexBytes =
+				atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+			std::memcpy(
+				std::addressof(sharedBakeData->positions[vertexIndex]),
+				vertexBytes + MeshVertexLayout::PositionOffset,
+				sizeof(DirectX::XMFLOAT3));
+			if (hasSharedNormals) {
+				std::memcpy(
+					std::addressof(sharedBakeData->normals[vertexIndex]),
+					vertexBytes + MeshVertexLayout::NormalOffset,
+					sizeof(DirectX::XMFLOAT3));
+			}
+		}
+
+		auto buildPrototypeGeometry = [&](const std::vector<std::uint32_t>& subsetIndices) {
+			br::import::RenderablePrototypeGeometry prototypeGeometry;
+			prototypeGeometry.vertexFlags = vertexFlags;
+			prototypeGeometry.indices.assign(subsetIndices.begin(), subsetIndices.end());
+			if (vertexSize != 0u) {
+				prototypeGeometry.vertices.reserve(atlasVertexCount);
+				const bool hasNormals =
+					(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+					vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+				const bool hasTexcoords =
+					(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
+					vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(DirectX::XMFLOAT2);
+				const bool hasTangents =
+					(vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u &&
+					vertexSize >= MeshVertexLayout::TangentOffset(vertexFlags) + sizeof(DirectX::XMFLOAT4);
+				const bool hasColors =
+					(vertexFlags & VertexFlags::VERTEX_COLORS) != 0u &&
+					vertexSize >= MeshVertexLayout::ColorOffset(vertexFlags) + sizeof(DirectX::XMFLOAT3);
+				for (std::size_t vertexIndex = 0; vertexIndex < atlasVertexCount; ++vertexIndex) {
+					const std::byte* vertexBytes =
+						atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+					br::import::RenderablePrototypeVertex vertex{};
+					std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
+					if (hasNormals) {
+						std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
+					}
+					if (hasTexcoords) {
+						std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
+					}
+					if (hasTangents) {
+						std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
+					}
+					if (hasColors) {
+						DirectX::XMFLOAT3 color{};
+						std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
+						vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
+					}
+					prototypeGeometry.vertices.push_back(vertex);
+				}
+			}
+			return prototypeGeometry;
+		};
+
+		spdlog::info(
+			"Object Reyes atlas-baked height preprocessing combined {} sibling mesh prim(s) under '{}' into one shared atlas ({}x{}, uvSet={}, density={}) and will emit {} material subset mesh(es).",
+			group.size(),
+			parentPath,
+			atlasResult.atlasWidth,
+			atlasResult.atlasHeight,
+			atlasResult.atlasUvSetIndex,
+			atlasResult.texelsPerUnit,
+			group.size());
+		if (!atlasResult.diagnostics.empty()) {
+			spdlog::info(
+				"Object Reyes atlas-baked height diagnostics under '{}': {}.",
+				parentPath,
+				atlasResult.diagnostics);
+		}
+
+		std::vector<std::vector<std::uint32_t>> indicesByMaterial(group.size());
+		const std::size_t triangleCount = atlasResult.indices.size() / 3u;
+		for (std::size_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex) {
+			const std::uint32_t materialIndex = triangleIndex < atlasResult.triangleMaterialIndices.size()
+				? atlasResult.triangleMaterialIndices[triangleIndex]
+				: 0u;
+			if (materialIndex >= indicesByMaterial.size()) {
+				spdlog::warn(
+					"Object Reyes atlas bake failed under '{}': generated triangle {} references invalid material index {}.",
+					parentPath,
+					triangleIndex,
+					materialIndex);
+				return std::nullopt;
+			}
+			std::vector<std::uint32_t>& subsetIndices = indicesByMaterial[materialIndex];
+			subsetIndices.push_back(atlasResult.indices[triangleIndex * 3u + 0u]);
+			subsetIndices.push_back(atlasResult.indices[triangleIndex * 3u + 1u]);
+			subsetIndices.push_back(atlasResult.indices[triangleIndex * 3u + 2u]);
+		}
+
+		std::vector<ObjectReyesAtlasBakedSubsetResult> subsetResults;
+		subsetResults.reserve(group.size());
+		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
+			std::vector<std::uint32_t>& subsetIndices = indicesByMaterial[groupEntry];
+			if (subsetIndices.empty()) {
+				spdlog::warn(
+					"Object Reyes atlas bake failed under '{}': source mesh '{}' produced no atlas triangles.",
+					parentPath,
+					workItems[group[groupEntry]].mesh.GetPrim().GetPath().GetString());
+				return std::nullopt;
+			}
+
+			MeshIngestBuilder ingest(vertexSize, 0u, vertexFlags, builderSettings);
+			ingest.SetUvSets(std::vector<MeshUvSetData>(atlasResult.uvSets));
+			ingest.ReserveVertices(atlasVertexCount);
+			for (std::size_t vertexIndex = 0; vertexIndex < atlasVertexCount; ++vertexIndex) {
+				ingest.AppendVertexBytes(
+					atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize),
+					vertexSize);
+			}
+			ingest.ReserveIndices(subsetIndices.size());
+			ingest.AppendIndices(subsetIndices.data(), subsetIndices.size());
+
+			const std::size_t workIndex = group[groupEntry];
+			const MeshPreprocessWorkItem& item = workItems[workIndex];
+			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
+			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=9";
+			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
+			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
+			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
+			identity.sourceIdentifier += "#object_reyes_atlas_size=" +
+				std::to_string(atlasResult.atlasWidth) + "x" + std::to_string(atlasResult.atlasHeight);
+			identity.sourceIdentifier += "#object_reyes_atlas_requested_resolution=" + std::to_string(bakeOptions.resolution);
+			identity.sourceIdentifier += "#object_reyes_atlas_padding=" + std::to_string(bakeOptions.paddingTexels);
+			identity.sourceIdentifier += "#object_reyes_atlas_blend_width=" + std::to_string(stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits);
+			for (std::size_t sourceIndex : group) {
+				identity.sourceIdentifier += "#atlas_source_mesh=" + workItems[sourceIndex].mesh.GetPrim().GetPath().GetString();
+			}
+
+			ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+			ClusterLODPrebuiltData savedPrebuiltData;
+			std::optional<ClusterLODPrebuiltData> prebuiltData;
+			if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {
+				prebuiltData = std::move(savedPrebuiltData);
+			}
+			else {
+				spdlog::warn(
+					"Object Reyes atlas-baked CLod cache save failed for subset '{}' under '{}'; using in-memory artifacts.",
+					item.mesh.GetPrim().GetName().GetString(),
+					parentPath);
+				prebuiltData = std::move(artifacts.prebuiltData);
+			}
+
+			MeshPreprocessResult result(
+				std::move(ingest),
+				std::move(identity),
+				std::move(prebuiltData),
+				preprocessed[workIndex]->forceDoubleSidedPreview,
+				buildPrototypeGeometry(subsetIndices));
+			result.geometricDisplacementOptIn = true;
+			result.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
+			result.objectSurfaceTexelDensity = atlasResult.texelsPerUnit;
+			result.objectAtlasBakedHeight = true;
+			result.objectAtlasHeightUvSetIndex = atlasResult.atlasUvSetIndex;
+			result.objectAtlasWidth = atlasResult.atlasWidth;
+			result.objectAtlasHeight = atlasResult.atlasHeight;
+			result.objectAtlasBlendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
+			result.objectAtlasTriangleMaterialIndices.assign(subsetIndices.size() / 3u, static_cast<std::uint32_t>(groupEntry));
+			result.objectAtlasSourceMaterialNames = sourceMaterialNames;
+			result.objectAtlasSourceMaterials = sourceMaterials;
+			result.objectAtlasSharedBakeData = sharedBakeData;
+			subsetResults.push_back(ObjectReyesAtlasBakedSubsetResult{
+				.sourceWorkIndex = workIndex,
+				.result = std::move(result),
+			});
+		}
+
+		return subsetResults;
 	}
 
 	struct ObjectBoundaryEdgeKey {
@@ -5464,8 +5580,8 @@ namespace USDLoader {
 				if (group.empty()) {
 					continue;
 				}
-				auto combined = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed, stageOptions);
-				if (!combined) {
+				auto bakedSubsets = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed, stageOptions);
+				if (!bakedSubsets) {
 					spdlog::warn(
 						"Object Reyes atlas-baked height failed under '{}'; disabling Object Reyes geometric displacement for that parent.",
 						parentPath);
@@ -5477,18 +5593,25 @@ namespace USDLoader {
 				const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
 				auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
 				ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
-				ownerRecord.subsets.emplace_back(
-					ownerItem.material,
-					std::move(*combined),
-					ownerItem.inferredDoubleSided,
-					ownerItem.mesh.GetPrim().GetName().GetString());
-				consumed[ownerIndex] = true;
+				for (ObjectReyesAtlasBakedSubsetResult& bakedSubset : *bakedSubsets) {
+					if (bakedSubset.sourceWorkIndex >= workItems.size()) {
+						continue;
+					}
+					const MeshPreprocessWorkItem& sourceItem = workItems[bakedSubset.sourceWorkIndex];
+					ownerRecord.subsets.emplace_back(
+						sourceItem.material,
+						std::move(bakedSubset.result),
+						sourceItem.inferredDoubleSided,
+						sourceItem.mesh.GetPrim().GetName().GetString());
+				}
 
-				for (std::size_t groupEntry = 1u; groupEntry < group.size(); ++groupEntry) {
+				for (std::size_t groupEntry = 0u; groupEntry < group.size(); ++groupEntry) {
 					const std::size_t index = group[groupEntry];
 					const MeshPreprocessWorkItem& item = workItems[index];
-					auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
-					emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
+					if (index != ownerIndex) {
+						auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
+						emptyRecord.authoredDoubleSided = item.authoredDoubleSided;
+					}
 					consumed[index] = true;
 				}
 			}

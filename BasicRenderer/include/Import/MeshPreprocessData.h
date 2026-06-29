@@ -6,12 +6,14 @@
 // GPU Mesh creation (renderer).
 
 #include <optional>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "Import/CLodCacheLoader.h"
 #include "Import/RenderablePrototypeGeometry.h"
 #include "Materials/MaterialDescription.h"
+#include "Mesh/Mesh.h"
 #include "Mesh/ClusterLODTypes.h"
 
 struct MeshPreprocessResult {
@@ -33,6 +35,7 @@ struct MeshPreprocessResult {
 	std::vector<std::uint32_t> objectAtlasTriangleMaterialIndices;
 	std::vector<std::string> objectAtlasSourceMaterialNames;
 	std::vector<MaterialDescription> objectAtlasSourceMaterials;
+	std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData> objectAtlasSharedBakeData;
 
 	MeshPreprocessResult(
 		MeshIngestBuilder&& ingestData,
