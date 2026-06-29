@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "22";
+constexpr std::string_view kObjectReyesConfigVersion = "25";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -495,7 +495,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 34u;
+constexpr std::uint32_t kPayloadCacheVersion = 36u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -1460,6 +1460,7 @@ void WriteObjectReyesAtlasBakeData(
     writer.Pod(data->atlasHeight);
     writer.Pod(data->atlasUvSetIndex);
     writer.Pod(data->texelsPerUnit);
+    writer.Pod(data->blendWidthObjectUnits);
     writer.PodVector(data->positions);
     writer.PodVector(data->normals);
     writer.PodVector(data->atlasUvs);
@@ -1494,6 +1495,7 @@ bool ReadObjectReyesAtlasBakeData(
         !reader.Pod(mutableData->atlasHeight) ||
         !reader.Pod(mutableData->atlasUvSetIndex) ||
         !reader.Pod(mutableData->texelsPerUnit) ||
+        !reader.Pod(mutableData->blendWidthObjectUnits) ||
         !reader.PodVector(mutableData->positions) ||
         !reader.PodVector(mutableData->normals) ||
         !reader.PodVector(mutableData->atlasUvs) ||

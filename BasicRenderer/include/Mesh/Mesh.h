@@ -32,6 +32,7 @@ public:
 		std::uint32_t atlasHeight = 0;
 		std::uint32_t atlasUvSetIndex = 0;
 		float texelsPerUnit = 1.0f;
+		float blendWidthObjectUnits = 8.0f;
 		std::vector<DirectX::XMFLOAT3> positions;
 		std::vector<DirectX::XMFLOAT3> normals;
 		std::vector<DirectX::XMFLOAT2> atlasUvs;

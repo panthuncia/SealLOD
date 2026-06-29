@@ -251,6 +251,12 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
     set_target_properties(xatlas PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 endif()
 
+if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT TARGET geometry-central)
+    set(SUITESPARSE OFF CACHE BOOL "Enable SuiteSparse for geometry-central." FORCE)
+    add_subdirectory("${BASICRENDERER_REPO_ROOT}/geometry-central" "${CMAKE_CURRENT_BINARY_DIR}/_deps/geometry-central" EXCLUDE_FROM_ALL)
+    set_property(TARGET geometry-central PROPERTY INTERFACE_COMPILE_DEFINITIONS "")
+endif()
+
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
@@ -1061,6 +1067,7 @@ target_link_libraries(${PROJECT_NAME}
 PRIVATE 
     dxgi.lib 
     xatlas
+    geometry-central
     spdlog::spdlog_header_only 
     Microsoft::DirectXTex 
     imgui::imgui 
@@ -1107,6 +1114,7 @@ PUBLIC
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
+    geometry-central
 )
 
 if(TARGET BasicRenderer_DirectStorage)

@@ -569,8 +569,11 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
 			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
 			const auto logIndex = loggedGeometricMaterials.fetch_add(1, std::memory_order_relaxed);
-			if (logIndex < 128u) {
-				const auto desc = material.ToCacheDescription();
+			const auto desc = material.ToCacheDescription();
+			const bool forceAtlasHeightLog =
+				desc.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
+				desc.heightMap.uvSetName == "__object_reyes_atlas_height";
+			if (logIndex < 128u || forceAtlasHeightLog) {
 				const auto* heightTexture = desc.heightMap.texture.get();
 				spdlog::info(
 					"SARP material upload: non-terrain geometric material id={} name='{}' base='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} baseIndex={} baseSampler={} normalIndex={} mrIndex=({}, {}) aoIndex={} heightIndex={} heightSampler={} heightUv={} heightChannel={} heightScale={} geomMin={} geomMax={} fallbackHeight={} usableHeight={} reyesUvDensity=({}, {}) objectSurfaceMode={} objectSurfaceDensity={}",

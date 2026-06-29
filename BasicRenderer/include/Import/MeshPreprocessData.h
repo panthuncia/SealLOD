@@ -28,6 +28,7 @@ struct MeshPreprocessResult {
 	std::uint32_t objectAtlasHeightUvSetIndex = 0;
 	std::uint32_t objectAtlasWidth = 0;
 	std::uint32_t objectAtlasHeight = 0;
+	float objectAtlasBlendWidthObjectUnits = 8.0f;
 	std::string objectAtlasBakedHeightSourcePath;
 	std::vector<std::uint32_t> objectAtlasTriangleMaterialIndices;
 	std::vector<std::string> objectAtlasSourceMaterialNames;

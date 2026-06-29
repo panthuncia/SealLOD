@@ -2022,6 +2022,44 @@ namespace USDLoader {
 		return false;
 	}
 
+	bool PromoteParallaxHeightSourcePathFromBaseColor(MaterialDescription& result)
+	{
+		if (result.baseColor.sourcePath.empty() ||
+			(result.heightMap.texture && !result.heightMapFromBaseColorAlpha) ||
+			(!result.heightMap.sourcePath.empty() && !result.heightMapFromBaseColorAlpha)) {
+			return false;
+		}
+
+		std::vector<std::string> candidates;
+		auto appendCandidate = [&](std::optional<std::string> candidate) {
+			if (!candidate || candidate->empty()) {
+				return;
+			}
+			const std::string normalized = NormalizeBrniflyTexturePath(*candidate);
+			if (std::find(candidates.begin(), candidates.end(), normalized) == candidates.end()) {
+				candidates.push_back(normalized);
+			}
+		};
+		appendCandidate(MakeCommunityShadersPbrDisplacementPath(result.baseColor.sourcePath));
+		appendCandidate(MakeParallaxHeightSiblingPath(result.baseColor.sourcePath));
+
+		for (const std::string& candidate : candidates) {
+			if (!ResolveTexturePathFromSearchRoots(candidate)) {
+				continue;
+			}
+
+			result.heightMap.sourcePath = candidate;
+			result.heightMap.channels = { 0 };
+			result.heightMap.uvSetIndex = result.baseColor.uvSetIndex;
+			result.heightMap.uvSetName = result.baseColor.uvSetName;
+			result.heightMapFromBaseColorAlpha = false;
+			MarkDisplacementEnabled(result, result.heightMapScale);
+			return true;
+		}
+
+		return false;
+	}
+
 	void ProcessDisplacementTerminal(
 		MaterialDescription& result,
 		const pxr::UsdShadeMaterial& material,
@@ -2730,14 +2768,12 @@ namespace USDLoader {
 			resolvedDesc.objectSurfaceSamplingMode = preprocessResult->objectSurfaceSamplingMode;
 		}
 		if (preprocessResult && preprocessResult->objectAtlasBakedHeight) {
-			if (!preprocessResult->objectAtlasBakedHeightSourcePath.empty()) {
-				resolvedDesc.heightMap.texture.reset();
-				resolvedDesc.heightMap.sourcePath = preprocessResult->objectAtlasBakedHeightSourcePath;
-				resolvedDesc.heightMap.channels = { 0u };
-				resolvedDesc.heightMapFromBaseColorAlpha = false;
-				resolvedDesc.geometricDisplacementOptIn = true;
-				resolvedDesc.enableGeometricDisplacement = true;
-			}
+			resolvedDesc.heightMap.texture.reset();
+			resolvedDesc.heightMap.sourcePath.clear();
+			resolvedDesc.heightMap.channels = { 0u };
+			resolvedDesc.heightMapFromBaseColorAlpha = false;
+			resolvedDesc.geometricDisplacementOptIn = true;
+			resolvedDesc.enableGeometricDisplacement = true;
 			resolvedDesc.heightMap.uvSetIndex = preprocessResult->objectAtlasHeightUvSetIndex;
 			resolvedDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
 		}
@@ -2881,6 +2917,7 @@ namespace USDLoader {
 		data->atlasHeight = result.objectAtlasHeight;
 		data->atlasUvSetIndex = result.objectAtlasHeightUvSetIndex;
 		data->texelsPerUnit = result.objectSurfaceTexelDensity;
+		data->blendWidthObjectUnits = result.objectAtlasBlendWidthObjectUnits;
 		data->indices = indices;
 		data->triangleMaterialIndices = result.objectAtlasTriangleMaterialIndices;
 		data->sourceMaterialNames = result.objectAtlasSourceMaterialNames;
@@ -2949,8 +2986,11 @@ namespace USDLoader {
 			(objectReyesSelected || surfaceSamplingSelected) &&
 			!explicitHeightCandidate &&
 			SupportsPotentialObjectReyesHeightSidecar(desc);
+		const bool trustDeferredAtlasMaterialResolution =
+			atlasBakedHeightMode &&
+			surfaceSamplingSelected;
 		options.geometricDisplacementOptIn = (objectReyesSelected || surfaceSamplingSelected) &&
-			(explicitHeightCandidate || potentialStaticHeightSidecar);
+			(trustDeferredAtlasMaterialResolution || explicitHeightCandidate || potentialStaticHeightSidecar);
 		if (surfaceSamplingSelected && options.geometricDisplacementOptIn) {
 			if (desc.brniflyModelSpaceNormals) {
 				spdlog::warn(
@@ -3233,7 +3273,7 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=1";
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=2";
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
@@ -3776,6 +3816,47 @@ namespace USDLoader {
 			return std::nullopt;
 		}
 
+		br::import::RenderablePrototypeGeometry prototypeGeometry;
+		prototypeGeometry.vertexFlags = vertexFlags;
+		prototypeGeometry.indices.assign(atlasResult.indices.begin(), atlasResult.indices.end());
+		const std::size_t atlasVertexCount = atlasResult.vertices.size() / static_cast<std::size_t>(vertexSize);
+		if (vertexSize != 0u) {
+			prototypeGeometry.vertices.reserve(atlasVertexCount);
+			const bool hasNormals =
+				(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
+				vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
+			const bool hasTexcoords =
+				(vertexFlags & VertexFlags::VERTEX_TEXCOORDS) != 0u &&
+				vertexSize >= MeshVertexLayout::TexcoordOffset(vertexFlags) + sizeof(DirectX::XMFLOAT2);
+			const bool hasTangents =
+				(vertexFlags & VertexFlags::VERTEX_TANGENTS) != 0u &&
+				vertexSize >= MeshVertexLayout::TangentOffset(vertexFlags) + sizeof(DirectX::XMFLOAT4);
+			const bool hasColors =
+				(vertexFlags & VertexFlags::VERTEX_COLORS) != 0u &&
+				vertexSize >= MeshVertexLayout::ColorOffset(vertexFlags) + sizeof(DirectX::XMFLOAT3);
+			for (std::size_t vertexIndex = 0; vertexIndex < atlasVertexCount; ++vertexIndex) {
+				const std::byte* vertexBytes =
+					atlasResult.vertices.data() + vertexIndex * static_cast<std::size_t>(vertexSize);
+				br::import::RenderablePrototypeVertex vertex{};
+				std::memcpy(std::addressof(vertex.position), vertexBytes + MeshVertexLayout::PositionOffset, sizeof(vertex.position));
+				if (hasNormals) {
+					std::memcpy(std::addressof(vertex.normal), vertexBytes + MeshVertexLayout::NormalOffset, sizeof(vertex.normal));
+				}
+				if (hasTexcoords) {
+					std::memcpy(std::addressof(vertex.uv), vertexBytes + MeshVertexLayout::TexcoordOffset(vertexFlags), sizeof(vertex.uv));
+				}
+				if (hasTangents) {
+					std::memcpy(std::addressof(vertex.tangent), vertexBytes + MeshVertexLayout::TangentOffset(vertexFlags), sizeof(vertex.tangent));
+				}
+				if (hasColors) {
+					DirectX::XMFLOAT3 color{};
+					std::memcpy(std::addressof(color), vertexBytes + MeshVertexLayout::ColorOffset(vertexFlags), sizeof(color));
+					vertex.color = DirectX::XMFLOAT4{ color.x, color.y, color.z, 1.0f };
+				}
+				prototypeGeometry.vertices.push_back(vertex);
+			}
+		}
+
 		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
 		builderSettings.doubleSidedVoxelSourceNormals = false;
 		for (std::size_t index : group) {
@@ -3798,13 +3879,14 @@ namespace USDLoader {
 
 		CLodCacheLoader::MeshCacheIdentity identity = first.cacheIdentity;
 		identity.subsetName = "object-reyes-atlas-baked-height";
-		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=3";
+		identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=8";
 		identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 		identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
 		identity.sourceIdentifier += "#object_reyes_atlas_size=" +
 			std::to_string(atlasResult.atlasWidth) + "x" + std::to_string(atlasResult.atlasHeight);
 		identity.sourceIdentifier += "#object_reyes_atlas_requested_resolution=" + std::to_string(bakeOptions.resolution);
 		identity.sourceIdentifier += "#object_reyes_atlas_padding=" + std::to_string(bakeOptions.paddingTexels);
+		identity.sourceIdentifier += "#object_reyes_atlas_blend_width=" + std::to_string(stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits);
 		for (std::size_t index : group) {
 			identity.sourceIdentifier += "#atlas_source_mesh=" + workItems[index].mesh.GetPrim().GetPath().GetString();
 		}
@@ -3817,6 +3899,12 @@ namespace USDLoader {
 			atlasResult.atlasHeight,
 			atlasResult.atlasUvSetIndex,
 			atlasResult.texelsPerUnit);
+		if (!atlasResult.diagnostics.empty()) {
+			spdlog::info(
+				"Object Reyes atlas-baked height diagnostics under '{}': {}.",
+				parentPath,
+				atlasResult.diagnostics);
+		}
 		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
 		ClusterLODPrebuiltData savedPrebuiltData;
 		std::optional<ClusterLODPrebuiltData> prebuiltData;
@@ -3833,7 +3921,7 @@ namespace USDLoader {
 			std::move(identity),
 			std::move(prebuiltData),
 			first.forceDoubleSidedPreview,
-			std::move(first.prototypeGeometry));
+			std::move(prototypeGeometry));
 		result.geometricDisplacementOptIn = true;
 		result.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
 		result.objectSurfaceTexelDensity = atlasResult.texelsPerUnit;
@@ -3841,6 +3929,7 @@ namespace USDLoader {
 		result.objectAtlasHeightUvSetIndex = atlasResult.atlasUvSetIndex;
 		result.objectAtlasWidth = atlasResult.atlasWidth;
 		result.objectAtlasHeight = atlasResult.atlasHeight;
+		result.objectAtlasBlendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
 		result.objectAtlasTriangleMaterialIndices = std::move(atlasResult.triangleMaterialIndices);
 		result.objectAtlasSourceMaterialNames.reserve(group.size());
 		result.objectAtlasSourceMaterials.reserve(group.size());
@@ -3868,9 +3957,6 @@ namespace USDLoader {
 			result.objectAtlasSourceMaterials.push_back(std::move(sourceDesc));
 		}
 		if (!ObjectReyesAtlasBakedMaterialCombinationAllowed(stageOptions, result, parentPath)) {
-			return std::nullopt;
-		}
-		if (!BakeObjectReyesAtlasHeightTextureForPreprocess(result, parentPath, result.cacheIdentity.sourceIdentifier)) {
 			return std::nullopt;
 		}
 		return result;

@@ -28,3 +28,6 @@
 [submodule "xatlas"]
 	path = xatlas
 	url = https://github.com/jpcy/xatlas.git
+[submodule "geometry-central"]
+	path = geometry-central
+	url = https://github.com/nmwsharp/geometry-central.git

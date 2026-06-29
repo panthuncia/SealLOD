@@ -28,6 +28,7 @@ struct ObjectReyesAtlasBakeOptions {
 struct ObjectReyesAtlasBakeResult {
 	bool success = false;
 	std::string error;
+	std::string diagnostics;
 	std::vector<std::byte> vertices;
 	std::vector<std::uint32_t> indices;
 	std::vector<MeshUvSetData> uvSets;

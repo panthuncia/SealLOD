@@ -791,6 +791,12 @@ namespace detail {
             return {};
         }
 
+        // Raw DDS files store mip rows tightly. DirectStorage texture destinations expect the
+        // request byte stream to match the D3D12 copyable footprint layout, including row padding.
+        // Route normal DDS files through DirectXTex decode + the standard upload path. The
+        // conditioned texture cache has its own footprint-compatible DirectStorage path.
+        return {};
+
         DirectX::ScratchImage image;
         DirectX::TexMetadata metadata{};
         const HRESULT loadHr = DirectX::LoadFromDDSFile(filePath.c_str(), flags.dds, &metadata, image);

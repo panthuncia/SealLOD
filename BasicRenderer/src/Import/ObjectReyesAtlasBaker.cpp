@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <unordered_map>
 
 #include <DirectXMath.h>
@@ -34,6 +35,25 @@ struct PositionKeyHash {
 	}
 };
 
+struct TriangleKey {
+	std::array<std::uint32_t, 3> indices{};
+
+	bool operator==(const TriangleKey& rhs) const noexcept {
+		return indices == rhs.indices;
+	}
+};
+
+struct TriangleKeyHash {
+	std::size_t operator()(const TriangleKey& key) const noexcept {
+		std::size_t h = 1469598103934665603ull;
+		for (std::uint32_t value : key.indices) {
+			h ^= static_cast<std::size_t>(value);
+			h *= 1099511628211ull;
+		}
+		return h;
+	}
+};
+
 DirectX::XMFLOAT3 LoadFloat3(const std::byte* bytes, std::size_t offset)
 {
 	DirectX::XMFLOAT3 v{};
@@ -56,6 +76,35 @@ bool IsFinite(const DirectX::XMFLOAT2& v)
 bool IsFinite(const DirectX::XMFLOAT3& v)
 {
 	return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+TriangleKey MakeTriangleKey(std::uint32_t a, std::uint32_t b, std::uint32_t c)
+{
+	return TriangleKey{ { a, b, c } };
+}
+
+bool TryFindTriangleMaterial(
+	const std::unordered_map<TriangleKey, std::uint32_t, TriangleKeyHash>& lookup,
+	std::uint32_t a,
+	std::uint32_t b,
+	std::uint32_t c,
+	std::uint32_t& outMaterial)
+{
+	const TriangleKey variants[6] = {
+		MakeTriangleKey(a, b, c),
+		MakeTriangleKey(b, c, a),
+		MakeTriangleKey(c, a, b),
+		MakeTriangleKey(a, c, b),
+		MakeTriangleKey(c, b, a),
+		MakeTriangleKey(b, a, c)
+	};
+	for (const TriangleKey& key : variants) {
+		if (const auto it = lookup.find(key); it != lookup.end()) {
+			outMaterial = it->second;
+			return true;
+		}
+	}
+	return false;
 }
 
 PositionKey MakePositionKey(const std::byte* vertex)
@@ -240,6 +289,18 @@ ObjectReyesAtlasBakeResult BuildObjectReyesAtlasBakedHeightMesh(
 		}
 	}
 
+	std::unordered_map<TriangleKey, std::uint32_t, TriangleKeyHash> sourceTriangleMaterials;
+	sourceTriangleMaterials.reserve(inputIndices.size() / 3u);
+	for (std::size_t triangleIndex = 0; triangleIndex + 2u < inputIndices.size() / 3u * 3u; triangleIndex += 3u) {
+		const std::size_t faceIndex = triangleIndex / 3u;
+		const std::uint32_t materialIndex = faceIndex < inputTriangleMaterials.size()
+			? inputTriangleMaterials[faceIndex]
+			: 0u;
+		sourceTriangleMaterials.emplace(
+			MakeTriangleKey(inputIndices[triangleIndex + 0u], inputIndices[triangleIndex + 1u], inputIndices[triangleIndex + 2u]),
+			materialIndex);
+	}
+
 	xatlas::Atlas* atlas = xatlas::Create();
 	xatlas::MeshDecl meshDecl{};
 	meshDecl.vertexCount = static_cast<std::uint32_t>(positions.size());
@@ -331,11 +392,41 @@ ObjectReyesAtlasBakeResult BuildObjectReyesAtlasBakedHeightMesh(
 	result.atlasUvSetIndex = static_cast<std::uint32_t>(result.uvSets.size());
 	result.uvSets.push_back(std::move(atlasUvSet));
 	result.triangleMaterialIndices.resize(result.indices.size() / 3u, 0u);
+	std::uint32_t xrefMaterialResolved = 0u;
+	std::uint32_t xrefMaterialFallbacks = 0u;
+	std::uint32_t orderedMaterialMismatches = 0u;
 	for (std::size_t triangleIndex = 0; triangleIndex < result.triangleMaterialIndices.size(); ++triangleIndex) {
+		const std::uint32_t i0 = result.indices[triangleIndex * 3u + 0u];
+		const std::uint32_t i1 = result.indices[triangleIndex * 3u + 1u];
+		const std::uint32_t i2 = result.indices[triangleIndex * 3u + 2u];
+		std::uint32_t materialFromXref = 0u;
+		const bool canResolveFromXref =
+			i0 < xaMesh.vertexCount &&
+			i1 < xaMesh.vertexCount &&
+			i2 < xaMesh.vertexCount &&
+			TryFindTriangleMaterial(
+				sourceTriangleMaterials,
+				xaMesh.vertexArray[i0].xref,
+				xaMesh.vertexArray[i1].xref,
+				xaMesh.vertexArray[i2].xref,
+				materialFromXref);
+		if (canResolveFromXref) {
+			result.triangleMaterialIndices[triangleIndex] = materialFromXref;
+			++xrefMaterialResolved;
+			if (triangleIndex < inputTriangleMaterials.size() &&
+				inputTriangleMaterials[triangleIndex] != materialFromXref) {
+				++orderedMaterialMismatches;
+			}
+			continue;
+		}
 		if (triangleIndex < inputTriangleMaterials.size()) {
 			result.triangleMaterialIndices[triangleIndex] = inputTriangleMaterials[triangleIndex];
 		}
+		++xrefMaterialFallbacks;
 	}
+	result.diagnostics = "xatlas triangle material mapping: xrefResolved=" + std::to_string(xrefMaterialResolved) +
+		" fallback=" + std::to_string(xrefMaterialFallbacks) +
+		" orderedMismatch=" + std::to_string(orderedMaterialMismatches);
 	result.atlasWidth = atlas->width;
 	result.atlasHeight = atlas->height;
 	result.texelsPerUnit = atlas->texelsPerUnit > 0.0f ? atlas->texelsPerUnit : packOptions.texelsPerUnit;

@@ -1137,6 +1137,11 @@ std::shared_ptr<PixelBuffer> TryUploadDDSFilePathDirectToVRAM(
 		RecordDirectStorageTexturePreflight(DirectStorageTexturePreflightResult::QueueUnavailable, path, "GPU queue unavailable");
 		return {};
 	}
+	RecordDirectStorageTexturePreflight(
+		DirectStorageTexturePreflightResult::UnsupportedFormat,
+		path,
+		"raw DDS rows are tightly packed, but DirectStorage texture uploads require D3D12 copyable-footprint row layout");
+	return {};
 
 	const std::filesystem::path filePath(path);
 	std::wstring extension = filePath.extension().wstring();
@@ -1343,6 +1348,12 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 		handle->state.store(TextureDirectStorageReloadJobState::CreatingResource, std::memory_order_release);
 
 		try {
+			RecordDirectStorageTexturePreflight(
+				DirectStorageTexturePreflightResult::UnsupportedFormat,
+				path,
+				"raw DDS rows are tightly packed, but DirectStorage texture uploads require D3D12 copyable-footprint row layout");
+			throw std::runtime_error("raw DDS textures do not use this DirectStorage GPU-direct path");
+
 			const std::filesystem::path filePath(path);
 			std::wstring extension = filePath.extension().wstring();
 			std::transform(extension.begin(), extension.end(), extension.begin(), towlower);
