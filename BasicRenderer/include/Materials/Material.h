@@ -196,7 +196,8 @@ public:
         if (SupportsObjectReyesGeometricDisplacement(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         }
-        if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic) {
+        if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic ||
+            (desc.objectSurfaceUseTriplanarProjection && desc.objectSurfaceUseTripleTapStochastic)) {
             materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC;
         }
         if (desc.objectTriplanarBlendMaterial) {

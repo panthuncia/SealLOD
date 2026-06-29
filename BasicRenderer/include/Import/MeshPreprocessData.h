@@ -24,12 +24,15 @@ struct MeshPreprocessResult {
 	bool forceDoubleSidedPreview = false;
 	bool geometricDisplacementOptIn = false;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	bool objectSurfaceUseTriplanarProjection = false;
+	bool objectSurfaceUseTripleTapStochastic = false;
 	float objectSurfaceTexelDensity = 1.0f;
 	std::uint32_t objectBlendWeightUvSetIndex = 0;
 	bool objectAtlasBakedHeight = false;
 	std::uint32_t objectAtlasHeightUvSetIndex = 0;
 	std::uint32_t objectAtlasWidth = 0;
 	std::uint32_t objectAtlasHeight = 0;
+	float objectAtlasTexelsPerUnit = 1.0f;
 	float objectAtlasBlendWidthObjectUnits = 8.0f;
 	float objectAtlasDisplacementMin = -0.5f;
 	float objectAtlasDisplacementMax = 0.5f;

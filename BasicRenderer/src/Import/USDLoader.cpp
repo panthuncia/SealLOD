@@ -1119,19 +1119,106 @@ namespace USDLoader {
 		const ObjectAtlasHeightSampler& sampler,
 		const DirectX::XMFLOAT3& position,
 		const DirectX::XMFLOAT3& normal,
-		float density)
+		float density,
+		bool tripleTapStochastic)
 	{
 		if (!std::isfinite(density) || density <= 0.0f) {
 			density = 1.0f;
 		}
+		auto frac = [](float x) {
+			return x - std::floor(x);
+		};
+		auto hash22 = [&](float x, float y) {
+			auto hash21 = [&](float hx, float hy) {
+				hx = frac(hx * 123.34f);
+				hy = frac(hy * 456.21f);
+				const float d = hx * (hx + 45.32f) + hy * (hy + 45.32f);
+				hx += d;
+				hy += d;
+				return frac(hx * hy);
+			};
+			const float n = hash21(x, y);
+			return DirectX::XMFLOAT2{
+				frac(n) - 0.5f,
+				frac(hash21(x + n + 17.17f, y + n + 17.17f)) - 0.5f
+			};
+		};
+		auto sampleProjected = [&](float u, float v) {
+			if (!tripleTapStochastic) {
+				return sampler.Sample(u, v).r;
+			}
+			const float cellX = std::floor(u);
+			const float cellY = std::floor(v);
+			const float fx = frac(u);
+			const float fy = frac(v);
+			float w0 = std::clamp(1.0f - fx - fy, 0.0f, 1.0f);
+			float w1 = std::clamp(fx, 0.0f, 1.0f);
+			float w2 = std::clamp(fy, 0.0f, 1.0f);
+			const float weightSum = std::max(1.0e-5f, w0 + w1 + w2);
+			w0 /= weightSum;
+			w1 /= weightSum;
+			w2 /= weightSum;
+			const DirectX::XMFLOAT2 o0 = hash22(cellX, cellY);
+			const DirectX::XMFLOAT2 o1 = hash22(cellX + 1.0f, cellY);
+			const DirectX::XMFLOAT2 o2 = hash22(cellX, cellY + 1.0f);
+			return sampler.Sample(u + o0.x, v + o0.y).r * w0 +
+				sampler.Sample(u + o1.x, v + o1.y).r * w1 +
+				sampler.Sample(u + o2.x, v + o2.y).r * w2;
+		};
 		const float ax = std::pow(std::abs(normal.x), 4.0f);
 		const float ay = std::pow(std::abs(normal.y), 4.0f);
 		const float az = std::pow(std::abs(normal.z), 4.0f);
 		const float sum = std::max(1.0e-6f, ax + ay + az);
-		const float hx = sampler.Sample(position.y * density, position.z * density).r;
-		const float hy = sampler.Sample(position.z * density, position.x * density).r;
-		const float hz = sampler.Sample(position.x * density, position.y * density).r;
+		const float hx = sampleProjected(position.y * density, position.z * density);
+		const float hy = sampleProjected(position.z * density, position.x * density);
+		const float hz = sampleProjected(position.x * density, position.y * density);
 		return (hx * ax + hy * ay + hz * az) / sum;
+	}
+
+	float ObjectAtlasSampleUvHeight(
+		const ObjectAtlasHeightSampler& sampler,
+		float u,
+		float v,
+		bool tripleTapStochastic)
+	{
+		if (!tripleTapStochastic) {
+			return sampler.Sample(u, v).r;
+		}
+		auto frac = [](float x) {
+			return x - std::floor(x);
+		};
+		auto hash22 = [&](float x, float y) {
+			auto hash21 = [&](float hx, float hy) {
+				hx = frac(hx * 123.34f);
+				hy = frac(hy * 456.21f);
+				const float d = hx * (hx + 45.32f) + hy * (hy + 45.32f);
+				hx += d;
+				hy += d;
+				return frac(hx * hy);
+			};
+			const float n = hash21(x, y);
+			return DirectX::XMFLOAT2{
+				frac(n) - 0.5f,
+				frac(hash21(x + n + 17.17f, y + n + 17.17f)) - 0.5f
+			};
+		};
+		const float cellX = std::floor(u);
+		const float cellY = std::floor(v);
+		const float fx = frac(u);
+		const float fy = frac(v);
+		float w0 = std::clamp(1.0f - fx - fy, 0.0f, 1.0f);
+		float w1 = std::clamp(fx, 0.0f, 1.0f);
+		float w2 = std::clamp(fy, 0.0f, 1.0f);
+		const float weightSum = std::max(1.0e-5f, w0 + w1 + w2);
+		w0 /= weightSum;
+		w1 /= weightSum;
+		w2 /= weightSum;
+		const DirectX::XMFLOAT2 o0 = hash22(cellX, cellY);
+		const DirectX::XMFLOAT2 o1 = hash22(cellX + 1.0f, cellY);
+		const DirectX::XMFLOAT2 o2 = hash22(cellX, cellY + 1.0f);
+		return sampler.Sample(u + o0.x, v + o0.y).r * w0 +
+			sampler.Sample(u + o1.x, v + o1.y).r * w1 +
+			sampler.Sample(u + o2.x, v + o2.y).r * w2;
 	}
 
 	float ObjectAtlasEdgeFunction(const DirectX::XMFLOAT2& a, const DirectX::XMFLOAT2& b, float x, float y)
@@ -2389,6 +2476,8 @@ namespace USDLoader {
 			std::to_string(resolvedDesc.brniflyModelSpaceNormals ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.geometricDisplacementOptIn ? 1 : 0) + "|" +
 			std::to_string(static_cast<std::uint32_t>(resolvedDesc.objectSurfaceSamplingMode)) + "|" +
+			std::to_string(resolvedDesc.objectSurfaceUseTriplanarProjection ? 1 : 0) + "|" +
+			std::to_string(resolvedDesc.objectSurfaceUseTripleTapStochastic ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.objectSurfaceTexelDensity) + "|" +
 			std::to_string(resolvedDesc.objectTriplanarBlendMaterial ? 1 : 0) + "|" +
 			std::to_string(resolvedDesc.objectBlendWeightUvSetIndex) + "|" +
@@ -2772,6 +2861,10 @@ namespace USDLoader {
 		if (preprocessResult && preprocessResult->objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
 			resolvedDesc.objectSurfaceSamplingMode = preprocessResult->objectSurfaceSamplingMode;
 		}
+		if (preprocessResult) {
+			resolvedDesc.objectSurfaceUseTriplanarProjection = preprocessResult->objectSurfaceUseTriplanarProjection;
+			resolvedDesc.objectSurfaceUseTripleTapStochastic = preprocessResult->objectSurfaceUseTripleTapStochastic;
+		}
 		if (preprocessResult && preprocessResult->objectAtlasBakedHeight) {
 			resolvedDesc.heightMap.texture.reset();
 			resolvedDesc.heightMap.sourcePath.clear();
@@ -2781,9 +2874,7 @@ namespace USDLoader {
 			resolvedDesc.enableGeometricDisplacement = true;
 			resolvedDesc.heightMap.uvSetIndex = preprocessResult->objectAtlasHeightUvSetIndex;
 			resolvedDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
-			resolvedDesc.heightMapScale = std::max(
-				1.0e-6f,
-				preprocessResult->objectAtlasDisplacementMax - preprocessResult->objectAtlasDisplacementMin);
+			resolvedDesc.heightMapScale = 1.0f;
 			resolvedDesc.geometricDisplacementMin = preprocessResult->objectAtlasDisplacementMin;
 			resolvedDesc.geometricDisplacementMax = preprocessResult->objectAtlasDisplacementMax;
 		}
@@ -2850,10 +2941,14 @@ namespace USDLoader {
 			if (enabled) {
 				desc.geometricDisplacementOptIn = true;
 				desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+				desc.objectSurfaceUseTriplanarProjection = true;
+				desc.objectSurfaceUseTripleTapStochastic = true;
 				return;
 			}
 			desc.geometricDisplacementOptIn = false;
 			desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+			desc.objectSurfaceUseTriplanarProjection = false;
+			desc.objectSurfaceUseTripleTapStochastic = false;
 		};
 		applyObjectReyesChildState(childDesc0, material0ObjectReyes, material0ObjectSurfaceTexelDensity);
 		applyObjectReyesChildState(childDesc1, material1ObjectReyes, material1ObjectSurfaceTexelDensity);
@@ -2865,6 +2960,8 @@ namespace USDLoader {
 		desc.name += "_ObjectTriplanarBlend";
 		desc.objectTriplanarBlendMaterial = true;
 		desc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::TriplanarStochastic;
+		desc.objectSurfaceUseTriplanarProjection = true;
+		desc.objectSurfaceUseTripleTapStochastic = true;
 		desc.objectBlendWeightUvSetIndex = preprocessResult ? preprocessResult->objectBlendWeightUvSetIndex : 0u;
 		desc.heightMap.uvSetIndex = desc.objectBlendWeightUvSetIndex;
 		desc.geometricDisplacementOptIn = true;
@@ -2929,7 +3026,7 @@ namespace USDLoader {
 		data->atlasWidth = result.objectAtlasWidth;
 		data->atlasHeight = result.objectAtlasHeight;
 		data->atlasUvSetIndex = result.objectAtlasHeightUvSetIndex;
-		data->texelsPerUnit = result.objectSurfaceTexelDensity;
+		data->texelsPerUnit = result.objectAtlasTexelsPerUnit;
 		data->blendWidthObjectUnits = result.objectAtlasBlendWidthObjectUnits;
 		data->indices = indices;
 		data->triangleMaterialIndices = result.objectAtlasTriangleMaterialIndices;
@@ -2938,6 +3035,11 @@ namespace USDLoader {
 		data->positions.resize(vertexCount);
 		data->normals.resize(vertexCount, DirectX::XMFLOAT3{ 0.0f, 0.0f, 1.0f });
 		data->atlasUvs = uvSets[result.objectAtlasHeightUvSetIndex].values;
+		data->uvSets.clear();
+		data->uvSets.reserve(uvSets.size());
+		for (const MeshUvSetData& uvSet : uvSets) {
+			data->uvSets.push_back(uvSet.values);
+		}
 		const bool hasNormals =
 			(vertexFlags & VertexFlags::VERTEX_NORMALS) != 0u &&
 			vertexSize >= MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3);
@@ -2994,6 +3096,15 @@ namespace USDLoader {
 			((stageOptions.objectReyesSurfaceSamplingIncludeSelected && objectReyesSelected) ||
 			 stageOptions.objectReyesSurfaceSamplingNifMatched ||
 			 MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesSurfaceSamplingTexturePaths));
+		const bool triplanarProjectionSelected =
+			stageOptions.objectReyesTriplanarProjectionNifMatched ||
+			MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesTriplanarProjectionTexturePaths) ||
+			(stageOptions.objectReyesTriplanarProjectionIncludeSelected && (objectReyesSelected || surfaceSamplingSelected));
+		const bool tripleTapStochasticSelected =
+			stageOptions.objectReyesTripleTapStochasticNifMatched ||
+			MaterialUsesWhitelistedTexture(desc, stageOptions.objectReyesTripleTapStochasticTexturePaths) ||
+			(stageOptions.objectReyesTripleTapStochasticIncludeSelected &&
+				(objectReyesSelected || surfaceSamplingSelected || triplanarProjectionSelected));
 		const bool explicitHeightCandidate = SupportsObjectReyesGeometricDisplacementCandidate(desc);
 		const bool potentialStaticHeightSidecar =
 			(objectReyesSelected || surfaceSamplingSelected) &&
@@ -3015,6 +3126,11 @@ namespace USDLoader {
 				options.objectSurfaceSamplingMode = stageOptions.objectReyesSurfaceSamplingMode;
 				options.objectSurfaceSamplingConfigHash = stageOptions.objectReyesConfigHash;
 			}
+		}
+		if ((triplanarProjectionSelected || tripleTapStochasticSelected) && !desc.brniflyModelSpaceNormals) {
+			options.objectSurfaceUseTriplanarProjection = triplanarProjectionSelected;
+			options.objectSurfaceUseTripleTapStochastic = tripleTapStochasticSelected;
+			options.objectSurfaceSamplingConfigHash = stageOptions.objectReyesConfigHash;
 		}
 		if ((objectReyesSelected || surfaceSamplingSelected) && !options.geometricDisplacementOptIn) {
 			spdlog::info(
@@ -3300,7 +3416,7 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=3";
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=5";
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
@@ -3324,6 +3440,10 @@ namespace USDLoader {
 			bakeIdentity += std::to_string(desc.heightMapScale);
 			bakeIdentity += "@density:";
 			bakeIdentity += std::to_string(desc.objectSurfaceTexelDensity);
+			bakeIdentity += "@triplanar:";
+			bakeIdentity += desc.objectSurfaceUseTriplanarProjection ? "1" : "0";
+			bakeIdentity += "@tripleTap:";
+			bakeIdentity += desc.objectSurfaceUseTripleTapStochastic ? "1" : "0";
 		}
 		if (!std::isfinite(atlasDisplacementMin) ||
 			!std::isfinite(atlasDisplacementMax) ||
@@ -3385,12 +3505,53 @@ namespace USDLoader {
 		auto offsetToAtlasHeight = [&](float displacementOffset) {
 			return std::clamp((displacementOffset - atlasDisplacementMin) / atlasDisplacementRange, 0.0f, 1.0f);
 		};
-		auto sampleMaterialAtlasHeight = [&](std::uint32_t materialIndex, const DirectX::XMFLOAT3& position, const DirectX::XMFLOAT3& normal) {
+		auto sampleMaterialAtlasHeight = [&](
+			std::uint32_t materialIndex,
+			std::uint32_t i0,
+			std::uint32_t i1,
+			std::uint32_t i2,
+			float w0,
+			float w1,
+			float w2,
+			const DirectX::XMFLOAT3& position,
+			const DirectX::XMFLOAT3& normal) {
 			if (materialIndex >= samplers.size()) {
 				return offsetToAtlasHeight(0.0f);
 			}
-			const float density = result.objectAtlasSourceMaterials[materialIndex].objectSurfaceTexelDensity;
-			const float sourceHeight = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[materialIndex], position, normal, density), 0.0f, 1.0f);
+			const MaterialDescription& materialDesc = result.objectAtlasSourceMaterials[materialIndex];
+			const bool tripleTapStochastic = materialDesc.objectSurfaceUseTripleTapStochastic;
+			float sourceHeight = 0.0f;
+			if (materialDesc.objectSurfaceUseTriplanarProjection) {
+				sourceHeight = ObjectAtlasSampleTriplanarHeight(
+					samplers[materialIndex],
+					position,
+					normal,
+					materialDesc.objectSurfaceTexelDensity,
+					tripleTapStochastic);
+			}
+			else {
+				const std::uint32_t uvSetIndex = materialDesc.heightMap.uvSetIndex;
+				if (uvSetIndex >= uvSets.size() ||
+					i0 >= uvSets[uvSetIndex].values.size() ||
+					i1 >= uvSets[uvSetIndex].values.size() ||
+					i2 >= uvSets[uvSetIndex].values.size()) {
+					sourceHeight = ObjectAtlasSampleTriplanarHeight(
+						samplers[materialIndex],
+						position,
+						normal,
+						materialDesc.objectSurfaceTexelDensity,
+						tripleTapStochastic);
+				}
+				else {
+					const DirectX::XMFLOAT2 uv0 = uvSets[uvSetIndex].values[i0];
+					const DirectX::XMFLOAT2 uv1 = uvSets[uvSetIndex].values[i1];
+					const DirectX::XMFLOAT2 uv2 = uvSets[uvSetIndex].values[i2];
+					const float u = uv0.x * w0 + uv1.x * w1 + uv2.x * w2;
+					const float v = uv0.y * w0 + uv1.y * w1 + uv2.y * w2;
+					sourceHeight = ObjectAtlasSampleUvHeight(samplers[materialIndex], u, v, tripleTapStochastic);
+				}
+			}
+			sourceHeight = std::clamp(sourceHeight, 0.0f, 1.0f);
 			const float sourceMin = materialIndex < sourceDisplacementMins.size() ? sourceDisplacementMins[materialIndex] : 0.0f;
 			const float sourceMax = materialIndex < sourceDisplacementMaxs.size() ? sourceDisplacementMaxs[materialIndex] : 0.0f;
 			return offsetToAtlasHeight(sourceMin + (sourceMax - sourceMin) * sourceHeight);
@@ -3461,7 +3622,7 @@ namespace USDLoader {
 					}
 					const auto position = lerp3(positions[i0], positions[i1], positions[i2], w0, w1, w2);
 					const auto normal = NormalizeObjectAtlasVector(lerp3(normals[i0], normals[i1], normals[i2], w0, w1, w2));
-					const float sample = sampleMaterialAtlasHeight(materialIndex, position, normal);
+					const float sample = sampleMaterialAtlasHeight(materialIndex, i0, i1, i2, w0, w1, w2, position, normal);
 					const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
 					pixels[pixelIndex] = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
 					coverage[pixelIndex] = 1u;
@@ -3497,7 +3658,16 @@ namespace USDLoader {
 					canonical.n0.y * (1.0f - t) + canonical.n1.y * t,
 					canonical.n0.z * (1.0f - t) + canonical.n1.z * t
 				});
-				const float sample = sampleMaterialAtlasHeight(canonical.materialIndex, position, normal);
+				const float sample = sampleMaterialAtlasHeight(
+					canonical.materialIndex,
+					0u,
+					0u,
+					0u,
+					1.0f,
+					0.0f,
+					0.0f,
+					position,
+					normal);
 				const std::uint16_t value = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
 				for (const ObjectAtlasEdgeSample& edgeSample : samples) {
 					const bool sameDirection = MakeObjectAtlasPositionKey(edgeSample.p0) == canonicalStart;
@@ -3807,6 +3977,8 @@ namespace USDLoader {
 		result.geometricDisplacementOptIn = first.geometricDisplacementOptIn;
 		result.objectBlendWeightUvSetIndex = first.objectBlendWeightUvSetIndex;
 		result.objectSurfaceSamplingMode = first.objectSurfaceSamplingMode;
+		result.objectSurfaceUseTriplanarProjection = first.objectSurfaceUseTriplanarProjection;
+		result.objectSurfaceUseTripleTapStochastic = first.objectSurfaceUseTripleTapStochastic;
 		result.objectSurfaceTexelDensity = first.objectSurfaceTexelDensity;
 		return result;
 	}
@@ -3921,6 +4093,8 @@ namespace USDLoader {
 			sourceDesc.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
 			if (index < preprocessed.size() && preprocessed[index]) {
 				sourceDesc.objectSurfaceTexelDensity = preprocessed[index]->objectSurfaceTexelDensity;
+				sourceDesc.objectSurfaceUseTriplanarProjection = preprocessed[index]->objectSurfaceUseTriplanarProjection;
+				sourceDesc.objectSurfaceUseTripleTapStochastic = preprocessed[index]->objectSurfaceUseTripleTapStochastic;
 			}
 			sourceMaterials.push_back(std::move(sourceDesc));
 		}
@@ -3944,6 +4118,11 @@ namespace USDLoader {
 		sharedBakeData->texelsPerUnit = atlasResult.texelsPerUnit;
 		sharedBakeData->blendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
 		sharedBakeData->atlasUvs = atlasResult.uvSets[atlasResult.atlasUvSetIndex].values;
+		sharedBakeData->uvSets.clear();
+		sharedBakeData->uvSets.reserve(atlasResult.uvSets.size());
+		for (const MeshUvSetData& uvSet : atlasResult.uvSets) {
+			sharedBakeData->uvSets.push_back(uvSet.values);
+		}
 		sharedBakeData->indices = atlasResult.indices;
 		sharedBakeData->triangleMaterialIndices = atlasResult.triangleMaterialIndices;
 		sharedBakeData->sourceMaterialNames = sourceMaterialNames;
@@ -4074,7 +4253,7 @@ namespace USDLoader {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
 			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
-			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=10";
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=13";
 			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
 			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
@@ -4109,11 +4288,14 @@ namespace USDLoader {
 				buildPrototypeGeometry(subsetIndices));
 			result.geometricDisplacementOptIn = true;
 			result.objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
-			result.objectSurfaceTexelDensity = atlasResult.texelsPerUnit;
+			result.objectSurfaceUseTriplanarProjection = preprocessed[workIndex]->objectSurfaceUseTriplanarProjection;
+			result.objectSurfaceUseTripleTapStochastic = preprocessed[workIndex]->objectSurfaceUseTripleTapStochastic;
+			result.objectSurfaceTexelDensity = preprocessed[workIndex]->objectSurfaceTexelDensity;
 			result.objectAtlasBakedHeight = true;
 			result.objectAtlasHeightUvSetIndex = atlasResult.atlasUvSetIndex;
 			result.objectAtlasWidth = atlasResult.atlasWidth;
 			result.objectAtlasHeight = atlasResult.atlasHeight;
+			result.objectAtlasTexelsPerUnit = atlasResult.texelsPerUnit;
 			result.objectAtlasBlendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
 			result.objectAtlasTriangleMaterialIndices.assign(subsetIndices.size() / 3u, static_cast<std::uint32_t>(groupEntry));
 			result.objectAtlasSourceMaterialNames = sourceMaterialNames;

@@ -36,6 +36,7 @@ public:
 		std::vector<DirectX::XMFLOAT3> positions;
 		std::vector<DirectX::XMFLOAT3> normals;
 		std::vector<DirectX::XMFLOAT2> atlasUvs;
+		std::vector<std::vector<DirectX::XMFLOAT2>> uvSets;
 		std::vector<std::uint32_t> indices;
 		std::vector<std::uint32_t> triangleMaterialIndices;
 		std::vector<std::string> sourceMaterialNames;

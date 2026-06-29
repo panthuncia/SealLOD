@@ -1661,6 +1661,14 @@ MeshPreprocessResult ExtractSubMeshGroup(
 			std::to_string(static_cast<std::uint32_t>(options.objectSurfaceSamplingMode));
 		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
 	}
+	if (options.objectSurfaceUseTriplanarProjection) {
+		cacheIdentity.sourceIdentifier += "#object_surface_triplanar_projection=1";
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
+	}
+	if (options.objectSurfaceUseTripleTapStochastic) {
+		cacheIdentity.sourceIdentifier += "#object_surface_triple_tap_stochastic=1";
+		cacheIdentity.sourceIdentifier += "#object_surface_sampling_config=" + options.objectSurfaceSamplingConfigHash;
+	}
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	spdlog::debug("    ExtractSubMesh: prim='{}' subset='{}' source='{}'",
 		cacheIdentity.primPath, subsetName, cacheIdentity.sourceIdentifier);
@@ -1731,10 +1739,12 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	}
 	else if (objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
 		spdlog::info(
-			"Object Reyes atlas-baked height sampling enabled for prim='{}' subset='{}' density={}.",
+			"Object Reyes atlas-baked height sampling enabled for prim='{}' subset='{}' density={} triplanarProjection={} tripleTapStochastic={}.",
 			cacheIdentity.primPath,
 			subsetName,
-			objectSurfaceTexelDensity);
+			objectSurfaceTexelDensity,
+			options.objectSurfaceUseTriplanarProjection,
+			options.objectSurfaceUseTripleTapStochastic);
 	}
 
 	const size_t loadedVertCount = rawData ? (rawData->size() / static_cast<size_t>(vertexSize > 0 ? vertexSize : 1)) : 0;
@@ -1822,6 +1832,8 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		std::move(prototypeGeometry));
 	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
 	result.objectSurfaceSamplingMode = objectSurfaceSamplingMode;
+	result.objectSurfaceUseTriplanarProjection = options.objectSurfaceUseTriplanarProjection;
+	result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
 	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;
 	return result;
 }

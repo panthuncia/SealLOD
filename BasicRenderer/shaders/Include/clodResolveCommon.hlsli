@@ -1757,8 +1757,11 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     MaterialInfo materialInfo = materialDataBuffer[md.materialDataIndex];
 #endif
     uint materialFlags = materialInfo.materialFlags;
-    const bool useReyesGeometricNormal = isReyesPatch && VISBUF_REYES_USE_NORMAL_MAPS == 0u;
-    if (useReyesGeometricNormal)
+    const float reyesObjectNormalMapBlend = isReyesPatch
+        ? saturate(asfloat(VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT))
+        : 1.0f;
+    const bool useReyesGeometricNormal = isReyesPatch && reyesObjectNormalMapBlend < 0.999f;
+    if (isReyesPatch && reyesObjectNormalMapBlend <= 1.0e-4f)
     {
         materialFlags &= ~MATERIAL_NORMAL_MAP;
         materialInfo.materialFlags = materialFlags;
@@ -2133,6 +2136,15 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         const float3 objectNormalOS = DecodeMaterialNormalSample(objectNormalSample, materialInfo.normalChannels, materialFlags);
         materialInputs.normalWS = normalize(mul(objectNormalOS, normalMatrix));
 #endif
+    }
+
+    if (useReyesGeometricNormal)
+    {
+        const float normalMapLengthSq = dot(materialInputs.normalWS, materialInputs.normalWS);
+        const float3 materialNormalWS = normalMapLengthSq > 1.0e-8f
+            ? materialInputs.normalWS * rsqrt(normalMapLengthSq)
+            : worldNormal;
+        materialInputs.normalWS = normalize(lerp(worldNormal, materialNormalWS, reyesObjectNormalMapBlend));
     }
 #endif
 

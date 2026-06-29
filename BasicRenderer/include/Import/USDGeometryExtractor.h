@@ -37,6 +37,8 @@ struct ExtractOptions {
 	bool brniflyModelSpaceNormals = false;
 	bool geometricDisplacementOptIn = false;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	bool objectSurfaceUseTriplanarProjection = false;
+	bool objectSurfaceUseTripleTapStochastic = false;
 	std::string objectSurfaceSamplingConfigHash;
 };
 

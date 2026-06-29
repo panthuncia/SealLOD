@@ -302,6 +302,9 @@ MaterialDescription Material::ToCacheDescription() const
     desc.glintEnabled = m_materialData.glintEnabled != 0u;
     desc.glintParameters = m_materialData.glintParameters;
     desc.objectSurfaceSamplingMode = static_cast<ObjectSurfaceSamplingMode>(m_materialData.objectSurfaceSamplingMode);
+    desc.objectSurfaceUseTriplanarProjection =
+        (m_materialData.materialFlags & MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u;
+    desc.objectSurfaceUseTripleTapStochastic = desc.objectSurfaceUseTriplanarProjection;
     desc.objectSurfaceTexelDensity = m_materialData.objectSurfaceTexelDensity;
     desc.objectTriplanarBlendMaterial =
         (m_materialData.materialFlags & MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u;

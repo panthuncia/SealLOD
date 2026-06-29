@@ -19,6 +19,7 @@ inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDis
 inline constexpr const char* CLodDisableNonVoxelVisibilitySettingName = "clodDisableNonVoxelVisibility";
 inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
+inline constexpr const char* CLodReyesObjectNormalMapBlendSettingName = "clodReyesObjectNormalMapBlend";
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
 inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodReyesTerrainNormalMipBias";
 inline constexpr const char* CLodReyesDiceRatePixelsSettingName = "clodReyesDiceRatePixels";
@@ -49,6 +50,7 @@ inline constexpr const char* CLodWorkGraphComputePageJobDescriptorBufferId = "CL
 inline constexpr const char* CLodLevelInfosBufferId = "Builtin::CLod::LevelInfos";
 inline constexpr const char* CLodDirectionalVirtualShadowMaxBackingResolutionSettingName = "clodDirectionalVirtualShadowMaxBackingResolution";
 inline constexpr float CLodReyesTerrainNormalBlendDefault = 0.35f;
+inline constexpr float CLodReyesObjectNormalMapBlendDefault = 0.0f;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasDefault = 2u;
 inline constexpr uint32_t CLodReyesTerrainNormalMipBiasMax = 8u;
 inline constexpr float CLodReyesDiceRatePixelsDefault = 1.0f;
@@ -58,6 +60,17 @@ inline constexpr float CLodReyesDiceRatePixelsMax = 8.0f;
 inline bool CLodReyesUseNormalMaps()
 {
     return !SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesGeometricNormalSettingName)();
+}
+
+inline float CLodReyesObjectNormalMapBlend()
+{
+    if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesGeometricNormalSettingName)()) {
+        return 1.0f;
+    }
+    return std::clamp(
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodReyesObjectNormalMapBlendSettingName)(),
+        0.0f,
+        1.0f);
 }
 
 inline float CLodReyesTerrainNormalBlend()

@@ -1599,6 +1599,21 @@ float SampleMaterialGeometricHeightDebug(
     float2 parallaxDUdy,
     inout MaterialInputs materialInputs)
 {
+    if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.heightStreamingTextureID,
+            saturate(heightUv.uv),
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).r);
+    }
+
     if (!uvBindings.hasHeightSource)
     {
         return 0.0f;
@@ -1649,6 +1664,21 @@ float SampleMaterialGeometricHeightDebug(
     float2 parallaxDUdy,
     inout MaterialInputs materialInputs)
 {
+    if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
+    {
+        MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+        return saturate(SampleMaterialTexture2DGrad(
+            heightTexture,
+            heightSampler,
+            materialInfo.heightStreamingTextureID,
+            saturate(heightUv.uv),
+            heightUv.dUVdx,
+            heightUv.dUVdy,
+            materialInputs).r);
+    }
+
     if (!uvBindings.hasHeightSource)
     {
         return 0.0f;
@@ -2122,7 +2152,7 @@ void SampleObjectTriplanarStochasticMaterial(
 
     float3 normalWS = normalWSBase;
 #if defined(PSO_NORMAL_MAP)
-    if ((materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
         SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
@@ -2230,7 +2260,7 @@ void SampleObjectTriplanarStochasticMaterial(
 
     float3 normalWS = normalWSBase;
 #if defined(PSO_NORMAL_MAP)
-    if ((materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    if ((materialFlags & MATERIAL_NORMAL_MAP) != 0u && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
     {
         Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.normalTextureIndex)];
         SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];

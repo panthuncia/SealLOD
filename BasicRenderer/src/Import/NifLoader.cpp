@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "26";
+constexpr std::string_view kObjectReyesConfigVersion = "29";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -164,9 +164,16 @@ struct ObjectReyesConfig
     std::unordered_set<std::string> texturePaths;
     std::unordered_set<std::string> surfaceSamplingNifPaths;
     std::unordered_set<std::string> surfaceSamplingTexturePaths;
+    std::unordered_set<std::string> bakedHeightNifPaths;
+    std::unordered_set<std::string> triplanarProjectionNifPaths;
+    std::unordered_set<std::string> triplanarProjectionTexturePaths;
+    std::unordered_set<std::string> tripleTapStochasticNifPaths;
+    std::unordered_set<std::string> tripleTapStochasticTexturePaths;
     std::vector<BakedHeightMaterialEntry> bakedHeightMaterials;
     std::string surfaceSamplingMode;
     bool surfaceSamplingIncludeSelected = false;
+    bool triplanarProjectionIncludeSelected = false;
+    bool tripleTapStochasticIncludeSelected = false;
     bool boundaryBlendingEnabled = false;
     float boundaryBlendStripWidthObjectUnits = 8.0f;
     std::uint32_t atlasBakeResolution = 4096u;
@@ -276,6 +283,68 @@ ObjectReyesConfig LoadObjectReyesConfig()
             readNifPathArray(*nifPaths, config.nifPaths);
         }
         readTexturePathArray(doc.value("texturePaths", json::array()), config.texturePaths);
+        auto readBakedHeightObject = [&](const json& bakedHeight) {
+            if (const auto nifPaths = bakedHeight.find("nifPaths"); nifPaths != bakedHeight.end() && nifPaths->is_array()) {
+                std::unordered_set<std::string> bakedHeightNifPaths;
+                readNifPathArray(*nifPaths, bakedHeightNifPaths);
+                for (std::string nifPath : bakedHeightNifPaths) {
+                    if (!nifPath.empty()) {
+                        config.bakedHeightNifPaths.insert(nifPath);
+                        config.bakedHeightMaterials.push_back(ObjectReyesConfig::BakedHeightMaterialEntry{
+                            .nifPath = std::move(nifPath),
+                            .materialTexturePaths = {}
+                        });
+                    }
+                }
+            }
+            if (const auto entries = bakedHeight.find("entries"); entries != bakedHeight.end() && entries->is_array()) {
+                for (const auto& entryNode : *entries) {
+                    if (!entryNode.is_object()) {
+                        continue;
+                    }
+                    ObjectReyesConfig::BakedHeightMaterialEntry entry{};
+                    entry.nifPath = NormalizeObjectReyesNifWhitelistPath(entryNode.value("nifPath", std::string{}));
+                    const json textureArray = entryNode.contains("materialTexturePaths")
+                        ? entryNode.at("materialTexturePaths")
+                        : entryNode.value("texturePaths", json::array());
+                    std::unordered_set<std::string> uniqueTextures;
+                    readTexturePathArray(textureArray, uniqueTextures);
+                    entry.materialTexturePaths.assign(uniqueTextures.begin(), uniqueTextures.end());
+                    std::sort(entry.materialTexturePaths.begin(), entry.materialTexturePaths.end());
+                    if (!entry.nifPath.empty()) {
+                        config.bakedHeightNifPaths.insert(entry.nifPath);
+                        config.bakedHeightMaterials.push_back(std::move(entry));
+                    }
+                }
+            }
+            if (const auto atlasBake = bakedHeight.find("atlasBake");
+                atlasBake != bakedHeight.end() && atlasBake->is_object()) {
+                config.atlasBakeResolution = atlasBake->value("resolution", config.atlasBakeResolution);
+                config.atlasBakePaddingTexels = atlasBake->value("paddingTexels", config.atlasBakePaddingTexels);
+            }
+            if (const auto boundaryBlending = bakedHeight.find("boundaryBlending");
+                boundaryBlending != bakedHeight.end() && boundaryBlending->is_object()) {
+                config.boundaryBlendingEnabled = boundaryBlending->value("enabled", config.boundaryBlendingEnabled);
+                config.boundaryBlendStripWidthObjectUnits = boundaryBlending->value(
+                    "stripWidthObjectUnits",
+                    config.boundaryBlendStripWidthObjectUnits);
+            }
+        };
+
+        if (const auto bakedHeight = doc.find("bakedHeight"); bakedHeight != doc.end() && bakedHeight->is_object()) {
+            readBakedHeightObject(*bakedHeight);
+        }
+        if (const auto triplanarProjection = doc.find("triplanarProjection");
+            triplanarProjection != doc.end() && triplanarProjection->is_object()) {
+            config.triplanarProjectionIncludeSelected =
+                triplanarProjection->value("includeSelected", config.triplanarProjectionIncludeSelected);
+            if (const auto nifPaths = triplanarProjection->find("nifPaths"); nifPaths != triplanarProjection->end()) {
+                readNifPathArray(*nifPaths, config.triplanarProjectionNifPaths);
+            }
+            readTexturePathArray(
+                triplanarProjection->value("texturePaths", json::array()),
+                config.triplanarProjectionTexturePaths);
+        }
         if (const auto surfaceSampling = doc.find("surfaceSampling"); surfaceSampling != doc.end() && surfaceSampling->is_object()) {
             config.surfaceSamplingMode = surfaceSampling->value("mode", std::string{});
             config.surfaceSamplingIncludeSelected = surfaceSampling->value("includeSelected", config.surfaceSamplingIncludeSelected);
@@ -316,43 +385,43 @@ ObjectReyesConfig LoadObjectReyesConfig()
             }
             if (const auto bakedHeight = surfaceSampling->find("bakedHeight");
                 bakedHeight != surfaceSampling->end() && bakedHeight->is_object()) {
-                if (const auto nifPaths = bakedHeight->find("nifPaths"); nifPaths != bakedHeight->end() && nifPaths->is_array()) {
-                    std::unordered_set<std::string> bakedHeightNifPaths;
-                    readNifPathArray(*nifPaths, bakedHeightNifPaths);
-                    for (std::string nifPath : bakedHeightNifPaths) {
-                        if (!nifPath.empty()) {
-                            config.bakedHeightMaterials.push_back(ObjectReyesConfig::BakedHeightMaterialEntry{
-                                .nifPath = std::move(nifPath),
-                                .materialTexturePaths = {}
-                            });
-                        }
-                    }
-                }
-                if (const auto entries = bakedHeight->find("entries"); entries != bakedHeight->end() && entries->is_array()) {
-                    for (const auto& entryNode : *entries) {
-                        if (!entryNode.is_object()) {
-                            continue;
-                        }
-                        ObjectReyesConfig::BakedHeightMaterialEntry entry{};
-                        entry.nifPath = NormalizeObjectReyesNifWhitelistPath(entryNode.value("nifPath", std::string{}));
-                        const json textureArray = entryNode.contains("materialTexturePaths")
-                            ? entryNode.at("materialTexturePaths")
-                            : entryNode.value("texturePaths", json::array());
-                        std::unordered_set<std::string> uniqueTextures;
-                        readTexturePathArray(textureArray, uniqueTextures);
-                        entry.materialTexturePaths.assign(uniqueTextures.begin(), uniqueTextures.end());
-                        std::sort(entry.materialTexturePaths.begin(), entry.materialTexturePaths.end());
-                        if (!entry.nifPath.empty()) {
-                            config.bakedHeightMaterials.push_back(std::move(entry));
-                        }
-                    }
-                }
+                readBakedHeightObject(*bakedHeight);
             }
+            if (const auto tripleTap = surfaceSampling->find("tripleTapStochastic");
+                tripleTap != surfaceSampling->end() && tripleTap->is_object()) {
+                config.tripleTapStochasticIncludeSelected =
+                    tripleTap->value("includeSelected", config.tripleTapStochasticIncludeSelected);
+                if (const auto nifPaths = tripleTap->find("nifPaths"); nifPaths != tripleTap->end()) {
+                    readNifPathArray(*nifPaths, config.tripleTapStochasticNifPaths);
+                }
+                readTexturePathArray(
+                    tripleTap->value("texturePaths", json::array()),
+                    config.tripleTapStochasticTexturePaths);
+            }
+        }
+        if (!std::isfinite(config.boundaryBlendStripWidthObjectUnits) ||
+            config.boundaryBlendStripWidthObjectUnits <= 0.0f) {
+            spdlog::warn(
+                "Object Reyes boundaryBlending.stripWidthObjectUnits={} is invalid; using 8.0.",
+                config.boundaryBlendStripWidthObjectUnits);
+            config.boundaryBlendStripWidthObjectUnits = 8.0f;
+        }
+        if (config.atlasBakeResolution < 256u || config.atlasBakeResolution > 8192u) {
+            spdlog::warn(
+                "Object Reyes atlasBake.resolution={} is invalid; using 4096.",
+                config.atlasBakeResolution);
+            config.atlasBakeResolution = 4096u;
+        }
+        if (config.atlasBakePaddingTexels > 64u) {
+            spdlog::warn(
+                "Object Reyes atlasBake.paddingTexels={} is invalid; using 8.",
+                config.atlasBakePaddingTexels);
+            config.atlasBakePaddingTexels = 8u;
         }
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight entries={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
@@ -360,7 +429,14 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.surfaceSamplingIncludeSelected,
             config.surfaceSamplingNifPaths.size(),
             config.surfaceSamplingTexturePaths.size(),
+            config.bakedHeightNifPaths.size(),
             config.bakedHeightMaterials.size(),
+            config.triplanarProjectionNifPaths.size(),
+            config.triplanarProjectionTexturePaths.size(),
+            config.triplanarProjectionIncludeSelected,
+            config.tripleTapStochasticNifPaths.size(),
+            config.tripleTapStochasticTexturePaths.size(),
+            config.tripleTapStochasticIncludeSelected,
             config.boundaryBlendingEnabled,
             config.boundaryBlendStripWidthObjectUnits,
             config.atlasBakeResolution,
@@ -383,21 +459,29 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
     const bool nifListed =
         config.nifPaths.contains(normalizedSlashKey) ||
         config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
+        config.bakedHeightNifPaths.contains(normalizedSlashKey) ||
+        config.triplanarProjectionNifPaths.contains(normalizedSlashKey) ||
+        config.tripleTapStochasticNifPaths.contains(normalizedSlashKey) ||
         std::any_of(
             config.bakedHeightMaterials.begin(),
             config.bakedHeightMaterials.end(),
             [&](const ObjectReyesConfig::BakedHeightMaterialEntry& entry) { return entry.nifPath == normalizedSlashKey; });
-    if (config.surfaceSamplingMode == "atlasBakedHeight") {
+    if (config.surfaceSamplingMode == "atlasBakedHeight" || config.bakedHeightNifPaths.contains(normalizedSlashKey)) {
         return nifListed;
     }
     return config.nifPaths.contains(normalizedSlashKey) ||
         config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
+        config.bakedHeightNifPaths.contains(normalizedSlashKey) ||
+        config.triplanarProjectionNifPaths.contains(normalizedSlashKey) ||
+        config.tripleTapStochasticNifPaths.contains(normalizedSlashKey) ||
         std::any_of(
             config.bakedHeightMaterials.begin(),
             config.bakedHeightMaterials.end(),
             [&](const ObjectReyesConfig::BakedHeightMaterialEntry& entry) { return entry.nifPath == normalizedSlashKey; }) ||
         !config.texturePaths.empty() ||
-        !config.surfaceSamplingTexturePaths.empty();
+        !config.surfaceSamplingTexturePaths.empty() ||
+        !config.triplanarProjectionTexturePaths.empty() ||
+        !config.tripleTapStochasticTexturePaths.empty();
 }
 
 std::string SanitizeFileStem(std::string_view value)
@@ -507,7 +591,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 37u;
+constexpr std::uint32_t kPayloadCacheVersion = 39u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -620,6 +704,8 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.brniflyModelSpaceNormals);
     HashPod(hash, desc.heightMapFromBaseColorAlpha);
     HashPod(hash, desc.objectSurfaceSamplingMode);
+    HashPod(hash, desc.objectSurfaceUseTriplanarProjection);
+    HashPod(hash, desc.objectSurfaceUseTripleTapStochastic);
     HashPod(hash, desc.objectSurfaceTexelDensity);
     HashPod(hash, desc.objectTriplanarBlendMaterial);
     HashPod(hash, desc.objectBlendWeightUvSetIndex);
@@ -819,14 +905,26 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.surfaceSamplingTexturePaths.begin(),
         objectReyesConfig.surfaceSamplingTexturePaths.end());
     std::sort(options.objectReyesSurfaceSamplingTexturePaths.begin(), options.objectReyesSurfaceSamplingTexturePaths.end());
+    options.objectReyesTriplanarProjectionTexturePaths.assign(
+        objectReyesConfig.triplanarProjectionTexturePaths.begin(),
+        objectReyesConfig.triplanarProjectionTexturePaths.end());
+    std::sort(options.objectReyesTriplanarProjectionTexturePaths.begin(), options.objectReyesTriplanarProjectionTexturePaths.end());
+    options.objectReyesTripleTapStochasticTexturePaths.assign(
+        objectReyesConfig.tripleTapStochasticTexturePaths.begin(),
+        objectReyesConfig.tripleTapStochasticTexturePaths.end());
+    std::sort(options.objectReyesTripleTapStochasticTexturePaths.begin(), options.objectReyesTripleTapStochasticTexturePaths.end());
     options.objectReyesNifMatched =
         objectReyesConfig.loaded &&
         objectReyesConfig.nifPaths.contains(options.objectReyesNifPath);
+    const bool bakedHeightNifMatched =
+        objectReyesConfig.loaded &&
+        objectReyesConfig.bakedHeightNifPaths.contains(options.objectReyesNifPath);
     options.objectReyesSurfaceSamplingEnabled =
         objectReyesConfig.loaded &&
-        (objectReyesConfig.surfaceSamplingMode == "triplanarStochastic" ||
+        (bakedHeightNifMatched ||
+         objectReyesConfig.surfaceSamplingMode == "triplanarStochastic" ||
          objectReyesConfig.surfaceSamplingMode == "atlasBakedHeight");
-    if (objectReyesConfig.surfaceSamplingMode == "atlasBakedHeight") {
+    if (bakedHeightNifMatched || objectReyesConfig.surfaceSamplingMode == "atlasBakedHeight") {
         options.objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::AtlasBakedHeight;
     }
     else if (objectReyesConfig.surfaceSamplingMode == "triplanarStochastic") {
@@ -838,7 +936,13 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     options.objectReyesSurfaceSamplingIncludeSelected = objectReyesConfig.surfaceSamplingIncludeSelected;
     options.objectReyesSurfaceSamplingNifMatched =
         options.objectReyesSurfaceSamplingEnabled &&
-        objectReyesConfig.surfaceSamplingNifPaths.contains(options.objectReyesNifPath);
+        (bakedHeightNifMatched || objectReyesConfig.surfaceSamplingNifPaths.contains(options.objectReyesNifPath));
+    options.objectReyesTriplanarProjectionIncludeSelected = objectReyesConfig.triplanarProjectionIncludeSelected;
+    options.objectReyesTriplanarProjectionNifMatched =
+        objectReyesConfig.triplanarProjectionNifPaths.contains(options.objectReyesNifPath);
+    options.objectReyesTripleTapStochasticIncludeSelected = objectReyesConfig.tripleTapStochasticIncludeSelected;
+    options.objectReyesTripleTapStochasticNifMatched =
+        objectReyesConfig.tripleTapStochasticNifPaths.contains(options.objectReyesNifPath);
     options.objectReyesBoundaryBlendingEnabled = objectReyesConfig.boundaryBlendingEnabled;
     options.objectReyesBoundaryBlendStripWidthObjectUnits = objectReyesConfig.boundaryBlendStripWidthObjectUnits;
     options.objectReyesAtlasBakeResolution = objectReyesConfig.atlasBakeResolution;
@@ -1375,6 +1479,8 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.brniflyModelSpaceNormals);
     writer.Pod(desc.heightMapFromBaseColorAlpha);
     writer.Pod(static_cast<std::uint32_t>(desc.objectSurfaceSamplingMode));
+    writer.Pod(desc.objectSurfaceUseTriplanarProjection);
+    writer.Pod(desc.objectSurfaceUseTripleTapStochastic);
     writer.Pod(desc.objectSurfaceTexelDensity);
     writer.Pod(desc.objectTriplanarBlendMaterial);
     writer.Pod(desc.objectBlendWeightUvSetIndex);
@@ -1429,6 +1535,8 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.brniflyModelSpaceNormals) ||
         !reader.Pod(desc.heightMapFromBaseColorAlpha) ||
         !reader.Pod(objectSurfaceSamplingMode) ||
+        !reader.Pod(desc.objectSurfaceUseTriplanarProjection) ||
+        !reader.Pod(desc.objectSurfaceUseTripleTapStochastic) ||
         !reader.Pod(desc.objectSurfaceTexelDensity) ||
         !reader.Pod(desc.objectTriplanarBlendMaterial) ||
         !reader.Pod(desc.objectBlendWeightUvSetIndex) ||
@@ -1476,6 +1584,11 @@ void WriteObjectReyesAtlasBakeData(
     writer.PodVector(data->positions);
     writer.PodVector(data->normals);
     writer.PodVector(data->atlasUvs);
+    const std::uint64_t uvSetCount = data->uvSets.size();
+    writer.Pod(uvSetCount);
+    for (const auto& uvSet : data->uvSets) {
+        writer.PodVector(uvSet);
+    }
     writer.PodVector(data->indices);
     writer.PodVector(data->triangleMaterialIndices);
     WriteStringVector(writer, data->sourceMaterialNames);
@@ -1510,8 +1623,20 @@ bool ReadObjectReyesAtlasBakeData(
         !reader.Pod(mutableData->blendWidthObjectUnits) ||
         !reader.PodVector(mutableData->positions) ||
         !reader.PodVector(mutableData->normals) ||
-        !reader.PodVector(mutableData->atlasUvs) ||
-        !reader.PodVector(mutableData->indices) ||
+        !reader.PodVector(mutableData->atlasUvs)) {
+        return false;
+    }
+    std::uint64_t uvSetCount = 0u;
+    if (!reader.Pod(uvSetCount) || uvSetCount > 64u) {
+        return false;
+    }
+    mutableData->uvSets.resize(static_cast<std::size_t>(uvSetCount));
+    for (auto& uvSet : mutableData->uvSets) {
+        if (!reader.PodVector(uvSet)) {
+            return false;
+        }
+    }
+    if (!reader.PodVector(mutableData->indices) ||
         !reader.PodVector(mutableData->triangleMaterialIndices) ||
         !ReadStringVector(reader, mutableData->sourceMaterialNames)) {
         return false;
@@ -1544,6 +1669,11 @@ bool ReadObjectReyesAtlasBakeData(
         mutableData->sourceMaterialNames.size() != mutableData->sourceMaterials.size() ||
         mutableData->sourceMaterials.empty()) {
         return false;
+    }
+    for (const auto& uvSet : mutableData->uvSets) {
+        if (!uvSet.empty() && uvSet.size() != vertexCount) {
+            return false;
+        }
     }
     if (vertexCount > 10000000u || mutableData->indices.size() > 30000000u) {
         return false;

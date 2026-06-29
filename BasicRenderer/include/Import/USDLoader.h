@@ -38,11 +38,17 @@ namespace USDLoader {
 		std::string objectReyesConfigHash;
 		std::vector<std::string> objectReyesTexturePaths;
 		std::vector<std::string> objectReyesSurfaceSamplingTexturePaths;
+		std::vector<std::string> objectReyesTriplanarProjectionTexturePaths;
+		std::vector<std::string> objectReyesTripleTapStochasticTexturePaths;
 		bool objectReyesNifMatched = false;
 		bool objectReyesSurfaceSamplingEnabled = false;
 		ObjectSurfaceSamplingMode objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 		bool objectReyesSurfaceSamplingIncludeSelected = false;
 		bool objectReyesSurfaceSamplingNifMatched = false;
+		bool objectReyesTriplanarProjectionIncludeSelected = false;
+		bool objectReyesTriplanarProjectionNifMatched = false;
+		bool objectReyesTripleTapStochasticIncludeSelected = false;
+		bool objectReyesTripleTapStochasticNifMatched = false;
 		bool objectReyesBoundaryBlendingEnabled = false;
 		float objectReyesBoundaryBlendStripWidthObjectUnits = 8.0f;
 		std::uint32_t objectReyesAtlasBakeResolution = 4096;

@@ -558,6 +558,10 @@ private:
     std::function<bool()> getCLodReyesGeometricNormal;
     std::function<void(bool)> setCLodReyesGeometricNormal;
 
+    float m_clodReyesObjectNormalMapBlend = CLodReyesObjectNormalMapBlendDefault;
+    std::function<float()> getCLodReyesObjectNormalMapBlend;
+    std::function<void(float)> setCLodReyesObjectNormalMapBlend;
+
     float m_clodReyesTerrainNormalBlend = CLodReyesTerrainNormalBlendDefault;
     std::function<float()> getCLodReyesTerrainNormalBlend;
     std::function<void(float)> setCLodReyesTerrainNormalBlend;
@@ -1123,6 +1127,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodReyesGeometricNormal = settingsManager.getSettingSetter<bool>(CLodReyesGeometricNormalSettingName);
     m_clodReyesGeometricNormal = getCLodReyesGeometricNormal();
     observerSetting(m_clodReyesGeometricNormal, CLodReyesGeometricNormalSettingName);
+
+    getCLodReyesObjectNormalMapBlend = settingsManager.getSettingGetter<float>(CLodReyesObjectNormalMapBlendSettingName);
+    setCLodReyesObjectNormalMapBlend = settingsManager.getSettingSetter<float>(CLodReyesObjectNormalMapBlendSettingName);
+    m_clodReyesObjectNormalMapBlend = getCLodReyesObjectNormalMapBlend();
+    observerSetting(m_clodReyesObjectNormalMapBlend, CLodReyesObjectNormalMapBlendSettingName);
 
     getCLodReyesTerrainNormalBlend = settingsManager.getSettingGetter<float>(CLodReyesTerrainNormalBlendSettingName);
     setCLodReyesTerrainNormalBlend = settingsManager.getSettingSetter<float>(CLodReyesTerrainNormalBlendSettingName);
@@ -1853,6 +1862,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Reyes Geometric Normal", &m_clodReyesGeometricNormal)) {
             setCLodReyesGeometricNormal(m_clodReyesGeometricNormal);
+        }
+        if (ImGui::SliderFloat("Reyes Object Normal Map Blend", &m_clodReyesObjectNormalMapBlend, 0.0f, 1.0f, "%.2f")) {
+            m_clodReyesObjectNormalMapBlend = std::clamp(m_clodReyesObjectNormalMapBlend, 0.0f, 1.0f);
+            setCLodReyesObjectNormalMapBlend(m_clodReyesObjectNormalMapBlend);
         }
         if (ImGui::SliderFloat("Reyes Terrain Normal Blend", &m_clodReyesTerrainNormalBlend, 0.0f, 1.0f, "%.2f")) {
             m_clodReyesTerrainNormalBlend = std::clamp(m_clodReyesTerrainNormalBlend, 0.0f, 1.0f);

@@ -118,6 +118,8 @@ struct MaterialDescription {
 	bool brniflyModelSpaceNormals = false;
 	bool heightMapFromBaseColorAlpha = false;
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+	bool objectSurfaceUseTriplanarProjection = false;
+	bool objectSurfaceUseTripleTapStochastic = false;
 	float objectSurfaceTexelDensity = 1.0f;
 	bool objectTriplanarBlendMaterial = false;
 	uint32_t objectBlendWeightUvSetIndex = 0;
