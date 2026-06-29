@@ -2781,6 +2781,11 @@ namespace USDLoader {
 			resolvedDesc.enableGeometricDisplacement = true;
 			resolvedDesc.heightMap.uvSetIndex = preprocessResult->objectAtlasHeightUvSetIndex;
 			resolvedDesc.heightMap.uvSetName = "__object_reyes_atlas_height";
+			resolvedDesc.heightMapScale = std::max(
+				1.0e-6f,
+				preprocessResult->objectAtlasDisplacementMax - preprocessResult->objectAtlasDisplacementMin);
+			resolvedDesc.geometricDisplacementMin = preprocessResult->objectAtlasDisplacementMin;
+			resolvedDesc.geometricDisplacementMax = preprocessResult->objectAtlasDisplacementMax;
 		}
 		if (preprocessResult) {
 			resolvedDesc.objectSurfaceTexelDensity = preprocessResult->objectSurfaceTexelDensity;
@@ -3270,6 +3275,20 @@ namespace USDLoader {
 		}
 
 		std::vector<ObjectAtlasHeightSampler> samplers(result.objectAtlasSourceMaterials.size());
+		std::vector<float> sourceDisplacementMins(result.objectAtlasSourceMaterials.size(), 0.0f);
+		std::vector<float> sourceDisplacementMaxs(result.objectAtlasSourceMaterials.size(), 0.0f);
+		float atlasDisplacementMin = 0.0f;
+		float atlasDisplacementMax = 0.0f;
+		auto materialDisplacementRange = [](const MaterialDescription& desc) {
+			float minValue = desc.geometricDisplacementMin;
+			float maxValue = desc.geometricDisplacementMax;
+			if (!std::isfinite(minValue) || !std::isfinite(maxValue) || maxValue <= minValue) {
+				const float scale = std::isfinite(desc.heightMapScale) ? std::max(0.0f, desc.heightMapScale) : 0.0f;
+				minValue = -0.5f * scale;
+				maxValue = 0.5f * scale;
+			}
+			return std::pair<float, float>{ minValue, maxValue };
+		};
 		std::string bakeIdentity;
 		bakeIdentity.reserve(1024);
 		bakeIdentity += sourceIdentifier;
@@ -3281,7 +3300,7 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=2";
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=3";
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
@@ -3292,6 +3311,11 @@ namespace USDLoader {
 					desc.heightMap.sourcePath);
 				return false;
 			}
+			const auto [sourceMin, sourceMax] = materialDisplacementRange(desc);
+			sourceDisplacementMins[materialIndex] = sourceMin;
+			sourceDisplacementMaxs[materialIndex] = sourceMax;
+			atlasDisplacementMin = std::min(atlasDisplacementMin, sourceMin);
+			atlasDisplacementMax = std::max(atlasDisplacementMax, sourceMax);
 			bakeIdentity += "|mat";
 			bakeIdentity += std::to_string(materialIndex);
 			bakeIdentity += "=";
@@ -3301,6 +3325,19 @@ namespace USDLoader {
 			bakeIdentity += "@density:";
 			bakeIdentity += std::to_string(desc.objectSurfaceTexelDensity);
 		}
+		if (!std::isfinite(atlasDisplacementMin) ||
+			!std::isfinite(atlasDisplacementMax) ||
+			atlasDisplacementMax <= atlasDisplacementMin) {
+			atlasDisplacementMin = -0.5f;
+			atlasDisplacementMax = 0.5f;
+		}
+		const float atlasDisplacementRange = std::max(1.0e-6f, atlasDisplacementMax - atlasDisplacementMin);
+		result.objectAtlasDisplacementMin = atlasDisplacementMin;
+		result.objectAtlasDisplacementMax = atlasDisplacementMax;
+		bakeIdentity += "|atlasDisplacementMin=";
+		bakeIdentity += std::to_string(atlasDisplacementMin);
+		bakeIdentity += "|atlasDisplacementMax=";
+		bakeIdentity += std::to_string(atlasDisplacementMax);
 
 		const std::filesystem::path cachePath = ObjectReyesAtlasHeightDdsCachePath(bakeIdentity);
 		std::error_code ec;
@@ -3345,6 +3382,19 @@ namespace USDLoader {
 		const std::uint32_t height = std::clamp<std::uint32_t>(result.objectAtlasHeight, 1u, 4096u);
 		std::vector<std::uint16_t> pixels(static_cast<std::size_t>(width) * height, 32768u);
 		std::vector<std::uint8_t> coverage(pixels.size(), 0u);
+		auto offsetToAtlasHeight = [&](float displacementOffset) {
+			return std::clamp((displacementOffset - atlasDisplacementMin) / atlasDisplacementRange, 0.0f, 1.0f);
+		};
+		auto sampleMaterialAtlasHeight = [&](std::uint32_t materialIndex, const DirectX::XMFLOAT3& position, const DirectX::XMFLOAT3& normal) {
+			if (materialIndex >= samplers.size()) {
+				return offsetToAtlasHeight(0.0f);
+			}
+			const float density = result.objectAtlasSourceMaterials[materialIndex].objectSurfaceTexelDensity;
+			const float sourceHeight = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[materialIndex], position, normal, density), 0.0f, 1.0f);
+			const float sourceMin = materialIndex < sourceDisplacementMins.size() ? sourceDisplacementMins[materialIndex] : 0.0f;
+			const float sourceMax = materialIndex < sourceDisplacementMaxs.size() ? sourceDisplacementMaxs[materialIndex] : 0.0f;
+			return offsetToAtlasHeight(sourceMin + (sourceMax - sourceMin) * sourceHeight);
+		};
 		auto lerp3 = [](const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, const DirectX::XMFLOAT3& c, float wa, float wb, float wc) {
 			return DirectX::XMFLOAT3{
 				a.x * wa + b.x * wb + c.x * wc,
@@ -3411,8 +3461,7 @@ namespace USDLoader {
 					}
 					const auto position = lerp3(positions[i0], positions[i1], positions[i2], w0, w1, w2);
 					const auto normal = NormalizeObjectAtlasVector(lerp3(normals[i0], normals[i1], normals[i2], w0, w1, w2));
-					const float density = result.objectAtlasSourceMaterials[materialIndex].objectSurfaceTexelDensity;
-					const float sample = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[materialIndex], position, normal, density), 0.0f, 1.0f);
+					const float sample = sampleMaterialAtlasHeight(materialIndex, position, normal);
 					const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
 					pixels[pixelIndex] = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
 					coverage[pixelIndex] = 1u;
@@ -3448,8 +3497,7 @@ namespace USDLoader {
 					canonical.n0.y * (1.0f - t) + canonical.n1.y * t,
 					canonical.n0.z * (1.0f - t) + canonical.n1.z * t
 				});
-				const float density = result.objectAtlasSourceMaterials[canonical.materialIndex].objectSurfaceTexelDensity;
-				const float sample = std::clamp(ObjectAtlasSampleTriplanarHeight(samplers[canonical.materialIndex], position, normal, density), 0.0f, 1.0f);
+				const float sample = sampleMaterialAtlasHeight(canonical.materialIndex, position, normal);
 				const std::uint16_t value = static_cast<std::uint16_t>(std::lround(sample * 65535.0f));
 				for (const ObjectAtlasEdgeSample& edgeSample : samples) {
 					const bool sameDirection = MakeObjectAtlasPositionKey(edgeSample.p0) == canonicalStart;
@@ -3517,13 +3565,15 @@ namespace USDLoader {
 			result.objectAtlasBakedHeightSourcePath = cachePath.string();
 		}
 		spdlog::info(
-			"Object Reyes atlas height preprocess baked '{}' for '{}' size={}x{} mips={} sourceMaterials={}.",
+			"Object Reyes atlas height preprocess baked '{}' for '{}' size={}x{} mips={} sourceMaterials={} displacementRange=[{}, {}].",
 			result.objectAtlasBakedHeightSourcePath,
 			parentPath,
 			width,
 			height,
 			mipPixels.size(),
-			result.objectAtlasSourceMaterials.size());
+			result.objectAtlasSourceMaterials.size(),
+			atlasDisplacementMin,
+			atlasDisplacementMax);
 		return true;
 	}
 
@@ -4024,7 +4074,7 @@ namespace USDLoader {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
 			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
-			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=9";
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=10";
 			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
 			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);

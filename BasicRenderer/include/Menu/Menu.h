@@ -2170,7 +2170,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_terrainReyesDisplacementScale = std::max(0.0f, m_terrainReyesDisplacementScale);
             setTerrainReyesDisplacementScale(m_terrainReyesDisplacementScale);
         }
-        if (ImGui::SliderFloat("Object Reyes Displacement Global Scale", &m_objectReyesDisplacementScale, 0.0f, 16.0f, "%.2f")) {
+        if (ImGui::SliderFloat("Object Reyes Displacement Global Scale", &m_objectReyesDisplacementScale, 0.0f, 1000.0f, "%.2f")) {
             m_objectReyesDisplacementScale = std::max(0.0f, m_objectReyesDisplacementScale);
             setObjectReyesDisplacementScale(m_objectReyesDisplacementScale);
         }
