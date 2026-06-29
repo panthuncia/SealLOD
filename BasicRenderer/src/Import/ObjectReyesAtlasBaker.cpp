@@ -7,6 +7,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <DirectXMath.h>
 #include <xatlas.h>
@@ -78,6 +79,21 @@ bool IsFinite(const DirectX::XMFLOAT3& v)
 	return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
+float Distance2(const DirectX::XMFLOAT2& a, const DirectX::XMFLOAT2& b)
+{
+	const float dx = a.x - b.x;
+	const float dy = a.y - b.y;
+	return dx * dx + dy * dy;
+}
+
+float Distance2(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+{
+	const float dx = a.x - b.x;
+	const float dy = a.y - b.y;
+	const float dz = a.z - b.z;
+	return dx * dx + dy * dy + dz * dz;
+}
+
 TriangleKey MakeTriangleKey(std::uint32_t a, std::uint32_t b, std::uint32_t c)
 {
 	return TriangleKey{ { a, b, c } };
@@ -113,6 +129,52 @@ PositionKey MakePositionKey(const std::byte* vertex)
 	std::memcpy(key.bits.data(), vertex + MeshVertexLayout::PositionOffset, sizeof(float) * 3u);
 	return key;
 }
+
+PositionKey MakePositionKey(const DirectX::XMFLOAT3& position)
+{
+	PositionKey key{};
+	std::memcpy(key.bits.data(), &position, sizeof(float) * 3u);
+	return key;
+}
+
+struct EdgeKey {
+	PositionKey a{};
+	PositionKey b{};
+
+	bool operator==(const EdgeKey& rhs) const noexcept {
+		return a == rhs.a && b == rhs.b;
+	}
+};
+
+struct EdgeKeyHash {
+	std::size_t operator()(const EdgeKey& key) const noexcept {
+		PositionKeyHash hashPosition;
+		std::size_t h = hashPosition(key.a);
+		h ^= hashPosition(key.b) + 0x9e3779b97f4a7c15ull + (h << 6u) + (h >> 2u);
+		return h;
+	}
+};
+
+bool PositionKeyLess(const PositionKey& lhs, const PositionKey& rhs)
+{
+	return lhs.bits < rhs.bits;
+}
+
+EdgeKey MakeEdgeKey(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+{
+	PositionKey ka = MakePositionKey(a);
+	PositionKey kb = MakePositionKey(b);
+	if (PositionKeyLess(kb, ka)) {
+		std::swap(ka, kb);
+	}
+	return EdgeKey{ ka, kb };
+}
+
+struct EdgeDiagnosticSample {
+	std::uint32_t i0 = 0;
+	std::uint32_t i1 = 0;
+	std::uint32_t materialIndex = 0;
+};
 
 DirectX::XMFLOAT3 NormalizeOrFallback(const DirectX::XMFLOAT3& n)
 {
@@ -182,6 +244,132 @@ void RecomputeExactPositionWeldedNormals(
 		const DirectX::XMFLOAT3 n = weldedNormals[vertexToWeld[vertexIndex]];
 		std::memcpy(vertices.data() + vertexIndex * vertexSize + MeshVertexLayout::NormalOffset, &n, sizeof(n));
 	}
+}
+
+std::string BuildAtlasMeshTopologyDiagnostics(
+	const std::vector<std::byte>& vertices,
+	std::uint32_t vertexSize,
+	std::span<const std::uint32_t> indices,
+	std::span<const MeshUvSetData> uvSets,
+	std::uint32_t atlasUvSetIndex,
+	std::span<const std::uint32_t> triangleMaterials)
+{
+	if (vertexSize < MeshVertexLayout::NormalOffset + sizeof(DirectX::XMFLOAT3) ||
+		atlasUvSetIndex >= uvSets.size() ||
+		vertices.empty()) {
+		return {};
+	}
+
+	const std::size_t vertexCount = vertices.size() / vertexSize;
+	const MeshUvSetData& atlasUvs = uvSets[atlasUvSetIndex];
+	if (atlasUvs.values.size() != vertexCount) {
+		return {};
+	}
+
+	std::unordered_map<PositionKey, std::vector<std::uint32_t>, PositionKeyHash> verticesByPosition;
+	verticesByPosition.reserve(vertexCount);
+	for (std::uint32_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+		const std::byte* vertex = vertices.data() + static_cast<std::size_t>(vertexIndex) * vertexSize;
+		verticesByPosition[MakePositionKey(vertex)].push_back(vertexIndex);
+	}
+
+	std::size_t coincidentVertexGroups = 0u;
+	float maxCoincidentNormalDelta = 0.0f;
+	for (const auto& [key, group] : verticesByPosition) {
+		(void)key;
+		if (group.size() < 2u) {
+			continue;
+		}
+		++coincidentVertexGroups;
+		for (std::size_t a = 0; a < group.size(); ++a) {
+			const DirectX::XMFLOAT3 na = LoadFloat3(
+				vertices.data() + static_cast<std::size_t>(group[a]) * vertexSize,
+				MeshVertexLayout::NormalOffset);
+			for (std::size_t b = a + 1u; b < group.size(); ++b) {
+				const DirectX::XMFLOAT3 nb = LoadFloat3(
+					vertices.data() + static_cast<std::size_t>(group[b]) * vertexSize,
+					MeshVertexLayout::NormalOffset);
+				maxCoincidentNormalDelta = std::max(maxCoincidentNormalDelta, std::sqrt(Distance2(na, nb)));
+			}
+		}
+	}
+
+	std::unordered_map<EdgeKey, std::vector<EdgeDiagnosticSample>, EdgeKeyHash> edges;
+	edges.reserve(indices.size());
+	auto addEdge = [&](std::uint32_t i0, std::uint32_t i1, std::uint32_t materialIndex) {
+		if (i0 >= vertexCount || i1 >= vertexCount) {
+			return;
+		}
+		const DirectX::XMFLOAT3 p0 = LoadFloat3(
+			vertices.data() + static_cast<std::size_t>(i0) * vertexSize,
+			MeshVertexLayout::PositionOffset);
+		const DirectX::XMFLOAT3 p1 = LoadFloat3(
+			vertices.data() + static_cast<std::size_t>(i1) * vertexSize,
+			MeshVertexLayout::PositionOffset);
+		edges[MakeEdgeKey(p0, p1)].push_back(EdgeDiagnosticSample{ i0, i1, materialIndex });
+	};
+	for (std::size_t tri = 0; tri + 2u < indices.size(); tri += 3u) {
+		const std::uint32_t materialIndex = (tri / 3u) < triangleMaterials.size() ? triangleMaterials[tri / 3u] : 0u;
+		addEdge(indices[tri + 0u], indices[tri + 1u], materialIndex);
+		addEdge(indices[tri + 1u], indices[tri + 2u], materialIndex);
+		addEdge(indices[tri + 2u], indices[tri + 0u], materialIndex);
+	}
+
+	std::size_t sharedEdgeGroups = 0u;
+	std::size_t nonManifoldEdgeGroups = 0u;
+	std::size_t atlasSeamEdgeGroups = 0u;
+	std::size_t materialBoundaryEdgeGroups = 0u;
+	float maxSharedEdgeNormalDelta = 0.0f;
+	float maxSharedEdgeUvDeltaTexels = 0.0f;
+	const float atlasTexelScale = 4096.0f;
+	for (const auto& [key, samples] : edges) {
+		(void)key;
+		if (samples.size() < 2u) {
+			continue;
+		}
+		++sharedEdgeGroups;
+		if (samples.size() > 2u) {
+			++nonManifoldEdgeGroups;
+		}
+		const EdgeDiagnosticSample& first = samples.front();
+		for (std::size_t sampleIndex = 1u; sampleIndex < samples.size(); ++sampleIndex) {
+			const EdgeDiagnosticSample& sample = samples[sampleIndex];
+			if (sample.materialIndex != first.materialIndex) {
+				++materialBoundaryEdgeGroups;
+				break;
+			}
+		}
+		for (std::size_t sampleIndex = 1u; sampleIndex < samples.size(); ++sampleIndex) {
+			const EdgeDiagnosticSample& sample = samples[sampleIndex];
+			const bool sameDirection =
+				MakePositionKey(LoadFloat3(vertices.data() + static_cast<std::size_t>(first.i0) * vertexSize, MeshVertexLayout::PositionOffset)) ==
+				MakePositionKey(LoadFloat3(vertices.data() + static_cast<std::size_t>(sample.i0) * vertexSize, MeshVertexLayout::PositionOffset));
+			const std::uint32_t s0 = sameDirection ? sample.i0 : sample.i1;
+			const std::uint32_t s1 = sameDirection ? sample.i1 : sample.i0;
+			const float uvDelta0 = std::sqrt(Distance2(atlasUvs.values[first.i0], atlasUvs.values[s0])) * atlasTexelScale;
+			const float uvDelta1 = std::sqrt(Distance2(atlasUvs.values[first.i1], atlasUvs.values[s1])) * atlasTexelScale;
+			const float edgeUvDelta = std::max(uvDelta0, uvDelta1);
+			maxSharedEdgeUvDeltaTexels = std::max(maxSharedEdgeUvDeltaTexels, edgeUvDelta);
+			if (edgeUvDelta > 0.5f) {
+				++atlasSeamEdgeGroups;
+			}
+			const DirectX::XMFLOAT3 n00 = LoadFloat3(vertices.data() + static_cast<std::size_t>(first.i0) * vertexSize, MeshVertexLayout::NormalOffset);
+			const DirectX::XMFLOAT3 n01 = LoadFloat3(vertices.data() + static_cast<std::size_t>(first.i1) * vertexSize, MeshVertexLayout::NormalOffset);
+			const DirectX::XMFLOAT3 n10 = LoadFloat3(vertices.data() + static_cast<std::size_t>(s0) * vertexSize, MeshVertexLayout::NormalOffset);
+			const DirectX::XMFLOAT3 n11 = LoadFloat3(vertices.data() + static_cast<std::size_t>(s1) * vertexSize, MeshVertexLayout::NormalOffset);
+			maxSharedEdgeNormalDelta = std::max(maxSharedEdgeNormalDelta, std::sqrt(Distance2(n00, n10)));
+			maxSharedEdgeNormalDelta = std::max(maxSharedEdgeNormalDelta, std::sqrt(Distance2(n01, n11)));
+		}
+	}
+
+	return " topology: coincidentVertexGroups=" + std::to_string(coincidentVertexGroups) +
+		" maxCoincidentNormalDelta=" + std::to_string(maxCoincidentNormalDelta) +
+		" sharedEdgeGroups=" + std::to_string(sharedEdgeGroups) +
+		" nonManifoldEdgeGroups=" + std::to_string(nonManifoldEdgeGroups) +
+		" atlasSeamEdgeGroups=" + std::to_string(atlasSeamEdgeGroups) +
+		" materialBoundaryEdgeGroups=" + std::to_string(materialBoundaryEdgeGroups) +
+		" maxSharedEdgeNormalDelta=" + std::to_string(maxSharedEdgeNormalDelta) +
+		" maxSharedEdgeUvDeltaTexelsAt4096=" + std::to_string(maxSharedEdgeUvDeltaTexels);
 }
 
 } // namespace
@@ -433,6 +621,13 @@ ObjectReyesAtlasBakeResult BuildObjectReyesAtlasBakedHeightMesh(
 	xatlas::Destroy(atlas);
 
 	RecomputeExactPositionWeldedNormals(result.vertices, vertexSize, result.indices);
+	result.diagnostics += BuildAtlasMeshTopologyDiagnostics(
+		result.vertices,
+		vertexSize,
+		result.indices,
+		result.uvSets,
+		result.atlasUvSetIndex,
+		result.triangleMaterialIndices);
 	result.success = true;
 	return result;
 }

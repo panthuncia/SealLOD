@@ -714,7 +714,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(8));  // page-header-authoritative native float3 position stream + tangent-frame stream
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed meshlet vertex index bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // mesh quantization heuristic version
-		boost::hash_combine(seed, static_cast<uint32_t>(1));  // UV quantization heuristic version
+		boost::hash_combine(seed, static_cast<uint32_t>(2));  // UV quantization heuristic version; atlas height UVs use absolute quantization
 		boost::hash_combine(seed, static_cast<uint32_t>(12));  // USD compliance layout + inherited primvar card isolation + mixed Reyes boundary output cleanup + atlas-baked Object Reyes UV stream
 		boost::hash_combine(seed, static_cast<uint32_t>(27));  // voxel page descriptors use local segment addressing and SGGX voxel attributes
 		boost::hash_combine(seed, static_cast<uint32_t>(5));  // traversal leaves use owner group error; sloppy fallback error factor defaults to 2

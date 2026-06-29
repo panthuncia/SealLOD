@@ -45,6 +45,7 @@ namespace
 	constexpr uint32_t kMaxSkinInfluences = 8u;
 	constexpr float CLOD_UV_QUANTIZATION_SCALE = 65535.0f;
 	constexpr float CLOD_UV_QUANTIZATION_INV_SCALE = 1.0f / CLOD_UV_QUANTIZATION_SCALE;
+	constexpr const char* OBJECT_REYES_ATLAS_HEIGHT_UV_SET_NAME = "__object_reyes_atlas_height";
 	constexpr uint32_t CLOD_NATIVE_POSITION_FORMAT = CLOD_POSITION_FORMAT_FLOAT3;
 	constexpr uint32_t CLOD_NATIVE_POSITION_STRIDE_BYTES = CLOD_POSITION_FORMAT_FLOAT3_STRIDE_BYTES;
 
@@ -1421,6 +1422,15 @@ namespace
 						if (meshlet.vertex_count == 0)
 						{
 							minU = minV = maxU = maxV = 0.0f;
+						}
+
+						const bool useAbsoluteAtlasUvQuantization = groupUvSets[uvSetIndex].name == OBJECT_REYES_ATLAS_HEIGHT_UV_SET_NAME;
+						if (useAbsoluteAtlasUvQuantization)
+						{
+							minU = 0.0f;
+							minV = 0.0f;
+							maxU = 1.0f;
+							maxV = 1.0f;
 						}
 
 						const float rangeU = std::max(0.0f, maxU - minU);

@@ -744,9 +744,16 @@ float ReyesSampleMaterialDisplacementOffset(
     Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float2 sampleUv = saturate(uv);
-    const float4 heightSample = materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT
-        ? heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f)
-        : useUvDerivatives
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
+    const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
     const float heightValue = saturate(heightSample.r);
@@ -768,9 +775,16 @@ float ReyesSampleMaterialDisplacementOffset(
     Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
     SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float2 sampleUv = saturate(uv);
-    const float4 heightSample = materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT
-        ? heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f)
-        : useUvDerivatives
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
+    const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
     const float heightValue = saturate(heightSample.r);
@@ -1253,8 +1267,16 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
     const float2 sampleUv = materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT
         ? saturate(uv)
         : uv;
-    const float4 heightSample = heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f);
-    const float heightValue = saturate(heightSample.r);
+    if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
+    {
+        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        return lerp(
+            materialInfo.geometricDisplacementMin,
+            materialInfo.geometricDisplacementMax,
+            heightValue);
+    }
+
+    const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
