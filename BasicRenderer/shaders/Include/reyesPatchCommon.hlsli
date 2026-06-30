@@ -746,7 +746,7 @@ float ReyesSampleMaterialDisplacementOffset(
     const float2 sampleUv = saturate(uv);
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
-        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
             materialInfo.geometricDisplacementMax,
@@ -777,7 +777,7 @@ float ReyesSampleMaterialDisplacementOffset(
     const float2 sampleUv = saturate(uv);
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
-        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
             materialInfo.geometricDisplacementMax,
@@ -1327,7 +1327,7 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
         : uv;
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
-        const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
+        const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
             materialInfo.geometricDisplacementMax,

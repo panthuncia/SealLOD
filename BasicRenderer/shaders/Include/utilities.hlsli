@@ -671,6 +671,27 @@ float SampleMaterialTexture2DGrad(Texture2D<float> tex, SamplerState samp, uint 
     return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedMaterialInputs);
 }
 
+float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState samp, float2 uv)
+{
+    uint width;
+    uint height;
+    tex.GetDimensions(width, height);
+    const float2 texel = float2(1.0f, 1.0f) / max(float2((float)width, (float)height), float2(1.0f, 1.0f));
+    uv = saturate(uv);
+
+    float sum = 0.0f;
+    sum += tex.SampleLevel(samp, uv, 0.0f).r * 4.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv - float2(texel.x, 0.0f)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(0.0f, texel.y)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv - float2(0.0f, texel.y)), 0.0f).r * 2.0f;
+    sum += tex.SampleLevel(samp, saturate(uv + texel), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv - texel), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(texel.x, -texel.y)), 0.0f).r;
+    sum += tex.SampleLevel(samp, saturate(uv + float2(-texel.x, texel.y)), 0.0f).r;
+    return sum * (1.0f / 16.0f);
+}
+
 float ObjectSurfaceHash21(float2 p)
 {
     p = frac(p * float2(123.34f, 456.21f));
@@ -1604,14 +1625,7 @@ float SampleMaterialGeometricHeightDebug(
         MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-        return saturate(SampleMaterialTexture2DGrad(
-            heightTexture,
-            heightSampler,
-            materialInfo.heightStreamingTextureID,
-            saturate(heightUv.uv),
-            heightUv.dUVdx,
-            heightUv.dUVdy,
-            materialInputs).r);
+        return saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, heightUv.uv));
     }
 
     if (!uvBindings.hasHeightSource)
@@ -1669,14 +1683,7 @@ float SampleMaterialGeometricHeightDebug(
         MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
-        return saturate(SampleMaterialTexture2DGrad(
-            heightTexture,
-            heightSampler,
-            materialInfo.heightStreamingTextureID,
-            saturate(heightUv.uv),
-            heightUv.dUVdx,
-            heightUv.dUVdy,
-            materialInputs).r);
+        return saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, heightUv.uv));
     }
 
     if (!uvBindings.hasHeightSource)

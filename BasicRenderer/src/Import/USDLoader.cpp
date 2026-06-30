@@ -1316,18 +1316,9 @@ namespace USDLoader {
 	{
 		const int x = std::clamp(static_cast<int>(std::lround(u * static_cast<float>(width) - 0.5f)), 0, static_cast<int>(width) - 1);
 		const int y = std::clamp(static_cast<int>(std::lround(v * static_cast<float>(height) - 0.5f)), 0, static_cast<int>(height) - 1);
-		for (int oy = -1; oy <= 1; ++oy) {
-			for (int ox = -1; ox <= 1; ++ox) {
-				const int px = x + ox;
-				const int py = y + oy;
-				if (px < 0 || py < 0 || px >= static_cast<int>(width) || py >= static_cast<int>(height)) {
-					continue;
-				}
-				const std::size_t pixelIndex = static_cast<std::size_t>(py) * width + static_cast<std::size_t>(px);
-				pixels[pixelIndex] = value;
-				coverage[pixelIndex] = 1u;
-			}
-		}
+		const std::size_t pixelIndex = static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
+		pixels[pixelIndex] = value;
+		coverage[pixelIndex] = 1u;
 	}
 
 	std::filesystem::path ObjectReyesAtlasHeightCacheRoot()
@@ -3463,7 +3454,7 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=6";
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=7";
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
