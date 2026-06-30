@@ -505,6 +505,21 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
         !config.displacementScaleOverrides.empty();
 }
 
+std::string ObjectReyesContentHashMarker(const ObjectReyesConfig& config)
+{
+    return "_object_reyes_" + std::string(kObjectReyesConfigVersion) + "_" + config.contentHash + "_texroots_";
+}
+
+bool CachedContentHashMatchesObjectReyesConfig(const std::string& contentHash, const ObjectReyesConfig& config)
+{
+    if (!config.loaded) {
+        return true;
+    }
+
+    const std::string marker = ObjectReyesContentHashMarker(config);
+    return contentHash.find(marker) != std::string::npos;
+}
+
 std::string SanitizeFileStem(std::string_view value)
 {
     std::string sanitized;
@@ -2145,16 +2160,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         return std::nullopt;
     }
     const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
-    if (ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey)) {
-        spdlog::debug(
-            "nif_meta_cache=skip game='{}' reason='object Reyes config hash {} may affect payload'",
-            normalizedCacheKey,
-            objectReyesConfig.contentHash);
-        if (stats) {
-            stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
-        }
-        return std::nullopt;
-    }
+    const bool objectReyesRequiresCurrentPayload =
+        ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
 
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     std::vector<fs::path> candidates;
@@ -2174,6 +2181,16 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     for (const auto& cachePath : candidates) {
         ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
+        if (objectReyesRequiresCurrentPayload &&
+            !CachedContentHashMatchesObjectReyesConfig(fileContentHash, objectReyesConfig)) {
+            spdlog::debug(
+                "nif_meta_cache=skip_candidate game='{}' path='{}' content_hash='{}' reason='object Reyes config hash {} may affect payload'",
+                normalizedCacheKey,
+                cachePath.string(),
+                fileContentHash,
+                objectReyesConfig.contentHash);
+            continue;
+        }
 
         if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash, settings.loadMaterialTextures)) {
             spdlog::debug(
