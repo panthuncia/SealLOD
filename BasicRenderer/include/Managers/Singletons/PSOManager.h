@@ -252,7 +252,6 @@ private:
 	ComPtr<ID3D12PipelineState> debugPSO;
     ComPtr<ID3D12PipelineState> environmentConversionPSO;
     mutable std::mutex m_cacheMutex;
-    mutable std::mutex m_compileMutex;
     std::atomic<uint64_t> m_asyncPSOGeneration = 0;
 
     PipelineState CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
@@ -305,7 +304,7 @@ private:
         }
 
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
-        TaskSchedulerManager::GetInstance().RunBackgroundTask(
+        TaskSchedulerManager::GetInstance().QueueShaderCompileTask(
             taskName,
             [this, cacheMember, pendingMember, key, generation, factory = std::forward<TFactory>(factory)]() mutable {
                 try {

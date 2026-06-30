@@ -124,6 +124,48 @@ uint ReduceWaveGroupRequestedTopMipMin(uint4 groupMask, uint requestedTopMip)
     return minRequestedTopMip;
 }
 
+void RecordTextureStreamingFeedbackRequestedTopMip(
+    TextureStreamingGPUInfo streamingInfo,
+    uint streamingTextureID,
+    uint requestedTopMip)
+{
+    if (streamingTextureID == 0u) {
+        return;
+    }
+
+    if ((streamingInfo.flags & kTextureStreamingFlagEnabled) == 0u || streamingInfo.totalMipCount <= 1u) {
+        return;
+    }
+
+    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+
+    if (WaveActiveAllEqual(streamingTextureID))
+    {
+        const uint waveRequestedTopMip = WaveActiveMin(requestedTopMip);
+        if (WaveIsFirstLane())
+        {
+            uint previousRequestedTopMip;
+            InterlockedMin(
+                textureStreamingFeedbackBuffer[streamingTextureID],
+                waveRequestedTopMip,
+                previousRequestedTopMip);
+        }
+        return;
+    }
+
+    const uint4 groupMask = WaveMatch(streamingTextureID);
+    const uint leaderLane = WaveFirstLaneFromMask(groupMask);
+    if (WaveGetLaneIndex() != leaderLane) {
+        return;
+    }
+
+    const uint groupRequestedTopMip = ReduceWaveGroupRequestedTopMipMin(groupMask, requestedTopMip);
+
+    uint previousRequestedTopMip;
+    InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
+}
+
 void RecordTextureStreamingFeedback(
     TextureStreamingGPUInfo streamingInfo,
     uint streamingTextureID,
@@ -138,20 +180,8 @@ void RecordTextureStreamingFeedback(
         return;
     }
 
-    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
-
     const uint requestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, texelDdx, texelDdy);
-    const uint4 groupMask = WaveMatch(streamingTextureID);
-    const uint leaderLane = WaveFirstLaneFromMask(groupMask);
-    if (WaveGetLaneIndex() != leaderLane) {
-        return;
-    }
-
-    const uint groupRequestedTopMip = ReduceWaveGroupRequestedTopMipMin(groupMask, requestedTopMip);
-
-    uint previousRequestedTopMip;
-    InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
+    RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
 }
 
 OpenPBRSurfaceSample ResolveCanonicalOpenPBRSurface(
@@ -597,6 +627,16 @@ float4 SampleMaterialTexture2DGrad(Texture2D<float4> tex, SamplerState samp, uin
     return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedMaterialInputs);
 }
 
+float4 SampleMaterialTexture2DGradNoFeedback(
+    Texture2D<float4> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
 float SampleResidentMaterialTexture2DGrad(
     Texture2D<float> tex,
     SamplerState samp,
@@ -669,6 +709,16 @@ float SampleMaterialTexture2DGrad(Texture2D<float> tex, SamplerState samp, uint 
     MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
     InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
     return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, unusedMaterialInputs);
+}
+
+float SampleMaterialTexture2DGradNoFeedback(
+    Texture2D<float> tex,
+    SamplerState samp,
+    float2 uv,
+    float2 dUVdx,
+    float2 dUVdy)
+{
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
 }
 
 float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState samp, float2 uv)
@@ -745,11 +795,27 @@ float4 ObjectSurfaceSampleStochastic4(Texture2D<float4> tex, SamplerState samp, 
     return s0 * ctx.weights.x + s1 * ctx.weights.y + s2 * ctx.weights.z;
 }
 
+float4 ObjectSurfaceSampleStochastic4NoFeedback(Texture2D<float4> tex, SamplerState samp, ObjectSurfaceStochasticContext ctx)
+{
+    const float4 s0 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy);
+    const float4 s1 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy);
+    const float4 s2 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy);
+    return s0 * ctx.weights.x + s1 * ctx.weights.y + s2 * ctx.weights.z;
+}
+
 float ObjectSurfaceSampleStochastic1(Texture2D<float> tex, SamplerState samp, uint streamingTextureID, ObjectSurfaceStochasticContext ctx, inout MaterialInputs materialInputs)
 {
     const float s0 = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy, materialInputs);
     const float s1 = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy, materialInputs);
     const float s2 = SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy, materialInputs);
+    return s0 * ctx.weights.x + s1 * ctx.weights.y + s2 * ctx.weights.z;
+}
+
+float ObjectSurfaceSampleStochastic1NoFeedback(Texture2D<float> tex, SamplerState samp, ObjectSurfaceStochasticContext ctx)
+{
+    const float s0 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets0), ctx.dUVdx, ctx.dUVdy);
+    const float s1 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets1), ctx.dUVdx, ctx.dUVdy);
+    const float s2 = SampleMaterialTexture2DGradNoFeedback(tex, samp, ObjectSurfaceWrapUv(ctx.uv + ctx.offsets2), ctx.dUVdx, ctx.dUVdy);
     return s0 * ctx.weights.x + s1 * ctx.weights.y + s2 * ctx.weights.z;
 }
 
@@ -789,6 +855,122 @@ void ObjectSurfaceProjection(
     }
 }
 
+uint ComputeObjectSurfaceTriplanarRequestedTopMip(
+    TextureStreamingGPUInfo streamingInfo,
+    float2 texelScale,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy)
+{
+    const uint xRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, xDdx * texelScale, xDdy * texelScale);
+    const uint yRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, yDdx * texelScale, yDdy * texelScale);
+    const uint zRequestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, zDdx * texelScale, zDdy * texelScale);
+    return min(xRequestedTopMip, min(yRequestedTopMip, zRequestedTopMip));
+}
+
+void RecordObjectSurfaceTriplanarTextureAccess(
+    Texture2D<float4> tex,
+    uint streamingTextureID,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy,
+    inout MaterialInputs materialInputs)
+{
+    const bool hasStreamingInfo = streamingTextureID != 0u;
+    const bool trackMipDebug = ShouldTrackMaterialSelectedMipDebug();
+    if (!hasStreamingInfo && !trackMipDebug)
+    {
+        return;
+    }
+
+    uint width;
+    uint height;
+    tex.GetDimensions(width, height);
+
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        {
+            const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
+            const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
+                streamingInfo,
+                texelScale,
+                xDdx,
+                xDdy,
+                yDdx,
+                yDdy,
+                zDdx,
+                zDdy);
+            RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
+        }
+    }
+
+    if (trackMipDebug)
+    {
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, xDdx, xDdy);
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, yDdx, yDdy);
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, zDdx, zDdy);
+    }
+}
+
+void RecordObjectSurfaceTriplanarTextureAccess(
+    Texture2D<float> tex,
+    uint streamingTextureID,
+    float2 xDdx,
+    float2 xDdy,
+    float2 yDdx,
+    float2 yDdy,
+    float2 zDdx,
+    float2 zDdy,
+    inout MaterialInputs materialInputs)
+{
+    const bool hasStreamingInfo = streamingTextureID != 0u;
+    const bool trackMipDebug = ShouldTrackMaterialSelectedMipDebug();
+    if (!hasStreamingInfo && !trackMipDebug)
+    {
+        return;
+    }
+
+    uint width;
+    uint height;
+    tex.GetDimensions(width, height);
+
+    TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
+    if (hasStreamingInfo)
+    {
+        streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        {
+            const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
+            const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
+                streamingInfo,
+                texelScale,
+                xDdx,
+                xDdy,
+                yDdx,
+                yDdy,
+                zDdx,
+                zDdy);
+            RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
+        }
+    }
+
+    if (trackMipDebug)
+    {
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, xDdx, xDdy);
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, yDdx, yDdy);
+        RecordMaterialSelectedMipDebug(materialInputs, streamingInfo, hasStreamingInfo, width, height, zDdx, zDdy);
+    }
+}
+
 float4 ObjectSurfaceSampleTriplanar4(
     Texture2D<float4> tex,
     SamplerState samp,
@@ -801,15 +983,22 @@ float4 ObjectSurfaceSampleTriplanar4(
     inout MaterialInputs materialInputs)
 {
     const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
-    float2 uv;
-    float2 dUVdx;
-    float2 dUVdy;
-    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float4 xSample = ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
-    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float4 ySample = ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
-    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float4 zSample = ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, materialInputs);
+    const float4 xSample = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy));
+    const float4 ySample = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy));
+    const float4 zSample = ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy));
     return xSample * weights.x + ySample * weights.y + zSample * weights.z;
 }
 
@@ -825,15 +1014,22 @@ float ObjectSurfaceSampleTriplanarHeight(
     inout MaterialInputs materialInputs)
 {
     const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
-    float2 uv;
-    float2 dUVdx;
-    float2 dUVdy;
-    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float xSample = ObjectSurfaceSampleStochastic1(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
-    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float ySample = ObjectSurfaceSampleStochastic1(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
-    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
-    const float zSample = ObjectSurfaceSampleStochastic1(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, materialInputs);
+    const float xSample = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy));
+    const float ySample = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy));
+    const float zSample = ObjectSurfaceSampleStochastic1NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy));
     return xSample * weights.x + ySample * weights.y + zSample * weights.z;
 }
 
@@ -2088,23 +2284,30 @@ float3 ObjectSurfaceSampleTriplanarNormalWS(
     inout MaterialInputs materialInputs)
 {
     const float3 weights = ObjectSurfaceTriplanarWeights(normalOS);
-    float2 uv;
-    float2 dUVdx;
-    float2 dUVdy;
-    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
+    float2 xUv;
+    float2 xDdx;
+    float2 xDdy;
+    float2 yUv;
+    float2 yDdx;
+    float2 yDdy;
+    float2 zUv;
+    float2 zDdx;
+    float2 zDdy;
+    ObjectSurfaceProjection(0u, positionOS, dpdxOS, dpdyOS, density, xUv, xDdx, xDdy);
+    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, yUv, yDdx, yDdy);
+    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, zUv, zDdx, zDdy);
+    RecordObjectSurfaceTriplanarTextureAccess(tex, streamingTextureID, xDdx, xDdy, yDdx, yDdy, zDdx, zDdy, materialInputs);
     const float3 nX = ObjectSurfaceProjectionNormalOS(
         0u,
-        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs), channels, materialFlags),
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(xUv, xDdx, xDdy)), channels, materialFlags),
         normalOS);
-    ObjectSurfaceProjection(1u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
     const float3 nY = ObjectSurfaceProjectionNormalOS(
         1u,
-        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs), channels, materialFlags),
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(yUv, yDdx, yDdy)), channels, materialFlags),
         normalOS);
-    ObjectSurfaceProjection(2u, positionOS, dpdxOS, dpdyOS, density, uv, dUVdx, dUVdy);
     const float3 nZ = ObjectSurfaceProjectionNormalOS(
         2u,
-        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4(tex, samp, streamingTextureID, ObjectSurfaceBuildStochasticContext(uv, dUVdx, dUVdy), materialInputs), channels, materialFlags),
+        DecodeMaterialNormalSample(ObjectSurfaceSampleStochastic4NoFeedback(tex, samp, ObjectSurfaceBuildStochasticContext(zUv, zDdx, zDdy)), channels, materialFlags),
         normalOS);
     const float3 blendedNormalOS = normalize(nX * weights.x + nY * weights.y + nZ * weights.z);
     return normalize(mul(blendedNormalOS, normalMatrix));

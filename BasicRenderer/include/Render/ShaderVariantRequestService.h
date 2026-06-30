@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
+#include <vector>
 
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -76,5 +78,13 @@ inline ShaderVariantRequest NormalizeShaderVariantRequest(ShaderVariantRequest r
 
 class ShaderVariantRequestService {
 public:
+	struct BatchRequestResult {
+		std::size_t requested{ 0 };
+		std::size_t unique{ 0 };
+		std::size_t ready{ 0 };
+		std::size_t pending{ 0 };
+	};
+
 	bool RequestShaderVariant(const ShaderVariantRequest& request) const;
+	BatchRequestResult RequestShaderVariants(const std::vector<ShaderVariantRequest>& requests) const;
 };

@@ -1,5 +1,6 @@
 #include "Managers/Singletons/PSOManager.h"
 
+#include <condition_variable>
 #include <fstream>
 #include <filesystem>
 #include <spdlog/spdlog.h>
@@ -141,6 +142,86 @@ uint64_t BuildLibraryIdentityHash(
     util::hash_combine_u64(seed, HashStringStable(ws2s(info.target)));
     return seed;
 }
+
+struct ShaderCompileFlightKey {
+    shadercache::BinaryFormat binaryFormat = shadercache::BinaryFormat::Dxil;
+    shadercache::ArtifactKind artifactKind = shadercache::ArtifactKind::Bundle;
+    uint64_t identityHash = 0;
+    uint64_t buildConfigHash = 0;
+
+    bool operator==(const ShaderCompileFlightKey&) const = default;
+};
+
+struct ShaderCompileFlightKeyHash {
+    size_t operator()(const ShaderCompileFlightKey& key) const noexcept {
+        uint64_t seed = 0;
+        util::hash_combine_u64(seed, static_cast<uint8_t>(key.binaryFormat));
+        util::hash_combine_u64(seed, static_cast<uint8_t>(key.artifactKind));
+        util::hash_combine_u64(seed, key.identityHash);
+        util::hash_combine_u64(seed, key.buildConfigHash);
+        return static_cast<size_t>(seed);
+    }
+};
+
+class ShaderCompileFlightRegistry {
+public:
+    bool TryBecomeOwnerOrWait(const ShaderCompileFlightKey& key)
+    {
+        std::unique_lock lock(m_mutex);
+        auto [it, inserted] = m_activeKeys.insert(key);
+        if (inserted) {
+            return true;
+        }
+
+        m_cv.wait(lock, [&]() {
+            return !m_activeKeys.contains(key);
+        });
+        return false;
+    }
+
+    void Complete(const ShaderCompileFlightKey& key)
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_activeKeys.erase(key);
+        }
+        m_cv.notify_all();
+    }
+
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::unordered_set<ShaderCompileFlightKey, ShaderCompileFlightKeyHash> m_activeKeys;
+};
+
+ShaderCompileFlightRegistry& GetShaderCompileFlightRegistry()
+{
+    static ShaderCompileFlightRegistry registry;
+    return registry;
+}
+
+class ShaderCompileFlightScope {
+public:
+    explicit ShaderCompileFlightScope(ShaderCompileFlightKey key)
+        : m_key(key)
+    {
+    }
+
+    ~ShaderCompileFlightScope()
+    {
+        if (m_active) {
+            GetShaderCompileFlightRegistry().Complete(m_key);
+        }
+    }
+
+    ShaderCompileFlightScope(const ShaderCompileFlightScope&) = delete;
+    ShaderCompileFlightScope& operator=(const ShaderCompileFlightScope&) = delete;
+
+private:
+    ShaderCompileFlightKey m_key;
+    bool m_active = true;
+};
+
 uint64_t ComputeShaderCacheBuildConfigHash(shadercache::BinaryFormat binaryFormat)
 {
     uint64_t seed = 0;
@@ -2208,8 +2289,6 @@ void PSOManager::CompileShaderForSlot(
 }
 
 ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines) {
-    std::scoped_lock compileLock(m_compileMutex);
-
     Microsoft::WRL::ComPtr<ID3DBlob> outBlob;
     DxcBuffer dxcPreprocessBuff;
 
@@ -2235,9 +2314,21 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
         .artifactKind = shadercache::ArtifactKind::Library,
         .identityHash = BuildLibraryIdentityHash(libraryInfo, dxcPreprocessBuff),
     };
-    if (std::optional<ShaderLibraryBundle> cachedBundle = TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-        return *cachedBundle;
+    const ShaderCompileFlightKey flightKey{
+        .binaryFormat = cacheKey.binaryFormat,
+        .artifactKind = cacheKey.artifactKind,
+        .identityHash = cacheKey.identityHash,
+        .buildConfigHash = buildConfigHash,
+    };
+    for (;;) {
+        if (std::optional<ShaderLibraryBundle> cachedBundle = TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
+            return *cachedBundle;
+        }
+        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
+            break;
+        }
     }
+    ShaderCompileFlightScope flightScope(flightKey);
 
     // Compile BRSL info
     PreprocessedLibraryResult libPP = PreprocessShaderLibrary(dxcPreprocessBuff);
@@ -2285,8 +2376,6 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 }
 
 ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
-    std::scoped_lock compileLock(m_compileMutex);
-
     if (info.vertexShader && info.meshShader) 
 		throw std::runtime_error("Cannot compile both vertex and mesh shaders in the same bundle");
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
@@ -2325,16 +2414,28 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     const bool logMaterialEvalCache =
         info.computeShader.has_value()
         && info.computeShader->filename == L"shaders/VisUtilEvaluate.hlsl";
-    if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-        if (logMaterialEvalCache) {
-            spdlog::info(
-                "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
-                cacheKey.identityHash,
-                buildConfigHash,
-                ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
+    const ShaderCompileFlightKey flightKey{
+        .binaryFormat = cacheKey.binaryFormat,
+        .artifactKind = cacheKey.artifactKind,
+        .identityHash = cacheKey.identityHash,
+        .buildConfigHash = buildConfigHash,
+    };
+    for (;;) {
+        if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
+            if (logMaterialEvalCache) {
+                spdlog::info(
+                    "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
+                    cacheKey.identityHash,
+                    buildConfigHash,
+                    ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
+            }
+            return *cachedBundle;
         }
-        return *cachedBundle;
+        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
+            break;
+        }
     }
+    ShaderCompileFlightScope flightScope(flightKey);
     if (logMaterialEvalCache) {
         spdlog::info(
             "VisUtil material eval shader artifact cache miss; compiling identity=0x{:X} build=0x{:X} file='{}'",
