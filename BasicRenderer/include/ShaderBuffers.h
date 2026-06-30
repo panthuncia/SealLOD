@@ -258,10 +258,7 @@ struct PerMaterialCB {
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     float objectSurfaceTexelDensity = 1.0f;
     unsigned int objectSurfaceSamplingMode = 0u;
-    unsigned int objectBlendMaterialIndex0 = 0u;
-    unsigned int objectBlendMaterialIndex1 = 0u;
-    unsigned int objectBlendWeightUvSetIndex = 0u;
-    unsigned int padObjectBlend = 0u;
+    DirectX::XMUINT4 padObjectSurface = {};
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     unsigned int glintEnabled = 0u;
     DirectX::XMUINT3 padGlint = {};
@@ -333,10 +330,7 @@ struct PerMaterialEvalCB {
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     float objectSurfaceTexelDensity = 1.0f;
     unsigned int objectSurfaceSamplingMode = 0u;
-    unsigned int objectBlendMaterialIndex0 = 0u;
-    unsigned int objectBlendMaterialIndex1 = 0u;
-    unsigned int objectBlendWeightUvSetIndex = 0u;
-    unsigned int padObjectBlend = 0u;
+    DirectX::XMUINT4 padObjectSurface = {};
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     unsigned int glintEnabled = 0u;
     DirectX::XMUINT3 padGlint = {};

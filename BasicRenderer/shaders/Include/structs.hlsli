@@ -523,10 +523,7 @@ struct MaterialInfo {
     float2 reyesUvDensity;
     float objectSurfaceTexelDensity;
     uint objectSurfaceSamplingMode;
-    uint objectBlendMaterialIndex0;
-    uint objectBlendMaterialIndex1;
-    uint objectBlendWeightUvSetIndex;
-    uint padObjectBlend;
+    uint4 padObjectSurface;
     float4 glintParameters;
     uint glintEnabled;
     uint3 padGlint;
@@ -599,10 +596,7 @@ struct MaterialEvalInfo {
     float2 reyesUvDensity;
     float objectSurfaceTexelDensity;
     uint objectSurfaceSamplingMode;
-    uint objectBlendMaterialIndex0;
-    uint objectBlendMaterialIndex1;
-    uint objectBlendWeightUvSetIndex;
-    uint padObjectBlend;
+    uint4 padObjectSurface;
     float4 glintParameters;
     uint glintEnabled;
     uint3 padGlint;

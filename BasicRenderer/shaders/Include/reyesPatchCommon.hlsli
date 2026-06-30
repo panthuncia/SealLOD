@@ -965,43 +965,11 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, 
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
-float ReyesSampleObjectSurfaceBlendDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float blendWeight)
-{
-    if (!ReyesGeometricDisplacementEnabled(materialInfo))
-    {
-        return 0.0f;
-    }
-    StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    MaterialInfo material0 = materialDataBuffer[materialInfo.objectBlendMaterialIndex0];
-    MaterialInfo material1 = materialDataBuffer[materialInfo.objectBlendMaterialIndex1];
-    const float offset0 = ReyesSampleObjectSurfaceDisplacementOffset(material0, positionOS, normalOS);
-    const float offset1 = ReyesSampleObjectSurfaceDisplacementOffset(material1, positionOS, normalOS);
-    return lerp(offset0, offset1, saturate(blendWeight));
-}
-
-float ReyesSampleObjectSurfaceBlendDisplacementOffset(MaterialEvalInfo materialInfo, float3 positionOS, float3 normalOS, float blendWeight)
-{
-    if (!ReyesGeometricDisplacementEnabled(materialInfo))
-    {
-        return 0.0f;
-    }
-    StructuredBuffer<MaterialEvalInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
-    MaterialEvalInfo material0 = materialDataBuffer[materialInfo.objectBlendMaterialIndex0];
-    MaterialEvalInfo material1 = materialDataBuffer[materialInfo.objectBlendMaterialIndex1];
-    const float offset0 = ReyesSampleObjectSurfaceDisplacementOffset(material0, positionOS, normalOS);
-    const float offset1 = ReyesSampleObjectSurfaceDisplacementOffset(material1, positionOS, normalOS);
-    return lerp(offset0, offset1, saturate(blendWeight));
-}
-
 float ReyesSampleObjectDisplacementOffset(MaterialInfo materialInfo, float3 positionOS, float3 normalOS, float2 uv, CullingCameraInfo camera, float depth)
 {
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
         return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
-    }
-    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
-    {
-        return ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x);
     }
     if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
     {
@@ -1025,10 +993,6 @@ float ReyesSampleObjectDisplacementOffset(
     {
         return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
     }
-    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
-    {
-        return ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x);
-    }
     if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
     {
         return ReyesSampleObjectSurfaceDisplacementOffset(materialInfo, positionOS, normalOS);
@@ -1041,10 +1005,6 @@ float ReyesSampleObjectDisplacementOffset(MaterialEvalInfo materialInfo, float3 
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
         return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth);
-    }
-    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
-    {
-        return ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x);
     }
     if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
     {
@@ -1067,10 +1027,6 @@ float ReyesSampleObjectDisplacementOffset(
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
         return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv, camera, depth, useUvDerivatives, dUVdx, dUVdy);
-    }
-    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
-    {
-        return ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x);
     }
     if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
     {
@@ -1359,10 +1315,6 @@ float ReyesSampleObjectDisplacementOffset(MaterialInfo materialInfo, float3 posi
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
         return ReyesSampleDisplacementOffset(materialInfo, positionOS, uv);
-    }
-    if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u)
-    {
-        return ReyesSampleObjectSurfaceBlendDisplacementOffset(materialInfo, positionOS, normalOS, uv.x);
     }
     if ((materialInfo.materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
     {

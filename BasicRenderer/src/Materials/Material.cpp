@@ -202,13 +202,6 @@ void Material::SetLogicalTextureSourcePaths(const MaterialDescription& desc)
     m_opacitySourcePath = desc.opacity.sourcePath;
 }
 
-void Material::SetObjectBlendChildren(std::shared_ptr<Material> material0, std::shared_ptr<Material> material1, uint32_t weightUvSetIndex)
-{
-    m_objectBlendMaterial0 = std::move(material0);
-    m_objectBlendMaterial1 = std::move(material1);
-    m_materialData.objectBlendWeightUvSetIndex = weightUvSetIndex;
-}
-
 void Material::ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const {
     auto visitTexture = [&](const std::shared_ptr<TextureAsset>& texture) {
         if (texture) {
@@ -306,9 +299,6 @@ MaterialDescription Material::ToCacheDescription() const
         (m_materialData.materialFlags & MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u;
     desc.objectSurfaceUseTripleTapStochastic = desc.objectSurfaceUseTriplanarProjection;
     desc.objectSurfaceTexelDensity = m_materialData.objectSurfaceTexelDensity;
-    desc.objectTriplanarBlendMaterial =
-        (m_materialData.materialFlags & MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND) != 0u;
-    desc.objectBlendWeightUvSetIndex = m_materialData.objectBlendWeightUvSetIndex;
     desc.staticTextureOverrideSourceName = m_staticTextureOverrideSourceName;
     desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
     desc.brniflyZBufferWrite = m_brniflyZBufferWrite;

@@ -175,8 +175,6 @@ struct ObjectReyesConfig
     bool surfaceSamplingIncludeSelected = false;
     bool triplanarProjectionIncludeSelected = false;
     bool tripleTapStochasticIncludeSelected = false;
-    bool boundaryBlendingEnabled = false;
-    float boundaryBlendStripWidthObjectUnits = 8.0f;
     std::uint32_t atlasBakeResolution = 4096u;
     std::uint32_t atlasBakePaddingTexels = 8u;
     std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
@@ -341,13 +339,6 @@ ObjectReyesConfig LoadObjectReyesConfig()
                 config.atlasBakeResolution = atlasBake->value("resolution", config.atlasBakeResolution);
                 config.atlasBakePaddingTexels = atlasBake->value("paddingTexels", config.atlasBakePaddingTexels);
             }
-            if (const auto boundaryBlending = bakedHeight.find("boundaryBlending");
-                boundaryBlending != bakedHeight.end() && boundaryBlending->is_object()) {
-                config.boundaryBlendingEnabled = boundaryBlending->value("enabled", config.boundaryBlendingEnabled);
-                config.boundaryBlendStripWidthObjectUnits = boundaryBlending->value(
-                    "stripWidthObjectUnits",
-                    config.boundaryBlendStripWidthObjectUnits);
-            }
         };
 
         if (const auto bakedHeight = doc.find("bakedHeight"); bakedHeight != doc.end() && bakedHeight->is_object()) {
@@ -371,20 +362,6 @@ ObjectReyesConfig LoadObjectReyesConfig()
                 readNifPathArray(*nifPaths, config.surfaceSamplingNifPaths);
             }
             readTexturePathArray(surfaceSampling->value("texturePaths", json::array()), config.surfaceSamplingTexturePaths);
-            if (const auto boundaryBlending = surfaceSampling->find("boundaryBlending");
-                boundaryBlending != surfaceSampling->end() && boundaryBlending->is_object()) {
-                config.boundaryBlendingEnabled = boundaryBlending->value("enabled", config.boundaryBlendingEnabled);
-                config.boundaryBlendStripWidthObjectUnits = boundaryBlending->value(
-                    "stripWidthObjectUnits",
-                    config.boundaryBlendStripWidthObjectUnits);
-                if (!std::isfinite(config.boundaryBlendStripWidthObjectUnits) ||
-                    config.boundaryBlendStripWidthObjectUnits <= 0.0f) {
-                    spdlog::warn(
-                        "Object Reyes boundaryBlending.stripWidthObjectUnits={} is invalid; using 8.0.",
-                        config.boundaryBlendStripWidthObjectUnits);
-                    config.boundaryBlendStripWidthObjectUnits = 8.0f;
-                }
-            }
             if (const auto atlasBake = surfaceSampling->find("atlasBake");
                 atlasBake != surfaceSampling->end() && atlasBake->is_object()) {
                 config.atlasBakeResolution = atlasBake->value("resolution", config.atlasBakeResolution);
@@ -418,13 +395,6 @@ ObjectReyesConfig LoadObjectReyesConfig()
                     config.tripleTapStochasticTexturePaths);
             }
         }
-        if (!std::isfinite(config.boundaryBlendStripWidthObjectUnits) ||
-            config.boundaryBlendStripWidthObjectUnits <= 0.0f) {
-            spdlog::warn(
-                "Object Reyes boundaryBlending.stripWidthObjectUnits={} is invalid; using 8.0.",
-                config.boundaryBlendStripWidthObjectUnits);
-            config.boundaryBlendStripWidthObjectUnits = 8.0f;
-        }
         if (config.atlasBakeResolution < 256u || config.atlasBakeResolution > 8192u) {
             spdlog::warn(
                 "Object Reyes atlasBake.resolution={} is invalid; using 4096.",
@@ -440,7 +410,7 @@ ObjectReyesConfig LoadObjectReyesConfig()
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), displacementScaleOverrides={}, surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), displacementScaleOverrides={}, surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
@@ -457,8 +427,6 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.tripleTapStochasticNifPaths.size(),
             config.tripleTapStochasticTexturePaths.size(),
             config.tripleTapStochasticIncludeSelected,
-            config.boundaryBlendingEnabled,
-            config.boundaryBlendStripWidthObjectUnits,
             config.atlasBakeResolution,
             config.atlasBakePaddingTexels,
             config.contentHash);
@@ -627,7 +595,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 39u;
+constexpr std::uint32_t kPayloadCacheVersion = 40u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -743,8 +711,6 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashPod(hash, desc.objectSurfaceUseTriplanarProjection);
     HashPod(hash, desc.objectSurfaceUseTripleTapStochastic);
     HashPod(hash, desc.objectSurfaceTexelDensity);
-    HashPod(hash, desc.objectTriplanarBlendMaterial);
-    HashPod(hash, desc.objectBlendWeightUvSetIndex);
     HashString(hash, desc.staticTextureOverrideSourceName);
     HashPod(hash, desc.blendState);
     HashBinding(hash, desc.baseColor);
@@ -769,18 +735,7 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
 
 std::uint64_t ComputeMaterialHash(const Material& material)
 {
-    std::uint64_t hash = ComputeMaterialHash(material.ToCacheDescription());
-    const auto* blend0 = material.GetObjectBlendMaterial0();
-    const auto* blend1 = material.GetObjectBlendMaterial1();
-    HashPod(hash, blend0 != nullptr);
-    if (blend0) {
-        HashPod(hash, ComputeMaterialHash(*blend0));
-    }
-    HashPod(hash, blend1 != nullptr);
-    if (blend1) {
-        HashPod(hash, ComputeMaterialHash(*blend1));
-    }
-    return hash;
+    return ComputeMaterialHash(material.ToCacheDescription());
 }
 
 void EnsurePayloadMaterialHashes(USDLoader::ImportedAssetPayload& payload)
@@ -980,8 +935,6 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
     options.objectReyesTripleTapStochasticIncludeSelected = objectReyesConfig.tripleTapStochasticIncludeSelected;
     options.objectReyesTripleTapStochasticNifMatched =
         objectReyesConfig.tripleTapStochasticNifPaths.contains(options.objectReyesNifPath);
-    options.objectReyesBoundaryBlendingEnabled = objectReyesConfig.boundaryBlendingEnabled;
-    options.objectReyesBoundaryBlendStripWidthObjectUnits = objectReyesConfig.boundaryBlendStripWidthObjectUnits;
     options.objectReyesAtlasBakeResolution = objectReyesConfig.atlasBakeResolution;
     options.objectReyesAtlasBakePaddingTexels = objectReyesConfig.atlasBakePaddingTexels;
     options.objectReyesBakedHeightMaterials.reserve(objectReyesConfig.bakedHeightMaterials.size());
@@ -1519,8 +1472,6 @@ void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& d
     writer.Pod(desc.objectSurfaceUseTriplanarProjection);
     writer.Pod(desc.objectSurfaceUseTripleTapStochastic);
     writer.Pod(desc.objectSurfaceTexelDensity);
-    writer.Pod(desc.objectTriplanarBlendMaterial);
-    writer.Pod(desc.objectBlendWeightUvSetIndex);
     writer.String(desc.staticTextureOverrideSourceName);
     writer.Pod(static_cast<std::uint32_t>(desc.blendState));
     WriteTextureBinding(writer, desc.baseColor, TextureSemantic::BaseColor, true);
@@ -1575,8 +1526,6 @@ bool ReadMaterialDescription(
         !reader.Pod(desc.objectSurfaceUseTriplanarProjection) ||
         !reader.Pod(desc.objectSurfaceUseTripleTapStochastic) ||
         !reader.Pod(desc.objectSurfaceTexelDensity) ||
-        !reader.Pod(desc.objectTriplanarBlendMaterial) ||
-        !reader.Pod(desc.objectBlendWeightUvSetIndex) ||
         !reader.String(desc.staticTextureOverrideSourceName) ||
         !reader.Pod(blend)) {
         return false;
@@ -1730,49 +1679,6 @@ bool ReadObjectReyesAtlasBakeData(
     return true;
 }
 
-void WriteMaterialWithObjectBlendChildren(BinaryWriter& writer, const Material& material)
-{
-    WriteMaterialDescription(writer, material.ToCacheDescription());
-    const auto* blend0 = material.GetObjectBlendMaterial0();
-    const auto* blend1 = material.GetObjectBlendMaterial1();
-    const std::uint8_t hasBlendChildren = blend0 && blend1 ? 1u : 0u;
-    writer.Pod(hasBlendChildren);
-    if (hasBlendChildren) {
-        WriteMaterialDescription(writer, blend0->ToCacheDescription());
-        WriteMaterialDescription(writer, blend1->ToCacheDescription());
-    }
-}
-
-bool ReadMaterialWithObjectBlendChildren(
-    BinaryReader& reader,
-    MaterialDescription& desc,
-    std::optional<MaterialDescription>& blend0,
-    std::optional<MaterialDescription>& blend1,
-    const std::vector<std::string>& textureSearchRoots,
-    bool loadMaterialTextures)
-{
-    if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures)) {
-        return false;
-    }
-    std::uint8_t hasBlendChildren = 0u;
-    if (!reader.Pod(hasBlendChildren)) {
-        return false;
-    }
-    if (hasBlendChildren == 0u) {
-        return true;
-    }
-
-    MaterialDescription child0{};
-    MaterialDescription child1{};
-    if (!ReadMaterialDescription(reader, child0, textureSearchRoots, loadMaterialTextures) ||
-        !ReadMaterialDescription(reader, child1, textureSearchRoots, loadMaterialTextures)) {
-        return false;
-    }
-    blend0 = std::move(child0);
-    blend1 = std::move(child1);
-    return true;
-}
-
 void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
 {
     writer.PodVector(data.groups);
@@ -1885,7 +1791,7 @@ bool WritePayloadCache(
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::ComputeMaterialHash");
             materialHash = ComputeMaterialHash(*mesh->material);
         }
-        WriteMaterialWithObjectBlendChildren(writer, *mesh->material);
+        WriteMaterialDescription(writer, mesh->material->ToCacheDescription());
         {
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
             writer.Pod(materialHash);
@@ -1991,14 +1897,12 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     for (std::uint64_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
         ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh");
         MaterialDescription desc{};
-        std::optional<MaterialDescription> blendDesc0;
-        std::optional<MaterialDescription> blendDesc1;
         ClusterLODPrebuiltData prebuilt{};
         std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData> atlasBakeData;
         std::uint64_t materialHash = 0;
         {
             ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
-            if (!ReadMaterialWithObjectBlendChildren(reader, desc, blendDesc0, blendDesc1, textureSearchRoots, loadMaterialTextures) ||
+            if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures) ||
                 !reader.Pod(materialHash) ||
                 !ReadPrebuilt(reader, prebuilt) ||
                 !ReadObjectReyesAtlasBakeData(reader, atlasBakeData, textureSearchRoots, loadMaterialTextures)) {
@@ -2029,12 +1933,6 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                     materialData.geometricDisplacementEnabled,
                     materialData.heightUvSetIndex,
                     desc.heightMap.texture ? 0 : 1);
-            }
-            if (blendDesc0 && blendDesc1) {
-                material->SetObjectBlendChildren(
-                    Material::CreateShared(*blendDesc0),
-                    Material::CreateShared(*blendDesc1),
-                    desc.objectBlendWeightUvSetIndex);
             }
             auto vertices = std::make_unique<std::vector<std::byte>>();
             std::vector<UINT32> indices;

@@ -241,9 +241,6 @@ namespace {
 		result.reyesUvDensity = base.reyesUvDensity;
 		result.objectSurfaceTexelDensity = base.objectSurfaceTexelDensity;
 		result.objectSurfaceSamplingMode = base.objectSurfaceSamplingMode;
-		result.objectBlendMaterialIndex0 = base.objectBlendMaterialIndex0;
-		result.objectBlendMaterialIndex1 = base.objectBlendMaterialIndex1;
-		result.objectBlendWeightUvSetIndex = base.objectBlendWeightUvSetIndex;
 		result.glintParameters = base.glintParameters;
 		result.glintEnabled = base.glintEnabled;
 		return result;
@@ -435,12 +432,6 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CountZeroSlotLookup");
 		return GetMaterialSlot(material.GetMaterialID());
 	}
-	if (Material* blend0 = material.GetObjectBlendMaterial0()) {
-		IncrementMaterialUsageCount(*blend0, textureFactory, count);
-	}
-	if (Material* blend1 = material.GetObjectBlendMaterial1()) {
-		IncrementMaterialUsageCount(*blend1, textureFactory, count);
-	}
 
 	auto& flags = material.Technique().compileFlags;
 	unsigned int flagsSlot = 0;
@@ -531,18 +522,10 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Base");
 			materialData = material.GetData();
-			if (Material* blend0 = material.GetObjectBlendMaterial0()) {
-				materialData.objectBlendMaterialIndex0 = GetMaterialSlot(blend0->GetMaterialID());
-			}
-			if (Material* blend1 = material.GetObjectBlendMaterial1()) {
-				materialData.objectBlendMaterialIndex1 = GetMaterialSlot(blend1->GetMaterialID());
-			}
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Eval");
 			evalData = BuildMaterialEvalData(material);
-			evalData.objectBlendMaterialIndex0 = materialData.objectBlendMaterialIndex0;
-			evalData.objectBlendMaterialIndex1 = materialData.objectBlendMaterialIndex1;
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::OpenPBR");
@@ -646,12 +629,6 @@ void MaterialManager::RegisterStreamingTexture(const std::shared_ptr<TextureAsse
 
 void MaterialManager::DecrementMaterialUsageCount(const Material& material) {
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
-	if (Material* blend0 = material.GetObjectBlendMaterial0()) {
-		DecrementMaterialUsageCount(*blend0);
-	}
-	if (Material* blend1 = material.GetObjectBlendMaterial1()) {
-		DecrementMaterialUsageCount(*blend1);
-	}
 	auto& flags = material.Technique().compileFlags;
 	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
 	m_compileFlagsUsageCounts[flagsSlot]--;

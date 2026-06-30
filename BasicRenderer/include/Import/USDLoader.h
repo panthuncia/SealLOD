@@ -51,7 +51,6 @@ namespace USDLoader {
 		bool objectReyesTriplanarProjectionNifMatched = false;
 		bool objectReyesTripleTapStochasticIncludeSelected = false;
 		bool objectReyesTripleTapStochasticNifMatched = false;
-		bool objectReyesBoundaryBlendingEnabled = false;
 		float objectReyesBoundaryBlendStripWidthObjectUnits = 8.0f;
 		std::uint32_t objectReyesAtlasBakeResolution = 4096;
 		std::uint32_t objectReyesAtlasBakePaddingTexels = 8;

@@ -200,9 +200,6 @@ public:
             (desc.objectSurfaceUseTriplanarProjection && desc.objectSurfaceUseTripleTapStochastic)) {
             materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC;
         }
-        if (desc.objectTriplanarBlendMaterial) {
-            materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC_BLEND;
-        }
         auto diffuseColor = desc.diffuseColor;
         auto emissiveColor = desc.emissiveColor;
         if (desc.opacity.texture) { // TODO: How can we tell if this should be used as a mask or as a blend?
@@ -286,7 +283,6 @@ public:
         material->m_geometricDisplacementOptIn = desc.geometricDisplacementOptIn;
         material->m_materialData.objectSurfaceSamplingMode = static_cast<uint32_t>(desc.objectSurfaceSamplingMode);
         material->m_materialData.objectSurfaceTexelDensity = std::max(desc.objectSurfaceTexelDensity, 1.0e-6f);
-        material->m_materialData.objectBlendWeightUvSetIndex = desc.objectBlendWeightUvSetIndex;
         material->m_staticTextureOverrideSourceName = desc.staticTextureOverrideSourceName;
         material->SetLogicalTextureSourcePaths(desc);
         return material;
@@ -308,9 +304,6 @@ public:
     TechniqueDescriptor const& Technique() const { return m_technique; }
     OpenPBRMaterialParameters const& GetOpenPBRMaterial() const { return m_openPBRMaterial; }
     OpenPBRTextureBindings const& GetOpenPBRTextures() const { return m_openPBRTextures; }
-    void SetObjectBlendChildren(std::shared_ptr<Material> material0, std::shared_ptr<Material> material1, uint32_t weightUvSetIndex);
-    Material* GetObjectBlendMaterial0() const { return m_objectBlendMaterial0.get(); }
-    Material* GetObjectBlendMaterial1() const { return m_objectBlendMaterial1.get(); }
     bool BrniflyVertexAlpha() const { return m_brniflyVertexAlpha; }
     bool BrniflyZBufferWrite() const { return m_brniflyZBufferWrite; }
     bool BrniflyDecal() const { return m_brniflyDecal; }
@@ -379,9 +372,6 @@ private:
     bool m_brniflyModelSpaceNormals = false;
     bool m_geometricDisplacementOptIn = false;
     std::string m_staticTextureOverrideSourceName;
-    std::shared_ptr<Material> m_objectBlendMaterial0;
-    std::shared_ptr<Material> m_objectBlendMaterial1;
-
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);
 

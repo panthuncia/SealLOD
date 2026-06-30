@@ -27,7 +27,6 @@ struct MeshPreprocessResult {
 	bool objectSurfaceUseTriplanarProjection = false;
 	bool objectSurfaceUseTripleTapStochastic = false;
 	float objectSurfaceTexelDensity = 1.0f;
-	std::uint32_t objectBlendWeightUvSetIndex = 0;
 	bool objectAtlasBakedHeight = false;
 	std::uint32_t objectAtlasHeightUvSetIndex = 0;
 	std::uint32_t objectAtlasWidth = 0;
