@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "29";
+constexpr std::string_view kObjectReyesConfigVersion = "30";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -169,6 +169,7 @@ struct ObjectReyesConfig
     std::unordered_set<std::string> triplanarProjectionTexturePaths;
     std::unordered_set<std::string> tripleTapStochasticNifPaths;
     std::unordered_set<std::string> tripleTapStochasticTexturePaths;
+    std::unordered_map<std::string, float> displacementScaleOverrides;
     std::vector<BakedHeightMaterialEntry> bakedHeightMaterials;
     std::string surfaceSamplingMode;
     bool surfaceSamplingIncludeSelected = false;
@@ -283,6 +284,24 @@ ObjectReyesConfig LoadObjectReyesConfig()
             readNifPathArray(*nifPaths, config.nifPaths);
         }
         readTexturePathArray(doc.value("texturePaths", json::array()), config.texturePaths);
+        if (const auto overrides = doc.find("displacementScaleOverrides");
+            overrides != doc.end() && overrides->is_object()) {
+            for (auto it = overrides->begin(); it != overrides->end(); ++it) {
+                const std::string normalized = NormalizeObjectReyesWhitelistPath(it.key());
+                if (normalized.empty() || !it.value().is_number()) {
+                    continue;
+                }
+                const float scale = it.value().get<float>();
+                if (!std::isfinite(scale) || scale < 0.0f) {
+                    spdlog::warn(
+                        "Object Reyes displacementScaleOverrides['{}']={} is invalid; ignoring.",
+                        it.key(),
+                        scale);
+                    continue;
+                }
+                config.displacementScaleOverrides[normalized] = scale;
+            }
+        }
         auto readBakedHeightObject = [&](const json& bakedHeight) {
             if (const auto nifPaths = bakedHeight.find("nifPaths"); nifPaths != bakedHeight.end() && nifPaths->is_array()) {
                 std::unordered_set<std::string> bakedHeightNifPaths;
@@ -421,10 +440,11 @@ ObjectReyesConfig LoadObjectReyesConfig()
         config.loaded = true;
         config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), displacementScaleOverrides={}, surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, boundaryBlending enabled={}, stripWidthObjectUnits={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
+            config.displacementScaleOverrides.size(),
             config.surfaceSamplingMode,
             config.surfaceSamplingIncludeSelected,
             config.surfaceSamplingNifPaths.size(),
@@ -481,7 +501,8 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
         !config.texturePaths.empty() ||
         !config.surfaceSamplingTexturePaths.empty() ||
         !config.triplanarProjectionTexturePaths.empty() ||
-        !config.tripleTapStochasticTexturePaths.empty();
+        !config.tripleTapStochasticTexturePaths.empty() ||
+        !config.displacementScaleOverrides.empty();
 }
 
 std::string SanitizeFileStem(std::string_view value)
@@ -913,6 +934,7 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.tripleTapStochasticTexturePaths.begin(),
         objectReyesConfig.tripleTapStochasticTexturePaths.end());
     std::sort(options.objectReyesTripleTapStochasticTexturePaths.begin(), options.objectReyesTripleTapStochasticTexturePaths.end());
+    options.objectReyesDisplacementScaleOverrides = objectReyesConfig.displacementScaleOverrides;
     options.objectReyesNifMatched =
         objectReyesConfig.loaded &&
         objectReyesConfig.nifPaths.contains(options.objectReyesNifPath);

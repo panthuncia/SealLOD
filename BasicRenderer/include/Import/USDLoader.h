@@ -4,6 +4,7 @@
 #include <optional>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <DirectXMath.h>
@@ -40,6 +41,7 @@ namespace USDLoader {
 		std::vector<std::string> objectReyesSurfaceSamplingTexturePaths;
 		std::vector<std::string> objectReyesTriplanarProjectionTexturePaths;
 		std::vector<std::string> objectReyesTripleTapStochasticTexturePaths;
+		std::unordered_map<std::string, float> objectReyesDisplacementScaleOverrides;
 		bool objectReyesNifMatched = false;
 		bool objectReyesSurfaceSamplingEnabled = false;
 		ObjectSurfaceSamplingMode objectReyesSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;

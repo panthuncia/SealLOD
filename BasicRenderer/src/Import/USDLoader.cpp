@@ -701,6 +701,48 @@ namespace USDLoader {
 			return matched;
 		}
 
+		std::optional<float> FindObjectReyesDisplacementScaleOverride(
+			const MaterialDescription& desc,
+			const std::unordered_map<std::string, float>& overrides)
+		{
+			if (overrides.empty()) {
+				return std::nullopt;
+			}
+
+			std::optional<float> result;
+			ForEachMaterialTextureBinding(desc, [&](const TextureAndConstant& binding) {
+				if (result || binding.sourcePath.empty()) {
+					return;
+				}
+				const auto it = overrides.find(NormalizeObjectReyesWhitelistPath(binding.sourcePath));
+				if (it != overrides.end()) {
+					result = it->second;
+				}
+			});
+			return result;
+		}
+
+		void ApplyObjectReyesDisplacementScaleOverride(
+			MaterialDescription& desc,
+			const std::unordered_map<std::string, float>& overrides,
+			std::string_view context)
+		{
+			const auto scale = FindObjectReyesDisplacementScaleOverride(desc, overrides);
+			if (!scale) {
+				return;
+			}
+
+			desc.heightMapScale = std::max(0.0f, *scale);
+			desc.enableGeometricDisplacement = desc.heightMapScale > 0.0f;
+			desc.geometricDisplacementMin = -0.5f * desc.heightMapScale;
+			desc.geometricDisplacementMax = 0.5f * desc.heightMapScale;
+			spdlog::info(
+				"Object Reyes displacement scale override applied context='{}' material='{}' scale={}.",
+				context,
+				desc.name,
+				desc.heightMapScale);
+		}
+
 		bool ObjectReyesAtlasBakedHeightNifListed(const InMemoryStageOptions& stageOptions)
 		{
 			if (stageOptions.objectReyesSurfaceSamplingMode != ObjectSurfaceSamplingMode::AtlasBakedHeight) {
@@ -2402,6 +2444,7 @@ namespace USDLoader {
 	void ProcessMaterial(
 		const pxr::UsdShadeMaterial& material,
 		const pxr::UsdStageRefPtr& stage,
+		const InMemoryStageOptions& stageOptions,
 		bool isUSDZ,
 		const std::string& directory,
 		bool loadMaterialTextures)
@@ -2425,6 +2468,10 @@ namespace USDLoader {
 			ZoneScopedN("USDLoader::ProcessMaterial::ParseMaterialGraph");
 			materialDesc = ParseMaterialGraph(material, directory, stage, isUSDZ, loadMaterialTextures);
 		}
+		ApplyObjectReyesDisplacementScaleOverride(
+			materialDesc,
+			stageOptions.objectReyesDisplacementScaleOverrides,
+			materialPath);
         MaterialTemplateRecord record;
         record.desc = std::move(materialDesc);
 		{
@@ -3416,7 +3463,7 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=5";
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=6";
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
@@ -5677,7 +5724,7 @@ namespace USDLoader {
 
 				if (subsets.empty()) {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
-					ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
+					ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
@@ -5711,7 +5758,7 @@ namespace USDLoader {
 					subsetWorkItems.reserve(subsets.size());
 					for (const auto& subset : subsets) {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
-						ProcessMaterial(mat, stage, isUSDZ, directory, importSettings.loadMaterialTextures);
+						ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
