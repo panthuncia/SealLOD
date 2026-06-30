@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cmath>
+#include <chrono>
 #include <queue>
 
 #include <nlohmann/json.hpp>
@@ -89,6 +90,12 @@
 #include "Mesh/VertexLayout.h"
 
 namespace USDLoader {
+
+	std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin)
+	{
+		return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - begin).count());
+	}
 
 	using namespace pxr;
 	using json = nlohmann::json;
@@ -5456,7 +5463,8 @@ namespace USDLoader {
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromStage(
 		const UsdStageRefPtr& stage,
 		const InMemoryStageOptions& options,
-		const ImportSettings& importSettings) {
+		const ImportSettings& importSettings,
+		ImportTimingStats* timingStats) {
 		ZoneScopedN("USDLoader::LoadImportedAssetFromStage");
 		ZoneText(options.sourceIdentifier.data(), options.sourceIdentifier.size());
 		if (!stage) {
@@ -5477,8 +5485,21 @@ namespace USDLoader {
 		try {
 			UsdSkelCache skelCache;
 
-			PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
-			auto payload = ParseImportedAssetPayload(stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
+			{
+				const auto begin = std::chrono::steady_clock::now();
+				PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
+				if (timingStats) {
+					timingStats->meshPreprocessMs += ElapsedMs(begin);
+				}
+			}
+			auto payload = [&]() {
+				const auto begin = std::chrono::steady_clock::now();
+				auto result = ParseImportedAssetPayload(stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
+				if (timingStats) {
+					timingStats->payloadParseMs += ElapsedMs(begin);
+				}
+				return result;
+			}();
 			{
 				ZoneScopedN("USDLoader::LoadImportedAssetFromStage::ClearLoadingCache");
 				loadingCache.Clear();
@@ -5512,20 +5533,25 @@ namespace USDLoader {
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromFile(
 		const std::string& filePath,
 		const InMemoryStageOptions& options,
-		const ImportSettings& importSettings) {
+		const ImportSettings& importSettings,
+		ImportTimingStats* timingStats) {
 		ZoneScopedN("USDLoader::LoadImportedAssetFromFile");
 		ZoneText(filePath.data(), filePath.size());
 		UsdStageRefPtr stage;
 		{
 			ZoneScopedN("USDLoader::LoadImportedAssetFromFile::UsdStageOpen");
+			const auto begin = std::chrono::steady_clock::now();
 			stage = UsdStage::Open(filePath);
+			if (timingStats) {
+				timingStats->stageOpenMs += ElapsedMs(begin);
+			}
 		}
 		if (!stage) {
 			spdlog::error("USD payload stage open failed for {}", filePath);
 			return std::nullopt;
 		}
 
-		return LoadImportedAssetFromStage(stage, options, importSettings);
+		return LoadImportedAssetFromStage(stage, options, importSettings, timingStats);
 	}
 
 	std::shared_ptr<Scene> LoadModelFromFile(
@@ -5544,7 +5570,8 @@ namespace USDLoader {
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromUsdBytes(
 		const std::string& usdText,
 		const InMemoryStageOptions& options,
-		const ImportSettings& importSettings) {
+		const ImportSettings& importSettings,
+		ImportTimingStats* timingStats) {
 		ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes");
 		ZoneText(options.sourceIdentifier.data(), options.sourceIdentifier.size());
 		TracyPlot("SARP.Import.USD.InMemoryBytes", static_cast<int64_t>(usdText.size()));
@@ -5552,23 +5579,34 @@ namespace USDLoader {
 		SdfLayerRefPtr rootLayer = SdfLayer::CreateAnonymous(identifierHint);
 		{
 			ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes::ImportLayerFromString");
+			const auto begin = std::chrono::steady_clock::now();
 			if (!rootLayer || !rootLayer->ImportFromString(usdText)) {
+				if (timingStats) {
+					timingStats->layerImportMs += ElapsedMs(begin);
+				}
 				spdlog::error("Failed to import in-memory USD payload layer '{}'.", identifierHint);
 				return std::nullopt;
+			}
+			if (timingStats) {
+				timingStats->layerImportMs += ElapsedMs(begin);
 			}
 		}
 
 		UsdStageRefPtr stage;
 		{
 			ZoneScopedN("USDLoader::LoadImportedAssetFromUsdBytes::UsdStageOpen");
+			const auto begin = std::chrono::steady_clock::now();
 			stage = UsdStage::Open(rootLayer);
+			if (timingStats) {
+				timingStats->stageOpenMs += ElapsedMs(begin);
+			}
 		}
 		if (!stage) {
 			spdlog::error("Failed to open in-memory USD payload stage '{}'.", identifierHint);
 			return std::nullopt;
 		}
 
-		return LoadImportedAssetFromStage(stage, options, importSettings);
+		return LoadImportedAssetFromStage(stage, options, importSettings, timingStats);
 	}
 
 	std::shared_ptr<Scene> LoadModelFromUsdBytes(

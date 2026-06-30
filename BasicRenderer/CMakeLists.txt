@@ -117,7 +117,7 @@ if(NOT TARGET TBB::tbb)
 endif()
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(implot CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS container_hash)
+find_package(Boost REQUIRED COMPONENTS container_hash interprocess)
 find_package(Tracy REQUIRED CONFIG)
 if(COMMAND basicrenderer_use_release_library_for_debug)
     basicrenderer_use_release_library_for_debug(fmt::fmt)
@@ -1094,6 +1094,7 @@ PRIVATE
     BasicScene::BasicScene
     BasicRHI::BasicRHI
     Boost::container_hash
+    Boost::interprocess
     TBB::tbb
     Tracy::TracyClient
     slang::slang

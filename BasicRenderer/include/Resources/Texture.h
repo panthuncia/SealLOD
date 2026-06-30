@@ -306,6 +306,7 @@ public:
     bool IsMipStreamingEnabled() const { return m_streamingState.enabled; }
     bool IsUsingFallbackImage() const { return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
     bool HasUsableImage() const { return m_image && m_image->HasValidBackingResource(); }
+    bool IsResidentFinalImage() const { return HasUsableImage() && m_hasUploadedFinalImage && !m_hasUploadedPlaceholder; }
     uint64_t GetBindingRevision() const { return m_streamingState.bindingRevision; }
     uint64_t GetStreamingStateRevision() const { return m_streamingState.stateRevision; }
     bool HasPendingUploadWork() const {
@@ -353,6 +354,8 @@ public:
     DirectStorageAsyncRequestHandle QueueInitialDirectStorageUploadIfNeeded();
     void EnsureUploaded(const TextureFactory& factory);
     TextureUploadAdvanceResult EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    TextureUploadAdvanceResult RequestAllOrNothingUpload(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    bool DropResidentImageForStreaming();
 
     unsigned int GetWidth() const {
         return m_desc.imageDimensions[0].width;

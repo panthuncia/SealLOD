@@ -73,6 +73,13 @@ namespace USDLoader {
 		std::vector<RenderablePartPayload> parts;
 	};
 
+	struct ImportTimingStats {
+		std::uint64_t layerImportMs = 0;
+		std::uint64_t stageOpenMs = 0;
+		std::uint64_t meshPreprocessMs = 0;
+		std::uint64_t payloadParseMs = 0;
+	};
+
 	std::shared_ptr<Scene> LoadModel(std::string file, const ImportSettings& settings);
 	std::shared_ptr<Scene> LoadModel(std::string file);
 	std::shared_ptr<Scene> LoadModelFromFile(
@@ -91,13 +98,16 @@ namespace USDLoader {
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromFile(
 		const std::string& filePath,
 		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
+		const ImportSettings& settings = {},
+		ImportTimingStats* timingStats = nullptr);
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromStage(
 		const pxr::UsdStageRefPtr& stage,
 		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
+		const ImportSettings& settings = {},
+		ImportTimingStats* timingStats = nullptr);
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromUsdBytes(
 		const std::string& usdText,
 		const InMemoryStageOptions& options,
-		const ImportSettings& settings = {});
+		const ImportSettings& settings = {},
+		ImportTimingStats* timingStats = nullptr);
 }

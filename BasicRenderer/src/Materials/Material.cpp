@@ -1,6 +1,8 @@
 #include "Materials/Material.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <spdlog/spdlog.h>
 #include "Render/PSOFlags.h"
@@ -56,6 +58,23 @@ namespace {
 
     uint32_t FirstChannelOrDefault(const std::vector<uint32_t>& channels, uint32_t fallback) {
         return channels.empty() ? fallback : channels[0];
+    }
+
+    bool HeightAtlasStreamingEnabledForMaterialUpload() {
+        char* value = nullptr;
+        size_t valueSize = 0;
+        if (_dupenv_s(&value, &valueSize, "SARP_HEIGHT_ATLAS_STREAMING") != 0 || value == nullptr || *value == '\0') {
+            if (value) {
+                std::free(value);
+            }
+            return true;
+        }
+        std::string text(value);
+        std::free(value);
+        std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return text != "0" && text != "false" && text != "no" && text != "off";
     }
 
     DirectX::XMUINT3 RgbChannelsOrDefault(const std::vector<uint32_t>& channels) {
@@ -419,6 +438,8 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
     m_materialData.aoStreamingTextureID = 0u;
     m_materialData.heightStreamingTextureID = 0u;
     m_materialData.opacityStreamingTextureID = 0u;
+    m_materialData.heightMapIndex = 0u;
+    m_materialData.heightSamplerIndex = 0u;
 
     if (m_baseColorTexture) {
         m_baseColorTexture->SetGenerateMipmaps(true);
@@ -436,8 +457,12 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
         const bool hasExplicitObjectReyesAtlasMips =
             m_materialData.objectSurfaceSamplingMode == static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
         m_heightMap->SetGenerateMipmaps(!hasExplicitObjectReyesAtlasMips);
+        const bool streamObjectReyesAtlasHeight =
+            hasExplicitObjectReyesAtlasMips && HeightAtlasStreamingEnabledForMaterialUpload();
         const auto heightUploadMode =
-            (mode == TextureUploadAdvanceMode::NonBlocking && m_materialData.geometricDisplacementEnabled != 0u)
+            (mode == TextureUploadAdvanceMode::NonBlocking &&
+             m_materialData.geometricDisplacementEnabled != 0u &&
+             !streamObjectReyesAtlasHeight)
             ? TextureUploadAdvanceMode::AllowBlockingFallback
             : mode;
         m_heightMap->EnsureUploaded(factory, heightUploadMode);

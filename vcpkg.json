@@ -18,6 +18,7 @@
     "ms-gsl",
     "implot",
     "boost-container-hash",
+    "boost-interprocess",
     {
       "name": "tracy",
       "features": [ "on-demand" ]

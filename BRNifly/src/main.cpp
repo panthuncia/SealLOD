@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
@@ -23,8 +24,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include <boost/interprocess/mapped_region.hpp>
+#include <boost/interprocess/shared_memory_object.hpp>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include <pxr/pxr.h>
 #include <pxr/base/gf/vec2f.h>
@@ -49,6 +53,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <DbgHelp.h>
+#else
+#include <unistd.h>
 #endif
 
 using json = nlohmann::json;
@@ -56,6 +62,115 @@ namespace fs = std::filesystem;
 using namespace pxr;
 
 namespace {
+
+std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin)
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count());
+}
+
+class ScopedJsonTimer
+{
+public:
+    ScopedJsonTimer(json& timings, const char* name) :
+        m_timings(timings),
+        m_name(name),
+        m_begin(std::chrono::steady_clock::now())
+    {
+    }
+
+    ~ScopedJsonTimer()
+    {
+        m_timings[m_name] = m_timings.value(m_name, std::uint64_t{ 0 }) + ElapsedMs(m_begin);
+    }
+
+private:
+    json& m_timings;
+    const char* m_name;
+    std::chrono::steady_clock::time_point m_begin;
+};
+
+std::string DumpJsonResponseWithTiming(json& response)
+{
+    auto& timings = response["timings"];
+    if (!timings.is_object()) {
+        timings = json::object();
+    }
+    const auto dumpBegin = std::chrono::steady_clock::now();
+    std::string payload = response.dump();
+    timings["jsonDumpMs"] = ElapsedMs(dumpBegin);
+    return response.dump();
+}
+
+void WriteJsonLine(json response)
+{
+    ZoneScopedN("BRNifly::WriteJsonLine");
+    std::cout << DumpJsonResponseWithTiming(response) << '\n' << std::flush;
+}
+
+class SharedMemoryRegistry
+{
+public:
+    ~SharedMemoryRegistry()
+    {
+        for (const auto& entry : m_names) {
+            boost::interprocess::shared_memory_object::remove(entry.c_str());
+        }
+    }
+
+    std::optional<json> Store(std::string_view bytes, json& timings)
+    {
+        ZoneScopedN("BRNifly::SharedMemoryRegistry::Store");
+        ScopedJsonTimer timer(timings, "sharedMemoryCreateMs");
+        const std::string name = "BRNiflyUsd_" + ProcessIdText() + "_" + std::to_string(++m_nextId);
+        const auto size = static_cast<std::uint64_t>(bytes.size());
+        try {
+            boost::interprocess::shared_memory_object::remove(name.c_str());
+            boost::interprocess::shared_memory_object sharedMemory(
+                boost::interprocess::create_only,
+                name.c_str(),
+                boost::interprocess::read_write);
+            sharedMemory.truncate(static_cast<boost::interprocess::offset_t>(bytes.size()));
+            boost::interprocess::mapped_region region(sharedMemory, boost::interprocess::read_write);
+            if (region.get_size() < bytes.size()) {
+                boost::interprocess::shared_memory_object::remove(name.c_str());
+                return std::nullopt;
+            }
+            std::memcpy(region.get_address(), bytes.data(), bytes.size());
+        }
+        catch (const std::exception&) {
+            boost::interprocess::shared_memory_object::remove(name.c_str());
+            return std::nullopt;
+        }
+
+        m_names.insert(name);
+        return json{{"name", name}, {"size", size}};
+    }
+
+    bool Release(const std::string& name)
+    {
+        const auto it = m_names.find(name);
+        if (it == m_names.end()) {
+            return false;
+        }
+        boost::interprocess::shared_memory_object::remove(name.c_str());
+        m_names.erase(it);
+        return true;
+    }
+
+private:
+    static std::string ProcessIdText()
+    {
+#ifdef _WIN32
+        return std::to_string(GetCurrentProcessId());
+#else
+        return std::to_string(static_cast<unsigned long long>(::getpid()));
+#endif
+    }
+
+    std::uint64_t m_nextId = 0;
+    std::set<std::string> m_names;
+};
 
 #ifdef _WIN32
 namespace CrashLog {
@@ -1036,11 +1151,23 @@ std::string GetMessageLog(const NiflyApi& api)
 #endif
 }
 
-json DescribeServicesJson(const char* argv0)
+json DescribeServicesJson(
+    const char* argv0,
+    const NiflyApi* persistentApi = nullptr,
+    const std::vector<Diagnostic>* persistentDiagnostics = nullptr)
 {
     std::vector<Diagnostic> diagnostics;
     std::string niflyVersion = "unavailable";
-    if (auto api = LoadNiflyApi(argv0, diagnostics)) {
+    if (persistentApi) {
+        niflyVersion = VersionString(*persistentApi);
+        if (persistentDiagnostics) {
+            diagnostics.insert(diagnostics.end(), persistentDiagnostics->begin(), persistentDiagnostics->end());
+        }
+    }
+    else if (persistentDiagnostics) {
+        diagnostics.insert(diagnostics.end(), persistentDiagnostics->begin(), persistentDiagnostics->end());
+    }
+    else if (auto api = LoadNiflyApi(argv0, diagnostics)) {
         niflyVersion = VersionString(*api);
     }
 
@@ -2019,8 +2146,10 @@ std::optional<std::string> ConvertShapesToUsd(
     const std::vector<CollisionProxyData>& collisionProxies,
     const fs::path& nifPath,
     const std::string& gameName,
-    std::vector<Diagnostic>& diagnostics)
+    std::vector<Diagnostic>& diagnostics,
+    json* timings = nullptr)
 {
+    ZoneScopedN("BRNifly::ConvertShapesToUsd");
     SdfLayerRefPtr rootLayer = SdfLayer::CreateAnonymous("brnifly.usda");
     UsdStageRefPtr stage = UsdStage::Open(rootLayer);
     if (!stage) {
@@ -2299,87 +2428,250 @@ std::optional<std::string> ConvertShapesToUsd(
     }
 
     std::string usdText;
-    if (!rootLayer->ExportToString(&usdText)) {
-        AddDiagnostic(diagnostics, "error", "OpenUSD failed to export the generated layer.");
-        return std::nullopt;
+    {
+        ZoneScopedN("BRNifly::ConvertShapesToUsd::ExportToString");
+        std::optional<ScopedJsonTimer> timer;
+        if (timings) {
+            timer.emplace(*timings, "usdExportToStringMs");
+        }
+        if (!rootLayer->ExportToString(&usdText)) {
+            AddDiagnostic(diagnostics, "error", "OpenUSD failed to export the generated layer.");
+            return std::nullopt;
+        }
     }
 
     AddDiagnostic(diagnostics, "info", "Converted " + std::to_string(emittedMeshes) + " NIF shape(s), " + std::to_string(nodes.size()) + " node(s), and " + std::to_string(collisionProxies.size()) + " collision proxy/proxies to USD.");
     return usdText;
 }
 
-json ConvertUsdJson(const char* argv0, const fs::path& nifPath)
+json ConvertUsdJson(
+    const char* argv0,
+    const fs::path& nifPath,
+    const NiflyApi* persistentApi = nullptr,
+    SharedMemoryRegistry* rootLayerSharedMemory = nullptr)
 {
+    ZoneScopedN("BRNifly::ConvertUsdJson");
+    const std::string nifPathText = nifPath.string();
+    ZoneText(nifPathText.data(), nifPathText.size());
     std::vector<Diagnostic> diagnostics;
+    json timings = json::object();
     json response;
     response["status"] = "error";
-    response["sourcePath"] = nifPath.string();
-
-    auto api = LoadNiflyApi(argv0, diagnostics);
-    if (!api) {
-        response["message"] = "Unable to load niflyDLL.";
+    response["sourcePath"] = nifPathText;
+    auto finalizeResponse = [&]() {
+        response["timings"] = timings;
         response["diagnostics"] = json::array();
         for (const Diagnostic& diagnostic : diagnostics) {
             response["diagnostics"].push_back(DiagnosticJson(diagnostic));
         }
         return response;
+    };
+
+    std::optional<NiflyApi> ownedApi;
+    if (!persistentApi) {
+        ZoneScopedN("BRNifly::ConvertUsdJson::LoadNiflyApi");
+        ScopedJsonTimer timer(timings, "loadNiflyApiMs");
+        ownedApi = LoadNiflyApi(argv0, diagnostics);
+        persistentApi = ownedApi ? std::addressof(*ownedApi) : nullptr;
     }
+    if (!persistentApi) {
+        response["message"] = "Unable to load niflyDLL.";
+        return finalizeResponse();
+    }
+    const NiflyApi& api = *persistentApi;
 
 #ifdef _WIN32
-    if (api->clearMessageLog) {
-        api->clearMessageLog();
+    if (api.clearMessageLog) {
+        api.clearMessageLog();
     }
 
-    void* nifHandle = api->load(nifPath.string().c_str());
+    void* nifHandle = nullptr;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::NiflyLoad");
+        ScopedJsonTimer timer(timings, "niflyLoadMs");
+        nifHandle = api.load(nifPathText.c_str());
+    }
     if (!nifHandle) {
-        AddDiagnostic(diagnostics, "error", "niflyDLL failed to load '" + nifPath.string() + "'. " + GetMessageLog(*api));
+        AddDiagnostic(diagnostics, "error", "niflyDLL failed to load '" + nifPathText + "'. " + GetMessageLog(api));
         response["message"] = "niflyDLL failed to load the NIF file.";
-        response["diagnostics"] = json::array();
-        for (const Diagnostic& diagnostic : diagnostics) {
-            response["diagnostics"].push_back(DiagnosticJson(diagnostic));
-        }
-        return response;
+        return finalizeResponse();
     }
 
     std::string gameName = "unknown";
-    if (api->getGameName) {
-        gameName = ReadCString([&](char* buffer, int size) { return api->getGameName(nifHandle, buffer, size); }).value_or("unknown");
+    if (api.getGameName) {
+        ZoneScopedN("BRNifly::ConvertUsdJson::GetGameName");
+        ScopedJsonTimer timer(timings, "getGameNameMs");
+        gameName = ReadCString([&](char* buffer, int size) { return api.getGameName(nifHandle, buffer, size); }).value_or("unknown");
     }
 
-    std::vector<NodeData> nodes = ReadNodes(*api, nifHandle);
-    std::vector<ShapeData> shapes = ReadShapes(*api, nifHandle, diagnostics);
-    json rootExtraData = ReadExtraDataList(*api, nifHandle, nullptr);
+    std::vector<NodeData> nodes;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadNodes");
+        ScopedJsonTimer timer(timings, "readNodesMs");
+        nodes = ReadNodes(api, nifHandle);
+    }
+    std::vector<ShapeData> shapes;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadShapes");
+        ScopedJsonTimer timer(timings, "readShapesMs");
+        shapes = ReadShapes(api, nifHandle, diagnostics);
+    }
+    json rootExtraData;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ReadExtraData");
+        ScopedJsonTimer timer(timings, "readExtraDataMs");
+        rootExtraData = ReadExtraDataList(api, nifHandle, nullptr);
+    }
     std::vector<CollisionProxyData> collisionProxies;
-    api->destroy(nifHandle);
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::DestroyNif");
+        ScopedJsonTimer timer(timings, "destroyNifMs");
+        api.destroy(nifHandle);
+    }
 
-    auto usdText = ConvertShapesToUsd(shapes, std::move(nodes), rootExtraData, collisionProxies, nifPath, gameName, diagnostics);
+    std::optional<std::string> usdText;
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::ConvertShapesToUsd");
+        ScopedJsonTimer timer(timings, "convertShapesToUsdMs");
+        usdText = ConvertShapesToUsd(shapes, std::move(nodes), rootExtraData, collisionProxies, nifPath, gameName, diagnostics, &timings);
+    }
     if (!usdText) {
         response["message"] = "NIF-to-USD conversion failed.";
-        response["diagnostics"] = json::array();
-        for (const Diagnostic& diagnostic : diagnostics) {
-            response["diagnostics"].push_back(DiagnosticJson(diagnostic));
-        }
-        return response;
+        return finalizeResponse();
     }
 
-    const std::string hash = HexHash(Fnv1a64(std::string(kUsdContentIdentityVersion) + "\n" + *usdText));
-    response["status"] = "ok";
-    response["protocolVersion"] = "1.0";
-    response["sourcePath"] = nifPath.string();
-    response["sourceIdentifier"] = nifPath.string() + "#brnifly=" + hash;
-    response["contentHash"] = hash;
-    response["rootLayerText"] = *usdText;
-    response["dependencies"] = json::array();
-    response["textureSearchRoots"] = json::array({nifPath.parent_path().string()});
-    response["diagnostics"] = json::array();
-    for (const Diagnostic& diagnostic : diagnostics) {
-        response["diagnostics"].push_back(DiagnosticJson(diagnostic));
+    {
+        ZoneScopedN("BRNifly::ConvertUsdJson::HashAndResponse");
+        ScopedJsonTimer timer(timings, "hashAndResponseMs");
+        const std::string hash = HexHash(Fnv1a64(std::string(kUsdContentIdentityVersion) + "\n" + *usdText));
+        response["status"] = "ok";
+        response["protocolVersion"] = "1.0";
+        response["sourcePath"] = nifPathText;
+        response["sourceIdentifier"] = nifPathText + "#brnifly=" + hash;
+        response["contentHash"] = hash;
+        if (rootLayerSharedMemory) {
+            if (auto descriptor = rootLayerSharedMemory->Store(*usdText, timings)) {
+                response["rootLayerSharedMemory"] = std::move(*descriptor);
+            }
+            else {
+                response["rootLayerText"] = *usdText;
+            }
+        }
+        else {
+            response["rootLayerText"] = *usdText;
+        }
+        response["dependencies"] = json::array();
+        response["textureSearchRoots"] = json::array({nifPath.parent_path().string()});
     }
-    return response;
+    return finalizeResponse();
 #else
     response["message"] = "BRNifly conversion is currently implemented for Windows only.";
-    return response;
+    return finalizeResponse();
 #endif
+}
+
+int RunStdioJsonService(const char* argv0)
+{
+    ZoneScopedN("BRNifly::RunStdioJsonService");
+#ifdef _WIN32
+    CrashLog::SetContext("--stdio-json");
+#endif
+    SharedMemoryRegistry sharedMemory;
+    std::optional<NiflyApi> persistentApi;
+    bool persistentApiLoadAttempted = false;
+    std::uint64_t persistentApiLoadMs = 0;
+    std::vector<Diagnostic> persistentApiDiagnostics;
+    auto ensurePersistentApi = [&]() -> bool {
+        if (persistentApiLoadAttempted) {
+            return persistentApi.has_value();
+        }
+        persistentApiLoadAttempted = true;
+        ZoneScopedN("BRNifly::RunStdioJsonService::LoadPersistentNiflyApi");
+        const auto loadBegin = std::chrono::steady_clock::now();
+        persistentApi = LoadNiflyApi(argv0, persistentApiDiagnostics);
+        persistentApiLoadMs = ElapsedMs(loadBegin);
+        return persistentApi.has_value();
+    };
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) {
+            continue;
+        }
+
+        json response;
+        try {
+            const json request = json::parse(line);
+            const std::string command = request.value("command", "");
+            if (command == "describe-services") {
+                (void)ensurePersistentApi();
+                response = DescribeServicesJson(
+                    argv0,
+                    persistentApi ? std::addressof(*persistentApi) : nullptr,
+                    std::addressof(persistentApiDiagnostics));
+            }
+            else if (command == "convert-usd") {
+                const std::string path = request.value("path", "");
+                const bool preferSharedMemory = request.value("responseTransport", "") == "shared-memory";
+#ifdef _WIN32
+                CrashLog::SetContext("--stdio-json convert-usd", path);
+#endif
+                const bool loadingApiForThisRequest = !persistentApiLoadAttempted;
+                (void)ensurePersistentApi();
+
+                if (!persistentApi) {
+                    response["status"] = "error";
+                    response["message"] = "Unable to load niflyDLL.";
+                    response["sourcePath"] = path;
+                    response["timings"] = json::object({ { "loadNiflyApiMs", persistentApiLoadMs } });
+                    response["diagnostics"] = json::array();
+                    for (const Diagnostic& diagnostic : persistentApiDiagnostics) {
+                        response["diagnostics"].push_back(DiagnosticJson(diagnostic));
+                    }
+                }
+                else {
+                    response = ConvertUsdJson(
+                        argv0,
+                        fs::path(path),
+                        std::addressof(*persistentApi),
+                        preferSharedMemory ? std::addressof(sharedMemory) : nullptr);
+                    if (loadingApiForThisRequest) {
+                        auto& timings = response["timings"];
+                        if (!timings.is_object()) {
+                            timings = json::object();
+                        }
+                        timings["loadNiflyApiMs"] = timings.value("loadNiflyApiMs", std::uint64_t{ 0 }) + persistentApiLoadMs;
+                    }
+                }
+            }
+            else if (command == "release-shared-memory") {
+                const std::string name = request.value("name", "");
+                response["status"] = sharedMemory.Release(name) ? "ok" : "error";
+                response["message"] = response.value("status", "") == "ok" ? "released" : "unknown shared memory segment";
+                response["timings"] = json::object();
+            }
+            else if (command == "shutdown") {
+                response["status"] = "ok";
+                response["message"] = "shutdown";
+                response["timings"] = json::object();
+                WriteJsonLine(std::move(response));
+                return 0;
+            }
+            else {
+                response["status"] = "error";
+                response["message"] = "unknown BRNifly stdio command";
+                response["timings"] = json::object();
+            }
+        }
+        catch (const std::exception& e) {
+            response["status"] = "error";
+            response["message"] = std::string("BRNifly stdio JSON request failed: ") + e.what();
+            response["timings"] = json::object();
+        }
+
+        WriteJsonLine(std::move(response));
+    }
+    return 0;
 }
 
 int PrintUsage()
@@ -2409,11 +2701,15 @@ int main(int argc, char** argv)
 
     spdlog::set_level(spdlog::level::warn);
 
+    if (argc == 2 && std::string(argv[1]) == "--stdio-json") {
+        return RunStdioJsonService(argv[0]);
+    }
+
     if (argc == 2 && std::string(argv[1]) == "--describe-services") {
 #ifdef _WIN32
         CrashLog::SetContext("--describe-services");
 #endif
-        std::cout << DescribeServicesJson(argv[0]).dump(2) << std::endl;
+        WriteJsonLine(DescribeServicesJson(argv[0]));
         return 0;
     }
 
@@ -2421,7 +2717,7 @@ int main(int argc, char** argv)
 #ifdef _WIN32
         CrashLog::SetContext("--convert-usd-json", argv[2]);
 #endif
-        std::cout << ConvertUsdJson(argv[0], fs::path(argv[2])).dump(2) << std::endl;
+        WriteJsonLine(ConvertUsdJson(argv[0], fs::path(argv[2])));
         return 0;
     }
 

@@ -5,9 +5,12 @@ std::shared_ptr<Sampler> Sampler::m_defaultSampler = nullptr;
 std::shared_ptr<Sampler> Sampler::m_defaultShadowSampler = nullptr;
 std::unordered_map<rhi::SamplerDesc, std::shared_ptr<Sampler>, rhi::SamplerDescHash, rhi::SamplerDescEq> Sampler::m_samplerCache;
 
-Sampler::Sampler(rhi::SamplerDesc samplerDesc)
-    : m_index(0), m_samplerDesc(samplerDesc) {
-	m_index = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
+Sampler::Sampler(rhi::SamplerDesc samplerDesc, bool createDescriptor)
+	: m_index(0), m_hasDescriptorIndex(false), m_samplerDesc(samplerDesc) {
+	if (createDescriptor) {
+		m_index = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
+		m_hasDescriptorIndex = true;
+	}
 }
 
 std::shared_ptr<Sampler> Sampler::CreateSampler(rhi::SamplerDesc samplerDesc) {
@@ -15,7 +18,28 @@ std::shared_ptr<Sampler> Sampler::CreateSampler(rhi::SamplerDesc samplerDesc) {
 	if (it != m_samplerCache.end()) {
 		return it->second;
 	}
-	return std::shared_ptr<Sampler>(new Sampler(samplerDesc));
+	return std::shared_ptr<Sampler>(new Sampler(samplerDesc, true));
+}
+
+std::shared_ptr<Sampler> Sampler::CreateCpuOnlySampler(rhi::SamplerDesc samplerDesc) {
+	return std::shared_ptr<Sampler>(new Sampler(samplerDesc, false));
+}
+
+bool Sampler::CanCreateDescriptorSamplers() {
+	return rg::runtime::GetActiveDescriptorService() != nullptr;
+}
+
+UINT Sampler::GetDescriptorIndex() const {
+	if (m_hasDescriptorIndex.load(std::memory_order_acquire)) {
+		return m_index;
+	}
+
+	std::lock_guard<std::mutex> lock(m_descriptorMutex);
+	if (!m_hasDescriptorIndex.load(std::memory_order_relaxed)) {
+		m_index = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
+		m_hasDescriptorIndex.store(true, std::memory_order_release);
+	}
+	return m_index;
 }
 
 std::shared_ptr<Sampler> Sampler::GetDefaultSampler() {

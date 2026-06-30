@@ -741,11 +741,15 @@ float ReyesSampleMaterialDisplacementOffset(
         return 0.0f;
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float2 sampleUv = saturate(uv);
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
@@ -753,6 +757,8 @@ float ReyesSampleMaterialDisplacementOffset(
             heightValue);
     }
 
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
@@ -772,11 +778,15 @@ float ReyesSampleMaterialDisplacementOffset(
         return 0.0f;
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float2 sampleUv = saturate(uv);
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
@@ -784,6 +794,8 @@ float ReyesSampleMaterialDisplacementOffset(
             heightValue);
     }
 
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float4 heightSample = useUvDerivatives
         ? heightTexture.SampleGrad(heightSampler, uv, dUVdx, dUVdy)
         : heightTexture.SampleLevel(heightSampler, uv, 0.0f);
@@ -1276,13 +1288,17 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
         return 0.0f;
     }
 
-    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
-    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float2 sampleUv = materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT
         ? saturate(uv)
         : uv;
     if (materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT)
     {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
+        Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+        SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
         const float heightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(heightTexture, heightSampler, sampleUv));
         return lerp(
             materialInfo.geometricDisplacementMin,
@@ -1290,6 +1306,8 @@ float ReyesSampleMaterialDisplacementOffset(MaterialInfo materialInfo, float2 uv
             heightValue);
     }
 
+    Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+    SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
     const float heightValue = saturate(heightTexture.SampleLevel(heightSampler, sampleUv, 0.0f).r);
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }

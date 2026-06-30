@@ -1902,6 +1902,10 @@ float SampleMaterialGeometricHeightDebug(
 {
     if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
     {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
         MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
@@ -1960,6 +1964,10 @@ float SampleMaterialGeometricHeightDebug(
 {
     if (materialInfo.objectSurfaceSamplingMode == 2u && (materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u)
     {
+        if (materialInfo.heightMapIndex == 0u)
+        {
+            return 0.0f;
+        }
         MaterialUvSample heightUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_HEIGHT);
         Texture2D<float4> heightTexture = ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];

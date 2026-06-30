@@ -2154,6 +2154,26 @@ void TextureAsset::EnsureUploaded(const TextureFactory& factory) {
 	EnsureUploaded(factory, TextureUploadAdvanceMode::AllowBlockingFallback);
 }
 
+TextureUploadAdvanceResult TextureAsset::RequestAllOrNothingUpload(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
+	return EnsureUploaded(factory, mode);
+}
+
+bool TextureAsset::DropResidentImageForStreaming() {
+	std::lock_guard lock(m_uploadAdvanceMutex);
+	if (!m_hasUploadedFinalImage || !HasStreamingSourceData()) {
+		return false;
+	}
+
+	m_image.reset();
+	m_hasUploadedFinalImage = false;
+	m_hasUploadedPlaceholder = false;
+	m_directStorageReloadHandle.reset();
+	m_reloadHandle.reset();
+	BumpBindingRevision();
+	RecordUploadPath(TextureUploadPathTelemetry::DeferredPlaceholder, "height atlas streaming evicted resident image");
+	return true;
+}
+
 TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
 	ZoneScopedN("TextureAsset::EnsureUploaded");
 	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);

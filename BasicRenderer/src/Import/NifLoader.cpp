@@ -56,6 +56,32 @@ std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count());
 }
 
+void AccumulateBRNiflyChildTimingStats(LoadTimingStats& stats, const BRNiflyClient::TimingStats& brniflyTiming)
+{
+    stats.brniflyClientPersistentStartMs += brniflyTiming.clientPersistentStartMs;
+    stats.brniflyClientWriteRequestMs += brniflyTiming.clientWriteRequestMs;
+    stats.brniflyClientWaitResponseMs += brniflyTiming.clientWaitResponseMs;
+    stats.brniflyClientWaitFirstByteMs += brniflyTiming.clientWaitFirstByteMs;
+    stats.brniflyClientWaitMoreResponseMs += brniflyTiming.clientWaitMoreResponseMs;
+    stats.brniflyClientReadResponseMs += brniflyTiming.clientReadResponseMs;
+    stats.brniflyClientResponseBytes += brniflyTiming.clientResponseBytes;
+    stats.brniflyClientResponseChunks += brniflyTiming.clientResponseChunks;
+    stats.brniflyClientSharedMemoryReadMs += brniflyTiming.clientSharedMemoryReadMs;
+    stats.brniflyClientParseJsonMs += brniflyTiming.clientParseJsonMs;
+    stats.brniflyChildLoadNiflyApiMs += brniflyTiming.childLoadNiflyApiMs;
+    stats.brniflyChildNiflyLoadMs += brniflyTiming.childNiflyLoadMs;
+    stats.brniflyChildGetGameNameMs += brniflyTiming.childGetGameNameMs;
+    stats.brniflyChildReadNodesMs += brniflyTiming.childReadNodesMs;
+    stats.brniflyChildReadShapesMs += brniflyTiming.childReadShapesMs;
+    stats.brniflyChildReadExtraDataMs += brniflyTiming.childReadExtraDataMs;
+    stats.brniflyChildDestroyNifMs += brniflyTiming.childDestroyNifMs;
+    stats.brniflyChildConvertShapesToUsdMs += brniflyTiming.childConvertShapesToUsdMs;
+    stats.brniflyChildUsdExportToStringMs += brniflyTiming.childUsdExportToStringMs;
+    stats.brniflyChildHashAndResponseMs += brniflyTiming.childHashAndResponseMs;
+    stats.brniflyChildSharedMemoryCreateMs += brniflyTiming.childSharedMemoryCreateMs;
+    stats.brniflyChildJsonDumpMs += brniflyTiming.childJsonDumpMs;
+}
+
 std::string Hex64(std::uint64_t value)
 {
     std::ostringstream out;
@@ -2179,6 +2205,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
         stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
         stats->brniflyConvertMs += brniflyTiming.convertProcessMs;
+        AccumulateBRNiflyChildTimingStats(*stats, brniflyTiming);
     }
     if (!package) {
         if (stats) {
@@ -2222,15 +2249,17 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         normalizedCacheKey);
     const auto extractBegin = std::chrono::steady_clock::now();
     std::optional<USDLoader::ImportedAssetPayload> payload;
+    USDLoader::ImportTimingStats usdTiming;
     {
         ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey::LoadUsdPayload");
-        payload = USDLoader::LoadImportedAssetFromUsdBytes(package->rootLayerText, options, settings);
+        payload = USDLoader::LoadImportedAssetFromUsdBytes(package->rootLayerText, options, settings, &usdTiming);
     }
     if (stats) {
         const auto elapsed = ElapsedMs(extractBegin, std::chrono::steady_clock::now());
-        stats->usdExtractMs += elapsed;
-        stats->meshBuildMs += elapsed;
         stats->usdLoadMs += elapsed;
+        stats->usdOpenMs += usdTiming.layerImportMs + usdTiming.stageOpenMs;
+        stats->usdExtractMs += usdTiming.payloadParseMs;
+        stats->meshBuildMs += usdTiming.meshPreprocessMs;
     }
     if (payload) {
         {
@@ -2339,11 +2368,17 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
     std::string errorMessage;
     const auto brniflyBegin = std::chrono::steady_clock::now();
     BRNiflyClient::TimingStats brniflyTiming{};
-    auto package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
+    std::optional<BRNiflyClient::UsdAssetPackage> package;
+    {
+        ZoneScopedN("NifLoader::LoadModelWithCacheKey::BRNiflyConvertNifToUsd");
+        ZoneText(normalizedCacheKey.data(), normalizedCacheKey.size());
+        package = BRNiflyClient::ConvertNifToUsd(filePath, {}, &errorMessage, std::addressof(brniflyTiming));
+    }
     if (stats) {
         stats->brniflyMs += ElapsedMs(brniflyBegin, std::chrono::steady_clock::now());
         stats->brniflyDescribeMs += brniflyTiming.describeServicesMs;
         stats->brniflyConvertMs += brniflyTiming.convertProcessMs;
+        AccumulateBRNiflyChildTimingStats(*stats, brniflyTiming);
     }
     if (!package) {
         spdlog::error("NIF import failed for '{}': {}", filePath, errorMessage);

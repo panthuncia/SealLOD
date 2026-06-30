@@ -6,6 +6,8 @@ endif()
 
 find_package(nlohmann_json REQUIRED CONFIG)
 find_package(spdlog REQUIRED CONFIG)
+find_package(Tracy REQUIRED CONFIG)
+find_package(Boost REQUIRED COMPONENTS interprocess)
 find_package(pxr REQUIRED CONFIG)
 if(COMMAND basicrenderer_use_release_library_for_debug)
     basicrenderer_use_release_library_for_debug(fmt::fmt)
@@ -31,6 +33,8 @@ target_link_libraries(BRNifly PRIVATE
     tf
     vt
     arch
+    Tracy::TracyClient
+    Boost::interprocess
 )
 if(WIN32)
     target_link_libraries(BRNifly PRIVATE DbgHelp)
