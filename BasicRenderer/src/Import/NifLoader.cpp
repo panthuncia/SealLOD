@@ -49,7 +49,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "30";
+constexpr std::string_view kObjectReyesConfigVersion = "31";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -152,6 +152,33 @@ std::string NormalizeObjectReyesNifWhitelistPath(std::string_view path)
     return normalized;
 }
 
+std::string NormalizeObjectReyesHeightAtlasStorageSetting(std::string_view text)
+{
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (unsigned char ch : text) {
+        normalized.push_back(ch == '-' || ch == ' '
+            ? '_'
+            : static_cast<char>(std::tolower(ch)));
+    }
+    if (normalized == "r16" ||
+        normalized == "r16_unorm" ||
+        normalized == "r16_unorm_mips" ||
+        normalized == "r16unormmips" ||
+        normalized == "legacy" ||
+        normalized == "old") {
+        return "r16_unorm_mips";
+    }
+    if (!normalized.empty() &&
+        normalized != "bc4u" &&
+        normalized != "bc4_unorm" &&
+        normalized != "bc4_unorm_nomips" &&
+        normalized != "bc4u_nomips") {
+        spdlog::warn("Object Reyes heightAtlasStorage='{}' is unknown; using 'bc4u'.", text);
+    }
+    return "bc4u";
+}
+
 struct ObjectReyesConfig
 {
     struct BakedHeightMaterialEntry
@@ -177,6 +204,7 @@ struct ObjectReyesConfig
     bool tripleTapStochasticIncludeSelected = false;
     std::uint32_t atlasBakeResolution = 4096u;
     std::uint32_t atlasBakePaddingTexels = 8u;
+    std::string heightAtlasStorage = "bc4u";
     std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
     bool loaded = false;
 };
@@ -300,6 +328,9 @@ ObjectReyesConfig LoadObjectReyesConfig()
                 config.displacementScaleOverrides[normalized] = scale;
             }
         }
+        if (const auto storage = doc.find("heightAtlasStorage"); storage != doc.end() && storage->is_string()) {
+            config.heightAtlasStorage = NormalizeObjectReyesHeightAtlasStorageSetting(storage->get<std::string>());
+        }
         auto readBakedHeightObject = [&](const json& bakedHeight) {
             if (const auto nifPaths = bakedHeight.find("nifPaths"); nifPaths != bakedHeight.end() && nifPaths->is_array()) {
                 std::unordered_set<std::string> bakedHeightNifPaths;
@@ -395,6 +426,10 @@ ObjectReyesConfig LoadObjectReyesConfig()
                     config.tripleTapStochasticTexturePaths);
             }
         }
+        if (const char* envStorage = std::getenv("SARP_OBJECT_REYES_HEIGHT_ATLAS_STORAGE");
+            envStorage && envStorage[0] != '\0') {
+            config.heightAtlasStorage = NormalizeObjectReyesHeightAtlasStorageSetting(envStorage);
+        }
         if (config.atlasBakeResolution < 256u || config.atlasBakeResolution > 8192u) {
             spdlog::warn(
                 "Object Reyes atlasBake.resolution={} is invalid; using 4096.",
@@ -408,9 +443,13 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.atlasBakePaddingTexels = 8u;
         }
         config.loaded = true;
-        config.contentHash = Hex64(Fnv1a64(std::string("object-reyes:v1:") + text));
+        config.contentHash = Hex64(Fnv1a64(
+            std::string("object-reyes:v1:") +
+            text +
+            "|heightAtlasStorage=" +
+            config.heightAtlasStorage));
         spdlog::info(
-            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), displacementScaleOverrides={}, surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, atlasBake resolution={}, paddingTexels={}, hash={}).",
+            "Loaded Object Reyes config '{}' ({} opt-in nif path(s), {} opt-in texture path(s), displacementScaleOverrides={}, surfaceSampling mode='{}', includeSelected={}, {} surface nif path(s), {} surface texture path(s), bakedHeight nifs={}, bakedHeight entries={}, triplanarProjection nifs={}, textures={}, includeSelected={}, tripleTapStochastic nifs={}, textures={}, includeSelected={}, atlasBake resolution={}, paddingTexels={}, heightAtlasStorage={}, hash={}).",
             path->string(),
             config.nifPaths.size(),
             config.texturePaths.size(),
@@ -429,6 +468,7 @@ ObjectReyesConfig LoadObjectReyesConfig()
             config.tripleTapStochasticIncludeSelected,
             config.atlasBakeResolution,
             config.atlasBakePaddingTexels,
+            config.heightAtlasStorage,
             config.contentHash);
     }
     catch (const std::exception& e) {
@@ -937,6 +977,7 @@ USDLoader::InMemoryStageOptions MakeStageOptions(
         objectReyesConfig.tripleTapStochasticNifPaths.contains(options.objectReyesNifPath);
     options.objectReyesAtlasBakeResolution = objectReyesConfig.atlasBakeResolution;
     options.objectReyesAtlasBakePaddingTexels = objectReyesConfig.atlasBakePaddingTexels;
+    options.objectReyesHeightAtlasStorage = objectReyesConfig.heightAtlasStorage;
     options.objectReyesBakedHeightMaterials.reserve(objectReyesConfig.bakedHeightMaterials.size());
     for (const auto& entry : objectReyesConfig.bakedHeightMaterials) {
         options.objectReyesBakedHeightMaterials.push_back(USDLoader::ObjectReyesBakedHeightMaterialEntry{

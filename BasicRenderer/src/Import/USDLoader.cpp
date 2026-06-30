@@ -1237,43 +1237,6 @@ namespace USDLoader {
 		return (x - a.x) * (b.y - a.y) - (y - a.y) * (b.x - a.x);
 	}
 
-	std::uint32_t ObjectReyesAtlasMipCount(std::uint32_t width, std::uint32_t height)
-	{
-		std::uint32_t count = 1u;
-		while (width > 1u || height > 1u) {
-			width = std::max(1u, width >> 1u);
-			height = std::max(1u, height >> 1u);
-			++count;
-		}
-		return count;
-	}
-
-	std::vector<std::uint16_t> BuildObjectReyesAtlasMip(
-		const std::vector<std::uint16_t>& parent,
-		std::uint32_t parentWidth,
-		std::uint32_t parentHeight)
-	{
-		const std::uint32_t width = std::max(1u, parentWidth >> 1u);
-		const std::uint32_t height = std::max(1u, parentHeight >> 1u);
-		std::vector<std::uint16_t> mip(static_cast<std::size_t>(width) * height, 32768u);
-		for (std::uint32_t y = 0; y < height; ++y) {
-			for (std::uint32_t x = 0; x < width; ++x) {
-				std::uint32_t sum = 0u;
-				std::uint32_t count = 0u;
-				for (std::uint32_t oy = 0; oy < 2u; ++oy) {
-					for (std::uint32_t ox = 0; ox < 2u; ++ox) {
-						const std::uint32_t px = std::min(parentWidth - 1u, x * 2u + ox);
-						const std::uint32_t py = std::min(parentHeight - 1u, y * 2u + oy);
-						sum += parent[static_cast<std::size_t>(py) * parentWidth + px];
-						++count;
-					}
-				}
-				mip[static_cast<std::size_t>(y) * width + x] = static_cast<std::uint16_t>(sum / std::max(1u, count));
-			}
-		}
-		return mip;
-	}
-
 	void StampObjectReyesAtlasHeightPixel(
 		std::vector<std::uint16_t>& pixels,
 		std::vector<std::uint8_t>& coverage,
@@ -1301,11 +1264,82 @@ namespace USDLoader {
 		return ObjectReyesAtlasHeightCacheRoot() / (ObjectAtlasHashHex(bakeIdentity) + ".dds");
 	}
 
+	enum class ObjectReyesHeightAtlasStorage
+	{
+		BC4UNormNoMips,
+		R16UNormMips,
+	};
+
+	std::string NormalizeObjectReyesHeightAtlasStorageName(std::string_view text)
+	{
+		std::string normalized;
+		normalized.reserve(text.size());
+		for (unsigned char ch : text) {
+			normalized.push_back(ch == '-' || ch == ' '
+				? '_'
+				: static_cast<char>(std::tolower(ch)));
+		}
+		return normalized;
+	}
+
+	ObjectReyesHeightAtlasStorage ParseObjectReyesHeightAtlasStorage(std::string_view text)
+	{
+		const std::string normalized = NormalizeObjectReyesHeightAtlasStorageName(text);
+		if (normalized == "r16" ||
+			normalized == "r16_unorm" ||
+			normalized == "r16_unorm_mips" ||
+			normalized == "r16unormmips" ||
+			normalized == "legacy" ||
+			normalized == "old") {
+			return ObjectReyesHeightAtlasStorage::R16UNormMips;
+		}
+		return ObjectReyesHeightAtlasStorage::BC4UNormNoMips;
+	}
+
+	const char* ObjectReyesHeightAtlasStorageName(ObjectReyesHeightAtlasStorage storage)
+	{
+		switch (storage) {
+		case ObjectReyesHeightAtlasStorage::R16UNormMips:
+			return "r16_unorm_mips";
+		case ObjectReyesHeightAtlasStorage::BC4UNormNoMips:
+		default:
+			return "bc4u";
+		}
+	}
+
+	std::vector<std::uint16_t> BuildObjectReyesAtlasMip(
+		const std::vector<std::uint16_t>& parent,
+		std::uint32_t parentWidth,
+		std::uint32_t parentHeight)
+	{
+		const std::uint32_t width = std::max(1u, parentWidth >> 1u);
+		const std::uint32_t height = std::max(1u, parentHeight >> 1u);
+		std::vector<std::uint16_t> mip(static_cast<std::size_t>(width) * height, 32768u);
+		for (std::uint32_t y = 0; y < height; ++y) {
+			for (std::uint32_t x = 0; x < width; ++x) {
+				std::uint32_t sum = 0u;
+				std::uint32_t count = 0u;
+				for (std::uint32_t oy = 0; oy < 2u; ++oy) {
+					for (std::uint32_t ox = 0; ox < 2u; ++ox) {
+						const std::uint32_t px = std::min(parentWidth - 1u, x * 2u + ox);
+						const std::uint32_t py = std::min(parentHeight - 1u, y * 2u + oy);
+						sum += parent[static_cast<std::size_t>(py) * parentWidth + px];
+						++count;
+					}
+				}
+				mip[static_cast<std::size_t>(y) * width + x] =
+					static_cast<std::uint16_t>(sum / std::max(1u, count));
+			}
+		}
+		return mip;
+	}
+
 	bool WriteObjectReyesAtlasHeightDds(
 		const std::filesystem::path& path,
 		std::uint32_t width,
 		std::uint32_t height,
-		const std::vector<std::vector<std::uint16_t>>& mipPixels)
+		const std::vector<std::vector<std::uint16_t>>& mipPixels,
+		ObjectReyesHeightAtlasStorage storage)
 	{
 		if (width == 0u || height == 0u || mipPixels.empty()) {
 			return false;
@@ -1313,28 +1347,31 @@ namespace USDLoader {
 		std::error_code ec;
 		std::filesystem::create_directories(path.parent_path(), ec);
 
+		const std::size_t imageMipCount = storage == ObjectReyesHeightAtlasStorage::R16UNormMips
+			? mipPixels.size()
+			: 1u;
 		DirectX::ScratchImage image;
 		HRESULT hr = image.Initialize2D(
 			DXGI_FORMAT_R16_UNORM,
 			width,
 			height,
 			1u,
-			mipPixels.size());
+			imageMipCount);
 		if (FAILED(hr)) {
 			return false;
 		}
 
 		std::uint32_t mipWidth = width;
 		std::uint32_t mipHeight = height;
-		for (std::size_t mip = 0; mip < mipPixels.size(); ++mip) {
-			const DirectX::Image* mipImage = image.GetImage(mip, 0u, 0u);
-			if (!mipImage || !mipImage->pixels ||
+		for (std::size_t mip = 0; mip < imageMipCount; ++mip) {
+			const DirectX::Image* subresource = image.GetImage(mip, 0u, 0u);
+			if (!subresource || !subresource->pixels ||
 				mipPixels[mip].size() != static_cast<std::size_t>(mipWidth) * mipHeight) {
 				return false;
 			}
 			for (std::uint32_t y = 0; y < mipHeight; ++y) {
 				std::memcpy(
-					mipImage->pixels + static_cast<std::size_t>(y) * mipImage->rowPitch,
+					subresource->pixels + static_cast<std::size_t>(y) * subresource->rowPitch,
 					mipPixels[mip].data() + static_cast<std::size_t>(y) * mipWidth,
 					static_cast<std::size_t>(mipWidth) * sizeof(std::uint16_t));
 			}
@@ -1342,10 +1379,33 @@ namespace USDLoader {
 			mipHeight = std::max(1u, mipHeight >> 1u);
 		}
 
-		hr = DirectX::SaveToDDSFile(
+		if (storage == ObjectReyesHeightAtlasStorage::R16UNormMips) {
+			hr = DirectX::SaveToDDSFile(
+				image.GetImages(),
+				image.GetImageCount(),
+				image.GetMetadata(),
+				DirectX::DDS_FLAGS_NONE,
+				path.c_str());
+			return SUCCEEDED(hr);
+		}
+
+		DirectX::ScratchImage compressedImage;
+		hr = DirectX::Compress(
 			image.GetImages(),
 			image.GetImageCount(),
 			image.GetMetadata(),
+			DXGI_FORMAT_BC4_UNORM,
+			static_cast<DirectX::TEX_COMPRESS_FLAGS>(DirectX::TEX_COMPRESS_UNIFORM | DirectX::TEX_COMPRESS_PARALLEL),
+			DirectX::TEX_THRESHOLD_DEFAULT,
+			compressedImage);
+		if (FAILED(hr)) {
+			return false;
+		}
+
+		hr = DirectX::SaveToDDSFile(
+			compressedImage.GetImages(),
+			compressedImage.GetImageCount(),
+			compressedImage.GetMetadata(),
 			DirectX::DDS_FLAGS_NONE,
 			path.c_str());
 		return SUCCEEDED(hr);
@@ -3277,7 +3337,12 @@ namespace USDLoader {
 		bakeIdentity += std::to_string(result.objectAtlasHeight);
 		bakeIdentity += "|uv=";
 		bakeIdentity += std::to_string(result.objectAtlasHeightUvSetIndex);
-		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=7";
+		const ObjectReyesHeightAtlasStorage heightAtlasStorage =
+			ParseObjectReyesHeightAtlasStorage(result.objectAtlasHeightStorage);
+		const char* heightAtlasStorageName = ObjectReyesHeightAtlasStorageName(heightAtlasStorage);
+		bakeIdentity += "|object_reyes_preprocess_atlas_height_bake_v=8";
+		bakeIdentity += "|heightAtlasStorage=";
+		bakeIdentity += heightAtlasStorageName;
 		for (std::size_t materialIndex = 0; materialIndex < result.objectAtlasSourceMaterials.size(); ++materialIndex) {
 			const MaterialDescription& desc = result.objectAtlasSourceMaterials[materialIndex];
 			if (!LoadObjectAtlasHeightSamplerFromDescription(desc, samplers[materialIndex])) {
@@ -3577,17 +3642,18 @@ namespace USDLoader {
 		}
 
 		std::vector<std::vector<std::uint16_t>> mipPixels;
-		mipPixels.reserve(ObjectReyesAtlasMipCount(width, height));
 		mipPixels.push_back(std::move(pixels));
-		std::uint32_t mipWidth = width;
-		std::uint32_t mipHeight = height;
-		while (mipWidth > 1u || mipHeight > 1u) {
-			mipPixels.push_back(BuildObjectReyesAtlasMip(mipPixels.back(), mipWidth, mipHeight));
-			mipWidth = std::max(1u, mipWidth >> 1u);
-			mipHeight = std::max(1u, mipHeight >> 1u);
+		if (heightAtlasStorage == ObjectReyesHeightAtlasStorage::R16UNormMips) {
+			std::uint32_t mipWidth = width;
+			std::uint32_t mipHeight = height;
+			while (mipWidth > 1u || mipHeight > 1u) {
+				mipPixels.push_back(BuildObjectReyesAtlasMip(mipPixels.back(), mipWidth, mipHeight));
+				mipWidth = std::max(1u, mipWidth >> 1u);
+				mipHeight = std::max(1u, mipHeight >> 1u);
+			}
 		}
 
-		if (!WriteObjectReyesAtlasHeightDds(cachePath, width, height, mipPixels)) {
+		if (!WriteObjectReyesAtlasHeightDds(cachePath, width, height, mipPixels, heightAtlasStorage)) {
 			spdlog::warn("Object Reyes atlas height preprocess bake failed under '{}': could not write '{}'.", parentPath, cachePath.string());
 			return false;
 		}
@@ -3596,12 +3662,12 @@ namespace USDLoader {
 			result.objectAtlasBakedHeightSourcePath = cachePath.string();
 		}
 		spdlog::info(
-			"Object Reyes atlas height preprocess baked '{}' for '{}' size={}x{} mips={} sourceMaterials={} displacementRange=[{}, {}].",
+			"Object Reyes atlas height preprocess baked '{}' for '{}' size={}x{} storage={} sourceMaterials={} displacementRange=[{}, {}].",
 			result.objectAtlasBakedHeightSourcePath,
 			parentPath,
 			width,
 			height,
-			mipPixels.size(),
+			heightAtlasStorageName,
 			result.objectAtlasSourceMaterials.size(),
 			atlasDisplacementMin,
 			atlasDisplacementMax);
@@ -4157,6 +4223,7 @@ namespace USDLoader {
 			result.objectAtlasHeight = atlasResult.atlasHeight;
 			result.objectAtlasTexelsPerUnit = atlasResult.texelsPerUnit;
 			result.objectAtlasBlendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
+			result.objectAtlasHeightStorage = stageOptions.objectReyesHeightAtlasStorage;
 			result.objectAtlasTriangleMaterialIndices.assign(subsetIndices.size() / 3u, static_cast<std::uint32_t>(groupEntry));
 			result.objectAtlasSourceMaterialNames = sourceMaterialNames;
 			result.objectAtlasSourceMaterials = sourceMaterials;

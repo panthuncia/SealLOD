@@ -35,6 +35,7 @@ struct MeshPreprocessResult {
 	float objectAtlasBlendWidthObjectUnits = 8.0f;
 	float objectAtlasDisplacementMin = -0.5f;
 	float objectAtlasDisplacementMax = 0.5f;
+	std::string objectAtlasHeightStorage = "bc4u";
 	std::string objectAtlasBakedHeightSourcePath;
 	std::vector<std::uint32_t> objectAtlasTriangleMaterialIndices;
 	std::vector<std::string> objectAtlasSourceMaterialNames;
