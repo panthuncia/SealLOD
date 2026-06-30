@@ -2102,6 +2102,12 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
         macro.Name = L"PSO_OPENPBR_FUZZ_ROUGHNESS_TEXTURE";
         defines.insert(defines.begin(), macro);
     }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"VISUTIL_COLOR_ONLY_GBUFFER_EVAL";
+        defines.insert(defines.begin(), macro);
+    }
     if (materialFlags & MaterialCompileFlags::MaterialCompileTextureStreaming) {
         DxcDefine macro;
         macro.Value = L"1";

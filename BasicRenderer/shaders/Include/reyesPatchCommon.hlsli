@@ -924,8 +924,8 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialInfo materialInfo, floa
     float3 dpdxOS;
     float3 dpdyOS;
     ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
-    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
-    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
     const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
         heightTexture,
         heightSampler,
@@ -935,7 +935,7 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialInfo materialInfo, floa
         dpdxOS,
         dpdyOS,
         max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
-        unusedMaterialInputs));
+        unusedFeedback));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 
@@ -950,8 +950,8 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, 
     float3 dpdxOS;
     float3 dpdyOS;
     ReyesObjectSurfaceDerivativeBasis(normalOS, dpdxOS, dpdyOS);
-    MaterialInputs unusedMaterialInputs = (MaterialInputs)0;
-    InitializeMaterialSelectedMipDebug(unusedMaterialInputs);
+    MaterialTextureFeedback unusedFeedback;
+    InitializeMaterialTextureFeedback(unusedFeedback);
     const float heightValue = saturate(ObjectSurfaceSampleTriplanarHeight(
         heightTexture,
         heightSampler,
@@ -961,7 +961,7 @@ float ReyesSampleObjectSurfaceDisplacementOffset(MaterialEvalInfo materialInfo, 
         dpdxOS,
         dpdyOS,
         max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f),
-        unusedMaterialInputs));
+        unusedFeedback));
     return lerp(materialInfo.geometricDisplacementMin, materialInfo.geometricDisplacementMax, heightValue);
 }
 

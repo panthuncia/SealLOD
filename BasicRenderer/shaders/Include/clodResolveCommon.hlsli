@@ -1957,10 +1957,12 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 
     MaterialInputs materialInputs;
+#if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     float2 materialDebugUv = 0.0f.xx;
     float materialDebugUvValid = 0.0f;
     float2 materialDebugUvDerivative = 0.0f.xx;
     float3 reyesDebugSourceBarycentrics = bary.m_lambda;
+#endif
 #if defined(PSO_TERRAIN)
     if (!isReyesPatch)
     {
@@ -2005,9 +2007,23 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         }
     }
 #else
-    MaterialUvCache uvCache;
+    const bool isObjectTriplanarMaterial = (materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u;
+    const bool needsObjectSpaceNormalUv =
+        (materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP)) ==
+        (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP);
+#if defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
+    const bool needsMaterialDebugUv = false;
+#else
+    const bool needsMaterialDebugUv = true;
+#endif
+    const bool needsMaterialUvData = !isObjectTriplanarMaterial || needsObjectSpaceNormalUv || needsMaterialDebugUv;
+    MaterialUvCache uvCache = (MaterialUvCache)0;
     MaterialUvBindings uvBindings;
-    BuildClodMaterialUvData(materialInfo, materialFlags, md, triIdx, bary, uvCache, uvBindings);
+    if (needsMaterialUvData)
+    {
+        BuildClodMaterialUvData(materialInfo, materialFlags, md, triIdx, bary, uvCache, uvBindings);
+    }
+#if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     if (uvCache.count > 0u)
     {
         materialDebugUv = uvCache.samples[0].uv;
@@ -2016,8 +2032,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             length(uvCache.samples[0].dUVdx),
             length(uvCache.samples[0].dUVdy));
     }
+#endif
 #if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL)
-    if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    if (isObjectTriplanarMaterial)
     {
         SampleObjectTriplanarStochasticMaterial(
             worldNormal,
@@ -2046,7 +2063,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             materialInputs);
     }
 #else
-    if ((materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u)
+    if (isObjectTriplanarMaterial)
     {
         SampleObjectTriplanarStochasticMaterial(
             worldNormal,
@@ -2079,8 +2096,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #endif
 
 #if !defined(PSO_TERRAIN)
-    if ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP)) ==
-        (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP))
+    if (needsObjectSpaceNormalUv)
     {
 #if defined(PSO_NORMAL_MAP)
         const MaterialUvSample objectNormalUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
@@ -2119,12 +2135,16 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     sample.positionWS = worldPosition;
     sample.positionVS = positionVS;
     sample.normalWSBase = worldNormal;
+#if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     sample.normalOS = normalOS;
+#endif
     sample.vertexColor = vertexColor;
+#if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     sample.materialDebugUv = materialDebugUv;
     sample.materialDebugUvValid = materialDebugUvValid;
     sample.materialDebugUvDerivative = materialDebugUvDerivative;
     sample.reyesDebugSourceBarycentrics = reyesDebugSourceBarycentrics;
+#endif
     sample.dpdxWS = dpdx;
     sample.dpdyWS = dpdy;
     sample.motionVector = ComputeClodMotionVector(
@@ -2144,7 +2164,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     if (clodGBufferResolveBackface)
     {
         sample.normalWSBase = -sample.normalWSBase;
+#if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
         sample.normalOS = -sample.normalOS;
+#endif
         sample.materialInputs.normalWS = -sample.materialInputs.normalWS;
     }
 #endif
@@ -2228,8 +2250,8 @@ bool ResolveClodShadingSampleFromVisKey(uint64_t vis, uint2 pixel, out ClodShadi
 
 bool ResolveClodGBufferColorSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool isBackface, out ClodGBufferColorSample sample)
 {
-    ClodResolvedGBufferSample resolvedSample;
-    if (!ResolveClodGBufferSampleFromVisKeyWithFace(vis, pixel, isBackface, resolvedSample))
+    ClodResolvedCommonSample resolvedSample;
+    if (!ResolveClodCommonSampleFromVisKeyWithFace(vis, pixel, isBackface, resolvedSample))
     {
         sample = (ClodGBufferColorSample)0;
         return false;

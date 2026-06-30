@@ -5,9 +5,6 @@ void EvaluateGBufferOptimized(uint2 pixel)
 {
     Texture2D<uint64_t> visibilityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
     uint64_t vis = visibilityTexture[pixel];
-    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    uint outputType = perFrame.outputType;
-
     RWTexture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
     RWTexture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
     RWTexture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
@@ -15,6 +12,25 @@ void EvaluateGBufferOptimized(uint2 pixel)
     RWTexture2D<float4> fuzzTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Fuzz)];
     RWTexture2D<float4> metallicRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
     RWTexture2D<float2> motionVectorTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MotionVectors)];
+
+#if defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
+    ClodGBufferColorSample sample;
+    if (!ResolveClodGBufferColorSampleFromVisKey(vis, pixel, sample))
+    {
+        return;
+    }
+
+    normalsTexture[pixel] = float4(sample.materialInputs.normalWS, (float)sample.materialInputs.openPBRMaterialDataIndex);
+    albedoTexture[pixel] = float4(sample.materialInputs.albedo, sample.materialInputs.ambientOcclusion);
+    coatTexture[pixel] = float4(sample.materialInputs.coatColor, sample.materialInputs.coatWeight);
+    emissiveTexture[pixel].xyz = sample.materialInputs.emissive;
+    fuzzTexture[pixel] = float4(sample.materialInputs.fuzzColor, sample.materialInputs.fuzzRoughness);
+    metallicRoughnessTexture[pixel] = float4(sample.materialInputs.metallic, sample.materialInputs.roughness, sample.materialInputs.coatRoughness, sample.materialInputs.fuzzWeight);
+    motionVectorTexture[pixel] = sample.motionVector;
+    return;
+#else
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    uint outputType = perFrame.outputType;
 
     if (outputType == OUTPUT_COLOR)
     {
@@ -242,6 +258,7 @@ void EvaluateGBufferOptimized(uint2 pixel)
     if (payload.x != DEBUG_SENTINEL) {
         WriteDebugPixel(debugVisTex, pixel, payload);
     }
+#endif
 }
 
 [numthreads(8, 8, 1)]

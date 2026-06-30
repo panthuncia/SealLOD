@@ -13,6 +13,7 @@
 #include "Managers/MeshManager.h"
 #include "Render/RenderContext.h"
 #include "Render/IndirectCommand.h"
+#include "Render/OutputTypes.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/ShaderVariantRequestService.h"
@@ -254,6 +255,7 @@ public:
 
         const bool terrainRegionMaterialEvaluation =
             SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
+        const auto outputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")();
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
             if (terrainRegionMaterialEvaluation &&
                 (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
@@ -264,7 +266,10 @@ public:
                 slot >= ctx.materialManager->GetCompileFlagsSlotsUsed()) {
                 continue;
             }
-            const MaterialCompileFlags shaderKey = GetMaterialEvaluationShaderKey(flags);
+            MaterialCompileFlags shaderKey = GetMaterialEvaluationShaderKey(flags);
+            if (outputType == OutputType::COLOR) {
+                shaderKey |= MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly;
+            }
             const PipelineState* pso = psoMgr.TryGetMaterialEvalPSO(shaderKey);
             if (!pso) {
                 continue;
