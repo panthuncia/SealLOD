@@ -54,7 +54,7 @@ namespace USDLoader {
 		float objectReyesBoundaryBlendStripWidthObjectUnits = 8.0f;
 		std::uint32_t objectReyesAtlasBakeResolution = 4096;
 		std::uint32_t objectReyesAtlasBakePaddingTexels = 8;
-		std::string objectReyesHeightAtlasStorage = "bc4u";
+		std::string objectReyesHeightAtlasStorage = "r8_unorm";
 		std::vector<ObjectReyesBakedHeightMaterialEntry> objectReyesBakedHeightMaterials;
 		bool isUsdPackage = false;
 	};

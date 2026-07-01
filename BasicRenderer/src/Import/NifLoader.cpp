@@ -195,14 +195,26 @@ std::string NormalizeObjectReyesHeightAtlasStorageSetting(std::string_view text)
         normalized == "old") {
         return "r16_unorm_mips";
     }
+    if (normalized == "r8" ||
+        normalized == "r8_unorm" ||
+        normalized == "r8_unorm_nomips" ||
+        normalized == "r8u" ||
+        normalized == "r8u_nomips") {
+        return "r8_unorm";
+    }
     if (!normalized.empty() &&
         normalized != "bc4u" &&
         normalized != "bc4_unorm" &&
         normalized != "bc4_unorm_nomips" &&
         normalized != "bc4u_nomips") {
-        spdlog::warn("Object Reyes heightAtlasStorage='{}' is unknown; using 'bc4u'.", text);
+        spdlog::warn("Object Reyes heightAtlasStorage='{}' is unknown; using 'r8_unorm'.", text);
     }
-    return "bc4u";
+    return normalized == "bc4u" ||
+            normalized == "bc4_unorm" ||
+            normalized == "bc4_unorm_nomips" ||
+            normalized == "bc4u_nomips"
+        ? "bc4u"
+        : "r8_unorm";
 }
 
 struct ObjectReyesConfig
@@ -230,7 +242,7 @@ struct ObjectReyesConfig
     bool tripleTapStochasticIncludeSelected = false;
     std::uint32_t atlasBakeResolution = 4096u;
     std::uint32_t atlasBakePaddingTexels = 8u;
-    std::string heightAtlasStorage = "bc4u";
+    std::string heightAtlasStorage = "r8_unorm";
     std::string contentHash = Hex64(Fnv1a64("object-reyes:v1:missing"));
     bool loaded = false;
 };
