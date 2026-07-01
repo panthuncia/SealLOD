@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -2299,7 +2300,13 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		record.occupancyMask = accum.mask;
 		record.opacitySum = accum.opacitySum;
 		record.firstAttribute = input.firstAttribute + static_cast<uint32_t>(result.attributeSamples.size());
-		result.attributeSamples.insert(result.attributeSamples.end(), accum.attributes.begin(), accum.attributes.end());
+		for (uint32_t localBit = 0; localBit < 64u; ++localBit)
+		{
+			if ((accum.mask & (uint64_t{ 1 } << localBit)) != 0u)
+			{
+				result.attributeSamples.push_back(accum.attributes[localBit]);
+			}
+		}
 		result.cubeRecords.push_back(record);
 	}
 

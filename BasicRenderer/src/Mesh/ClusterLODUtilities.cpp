@@ -38,10 +38,10 @@ namespace
 	constexpr uint32_t CLOD_COMPRESSED_MESHLET_VERTEX_INDICES = 1u << 1;
 	constexpr uint32_t CLOD_COMPRESSED_NORMALS = 1u << 2;
 	constexpr uint32_t CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u; // VXCL
-	constexpr uint32_t CLOD_VOXEL_PAGE_VERSION = 11u;
+	constexpr uint32_t CLOD_VOXEL_PAGE_VERSION = 12u;
 	constexpr uint32_t CLOD_VOXEL_PAGE_HEADER_SIZE = 64u;
 	constexpr uint32_t CLOD_STREAMING_PAGE_SIZE_BYTES = 256u * 1024u;
-	constexpr uint32_t CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE = 64u;
+	constexpr uint32_t CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
 	constexpr uint32_t kMaxSkinInfluences = 8u;
 	constexpr float CLOD_UV_QUANTIZATION_SCALE = 65535.0f;
 	constexpr float CLOD_UV_QUANTIZATION_INV_SCALE = 1.0f / CLOD_UV_QUANTIZATION_SCALE;
@@ -124,6 +124,27 @@ namespace
 		std::memcpy(bytes.data() + offset, &value, sizeof(T));
 	}
 
+	uint32_t CountVoxelAttributeSamples(uint64_t occupancyMask)
+	{
+		return static_cast<uint32_t>(std::popcount(occupancyMask));
+	}
+
+	uint32_t CountVoxelAttributeSamples(
+		std::span<const CLodVoxelCubeRecord> cubeRecords,
+		uint32_t firstCube,
+		uint32_t cubeCount)
+	{
+		uint32_t attributeCount = 0u;
+		const uint32_t endCube = std::min<uint32_t>(
+			static_cast<uint32_t>(cubeRecords.size()),
+			firstCube + cubeCount);
+		for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
+		{
+			attributeCount += CountVoxelAttributeSamples(cubeRecords[cubeIndex].occupancyMask);
+		}
+		return attributeCount;
+	}
+
 	std::vector<std::vector<std::byte>> BuildVoxelGroupPageBlobs(
 		std::span<const ClusterLODGroupSegment> pageSegments,
 		std::span<const CLodVoxelClusterRecord> clusterRecords,
@@ -162,10 +183,11 @@ namespace
 			const uint32_t firstCubeInGroup = clusterRecords[firstClusterInGroup].firstCube;
 			const CLodVoxelClusterRecord& lastCluster = clusterRecords[firstClusterInGroup + pageClusterCount - 1u];
 			const uint32_t pageCubeCount = (lastCluster.firstCube + lastCluster.cubeCount) - firstCubeInGroup;
+			const uint32_t pageAttributeCount = CountVoxelAttributeSamples(cubeRecords, firstCubeInGroup, pageCubeCount);
 			const uint32_t pageCubeRecordOffset = static_cast<uint32_t>(align4(static_cast<size_t>(clusterRecordOffset) + pageClusterCount * sizeof(CLodVoxelClusterRecord)));
 			const uint32_t attributeOffset = pageCubeRecordOffset + pageCubeCount * static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord));
 			const size_t pageSize = static_cast<size_t>(attributeOffset) +
-				static_cast<size_t>(pageCubeCount) * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE * sizeof(CLodVoxelAttributeSample);
+				static_cast<size_t>(pageAttributeCount) * sizeof(CLodVoxelAttributeSample);
 			if (pageSize > CLOD_STREAMING_PAGE_SIZE_BYTES)
 			{
 				spdlog::error(
@@ -194,7 +216,7 @@ namespace
 				clusterRecordOffset,
 				pageCubeRecordOffset,
 				attributeOffset,
-				CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE,
+				CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT,
 				static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)),
 				static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)),
 				static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
@@ -208,27 +230,31 @@ namespace
 				StorePod(blob, clusterRecordOffset + clusterIndex * sizeof(CLodVoxelClusterRecord), pageCluster);
 			}
 
+			uint32_t pageAttributeCursor = 0u;
 			for (uint32_t cubeIndex = 0; cubeIndex < pageCubeCount; ++cubeIndex)
 			{
 				CLodVoxelCubeRecord pageCube = cubeRecords[firstCubeInGroup + cubeIndex];
 				const uint32_t globalFirstAttribute = pageCube.firstAttribute;
-				pageCube.firstAttribute = cubeIndex * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE;
+				const uint32_t cubeAttributeCount = CountVoxelAttributeSamples(pageCube.occupancyMask);
+				pageCube.firstAttribute = pageAttributeCursor;
 				StorePod(blob, pageCubeRecordOffset + cubeIndex * sizeof(CLodVoxelCubeRecord), pageCube);
 
 				if (globalFirstAttribute < attributeSampleBase)
 				{
+					pageAttributeCursor += cubeAttributeCount;
 					continue;
 				}
 				const size_t attributeSourceOffset = static_cast<size_t>(globalFirstAttribute - attributeSampleBase) * sizeof(CLodVoxelAttributeSample);
 				const size_t attributeDestOffset = static_cast<size_t>(attributeOffset) +
 					static_cast<size_t>(pageCube.firstAttribute) * sizeof(CLodVoxelAttributeSample);
-				const size_t attributeBytes = static_cast<size_t>(CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE) * sizeof(CLodVoxelAttributeSample);
+				const size_t attributeBytes = static_cast<size_t>(cubeAttributeCount) * sizeof(CLodVoxelAttributeSample);
 				if (attributeSourceOffset + attributeBytes <= attributeSamples.size() * sizeof(CLodVoxelAttributeSample))
 				{
 					std::memcpy(blob.data() + attributeDestOffset,
 						reinterpret_cast<const std::byte*>(attributeSamples.data()) + attributeSourceOffset,
 						attributeBytes);
 				}
+				pageAttributeCursor += cubeAttributeCount;
 			}
 
 			pageBlobs.push_back(std::move(blob));
@@ -237,13 +263,13 @@ namespace
 		return pageBlobs;
 	}
 
-	uint32_t ComputeVoxelPageSizeBytes(uint32_t clusterCount, uint32_t cubeCount)
+	uint32_t ComputeVoxelPageSizeBytes(uint32_t clusterCount, uint32_t cubeCount, uint32_t attributeCount)
 	{
 		constexpr uint32_t fixedBytes = CLOD_VOXEL_PAGE_HEADER_SIZE;
 		return fixedBytes +
 			clusterCount * static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)) +
-			cubeCount * (static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)) +
-				CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE * static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample)));
+			cubeCount * static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)) +
+			attributeCount * static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample));
 	}
 
 	void SplitVoxelClustersIntoPageSegments(
@@ -265,6 +291,7 @@ namespace
 		uint32_t pageFirstCluster = 0u;
 		uint32_t pageClusterCount = 0u;
 		uint32_t pageCubeCount = 0u;
+		uint32_t pageAttributeCount = 0u;
 		int32_t pageRefinedGroup = packed.clusterRecords.front().refinedGroup;
 		DirectX::XMFLOAT4 pageBounds{ 0.0f, 0.0f, 0.0f, 0.0f };
 
@@ -301,6 +328,7 @@ namespace
 			pageFirstCluster = static_cast<uint32_t>(pageClusterRecords.size());
 			pageClusterCount = 0u;
 			pageCubeCount = 0u;
+			pageAttributeCount = 0u;
 			pageBounds = DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
 		};
 
@@ -321,10 +349,21 @@ namespace
 				}
 
 				uint32_t chunkCubes = remainingCubes;
+				uint32_t chunkAttributes = CountVoxelAttributeSamples(
+					std::span<const CLodVoxelCubeRecord>(packed.cubeRecords.data(), packed.cubeRecords.size()),
+					sourceCluster.firstCube + cubeOffset,
+					chunkCubes);
 				while (chunkCubes > 0u &&
-					ComputeVoxelPageSizeBytes(pageClusterCount + 1u, pageCubeCount + chunkCubes) > CLOD_STREAMING_PAGE_SIZE_BYTES)
+					ComputeVoxelPageSizeBytes(
+						pageClusterCount + 1u,
+						pageCubeCount + chunkCubes,
+						pageAttributeCount + chunkAttributes) > CLOD_STREAMING_PAGE_SIZE_BYTES)
 				{
 					chunkCubes--;
+					chunkAttributes = CountVoxelAttributeSamples(
+						std::span<const CLodVoxelCubeRecord>(packed.cubeRecords.data(), packed.cubeRecords.size()),
+						sourceCluster.firstCube + cubeOffset,
+						chunkCubes);
 				}
 
 				if (chunkCubes == 0u)
@@ -339,6 +378,7 @@ namespace
 				pageClusterRecords.push_back(pageCluster);
 				pageClusterCount++;
 				pageCubeCount += chunkCubes;
+				pageAttributeCount += chunkAttributes;
 				pageBounds = mergeBounds(pageBounds, pageCluster.bounds);
 
 				remainingCubes -= chunkCubes;
@@ -2087,6 +2127,7 @@ namespace
 	{
 		uint32_t clusterCount = 0;
 		uint32_t cubeCount = 0;
+		uint32_t attributeCount = 0;
 	};
 
 	struct VoxelPageHeaderFields
@@ -2199,7 +2240,7 @@ namespace
 			outHeader.clusterRecordsOffset != 0u &&
 			outHeader.cubeRecordsOffset != 0u &&
 			outHeader.attributeSamplesOffset != 0u &&
-			outHeader.attributeSamplesPerCube == CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE &&
+			outHeader.attributeSamplesPerCube == CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT &&
 			outHeader.clusterRecordStride == sizeof(CLodVoxelClusterRecord) &&
 			outHeader.cubeRecordStride == sizeof(CLodVoxelCubeRecord) &&
 			outHeader.attributeSampleStride == sizeof(CLodVoxelAttributeSample);
@@ -2653,6 +2694,14 @@ namespace
 				}
 				totals.clusterCount++;
 				totals.cubeCount += cluster.cubeCount;
+				for (uint32_t cubeOffset = 0; cubeOffset < cluster.cubeCount; ++cubeOffset)
+				{
+					CLodVoxelCubeRecord cube{};
+					if (ReadVoxelCubeRecord(sourceBlob, sourceHeader, cluster.firstCube + cubeOffset, cube))
+					{
+						totals.attributeCount += CountVoxelAttributeSamples(cube.occupancyMask);
+					}
+				}
 			}
 		}
 		return totals;
@@ -2675,7 +2724,7 @@ namespace
 			static_cast<size_t>(totals.clusterCount) * sizeof(CLodVoxelClusterRecord)));
 		const uint32_t attributeOffset = cubeRecordOffset + totals.cubeCount * static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord));
 		const size_t pageSize = static_cast<size_t>(attributeOffset) +
-			static_cast<size_t>(totals.cubeCount) * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE * sizeof(CLodVoxelAttributeSample);
+			static_cast<size_t>(totals.attributeCount) * sizeof(CLodVoxelAttributeSample);
 		if (pageSize > CLOD_STREAMING_PAGE_SIZE_BYTES)
 		{
 			return {};
@@ -2695,7 +2744,7 @@ namespace
 			clusterRecordOffset,
 			cubeRecordOffset,
 			attributeOffset,
-			CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE,
+			CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT,
 			static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)),
 			static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)),
 			static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
@@ -2704,6 +2753,7 @@ namespace
 
 		uint32_t outputClusterIndex = 0u;
 		uint32_t outputCubeIndex = 0u;
+		uint32_t outputAttributeIndex = 0u;
 		for (const PagePackingSegmentRef& segment : segments)
 		{
 			if (segment.groupIndex >= state.groupPageBlobs.size() ||
@@ -2742,7 +2792,8 @@ namespace
 						continue;
 					}
 
-					const uint32_t outputFirstAttribute = outputCubeIndex * CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE;
+					const uint32_t outputFirstAttribute = outputAttributeIndex;
+					const uint32_t attributeCount = CountVoxelAttributeSamples(sourceCube.occupancyMask);
 					CLodVoxelCubeRecord outputCube = sourceCube;
 					outputCube.firstAttribute = outputFirstAttribute;
 					StorePod(blob, cubeRecordOffset + outputCubeIndex * sizeof(CLodVoxelCubeRecord), outputCube);
@@ -2754,7 +2805,7 @@ namespace
 						static_cast<size_t>(attributeOffset) +
 						static_cast<size_t>(outputFirstAttribute) * sizeof(CLodVoxelAttributeSample);
 					const size_t attributeBytes =
-						static_cast<size_t>(CLOD_VOXEL_ATTRIBUTE_SAMPLES_PER_CUBE) * sizeof(CLodVoxelAttributeSample);
+						static_cast<size_t>(attributeCount) * sizeof(CLodVoxelAttributeSample);
 					if (sourceAttributeOffset + attributeBytes <= sourceBlob.size() &&
 						destAttributeOffset + attributeBytes <= blob.size())
 					{
@@ -2762,6 +2813,7 @@ namespace
 					}
 
 					outputCubeIndex++;
+					outputAttributeIndex += attributeCount;
 				}
 			}
 		}
@@ -3004,7 +3056,7 @@ namespace
 			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const VoxelPageTraits&) -> size_t
 			{
 				const VoxelMeshPageBuildTotals totals = ComputeVoxelMeshPageTotals(packState, segments);
-				return ComputeVoxelPageSizeBytes(totals.clusterCount, totals.cubeCount);
+				return ComputeVoxelPageSizeBytes(totals.clusterCount, totals.cubeCount, totals.attributeCount);
 			},
 			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const VoxelPageTraits&) -> std::vector<std::byte>
 			{

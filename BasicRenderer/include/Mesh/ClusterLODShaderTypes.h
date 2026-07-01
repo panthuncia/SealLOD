@@ -165,7 +165,7 @@ struct CLodVoxelCubeRecord
 	uint32_t dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
 	uint64_t occupancyMask = 0;
 	float opacitySum = 0.0f;
-	uint32_t firstAttribute = 0; // first of 64 CLodVoxelAttributeSample records for this cube
+	uint32_t firstAttribute = 0; // first compact active-cell CLodVoxelAttributeSample for this cube
 	int32_t refinedGroup = -1;
 	uint32_t reserved0 = 0;
 };

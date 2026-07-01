@@ -278,10 +278,11 @@ struct CLodVoxelRasterDispatchCommand
 };
 
 static const uint CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u;
-static const uint CLOD_VOXEL_PAGE_VERSION = 11u;
+static const uint CLOD_VOXEL_PAGE_VERSION = 12u;
 static const uint CLOD_VOXEL_CLUSTER_RECORD_STRIDE = 64u;
 static const uint CLOD_VOXEL_CUBE_RECORD_STRIDE = 32u;
 static const uint CLOD_VOXEL_ATTRIBUTE_SAMPLE_STRIDE = 28u;
+static const uint CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
 
 struct CLodVoxelPageHeader
 {
@@ -426,11 +427,44 @@ bool CLodTryLoadVoxelPageForSegment(
 
 CLodVoxelAttributeSample CLodLoadVoxelAttributeSampleFromPage(GroupPageMapEntry pageEntry, CLodVoxelPageHeader pageHeader, CLodVoxelCubeRecord cube, uint localCellIndex)
 {
+    CLodVoxelAttributeSample sample;
+    sample.sggxAxisAndSigmas = float4(0.0f, 0.0f, 1.0e-4f, 0.5f);
+    sample.opacity = 0.0f;
+    sample.uv = float2(0.0f, 0.0f);
+
+    if (localCellIndex >= 64u)
+    {
+        return sample;
+    }
+
+    const uint localCellBit = localCellIndex < 32u
+        ? (1u << localCellIndex)
+        : (1u << (localCellIndex - 32u));
+    const bool occupied = localCellIndex < 32u
+        ? ((cube.occupancyMask.x & localCellBit) != 0u)
+        : ((cube.occupancyMask.y & localCellBit) != 0u);
+    if (!occupied)
+    {
+        return sample;
+    }
+
+    uint localAttributeIndex = localCellIndex;
+    if (pageHeader.attributeSamplesPerCube == CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT)
+    {
+        const uint lowerMask = localCellIndex < 32u
+            ? (localCellIndex == 0u ? 0u : ((1u << localCellIndex) - 1u))
+            : 0xFFFFFFFFu;
+        const uint upperMask = localCellIndex < 32u
+            ? 0u
+            : ((localCellIndex - 32u) == 0u ? 0u : ((1u << (localCellIndex - 32u)) - 1u));
+        localAttributeIndex = countbits(cube.occupancyMask.x & lowerMask) +
+            countbits(cube.occupancyMask.y & upperMask);
+    }
+
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageEntry.slabDescriptorIndex)];
-    const uint attributeIndex = cube.firstAttribute + localCellIndex;
+    const uint attributeIndex = cube.firstAttribute + localAttributeIndex;
     const uint attributeStride = pageHeader.attributeSampleStride != 0u ? pageHeader.attributeSampleStride : CLOD_VOXEL_ATTRIBUTE_SAMPLE_STRIDE;
     const uint addr = pageEntry.slabByteOffset + pageHeader.attributeSamplesOffset + attributeIndex * attributeStride;
-    CLodVoxelAttributeSample sample;
     sample.sggxAxisAndSigmas = asfloat(slab.Load4(addr));
     sample.opacity = asfloat(slab.Load(addr + 16u));
     sample.uv = attributeStride >= 28u ? asfloat(slab.Load2(addr + 20u)) : float2(0.0f, 0.0f);
