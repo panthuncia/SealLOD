@@ -200,6 +200,7 @@ struct ClusterLODGroup
 };
 
 static const uint CLOD_NODE_INTERNAL = 0u;
+static const uint CLOD_NODE_VOXEL_LEAF = 1u;
 static const uint CLOD_NODE_SEGMENT_LEAF = 2u;
 
 static const uint CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;

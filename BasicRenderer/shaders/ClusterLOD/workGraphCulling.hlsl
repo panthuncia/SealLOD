@@ -1941,6 +1941,79 @@ bool CLodPrepareRenderableLeaf(
     return true;
 }
 
+void CLodAppendVoxelRasterWorkForLeaf(
+    CLodMeshMetadata clodMeshMetadata,
+    uint instanceIndex,
+    uint viewId,
+    ClusterLODNode node,
+    ClusterLODGroup voxelGroup,
+    row_major matrix objectModelMatrix,
+    float lodUniformScale,
+    Camera cullCamera,
+    CullingCameraInfo lodCam,
+    bool lodCameraIsOrtho,
+    bool dirtyPageCullingEnabled,
+    uint meshBufferIndex,
+    float errorOverDistance)
+{
+    StructuredBuffer<ClusterLODGroupSegment> segments =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
+
+    if (node.range.isLeaf == CLOD_NODE_VOXEL_LEAF)
+    {
+		const uint firstLocalSegment = node.range.indexOrOffset;
+		const int sectionRefinedGroup = int(node.range.countMinusOne) - 1;
+
+        [loop]
+        for (uint localSegment = firstLocalSegment; localSegment < voxelGroup.segmentCount; ++localSegment)
+        {
+            const uint segGlobalIndex = clodMeshMetadata.segmentsBase + voxelGroup.firstSegment + localSegment;
+            const ClusterLODGroupSegment seg = segments[segGlobalIndex];
+            if (seg.refinedGroup != sectionRefinedGroup)
+            {
+                break;
+            }
+
+            WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
+            CLodAppendVoxelRasterClusterWork(
+                clodMeshMetadata,
+                instanceIndex,
+                viewId,
+                node.range.ownerGroupId,
+                voxelGroup,
+                seg,
+                objectModelMatrix,
+                lodUniformScale,
+                cullCamera,
+                lodCam,
+                lodCameraIsOrtho,
+                dirtyPageCullingEnabled,
+                meshBufferIndex,
+                errorOverDistance);
+        }
+        return;
+    }
+
+    const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
+    const ClusterLODGroupSegment seg = segments[segGlobalIndex];
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
+    CLodAppendVoxelRasterClusterWork(
+        clodMeshMetadata,
+        instanceIndex,
+        viewId,
+        node.range.ownerGroupId,
+        voxelGroup,
+        seg,
+        objectModelMatrix,
+        lodUniformScale,
+        cullCamera,
+        lodCam,
+        lodCameraIsOrtho,
+        dirtyPageCullingEnabled,
+        meshBufferIndex,
+        errorOverDistance);
+}
+
 void CLodHandleRenderableLeaf(
     TraverseNodeRecord rec,
     bool parentAllowsRefine,
@@ -2021,18 +2094,12 @@ void CLodHandleRenderableLeaf(
     }
     else if (leaf.isVoxel)
     {
-        StructuredBuffer<ClusterLODGroupSegment> segments =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-        const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
-        const ClusterLODGroupSegment seg = segments[segGlobalIndex];
-        WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
-        CLodAppendVoxelRasterClusterWork(
+        CLodAppendVoxelRasterWorkForLeaf(
             clodMeshMetadata,
             rec.instanceIndex,
             rec.viewId,
-            node.range.ownerGroupId,
+            node,
             leaf.group,
-            seg,
             objectModelMatrix,
             lodUniformScale,
             cullCamera,
