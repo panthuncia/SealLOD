@@ -51,10 +51,10 @@ bool SarpClodImportDebugLoggingEnabled()
 bool NvPerfCaptureSuppressesCLodStreaming()
 {
     static bool logged = false;
-    const bool suppressed = br::telemetry::nvperf::CaptureRequestedByEnvironment();
+    const bool suppressed = br::telemetry::nvperf::CaptureActive();
     if (suppressed && !logged) {
         logged = true;
-        spdlog::info("CLod streaming: suspending streaming service/readbacks while NVPerf capture is requested");
+        spdlog::info("CLod streaming: suspending streaming service/readbacks while NVPerf capture is active");
     }
     return suppressed;
 }

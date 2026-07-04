@@ -119,11 +119,41 @@ struct SelectedMetric {
     NVPW_MetricEvalRequest request{};
 };
 
-constexpr std::array<MetricSpec, 4> kDefaultMetrics{ {
+constexpr std::array<MetricSpec, 34> kDefaultMetrics{ {
     { "gpu__time_duration", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
     { "sm__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
-    { "dram__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "smsp__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "smsp__inst_executed", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__inst_executed_pipe_alu", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__inst_executed_pipe_fma", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__inst_executed_pipe_lsu", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__inst_executed_pipe_tex", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__sass_thread_inst_executed_op_fadd_pred_on", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__sass_thread_inst_executed_op_ffma_pred_on", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__sass_thread_inst_executed_op_fmul_pred_on", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__sass_thread_inst_executed_op_integer_pred_on", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__sass_thread_inst_executed_op_memory_pred_on", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "smsp__warps_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warps_eligible", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_barrier_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_branch_resolving_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_dispatch_stall_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_imc_miss_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_lg_throttle_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
     { "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_membar_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_mio_throttle_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_no_instruction_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_not_selected_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_short_scoreboard_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_tex_throttle_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "smsp__warp_issue_stalled_wait_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "l1tex__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "lts__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "dram__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "tensor__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "rtcore__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
 } };
 
 struct QueueCapture {
@@ -1202,6 +1232,27 @@ bool CaptureRequestedByEnvironment()
 {
 #if BASICRENDERER_ENABLE_NVPERF
     return IsTruthyEnv("BASICRENDERER_NVPERF_CAPTURE");
+#else
+    return false;
+#endif
+}
+
+bool CaptureActive()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (!profiler.initialized || profiler.failed || profiler.finished) {
+        return false;
+    }
+
+    for (const auto& [nativeQueue, queueCapture] : profiler.queues) {
+        (void)nativeQueue;
+        if (queueCapture.sessionActive || queueCapture.passActive) {
+            return true;
+        }
+    }
+    return false;
 #else
     return false;
 #endif

@@ -64,7 +64,7 @@ public:
     flecs::entity GetRoot() const;
     uint64_t GetSceneID() const;
     void Update(float elapsedSeconds);
-    void SetCamera(DirectX::XMFLOAT3 lookAt, DirectX::XMFLOAT3 up, float fov, float aspect, float zNear, float zFar);
+    void SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, DirectX::XMFLOAT3 up, float fov, float aspect, float zNear, float zFar);
     flecs::entity& GetPrimaryCamera();
     bool HasUsablePrimaryCamera() const;
     Components::Position& GetPrimaryCameraPosition();

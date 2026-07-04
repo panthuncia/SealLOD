@@ -5,6 +5,7 @@
 namespace br::telemetry::nvperf {
 
 bool CaptureRequestedByEnvironment();
+bool CaptureActive();
 bool ServicePendingGpuOperations();
 void LogStartupProbe(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue);
 void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue, uint64_t frameNumber);

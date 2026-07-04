@@ -1381,7 +1381,6 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     GroupPageMapEntry pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
     CLodVoxelPageHeader pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
     if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
-        pageHeader.version != CLOD_VOXEL_PAGE_VERSION ||
         pageLocalClusterIndex >= pageHeader.clusterCount)
     {
         return false;

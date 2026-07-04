@@ -41,6 +41,17 @@ namespace
 		DirectX::XMFLOAT4 weights1{ 0, 0, 0, 0 };
 	};
 
+	uint32_t PackVoxelCubeActiveBounds(uint32_t minX, uint32_t minY, uint32_t minZ, uint32_t maxX, uint32_t maxY, uint32_t maxZ)
+	{
+		return
+			((minX & 0x3u) << 0u) |
+			((minY & 0x3u) << 2u) |
+			((minZ & 0x3u) << 4u) |
+			((maxX & 0x3u) << 6u) |
+			((maxY & 0x3u) << 8u) |
+			((maxZ & 0x3u) << 10u);
+	}
+
 	Float3 ReadPosition(const std::vector<std::byte>& vertices, size_t stride, uint32_t index)
 	{
 		Float3 p;
@@ -2244,6 +2255,12 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		uint32_t cubeCoord = 0;
 		int32_t refinedGroup = -1;
 		uint64_t mask = 0;
+		uint32_t minLocalX = 3;
+		uint32_t minLocalY = 3;
+		uint32_t minLocalZ = 3;
+		uint32_t maxLocalX = 0;
+		uint32_t maxLocalY = 0;
+		uint32_t maxLocalZ = 0;
 		float opacitySum = 0.0f;
 		std::array<CLodVoxelAttributeSample, 64> attributes{};
 		std::unordered_map<uint32_t, float> boneWeights;
@@ -2273,6 +2290,12 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		accum.cubeCoord = cubeCoord;
 		accum.refinedGroup = cell.refinedGroup;
 		accum.mask |= (uint64_t{ 1 } << localBit);
+		accum.minLocalX = std::min(accum.minLocalX, localX);
+		accum.minLocalY = std::min(accum.minLocalY, localY);
+		accum.minLocalZ = std::min(accum.minLocalZ, localZ);
+		accum.maxLocalX = std::max(accum.maxLocalX, localX);
+		accum.maxLocalY = std::max(accum.maxLocalY, localY);
+		accum.maxLocalZ = std::max(accum.maxLocalZ, localZ);
 		accum.opacitySum += cell.opacity;
 		accum.attributes[localBit].sggxAxisAndSigmas = cell.sggxAxisAndSigmas;
 		accum.attributes[localBit].opacity = cell.opacity;
@@ -2300,6 +2323,13 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		record.occupancyMask = accum.mask;
 		record.opacitySum = accum.opacitySum;
 		record.firstAttribute = input.firstAttribute + static_cast<uint32_t>(result.attributeSamples.size());
+		record.activeBounds = PackVoxelCubeActiveBounds(
+			accum.minLocalX,
+			accum.minLocalY,
+			accum.minLocalZ,
+			accum.maxLocalX,
+			accum.maxLocalY,
+			accum.maxLocalZ);
 		for (uint32_t localBit = 0; localBit < 64u; ++localBit)
 		{
 			if ((accum.mask & (uint64_t{ 1 } << localBit)) != 0u)

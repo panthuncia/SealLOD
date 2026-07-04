@@ -535,7 +535,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 0.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 20.f, 15.f);
+        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;
@@ -548,7 +549,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         aspectRatio = static_cast<float>(clientWidth) / static_cast<float>(clientHeight);
         auto& scene = renderer.GetCurrentScene();
-        scene->SetCamera(lookAt, up, fov, aspectRatio, zNear, zFar);
+        scene->SetCamera(pos, lookAt, up, fov, aspectRatio, zNear, zFar);
     
 	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(0, -6, -1));
         //auto light3 = renderer.GetCurrentScene()->CreateSpotLightECS(L"light3", XMFLOAT3(0, 10, 3), XMFLOAT3(1, 1, 1), 2000.0, {0, -1, 0}, .5, .8, 0.0, 0.0, 1.0);

@@ -167,7 +167,7 @@ struct CLodVoxelCubeRecord
 	float opacitySum = 0.0f;
 	uint32_t firstAttribute = 0; // first compact active-cell CLodVoxelAttributeSample for this cube
 	int32_t refinedGroup = -1;
-	uint32_t reserved0 = 0;
+	uint32_t activeBounds = 0; // minX/Y/Z and maxX/Y/Z packed as 2-bit local cell coordinates
 };
 static_assert(sizeof(CLodVoxelCubeRecord) == 32, "CLodVoxelCubeRecord must be 32 bytes");
 

@@ -297,11 +297,9 @@ struct CLodVoxelRasterWorkRecord
     uint32_t localGroupId = 0u;
     uint32_t localPageIndex = 0u;
     uint32_t pageLocalClusterIndex = 0u;
-    uint32_t firstCubeOffset = 0u;
-    uint32_t cubeCount = 0u;
 };
 
-static_assert(sizeof(CLodVoxelRasterWorkRecord) == 32u, "CLodVoxelRasterWorkRecord size must match HLSL");
+static_assert(sizeof(CLodVoxelRasterWorkRecord) == 24u, "CLodVoxelRasterWorkRecord size must match HLSL");
 
 struct CLodVoxelRasterDispatchCommand
 {
@@ -1261,7 +1259,7 @@ inline uint32_t CLodRoundUpCapacity(uint32_t required)
 
 inline uint32_t CLodVoxelRasterWorkCapacity(uint32_t maxVisibleClusters)
 {
-    return std::max(1u, maxVisibleClusters * 4u);
+    return std::max(1u, maxVisibleClusters /** 16u*/);
 }
 
 inline std::shared_ptr<Buffer> CreateAliasedUnmaterializedStructuredBuffer(

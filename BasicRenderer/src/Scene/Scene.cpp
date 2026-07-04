@@ -922,7 +922,7 @@ void Scene::Update(float elapsedSeconds) {
 	}
 }
 
-void Scene::SetCamera(XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, float zNear, float zFar) {
+void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, float zNear, float zFar) {
 		
     if (m_primaryCamera.is_valid()) {
 
@@ -931,8 +931,8 @@ void Scene::SetCamera(XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, flo
 
     CameraInfo info;
 	auto planes = GetFrustumPlanesPerspective(aspect, fov, zNear, zFar);
-	info.view = XMMatrixIdentity();
-	info.viewInverse = XMMatrixIdentity();
+	//info.view = XMMatrixTranslation(pos.x, pos.y, pos.z);
+	//info.viewInverse = XMMatrixIdentity();
 	info.unjitteredProjection = XMMatrixPerspectiveFovRH(fov, aspect, zFar, zNear);  // Note the reversed near/far for reversed Z
 	info.jitteredProjection = info.unjitteredProjection;
 	info.viewProjection = DirectX::XMMatrixMultiply(info.view, info.unjitteredProjection);
@@ -961,7 +961,7 @@ void Scene::SetCamera(XMFLOAT3 lookAt, XMFLOAT3 up, float fov, float aspect, flo
 	camera.info = info;
 	auto entity = world.entity()
 		.set<Components::Camera>(camera)
-		.set<Components::Position>({ 0, 0, 0 })
+		.set<Components::Position>({ pos.x, pos.y, pos.z })
 		.set<Components::Rotation>({ 0, 0, 0 })
 		.set<Components::Scale>({ 1, 1, 1 })
 		.set<Components::Matrix>(DirectX::XMMatrixIdentity())

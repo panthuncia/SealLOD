@@ -38,7 +38,6 @@ namespace
 	constexpr uint32_t CLOD_COMPRESSED_MESHLET_VERTEX_INDICES = 1u << 1;
 	constexpr uint32_t CLOD_COMPRESSED_NORMALS = 1u << 2;
 	constexpr uint32_t CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u; // VXCL
-	constexpr uint32_t CLOD_VOXEL_PAGE_VERSION = 12u;
 	constexpr uint32_t CLOD_VOXEL_PAGE_HEADER_SIZE = 64u;
 	constexpr uint32_t CLOD_STREAMING_PAGE_SIZE_BYTES = 256u * 1024u;
 	constexpr uint32_t CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
@@ -205,7 +204,6 @@ namespace
 			std::vector<std::byte> blob(pageSize, std::byte{ 0 });
 			const std::array<uint32_t, 16> header = {
 				CLOD_VOXEL_PAGE_MAGIC,
-				CLOD_VOXEL_PAGE_VERSION,
 				firstClusterInGroup,
 				pageClusterCount,
 				firstCubeInGroup,
@@ -219,7 +217,8 @@ namespace
 				CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT,
 				static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)),
 				static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)),
-				static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
+				static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample)),
+				0u
 			};
 			std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
 
@@ -2133,7 +2132,6 @@ namespace
 	struct VoxelPageHeaderFields
 	{
 		uint32_t magic = 0;
-		uint32_t version = 0;
 		uint32_t firstCluster = 0;
 		uint32_t clusterCount = 0;
 		uint32_t firstCube = 0;
@@ -2148,6 +2146,7 @@ namespace
 		uint32_t clusterRecordStride = 0;
 		uint32_t cubeRecordStride = 0;
 		uint32_t attributeSampleStride = 0;
+		uint32_t reserved2 = 0;
 	};
 
 	template<typename T>
@@ -2220,23 +2219,22 @@ namespace
 		std::array<uint32_t, 16> words{};
 		std::memcpy(words.data(), blob.data(), words.size() * sizeof(uint32_t));
 		outHeader.magic = words[0];
-		outHeader.version = words[1];
-		outHeader.firstCluster = words[2];
-		outHeader.clusterCount = words[3];
-		outHeader.firstCube = words[4];
-		outHeader.cubeCount = words[5];
-		outHeader.reservedPage0 = words[6];
-		outHeader.reserved0 = words[7];
-		outHeader.reserved1 = words[8];
-		outHeader.clusterRecordsOffset = words[9];
-		outHeader.cubeRecordsOffset = words[10];
-		outHeader.attributeSamplesOffset = words[11];
-		outHeader.attributeSamplesPerCube = words[12];
-		outHeader.clusterRecordStride = words[13];
-		outHeader.cubeRecordStride = words[14];
-		outHeader.attributeSampleStride = words[15];
+		outHeader.firstCluster = words[1];
+		outHeader.clusterCount = words[2];
+		outHeader.firstCube = words[3];
+		outHeader.cubeCount = words[4];
+		outHeader.reservedPage0 = words[5];
+		outHeader.reserved0 = words[6];
+		outHeader.reserved1 = words[7];
+		outHeader.clusterRecordsOffset = words[8];
+		outHeader.cubeRecordsOffset = words[9];
+		outHeader.attributeSamplesOffset = words[10];
+		outHeader.attributeSamplesPerCube = words[11];
+		outHeader.clusterRecordStride = words[12];
+		outHeader.cubeRecordStride = words[13];
+		outHeader.attributeSampleStride = words[14];
+		outHeader.reserved2 = words[15];
 		return outHeader.magic == CLOD_VOXEL_PAGE_MAGIC &&
-			outHeader.version == CLOD_VOXEL_PAGE_VERSION &&
 			outHeader.clusterRecordsOffset != 0u &&
 			outHeader.cubeRecordsOffset != 0u &&
 			outHeader.attributeSamplesOffset != 0u &&
@@ -2733,7 +2731,6 @@ namespace
 		std::vector<std::byte> blob(pageSize, std::byte{ 0 });
 		const std::array<uint32_t, 16> header = {
 			CLOD_VOXEL_PAGE_MAGIC,
-			CLOD_VOXEL_PAGE_VERSION,
 			0u,
 			totals.clusterCount,
 			0u,
@@ -2747,7 +2744,8 @@ namespace
 			CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT,
 			static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)),
 			static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)),
-			static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample))
+			static_cast<uint32_t>(sizeof(CLodVoxelAttributeSample)),
+			0u
 		};
 		std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
 
