@@ -172,14 +172,26 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
     const float invRayDirY = rayDirAbsY > 1.0e-8f ? rcp(rayDir.y) : largeT;
     const float invRayDirZ = rayDirAbsZ > 1.0e-8f ? rcp(rayDir.z) : largeT;
 
-    const float t0x = (0.0f - rayOrigin.x) * invRayDirX;
-    const float t1x = (4.0f - rayOrigin.x) * invRayDirX;
-    const float t0y = (0.0f - rayOrigin.y) * invRayDirY;
-    const float t1y = (4.0f - rayOrigin.y) * invRayDirY;
-    const float t0z = (0.0f - rayOrigin.z) * invRayDirZ;
-    const float t1z = (4.0f - rayOrigin.z) * invRayDirZ;
-    const float tEnter = max(max(max(min(t0x, t1x), min(t0y, t1y)), min(t0z, t1z)), 0.0f);
-    const float tExit = min(min(max(t0x, t1x), max(t0y, t1y)), max(t0z, t1z));
+    float tEnter = 0.0f;
+    float tExit = largeT;
+    {
+        const float tx0 = -rayOrigin.x * invRayDirX;
+        const float tx1 = (4.0f - rayOrigin.x) * invRayDirX;
+        tEnter = max(tEnter, min(tx0, tx1));
+        tExit = min(tExit, max(tx0, tx1));
+    }
+    {
+        const float ty0 = -rayOrigin.y * invRayDirY;
+        const float ty1 = (4.0f - rayOrigin.y) * invRayDirY;
+        tEnter = max(tEnter, min(ty0, ty1));
+        tExit = min(tExit, max(ty0, ty1));
+    }
+    {
+        const float tz0 = -rayOrigin.z * invRayDirZ;
+        const float tz1 = (4.0f - rayOrigin.z) * invRayDirZ;
+        tEnter = max(tEnter, min(tz0, tz1));
+        tExit = min(tExit, max(tz0, tz1));
+    }
     if (tExit < tEnter)
     {
         return false;
@@ -191,24 +203,17 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
         return true;
     }
 
-    float currentT = tEnter + 1e-4f;
-    const float startT = currentT;
-    const float px = clamp(rayOrigin.x + rayDir.x * startT, 0.0f, 3.9999f);
-    const float py = clamp(rayOrigin.y + rayDir.y * startT, 0.0f, 3.9999f);
-    const float pz = clamp(rayOrigin.z + rayDir.z * startT, 0.0f, 3.9999f);
-    int cellX = int(floor(px));
-    int cellY = int(floor(py));
-    int cellZ = int(floor(pz));
+    tHit = tEnter + 1e-4f;
+    int cellX = int(clamp(rayOrigin.x + rayDir.x * tHit, 0.0f, 3.9999f));
+    int cellY = int(clamp(rayOrigin.y + rayDir.y * tHit, 0.0f, 3.9999f));
+    int cellZ = int(clamp(rayOrigin.z + rayDir.z * tHit, 0.0f, 3.9999f));
     const int stepDirX = rayDir.x >= 0.0f ? 1 : -1;
     const int stepDirY = rayDir.y >= 0.0f ? 1 : -1;
     const int stepDirZ = rayDir.z >= 0.0f ? 1 : -1;
 
-    const float nextBoundaryX = stepDirX > 0 ? float(cellX + 1) : float(cellX);
-    const float nextBoundaryY = stepDirY > 0 ? float(cellY + 1) : float(cellY);
-    const float nextBoundaryZ = stepDirZ > 0 ? float(cellZ + 1) : float(cellZ);
-    float tMaxX = rayDirAbsX > 1.0e-8f ? (nextBoundaryX - rayOrigin.x) * invRayDirX : largeT;
-    float tMaxY = rayDirAbsY > 1.0e-8f ? (nextBoundaryY - rayOrigin.y) * invRayDirY : largeT;
-    float tMaxZ = rayDirAbsZ > 1.0e-8f ? (nextBoundaryZ - rayOrigin.z) * invRayDirZ : largeT;
+    float tMaxX = rayDirAbsX > 1.0e-8f ? ((stepDirX > 0 ? float(cellX + 1) : float(cellX)) - rayOrigin.x) * invRayDirX : largeT;
+    float tMaxY = rayDirAbsY > 1.0e-8f ? ((stepDirY > 0 ? float(cellY + 1) : float(cellY)) - rayOrigin.y) * invRayDirY : largeT;
+    float tMaxZ = rayDirAbsZ > 1.0e-8f ? ((stepDirZ > 0 ? float(cellZ + 1) : float(cellZ)) - rayOrigin.z) * invRayDirZ : largeT;
     const float tDeltaX = abs(invRayDirX);
     const float tDeltaY = abs(invRayDirY);
     const float tDeltaZ = abs(invRayDirZ);
@@ -216,7 +221,7 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
     [loop]
     for (uint iter = 0u; iter < CLOD_MAX_DDA_STEPS; ++iter)
     {
-        if (cellX < 0 || cellY < 0 || cellZ < 0 || cellX >= 4 || cellY >= 4 || cellZ >= 4)
+        if ((uint)cellX >= 4u || (uint)cellY >= 4u || (uint)cellZ >= 4u)
         {
             break;
         }
@@ -224,33 +229,33 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
         const uint cellIndex = (uint)cellX | ((uint)cellY << 2u) | ((uint)cellZ << 4u);
         if (VoxelMaskTest(occupancyMask, cellIndex))
         {
-            tHit = currentT;
             return true;
         }
 
         if (tMaxX <= tMaxY && tMaxX <= tMaxZ)
         {
             if (tMaxX > tExit) break;
-            currentT = tMaxX + 1e-4f;
+            tHit = tMaxX + 1e-4f;
             cellX += stepDirX;
             tMaxX += tDeltaX;
         }
         else if (tMaxY <= tMaxZ)
         {
             if (tMaxY > tExit) break;
-            currentT = tMaxY + 1e-4f;
+            tHit = tMaxY + 1e-4f;
             cellY += stepDirY;
             tMaxY += tDeltaY;
         }
         else
         {
             if (tMaxZ > tExit) break;
-            currentT = tMaxZ + 1e-4f;
+            tHit = tMaxZ + 1e-4f;
             cellZ += stepDirZ;
             tMaxZ += tDeltaZ;
         }
     }
 
+    tHit = 0.0f;
     return false;
 }
 
@@ -853,11 +858,15 @@ uint VoxelRasterTracePixel(
     float3 localViewZ,
     out float linearDepth)
 {
-    const float2 uv = (float2(pixel) + 0.5f) * targetDimsInv;
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 viewNear = ndc.x * projectionSetup.ndcX + ndc.y * projectionSetup.ndcY + projectionSetup.origin;
-    viewNear.xyz /= max(viewNear.w, 1.0e-6f);
-    const float3 rayDirObject = VoxelRasterTransformViewVectorToLocal(viewNear.xyz, viewToLocalX, viewToLocalY, viewToLocalZ);
+    const float ndcX = (float(pixel.x) + 0.5f) * targetDimsInv.x * 2.0f - 1.0f;
+    const float ndcY = 1.0f - (float(pixel.y) + 0.5f) * targetDimsInv.y * 2.0f;
+    const float viewNearW = ndcX * projectionSetup.ndcX.w + ndcY * projectionSetup.ndcY.w + projectionSetup.origin.w;
+    const float viewNearInvW = rcp(max(viewNearW, 1.0e-6f));
+    const float3 viewNear = (ndcX * projectionSetup.ndcX.xyz + ndcY * projectionSetup.ndcY.xyz + projectionSetup.origin.xyz) * viewNearInvW;
+    const float3 rayDirObject = float3(
+        dot(viewNear, viewToLocalX.xyz),
+        dot(viewNear, viewToLocalY.xyz),
+        dot(viewNear, viewToLocalZ.xyz));
     const float rayLinearDepthStep = dot(rayDirObject, localViewZ);
 
     float tHitCube = 0.0f;
