@@ -158,24 +158,28 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
     tHit = 0.0f;
 
     const float largeT = 3.402823e+38f;
-    const float3 rayDirAbs = abs(rayDir);
-    if ((rayDirAbs.x <= 1.0e-8f && (rayOrigin.x < 0.0f || rayOrigin.x > 4.0f)) ||
-        (rayDirAbs.y <= 1.0e-8f && (rayOrigin.y < 0.0f || rayOrigin.y > 4.0f)) ||
-        (rayDirAbs.z <= 1.0e-8f && (rayOrigin.z < 0.0f || rayOrigin.z > 4.0f)))
+    const float rayDirAbsX = abs(rayDir.x);
+    const float rayDirAbsY = abs(rayDir.y);
+    const float rayDirAbsZ = abs(rayDir.z);
+    if ((rayDirAbsX <= 1.0e-8f && (rayOrigin.x < 0.0f || rayOrigin.x > 4.0f)) ||
+        (rayDirAbsY <= 1.0e-8f && (rayOrigin.y < 0.0f || rayOrigin.y > 4.0f)) ||
+        (rayDirAbsZ <= 1.0e-8f && (rayOrigin.z < 0.0f || rayOrigin.z > 4.0f)))
     {
         return false;
     }
 
-    const float3 invRayDir = float3(
-        rayDirAbs.x > 1.0e-8f ? rcp(rayDir.x) : largeT,
-        rayDirAbs.y > 1.0e-8f ? rcp(rayDir.y) : largeT,
-        rayDirAbs.z > 1.0e-8f ? rcp(rayDir.z) : largeT);
-    const float3 t0 = (0.0f.xxx - rayOrigin) * invRayDir;
-    const float3 t1 = (4.0f.xxx - rayOrigin) * invRayDir;
-    const float3 tNear = min(t0, t1);
-    const float3 tFar = max(t0, t1);
-    const float tEnter = max(max(tNear.x, tNear.y), max(tNear.z, 0.0f));
-    const float tExit = min(tFar.x, min(tFar.y, tFar.z));
+    const float invRayDirX = rayDirAbsX > 1.0e-8f ? rcp(rayDir.x) : largeT;
+    const float invRayDirY = rayDirAbsY > 1.0e-8f ? rcp(rayDir.y) : largeT;
+    const float invRayDirZ = rayDirAbsZ > 1.0e-8f ? rcp(rayDir.z) : largeT;
+
+    const float t0x = (0.0f - rayOrigin.x) * invRayDirX;
+    const float t1x = (4.0f - rayOrigin.x) * invRayDirX;
+    const float t0y = (0.0f - rayOrigin.y) * invRayDirY;
+    const float t1y = (4.0f - rayOrigin.y) * invRayDirY;
+    const float t0z = (0.0f - rayOrigin.z) * invRayDirZ;
+    const float t1z = (4.0f - rayOrigin.z) * invRayDirZ;
+    const float tEnter = max(max(max(min(t0x, t1x), min(t0y, t1y)), min(t0z, t1z)), 0.0f);
+    const float tExit = min(min(max(t0x, t1x), max(t0y, t1y)), max(t0z, t1z));
     if (tExit < tEnter)
     {
         return false;
@@ -189,55 +193,61 @@ bool RaycastVoxelCubeDDA(float3 rayOrigin, float3 rayDir, uint2 occupancyMask, o
 
     float currentT = tEnter + 1e-4f;
     const float startT = currentT;
-    float3 p = clamp(rayOrigin + rayDir * startT, float3(0.0f, 0.0f, 0.0f), float3(3.9999f, 3.9999f, 3.9999f));
-    int3 cell = int3(floor(p));
-    const int3 stepDir = int3(rayDir.x >= 0.0f ? 1 : -1, rayDir.y >= 0.0f ? 1 : -1, rayDir.z >= 0.0f ? 1 : -1);
+    const float px = clamp(rayOrigin.x + rayDir.x * startT, 0.0f, 3.9999f);
+    const float py = clamp(rayOrigin.y + rayDir.y * startT, 0.0f, 3.9999f);
+    const float pz = clamp(rayOrigin.z + rayDir.z * startT, 0.0f, 3.9999f);
+    int cellX = int(floor(px));
+    int cellY = int(floor(py));
+    int cellZ = int(floor(pz));
+    const int stepDirX = rayDir.x >= 0.0f ? 1 : -1;
+    const int stepDirY = rayDir.y >= 0.0f ? 1 : -1;
+    const int stepDirZ = rayDir.z >= 0.0f ? 1 : -1;
 
-    float3 nextBoundary = float3(
-        stepDir.x > 0 ? float(cell.x + 1) : float(cell.x),
-        stepDir.y > 0 ? float(cell.y + 1) : float(cell.y),
-        stepDir.z > 0 ? float(cell.z + 1) : float(cell.z));
-    float3 tMax = float3(
-        rayDirAbs.x > 1.0e-8f ? (nextBoundary.x - rayOrigin.x) * invRayDir.x : largeT,
-        rayDirAbs.y > 1.0e-8f ? (nextBoundary.y - rayOrigin.y) * invRayDir.y : largeT,
-        rayDirAbs.z > 1.0e-8f ? (nextBoundary.z - rayOrigin.z) * invRayDir.z : largeT);
-    const float3 tDelta = abs(invRayDir);
+    const float nextBoundaryX = stepDirX > 0 ? float(cellX + 1) : float(cellX);
+    const float nextBoundaryY = stepDirY > 0 ? float(cellY + 1) : float(cellY);
+    const float nextBoundaryZ = stepDirZ > 0 ? float(cellZ + 1) : float(cellZ);
+    float tMaxX = rayDirAbsX > 1.0e-8f ? (nextBoundaryX - rayOrigin.x) * invRayDirX : largeT;
+    float tMaxY = rayDirAbsY > 1.0e-8f ? (nextBoundaryY - rayOrigin.y) * invRayDirY : largeT;
+    float tMaxZ = rayDirAbsZ > 1.0e-8f ? (nextBoundaryZ - rayOrigin.z) * invRayDirZ : largeT;
+    const float tDeltaX = abs(invRayDirX);
+    const float tDeltaY = abs(invRayDirY);
+    const float tDeltaZ = abs(invRayDirZ);
 
     [loop]
     for (uint iter = 0u; iter < CLOD_MAX_DDA_STEPS; ++iter)
     {
-        if (any(cell < 0) || any(cell >= 4))
+        if (cellX < 0 || cellY < 0 || cellZ < 0 || cellX >= 4 || cellY >= 4 || cellZ >= 4)
         {
             break;
         }
 
-        const uint cellIndex = (uint)cell.x | ((uint)cell.y << 2u) | ((uint)cell.z << 4u);
+        const uint cellIndex = (uint)cellX | ((uint)cellY << 2u) | ((uint)cellZ << 4u);
         if (VoxelMaskTest(occupancyMask, cellIndex))
         {
             tHit = currentT;
             return true;
         }
 
-        if (tMax.x <= tMax.y && tMax.x <= tMax.z)
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ)
         {
-            if (tMax.x > tExit) break;
-            currentT = tMax.x + 1e-4f;
-            cell.x += stepDir.x;
-            tMax.x += tDelta.x;
+            if (tMaxX > tExit) break;
+            currentT = tMaxX + 1e-4f;
+            cellX += stepDirX;
+            tMaxX += tDeltaX;
         }
-        else if (tMax.y <= tMax.z)
+        else if (tMaxY <= tMaxZ)
         {
-            if (tMax.y > tExit) break;
-            currentT = tMax.y + 1e-4f;
-            cell.y += stepDir.y;
-            tMax.y += tDelta.y;
+            if (tMaxY > tExit) break;
+            currentT = tMaxY + 1e-4f;
+            cellY += stepDirY;
+            tMaxY += tDeltaY;
         }
         else
         {
-            if (tMax.z > tExit) break;
-            currentT = tMax.z + 1e-4f;
-            cell.z += stepDir.z;
-            tMax.z += tDelta.z;
+            if (tMaxZ > tExit) break;
+            currentT = tMaxZ + 1e-4f;
+            cellZ += stepDirZ;
+            tMaxZ += tDeltaZ;
         }
     }
 
@@ -303,27 +313,49 @@ struct VoxelRasterProjectedCube
 #if PSO_SKINNED
 struct VoxelRasterSkinnedTraceBasis
 {
-    float3 cameraOriginLocal;
-    float4 localViewZAndRayOriginViewZ;
     float4 viewToLocalX;
     float4 viewToLocalY;
     float4 viewToLocalZ;
+    float4 localViewZAndRayOriginViewZ;
 };
 #endif
 
 struct VoxelRasterPreparedCube
 {
     uint2 occupancyMask;
-    uint pixelCount;
-    uint pixelWidth;
-    float pixelWidthInv;
+    uint packedMinPx;
+    uint packedPixelDims;
     uint minDepthBits;
-    float3 rayOriginCube;
+    uint cubeCoordPacked;
 #if PSO_SKINNED
     VoxelRasterSkinnedTraceBasis traceBasis;
 #endif
-    VoxelRasterProjectedCube projected;
 };
+
+uint VoxelRasterPackMinPx(int2 minPx)
+{
+    return (uint(minPx.x) & 0xFFFFu) | ((uint(minPx.y) & 0xFFFFu) << 16u);
+}
+
+int2 VoxelRasterUnpackMinPx(uint packedMinPx)
+{
+    return int2(int(packedMinPx & 0xFFFFu), int((packedMinPx >> 16u) & 0xFFFFu));
+}
+
+uint VoxelRasterPackPixelDims(uint pixelWidth, uint pixelCount)
+{
+    return (pixelWidth & 0xFFFFu) | ((pixelCount & 0xFFFFu) << 16u);
+}
+
+uint VoxelRasterUnpackPixelWidth(uint packedPixelDims)
+{
+    return packedPixelDims & 0xFFFFu;
+}
+
+uint VoxelRasterUnpackPixelCount(uint packedPixelDims)
+{
+    return (packedPixelDims >> 16u) & 0xFFFFu;
+}
 
 struct VoxelRasterVoxelSetup
 {
@@ -332,9 +364,25 @@ struct VoxelRasterVoxelSetup
     float invVoxelWidth;
 };
 
+struct VoxelRasterRayProjectionSetup
+{
+    float4 ndcX;
+    float4 ndcY;
+    float4 origin;
+};
+
+float3 VoxelRasterRayOriginCubeFromCoord(
+    uint cubeCoordPacked,
+    float3 cameraOriginLocal,
+    VoxelRasterVoxelSetup voxelSetup)
+{
+    const uint3 cubeCoord = CLodVoxelDecodeCubeCoord(cubeCoordPacked);
+    const float3 cubeMinObject = voxelSetup.aabbMin + float3(cubeCoord) * voxelSetup.cubeObjectWidth;
+    return (cameraOriginLocal - cubeMinObject) * voxelSetup.invVoxelWidth;
+}
+
 #if CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
 groupshared VoxelRasterPreparedCube gs_voxelRasterPreparedCubes[CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE];
-groupshared uint gs_voxelRasterPreparedCubeOffsets[CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE];
 #endif
 
 #if !PSO_SKINNED
@@ -345,7 +393,9 @@ struct VoxelRasterRigidSetup
     float3 cameraOriginLocal;
     float4 localViewZ;
     row_major matrix localToWorld;
-    row_major matrix viewToLocal;
+    float4 viewToLocalX;
+    float4 viewToLocalY;
+    float4 viewToLocalZ;
 };
 #endif
 
@@ -625,10 +675,35 @@ float4 VoxelRasterViewToLocalZ(row_major matrix viewToLocal)
     return float4(viewToLocal._m02, viewToLocal._m12, viewToLocal._m22, viewToLocal._m32);
 }
 
-float3 VoxelRasterTransformViewPointToLocal(float3 viewPoint, float4 viewToLocalX, float4 viewToLocalY, float4 viewToLocalZ)
+float3 VoxelRasterTransformViewVectorToLocal(float3 viewVector, float4 viewToLocalX, float4 viewToLocalY, float4 viewToLocalZ)
 {
-    const float4 viewPointH = float4(viewPoint, 1.0f);
-    return float3(dot(viewPointH, viewToLocalX), dot(viewPointH, viewToLocalY), dot(viewPointH, viewToLocalZ));
+    return float3(dot(viewVector, viewToLocalX.xyz), dot(viewVector, viewToLocalY.xyz), dot(viewVector, viewToLocalZ.xyz));
+}
+
+float3 VoxelRasterViewToLocalOrigin(float4 viewToLocalX, float4 viewToLocalY, float4 viewToLocalZ)
+{
+    return float3(viewToLocalX.w, viewToLocalY.w, viewToLocalZ.w);
+}
+
+VoxelRasterRayProjectionSetup VoxelRasterBuildRayProjectionSetup(row_major matrix projectionInverse)
+{
+    VoxelRasterRayProjectionSetup projectionSetup;
+    projectionSetup.ndcX = float4(
+        projectionInverse._m00,
+        projectionInverse._m01,
+        projectionInverse._m02,
+        projectionInverse._m03);
+    projectionSetup.ndcY = float4(
+        projectionInverse._m10,
+        projectionInverse._m11,
+        projectionInverse._m12,
+        projectionInverse._m13);
+    projectionSetup.origin = float4(
+        projectionInverse._m30,
+        projectionInverse._m31,
+        projectionInverse._m32,
+        projectionInverse._m33);
+    return projectionSetup;
 }
 
 uint VoxelRasterPrepareCube(
@@ -738,35 +813,25 @@ uint VoxelRasterPrepareCube(
     const row_major matrix viewToLocal = mul(camera.viewInverse, worldToLocal);
     const float rayOriginViewZ = dot(float4(cameraOriginLocal, 1.0f), localViewZ);
 #else
-    const float3 cameraOriginLocal = rigidSetup.cameraOriginLocal;
-    const row_major matrix viewToLocal = rigidSetup.viewToLocal;
     const float rayOriginViewZ = rigidSetup.rayOriginViewZ;
 #endif
     const uint pixelWidth = uint(projected.maxPx.x - projected.minPx.x + 1);
     const uint pixelHeight = uint(projected.maxPx.y - projected.minPx.y + 1);
 
-    preparedCube.pixelWidth = pixelWidth;
-    preparedCube.pixelCount = pixelWidth * pixelHeight;
-    preparedCube.rayOriginCube = (cameraOriginLocal - cubeMinObject) * voxelSetup.invVoxelWidth;
+    preparedCube.packedMinPx = VoxelRasterPackMinPx(projected.minPx);
+    preparedCube.packedPixelDims = VoxelRasterPackPixelDims(pixelWidth, pixelWidth * pixelHeight);
+    preparedCube.minDepthBits = asuint(projected.minLinearDepth) >> 1u;
+    preparedCube.cubeCoordPacked = cubeCoordPacked;
 #if PSO_SKINNED
-    preparedCube.traceBasis.cameraOriginLocal = cameraOriginLocal;
     preparedCube.traceBasis.localViewZAndRayOriginViewZ = float4(localViewZ.xyz, rayOriginViewZ);
     preparedCube.traceBasis.viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
     preparedCube.traceBasis.viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
     preparedCube.traceBasis.viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
 #endif
-    preparedCube.projected = projected;
     return VOXEL_RASTER_PROJECT_OK;
 }
 
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
-bool VoxelRasterPassesDepthPretest(uint2 pixel, float cubeMinLinearDepth, RWTexture2D<uint64_t> visibilityBuffer)
-{
-    const uint currentDepthBits = (uint)(visibilityBuffer[pixel] >> META_BITS);
-    const uint cubeMinDepthBits = asuint(cubeMinLinearDepth) >> 1u;
-    return currentDepthBits > cubeMinDepthBits;
-}
-
 bool VoxelRasterPassesDepthPretestBits(uint2 pixel, uint cubeMinDepthBits, RWTexture2D<uint64_t> visibilityBuffer)
 {
     const uint currentDepthBits = (uint)(visibilityBuffer[pixel] >> META_BITS);
@@ -777,13 +842,12 @@ bool VoxelRasterPassesDepthPretestBits(uint2 pixel, uint cubeMinDepthBits, RWTex
 uint VoxelRasterTracePixel(
     uint2 pixel,
     float2 targetDimsInv,
-    row_major matrix projectionInverse,
+    VoxelRasterRayProjectionSetup projectionSetup,
     float4 viewToLocalX,
     float4 viewToLocalY,
     float4 viewToLocalZ,
-    float3 cameraOriginLocal,
     float3 rayOriginCube,
-    float invVoxelWidth,
+    float voxelWidth,
     uint2 occupancyMask,
     float rayOriginViewZ,
     float3 localViewZ,
@@ -791,20 +855,19 @@ uint VoxelRasterTracePixel(
 {
     const float2 uv = (float2(pixel) + 0.5f) * targetDimsInv;
     const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 viewNear = mul(float4(ndc, 0.0f, 1.0f), projectionInverse);
+    float4 viewNear = ndc.x * projectionSetup.ndcX + ndc.y * projectionSetup.ndcY + projectionSetup.origin;
     viewNear.xyz /= max(viewNear.w, 1.0e-6f);
-    const float3 localPoint = VoxelRasterTransformViewPointToLocal(viewNear.xyz, viewToLocalX, viewToLocalY, viewToLocalZ);
-    const float3 rayDirObject = normalize(localPoint - cameraOriginLocal);
-    const float3 rayDirCube = rayDirObject * invVoxelWidth;
+    const float3 rayDirObject = VoxelRasterTransformViewVectorToLocal(viewNear.xyz, viewToLocalX, viewToLocalY, viewToLocalZ);
+    const float rayLinearDepthStep = dot(rayDirObject, localViewZ);
 
     float tHitCube = 0.0f;
-    if (!RaycastVoxelCubeDDA(rayOriginCube, rayDirCube, occupancyMask, tHitCube))
+    if (!RaycastVoxelCubeDDA(rayOriginCube, rayDirObject, occupancyMask, tHitCube))
     {
         linearDepth = 0.0f;
         return VOXEL_RASTER_TRACE_DDA_MISS;
     }
 
-    linearDepth = -(rayOriginViewZ + tHitCube * dot(rayDirObject, localViewZ));
+    linearDepth = -(rayOriginViewZ + tHitCube * voxelWidth * rayLinearDepthStep);
     return linearDepth > 0.0f ? VOXEL_RASTER_TRACE_HIT : VOXEL_RASTER_TRACE_NON_POSITIVE_DEPTH;
 }
 
@@ -960,7 +1023,10 @@ VoxelRasterRigidSetup VoxelRasterBuildRigidSetup(
     rigidSetup.sphereRadius = 0.0f;
     rigidSetup.localToWorld = objectData.model;
     rigidSetup.localViewZ = mul(objectData.model, camera.viewZ);
-    rigidSetup.viewToLocal = mul(camera.viewInverse, objectData.modelInverse);
+    const row_major matrix viewToLocal = mul(camera.viewInverse, objectData.modelInverse);
+    rigidSetup.viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
+    rigidSetup.viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
+    rigidSetup.viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
     rigidSetup.cameraOriginLocal = mul(float4(camera.positionWorldSpace.xyz, 1.0f), objectData.modelInverse).xyz;
     rigidSetup.rayOriginViewZ = dot(float4(rigidSetup.cameraOriginLocal, 1.0f), rigidSetup.localViewZ);
 #if CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT
@@ -988,6 +1054,7 @@ void VoxelRasterRasterizeClusterDirect(
     ClodViewRasterInfo rasterInfo,
     uint2 targetDims,
     float2 targetDimsInv,
+    VoxelRasterRayProjectionSetup projectionSetup,
 #if !PSO_SKINNED
     VoxelRasterRigidSetup rigidSetup,
 #endif
@@ -1044,39 +1111,38 @@ void VoxelRasterRasterizeClusterDirect(
             continue;
         }
 
-        const uint pixelCount = preparedCube.pixelCount;
-        const uint pixelWidth = preparedCube.pixelWidth;
-        const int2 minPx = preparedCube.projected.minPx;
-        const float minLinearDepth = preparedCube.projected.minLinearDepth;
+        const uint pixelCount = VoxelRasterUnpackPixelCount(preparedCube.packedPixelDims);
+        const uint pixelWidth = VoxelRasterUnpackPixelWidth(preparedCube.packedPixelDims);
+        const int2 minPx = VoxelRasterUnpackMinPx(preparedCube.packedMinPx);
+        const uint minDepthBits = preparedCube.minDepthBits;
         if (GI == 0u)
         {
             VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTED_PIXELS, pixelCount);
         }
 
-        const float3 rayOriginCube = preparedCube.rayOriginCube;
 #if PSO_SKINNED
         const float4 viewToLocalX = preparedCube.traceBasis.viewToLocalX;
         const float4 viewToLocalY = preparedCube.traceBasis.viewToLocalY;
         const float4 viewToLocalZ = preparedCube.traceBasis.viewToLocalZ;
-        const float3 cameraOriginLocal = preparedCube.traceBasis.cameraOriginLocal;
+        const float3 cameraOriginLocal = VoxelRasterViewToLocalOrigin(viewToLocalX, viewToLocalY, viewToLocalZ);
         const float rayOriginViewZ = preparedCube.traceBasis.localViewZAndRayOriginViewZ.w;
         const float3 localViewZ = preparedCube.traceBasis.localViewZAndRayOriginViewZ.xyz;
 #else
-        const row_major matrix viewToLocal = rigidSetup.viewToLocal;
-        const float4 viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
-        const float4 viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
-        const float4 viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
+        const float4 viewToLocalX = rigidSetup.viewToLocalX;
+        const float4 viewToLocalY = rigidSetup.viewToLocalY;
+        const float4 viewToLocalZ = rigidSetup.viewToLocalZ;
         const float3 cameraOriginLocal = rigidSetup.cameraOriginLocal;
         const float rayOriginViewZ = rigidSetup.rayOriginViewZ;
         const float3 localViewZ = rigidSetup.localViewZ.xyz;
 #endif
-        const float invVoxelWidth = voxelSetup.invVoxelWidth;
+        const float3 rayOriginCube = VoxelRasterRayOriginCubeFromCoord(preparedCube.cubeCoordPacked, cameraOriginLocal, voxelSetup);
+        const float voxelWidth = voxelSetup.cubeObjectWidth * 0.25f;
         for (uint pixelLinear = GI; pixelLinear < pixelCount; pixelLinear += VOXEL_RASTER_THREADS_PER_GROUP)
         {
             const uint2 pixel = VoxelRasterPixelFromLinear(pixelLinear, minPx, pixelWidth);
 
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
-            if (!VoxelRasterPassesDepthPretest(pixel, minLinearDepth, visibilityBuffer))
+            if (!VoxelRasterPassesDepthPretestBits(pixel, minDepthBits, visibilityBuffer))
             {
                 VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DEPTH_REJECTED, 1u);
                 continue;
@@ -1087,13 +1153,12 @@ void VoxelRasterRasterizeClusterDirect(
             const uint traceResult = VoxelRasterTracePixel(
                     pixel,
                     targetDimsInv,
-                    camera.projectionInverse,
+                    projectionSetup,
                     viewToLocalX,
                     viewToLocalY,
                     viewToLocalZ,
-                    cameraOriginLocal,
                     rayOriginCube,
-                    invVoxelWidth,
+                    voxelWidth,
                     occupancyMask,
                     rayOriginViewZ,
                     localViewZ,
@@ -1163,12 +1228,10 @@ uint VoxelRasterPrepareQueuedCubeCandidate(
     if ((occupancyMask.x | occupancyMask.y) == 0u ||
         projectResult != VOXEL_RASTER_PROJECT_OK)
     {
-        preparedCube.pixelCount = 0u;
+        preparedCube.packedPixelDims = 0u;
         return projectResult;
     }
 
-    preparedCube.pixelWidthInv = rcp(float(preparedCube.pixelWidth));
-    preparedCube.minDepthBits = asuint(preparedCube.projected.minLinearDepth) >> 1u;
     return VOXEL_RASTER_PROJECT_OK;
 }
 
@@ -1206,10 +1269,8 @@ uint VoxelRasterAccumulateQueuedCubeBatchStats(
 
 void VoxelRasterStoreQueuedPreparedCubeSlot(
     uint cubeSlot,
-    uint cubeOffset,
     VoxelRasterPreparedCube preparedCube)
 {
-    gs_voxelRasterPreparedCubeOffsets[cubeSlot] = cubeOffset;
     gs_voxelRasterPreparedCubes[cubeSlot] = preparedCube;
 }
 
@@ -1217,14 +1278,14 @@ uint VoxelRasterFinalizeQueuedCubeCandidate(
     uint GI,
     bool batchCubeLane,
     uint cubeSlot,
-    uint cubeOffset,
     uint projectResult,
     VoxelRasterPreparedCube preparedCube)
 {
-    const uint batchMaxPixelCount = VoxelRasterAccumulateQueuedCubeBatchStats(GI, preparedCube.pixelCount, projectResult, preparedCube.occupancyMask);
+    const uint pixelCount = VoxelRasterUnpackPixelCount(preparedCube.packedPixelDims);
+    const uint batchMaxPixelCount = VoxelRasterAccumulateQueuedCubeBatchStats(GI, pixelCount, projectResult, preparedCube.occupancyMask);
     if (batchCubeLane)
     {
-        VoxelRasterStoreQueuedPreparedCubeSlot(cubeSlot, cubeOffset, preparedCube);
+        VoxelRasterStoreQueuedPreparedCubeSlot(cubeSlot, preparedCube);
     }
     return batchMaxPixelCount;
 }
@@ -1292,7 +1353,12 @@ void VoxelRasterPrepareQueuedCubeBatch(
             preparedCube);
     }
 
-    const uint batchMaxPixelCountLocal = VoxelRasterFinalizeQueuedCubeCandidate(GI, batchCubeLane, GI, cubeOffset, projectResult, preparedCube);
+    const uint batchMaxPixelCountLocal = VoxelRasterFinalizeQueuedCubeCandidate(
+        GI,
+        batchCubeLane,
+        GI,
+        projectResult,
+        preparedCube);
     VoxelRasterPublishPreparedQueuedCubeBatch(GI, batchMaxPixelCountLocal, batchCubeCount, batchQueuedCubeCount, batchMaxPixelCount);
 }
 
@@ -1364,7 +1430,8 @@ bool VoxelRasterQueueCandidateFromTask(
 #endif
     )
 {
-    const uint pixelCount = gs_voxelRasterPreparedCubes[cubeSlot].pixelCount;
+    const uint packedPixelDims = gs_voxelRasterPreparedCubes[cubeSlot].packedPixelDims;
+    const uint pixelCount = VoxelRasterUnpackPixelCount(packedPixelDims);
     if (pixelLinear >= pixelCount)
     {
         localPixel = uint2(0u, 0u);
@@ -1375,10 +1442,10 @@ bool VoxelRasterQueueCandidateFromTask(
         return false;
     }
 
-    const uint pixelWidth = gs_voxelRasterPreparedCubes[cubeSlot].pixelWidth;
-    localPixel = VoxelRasterQueueLocalPixelFromLinear(pixelLinear, pixelWidth, gs_voxelRasterPreparedCubes[cubeSlot].pixelWidthInv);
+    const uint pixelWidth = VoxelRasterUnpackPixelWidth(packedPixelDims);
+    localPixel = VoxelRasterQueueLocalPixelFromLinear(pixelLinear, pixelWidth, rcp(float(pixelWidth)));
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
-    pixel = uint2(gs_voxelRasterPreparedCubes[cubeSlot].projected.minPx) + localPixel;
+    pixel = uint2(VoxelRasterUnpackMinPx(gs_voxelRasterPreparedCubes[cubeSlot].packedMinPx)) + localPixel;
     minDepthBits = gs_voxelRasterPreparedCubes[cubeSlot].minDepthBits;
 #endif
     return true;
@@ -1516,8 +1583,10 @@ void VoxelRasterTraceQueuedPixels(
     uint queueBase,
     uint queuedPixelCount,
     uint visibleClusterIndex,
+    uint batchFirstCubeOffset,
     float2 targetDimsInv,
-    CullingCameraInfo camera,
+    VoxelRasterRayProjectionSetup projectionSetup,
+    float voxelWidth,
     VoxelRasterVoxelSetup voxelSetup
 #if !PSO_SKINNED
     ,
@@ -1537,36 +1606,33 @@ void VoxelRasterTraceQueuedPixels(
         const uint cubeSlot = VoxelRasterQueuedPixelCubeSlot(queuedPixel);
         const uint2 localPixel = VoxelRasterQueuedPixelLocalCoords(queuedPixel);
         const uint2 occupancyMask = gs_voxelRasterPreparedCubes[cubeSlot].occupancyMask;
-        const float3 rayOriginCube = gs_voxelRasterPreparedCubes[cubeSlot].rayOriginCube;
-        const uint2 pixel = uint2(gs_voxelRasterPreparedCubes[cubeSlot].projected.minPx) + localPixel;
+        const uint2 pixel = uint2(VoxelRasterUnpackMinPx(gs_voxelRasterPreparedCubes[cubeSlot].packedMinPx)) + localPixel;
 #if PSO_SKINNED
         const float4 viewToLocalX = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.viewToLocalX;
         const float4 viewToLocalY = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.viewToLocalY;
         const float4 viewToLocalZ = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.viewToLocalZ;
-        const float3 cameraOriginLocal = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.cameraOriginLocal;
+        const float3 cameraOriginLocal = VoxelRasterViewToLocalOrigin(viewToLocalX, viewToLocalY, viewToLocalZ);
         const float rayOriginViewZ = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.localViewZAndRayOriginViewZ.w;
         const float3 localViewZ = gs_voxelRasterPreparedCubes[cubeSlot].traceBasis.localViewZAndRayOriginViewZ.xyz;
 #else
-        const row_major matrix viewToLocal = rigidSetup.viewToLocal;
-        const float4 viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
-        const float4 viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
-        const float4 viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
+        const float4 viewToLocalX = rigidSetup.viewToLocalX;
+        const float4 viewToLocalY = rigidSetup.viewToLocalY;
+        const float4 viewToLocalZ = rigidSetup.viewToLocalZ;
         const float3 cameraOriginLocal = rigidSetup.cameraOriginLocal;
         const float rayOriginViewZ = rigidSetup.rayOriginViewZ;
         const float3 localViewZ = rigidSetup.localViewZ.xyz;
 #endif
-        const float invVoxelWidth = voxelSetup.invVoxelWidth;
+        const float3 rayOriginCube = VoxelRasterRayOriginCubeFromCoord(gs_voxelRasterPreparedCubes[cubeSlot].cubeCoordPacked, cameraOriginLocal, voxelSetup);
         float linearDepth = 0.0f;
         const uint traceResult = VoxelRasterTracePixel(
             pixel,
             targetDimsInv,
-            camera.projectionInverse,
+            projectionSetup,
             viewToLocalX,
             viewToLocalY,
             viewToLocalZ,
-            cameraOriginLocal,
             rayOriginCube,
-            invVoxelWidth,
+            voxelWidth,
             occupancyMask,
             rayOriginViewZ,
             localViewZ,
@@ -1588,7 +1654,7 @@ void VoxelRasterTraceQueuedPixels(
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         VoxelRasterWriteHit(pixel, linearDepth, clipmapInfo, pageTable, physicalPages);
 #else
-        const uint cubeOffset = gs_voxelRasterPreparedCubeOffsets[cubeSlot];
+        const uint cubeOffset = batchFirstCubeOffset + cubeSlot;
         VoxelRasterWriteHit(pixel, linearDepth, visibleClusterIndex, cubeOffset, visibilityBuffer);
 #endif
     }
@@ -1615,7 +1681,8 @@ void VoxelRasterRasterizeClusterQueued(
     CullingCameraInfo camera,
     ClodViewRasterInfo rasterInfo,
     uint2 targetDims,
-    float2 targetDimsInv
+    float2 targetDimsInv,
+    VoxelRasterRayProjectionSetup projectionSetup
 #if !PSO_SKINNED
     ,
     VoxelRasterRigidSetup rigidSetup
@@ -1631,6 +1698,7 @@ void VoxelRasterRasterizeClusterQueued(
     const uint waveLane = WaveGetLaneIndex();
     const uint waveIndex = GI / VOXEL_RASTER_WAVE_SIZE;
     const uint waveQueueBase = waveIndex * VOXEL_RASTER_WAVE_PIXEL_QUEUE_CAPACITY;
+    const float voxelWidth = voxelSetup.cubeObjectWidth * 0.25f;
 
     for (uint batchFirstCubeOffset = workFirstCubeOffset; batchFirstCubeOffset < workCubeEnd; batchFirstCubeOffset += VOXEL_RASTER_CUBE_BATCH_SIZE)
     {
@@ -1680,8 +1748,10 @@ void VoxelRasterRasterizeClusterQueued(
                 waveQueueBase,
                 queuedPixelCount,
                 visibleClusterIndex,
+                batchFirstCubeOffset,
                 targetDimsInv,
-                camera,
+                projectionSetup,
+                voxelWidth,
                 voxelSetup
 #if !PSO_SKINNED
                 ,
@@ -1777,6 +1847,7 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const bool debugMode = perFrameBuffer.outputType == OUTPUT_SW_RASTER;
 #endif
     const float2 targetDimsInv = rcp(max(float2(targetDims), float2(1.0f, 1.0f)));
+    const VoxelRasterRayProjectionSetup projectionSetup = VoxelRasterBuildRayProjectionSetup(camera.projectionInverse);
 
     const VoxelRasterVoxelSetup voxelSetup = VoxelRasterBuildVoxelSetup(voxelCluster);
 
@@ -1804,7 +1875,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         camera,
         rasterInfo,
         targetDims,
-        targetDimsInv
+        targetDimsInv,
+        projectionSetup
 #if !PSO_SKINNED
         ,
         rigidSetup
@@ -1834,6 +1906,7 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         rasterInfo,
         targetDims,
         targetDimsInv,
+        projectionSetup,
 #if !PSO_SKINNED
         rigidSetup,
 #endif
