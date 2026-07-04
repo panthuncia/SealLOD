@@ -99,7 +99,6 @@ static const uint VOXEL_RASTER_PROJECT_FOOTPRINT_REJECTED = 3u;
 groupshared uint gs_voxelRasterQueueCount;
 groupshared uint gs_voxelRasterPixelQueue[VOXEL_RASTER_PIXEL_QUEUE_CAPACITY];
 groupshared uint gs_voxelRasterBatchMaxPixelCount;
-groupshared uint gs_voxelRasterBatchQueuedCubeCount;
 #endif
 
 bool VoxelMaskTest(uint2 mask, uint bitIndex)
@@ -1062,6 +1061,163 @@ void VoxelRasterRasterizeClusterDirect(
     }
 }
 #else
+uint VoxelRasterPrepareQueuedCubeCandidate(
+    uint cubeOffset,
+    GroupPageMapEntry pageEntry,
+    CLodVoxelPageHeader pageHeader,
+    CLodVoxelClusterRecord voxelCluster,
+    VoxelRasterVoxelSetup voxelSetup,
+#if PSO_SKINNED
+    PerMeshInstanceBuffer meshInstance,
+    PerObjectBuffer objectData,
+#endif
+    CullingCameraInfo camera,
+    ClodViewRasterInfo rasterInfo,
+    uint2 targetDims,
+#if !PSO_SKINNED
+    VoxelRasterRigidSetup rigidSetup,
+#endif
+    out VoxelRasterPreparedCube preparedCube,
+    out VoxelRasterQueuedCube queuedCube)
+{
+    preparedCube = (VoxelRasterPreparedCube)0;
+    queuedCube = (VoxelRasterQueuedCube)0;
+
+    const uint projectResult = VoxelRasterPrepareCube(
+        cubeOffset,
+        pageEntry,
+        pageHeader,
+        voxelCluster,
+        voxelSetup,
+#if PSO_SKINNED
+        meshInstance,
+        objectData,
+#endif
+        camera,
+        rasterInfo,
+        targetDims,
+#if !PSO_SKINNED
+        rigidSetup,
+#endif
+        preparedCube);
+
+    const uint2 occupancyMask = preparedCube.occupancyMask;
+    if ((occupancyMask.x | occupancyMask.y) == 0u ||
+        projectResult != VOXEL_RASTER_PROJECT_OK)
+    {
+        preparedCube.pixelCount = 0u;
+        return projectResult;
+    }
+
+    queuedCube.minPx = preparedCube.projected.minPx;
+    queuedCube.pixelCount = preparedCube.pixelCount;
+    queuedCube.pixelWidth = preparedCube.pixelWidth;
+    queuedCube.pixelWidthInv = rcp(float(preparedCube.pixelWidth));
+    queuedCube.minDepthBits = asuint(preparedCube.projected.minLinearDepth) >> 1u;
+    return VOXEL_RASTER_PROJECT_OK;
+}
+
+void VoxelRasterAccumulateQueuedCubeBatchStats(
+    uint GI,
+    uint pixelCount,
+    uint projectResult,
+    uint2 occupancyMask)
+{
+    const bool hasOccupancy = (occupancyMask.x | occupancyMask.y) != 0u;
+    const bool scissorRejected = hasOccupancy && projectResult == VOXEL_RASTER_PROJECT_SCISSOR_REJECTED;
+    const bool projectionRejected = hasOccupancy &&
+        projectResult != VOXEL_RASTER_PROJECT_OK &&
+        projectResult != VOXEL_RASTER_PROJECT_SCISSOR_REJECTED;
+
+    const uint waveMaxPixelCount = WaveActiveMax(pixelCount);
+    const uint waveProjectedPixels = WaveActiveSum(pixelCount);
+    const uint waveScissorRejected = WaveActiveCountBits(scissorRejected);
+    const uint waveProjectionRejected = WaveActiveCountBits(projectionRejected);
+    if (!WaveIsFirstLane())
+    {
+        return;
+    }
+
+    if (waveMaxPixelCount != 0u)
+    {
+        if (WaveGetLaneCount() >= VOXEL_RASTER_CUBE_BATCH_SIZE)
+        {
+            if (GI == 0u)
+            {
+                gs_voxelRasterBatchMaxPixelCount = waveMaxPixelCount;
+            }
+        }
+        else
+        {
+            InterlockedMax(gs_voxelRasterBatchMaxPixelCount, waveMaxPixelCount);
+        }
+    }
+    if (waveProjectedPixels != 0u)
+    {
+        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTED_PIXELS, waveProjectedPixels);
+    }
+    if (waveScissorRejected != 0u)
+    {
+        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SCISSOR_REJECTED, waveScissorRejected);
+    }
+    if (waveProjectionRejected != 0u)
+    {
+        VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, waveProjectionRejected);
+    }
+}
+
+void VoxelRasterStoreQueuedPreparedCubeSlot(
+    uint cubeSlot,
+    uint cubeOffset,
+    VoxelRasterPreparedCube preparedCube,
+    VoxelRasterQueuedCube queuedCube)
+{
+    gs_voxelRasterPreparedCubeOffsets[cubeSlot] = cubeOffset;
+    gs_voxelRasterPreparedCubes[cubeSlot] = preparedCube;
+    gs_voxelRasterQueuedCubes[cubeSlot] = queuedCube;
+}
+
+void VoxelRasterBeginPrepareQueuedCubeBatch(uint GI)
+{
+    if (GI == 0u)
+    {
+        gs_voxelRasterBatchMaxPixelCount = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+void VoxelRasterFinalizeQueuedCubeCandidate(
+    uint GI,
+    bool batchCubeLane,
+    uint cubeSlot,
+    uint cubeOffset,
+    uint projectResult,
+    VoxelRasterPreparedCube preparedCube,
+    VoxelRasterQueuedCube queuedCube)
+{
+    VoxelRasterAccumulateQueuedCubeBatchStats(GI, preparedCube.pixelCount, projectResult, preparedCube.occupancyMask);
+    if (batchCubeLane)
+    {
+        VoxelRasterStoreQueuedPreparedCubeSlot(cubeSlot, cubeOffset, preparedCube, queuedCube);
+    }
+}
+
+void VoxelRasterPublishPreparedQueuedCubeBatch(
+    uint GI,
+    uint batchCubeCount,
+    out uint batchQueuedCubeCount,
+    out uint batchMaxPixelCount)
+{
+    if (GI == 0u)
+    {
+        VoxelRasterQueueReset();
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    batchQueuedCubeCount = batchCubeCount;
+    batchMaxPixelCount = gs_voxelRasterBatchMaxPixelCount;
+}
+
 void VoxelRasterPrepareQueuedCubeBatch(
     uint GI,
     uint batchFirstCubeOffset,
@@ -1083,18 +1239,16 @@ void VoxelRasterPrepareQueuedCubeBatch(
     out uint batchQueuedCubeCount,
     out uint batchMaxPixelCount)
 {
-    if (GI == 0u)
-    {
-        gs_voxelRasterBatchMaxPixelCount = 0u;
-        gs_voxelRasterBatchQueuedCubeCount = 0u;
-    }
-    GroupMemoryBarrierWithGroupSync();
+    VoxelRasterBeginPrepareQueuedCubeBatch(GI);
 
-    if (GI < batchCubeCount)
+    uint cubeOffset = batchFirstCubeOffset + GI;
+    uint projectResult = VOXEL_RASTER_PROJECT_OK;
+    VoxelRasterPreparedCube preparedCube = (VoxelRasterPreparedCube)0;
+    VoxelRasterQueuedCube queuedCube = (VoxelRasterQueuedCube)0;
+    const bool batchCubeLane = GI < batchCubeCount;
+    if (batchCubeLane)
     {
-        const uint cubeOffset = batchFirstCubeOffset + GI;
-        VoxelRasterPreparedCube preparedCube = (VoxelRasterPreparedCube)0;
-        const uint projectResult = VoxelRasterPrepareCube(
+        projectResult = VoxelRasterPrepareQueuedCubeCandidate(
             cubeOffset,
             pageEntry,
             pageHeader,
@@ -1110,49 +1264,12 @@ void VoxelRasterPrepareQueuedCubeBatch(
 #if !PSO_SKINNED
             rigidSetup,
 #endif
-            preparedCube);
-
-        const uint2 occupancyMask = preparedCube.occupancyMask;
-        if ((occupancyMask.x | occupancyMask.y) == 0u)
-        {
-            preparedCube.pixelCount = 0u;
-        }
-        else if (projectResult != VOXEL_RASTER_PROJECT_OK)
-        {
-            VoxelRasterTelemetryAdd(
-                projectResult == VOXEL_RASTER_PROJECT_SCISSOR_REJECTED
-                    ? WG_COUNTER_VOXEL_RASTER_SCISSOR_REJECTED
-                    : WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED,
-                1u);
-            preparedCube.pixelCount = 0u;
-        }
-        else
-        {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTED_PIXELS, preparedCube.pixelCount);
-            InterlockedMax(gs_voxelRasterBatchMaxPixelCount, preparedCube.pixelCount);
-        }
-
-        if (preparedCube.pixelCount != 0u)
-        {
-            uint compactCubeSlot = 0u;
-            InterlockedAdd(gs_voxelRasterBatchQueuedCubeCount, 1u, compactCubeSlot);
-
-            VoxelRasterQueuedCube queuedCube = (VoxelRasterQueuedCube)0;
-            queuedCube.minPx = preparedCube.projected.minPx;
-            queuedCube.pixelCount = preparedCube.pixelCount;
-            queuedCube.pixelWidth = preparedCube.pixelWidth;
-            queuedCube.pixelWidthInv = rcp(max(float(preparedCube.pixelWidth), 1.0f));
-            queuedCube.minDepthBits = asuint(preparedCube.projected.minLinearDepth) >> 1u;
-
-            gs_voxelRasterPreparedCubeOffsets[compactCubeSlot] = cubeOffset;
-            gs_voxelRasterPreparedCubes[compactCubeSlot] = preparedCube;
-            gs_voxelRasterQueuedCubes[compactCubeSlot] = queuedCube;
-        }
+            preparedCube,
+            queuedCube);
     }
-    GroupMemoryBarrierWithGroupSync();
 
-    batchQueuedCubeCount = gs_voxelRasterBatchQueuedCubeCount;
-    batchMaxPixelCount = gs_voxelRasterBatchMaxPixelCount;
+    VoxelRasterFinalizeQueuedCubeCandidate(GI, batchCubeLane, GI, cubeOffset, projectResult, preparedCube, queuedCube);
+    VoxelRasterPublishPreparedQueuedCubeBatch(GI, batchCubeCount, batchQueuedCubeCount, batchMaxPixelCount);
 }
 
 void VoxelRasterQueueDecodeTaskPixel(
@@ -1276,12 +1393,6 @@ void VoxelRasterQueueBatchPixels(
 #endif
     )
 {
-    if (GI == 0u)
-    {
-        VoxelRasterQueueReset();
-    }
-    GroupMemoryBarrierWithGroupSync();
-
     const uint firstTaskLinear = taskBase + GI;
     uint cubeSlot = 0u;
     uint pixelLinear = 0u;
@@ -1315,6 +1426,20 @@ void VoxelRasterQueueBatchPixels(
         VoxelRasterQueuePushPixelCoords(enqueuePixel, cubeSlot, localPixel);
         VoxelRasterQueueAdvanceTaskPixel(taskPixelStepCube, taskPixelStepRemainder, batchMaxPixelCount, cubeSlot, pixelLinear);
     }
+}
+
+void VoxelRasterFinishQueuedPixelChunk(uint GI, bool resetNextQueue)
+{
+    if (resetNextQueue && GI == 0u)
+    {
+        VoxelRasterQueueReset();
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+void VoxelRasterPublishQueuedPixelsForTrace()
+{
+    GroupMemoryBarrierWithGroupSync();
 }
 
 void VoxelRasterTraceQueuedPixels(
@@ -1455,7 +1580,7 @@ void VoxelRasterRasterizeClusterQueued(
 #endif
                 );
 
-            GroupMemoryBarrierWithGroupSync();
+            VoxelRasterPublishQueuedPixelsForTrace();
 
             VoxelRasterTraceQueuedPixels(
                 GI,
@@ -1475,7 +1600,7 @@ void VoxelRasterRasterizeClusterQueued(
 #endif
                 );
 
-            GroupMemoryBarrierWithGroupSync();
+            VoxelRasterFinishQueuedPixelChunk(GI, taskEnd < batchTaskCount);
         }
     }
 }
