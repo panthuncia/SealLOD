@@ -268,6 +268,8 @@ struct CLodVoxelRasterWorkRecord
     uint localGroupId;
     uint localPageIndex;
     uint pageLocalClusterIndex;
+    uint firstCubeOffset;
+    uint cubeCount;
 };
 
 struct CLodVoxelRasterDispatchCommand

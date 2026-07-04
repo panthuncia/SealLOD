@@ -1084,6 +1084,54 @@ float ProjectedGeometricError(
 
 bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera camera);
 
+static const uint CLOD_VOXEL_RASTER_CUBES_PER_WORK_RECORD = 32u;
+
+bool CLodBuildVoxelRasterCubeRangeBounds(
+    uint slabDescriptorIndex,
+    uint pageByteOffset,
+    uint cubeRecordsOffset,
+    CLodVoxelClusterRecord voxelCluster,
+    uint firstCubeOffset,
+    uint cubeCount,
+    out float3 rangeCenter,
+    out float rangeRadius,
+    out bool rangeHasSkinnedCubes)
+{
+    const float3 aabbMin = voxelCluster.aabbMinAndVoxelWidth.xyz;
+    const float cubeObjectWidth = voxelCluster.aabbMinAndVoxelWidth.w * 4.0f;
+    float3 rangeMin = float3(3.402823e+38f, 3.402823e+38f, 3.402823e+38f);
+    float3 rangeMax = float3(-3.402823e+38f, -3.402823e+38f, -3.402823e+38f);
+    rangeHasSkinnedCubes = false;
+    bool hasOccupiedCube = false;
+
+    const uint rangeEnd = min(firstCubeOffset + cubeCount, voxelCluster.cubeCount);
+    [loop]
+    for (uint cubeOffset = firstCubeOffset; cubeOffset < rangeEnd; ++cubeOffset)
+    {
+        const CLodVoxelCubeRecord cube = CLodLoadVoxelCubeFromPage(
+            slabDescriptorIndex,
+            pageByteOffset,
+            cubeRecordsOffset,
+            voxelCluster.firstCube + cubeOffset);
+        if ((cube.occupancyMask.x | cube.occupancyMask.y) == 0u)
+        {
+            continue;
+        }
+
+        const uint3 cubeCoord = CLodVoxelDecodeCubeCoord(cube.cubeCoord);
+        const float3 cubeMin = aabbMin + float3(cubeCoord) * cubeObjectWidth;
+        rangeMin = min(rangeMin, cubeMin);
+        rangeMax = max(rangeMax, cubeMin + cubeObjectWidth);
+        rangeHasSkinnedCubes = rangeHasSkinnedCubes || cube.dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX;
+        hasOccupiedCube = true;
+    }
+
+    rangeCenter = (rangeMin + rangeMax) * 0.5f;
+    const float3 halfExtent = rangeMax - rangeCenter;
+    rangeRadius = length(halfExtent);
+    return hasOccupiedCube && rangeRadius >= 0.0f;
+}
+
 void CLodAppendVoxelRasterClusterWork(
     CLodMeshMetadata clodMeshMetadata,
     uint instanceIndex,
@@ -1187,74 +1235,115 @@ void CLodAppendVoxelRasterClusterWork(
         (void)clusterDirtyPageCullingEnabled;
 #endif
 
-        uint combinedSlot = 0u;
-        InterlockedAdd(replayState[0].visibleClusterCombinedCount, 1u, combinedSlot);
-        if (combinedSlot >= visibleClusterWriteCapacity)
-        {
-            InterlockedMin(replayState[0].visibleClusterCombinedCount, visibleClusterWriteCapacity);
-            ++droppedCount;
-            continue;
-        }
+        bool visibleClusterAllocated = false;
+        uint visibleClusterIndex = 0u;
 
-        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(
-            voxelPageEntry.slabDescriptorIndex,
-            voxelPageEntry.slabByteOffset,
-            voxelPageHeader.cubeRecordsOffset,
-            voxelCluster);
-
-        uint baseSlot = 0u;
-        if (clusterHasSkinnedCubes)
+        [loop]
+        for (uint firstCubeOffset = 0u; firstCubeOffset < voxelCluster.cubeCount; firstCubeOffset += CLOD_VOXEL_RASTER_CUBES_PER_WORK_RECORD)
         {
-            InterlockedAdd(skinnedWorkRecordCounter[0], 1u, baseSlot);
-        }
-        else
-        {
-            InterlockedAdd(rigidWorkRecordCounter[0], 1u, baseSlot);
-        }
-        if (baseSlot >= queueDescriptors.workRecordCapacity)
-        {
-            if (clusterHasSkinnedCubes)
+            const uint rangeCubeCount = min(CLOD_VOXEL_RASTER_CUBES_PER_WORK_RECORD, voxelCluster.cubeCount - firstCubeOffset);
+            float3 rangeCenterObject = 0.0f.xxx;
+            float rangeRadiusObject = 0.0f;
+            bool rangeHasSkinnedCubes = false;
+            if (!CLodBuildVoxelRasterCubeRangeBounds(
+                voxelPageEntry.slabDescriptorIndex,
+                voxelPageEntry.slabByteOffset,
+                voxelPageHeader.cubeRecordsOffset,
+                voxelCluster,
+                firstCubeOffset,
+                rangeCubeCount,
+                rangeCenterObject,
+                rangeRadiusObject,
+                rangeHasSkinnedCubes))
             {
-                InterlockedMin(skinnedWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+                continue;
+            }
+
+            const float3 rangeWorldCenter = mul(float4(rangeCenterObject, 1.0f), objectModelMatrix).xyz;
+            const float rangeWorldRadius = rangeRadiusObject * lodUniformScale;
+            const float3 rangeViewCenter = mul(float4(rangeWorldCenter, 1.0f), cullCamera.view).xyz;
+            if (CLodWorkGraphFrustumCullingEnabled() &&
+                SphereOutsideFrustumViewSpace(rangeViewCenter, rangeWorldRadius, cullCamera))
+            {
+                continue;
+            }
+
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+            if (clusterDirtyPageCullingEnabled && !CLodVirtualShadowBoundsTouchDirtyPages(rangeWorldCenter, rangeWorldRadius, viewId))
+            {
+                continue;
+            }
+#endif
+
+            if (!visibleClusterAllocated)
+            {
+                uint combinedSlot = 0u;
+                InterlockedAdd(replayState[0].visibleClusterCombinedCount, 1u, combinedSlot);
+                if (combinedSlot >= visibleClusterWriteCapacity)
+                {
+                    InterlockedMin(replayState[0].visibleClusterCombinedCount, visibleClusterWriteCapacity);
+                    ++droppedCount;
+                    break;
+                }
+
+                uint visibleBase = 0u;
+                InterlockedAdd(visibleClusterCounter[0], 1u, visibleBase);
+                visibleClusterIndex = phase1HWBase + visibleBase;
+                CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
+                    visibleClusters,
+                    visibleClusterIndex,
+                    viewId,
+                    instanceIndex,
+                    pageLocalClusterIndex & 0x3FFFu,
+                    localGroupId,
+                    voxelSegment.pageIndex,
+                    0u,
+                    CLodVisibleClusterMarkVoxelPayload(CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX)));
+                visibleClusterAllocated = true;
+            }
+
+            uint baseSlot = 0u;
+            if (rangeHasSkinnedCubes)
+            {
+                InterlockedAdd(skinnedWorkRecordCounter[0], 1u, baseSlot);
             }
             else
             {
-                InterlockedMin(rigidWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+                InterlockedAdd(rigidWorkRecordCounter[0], 1u, baseSlot);
             }
-            ++droppedCount;
-            continue;
-        }
+            if (baseSlot >= queueDescriptors.workRecordCapacity)
+            {
+                if (rangeHasSkinnedCubes)
+                {
+                    InterlockedMin(skinnedWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+                }
+                else
+                {
+                    InterlockedMin(rigidWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
+                }
+                ++droppedCount;
+                continue;
+            }
 
-        uint visibleBase = 0u;
-        InterlockedAdd(visibleClusterCounter[0], 1u, visibleBase);
-        const uint visibleClusterIndex = phase1HWBase + visibleBase;
-        CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
-            visibleClusters,
-            visibleClusterIndex,
-            viewId,
-            instanceIndex,
-            pageLocalClusterIndex & 0x3FFFu,
-            localGroupId,
-            voxelSegment.pageIndex,
-            0u,
-            CLodVisibleClusterMarkVoxelPayload(CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX)));
-
-        CLodVoxelRasterWorkRecord record;
-        record.visibleClusterIndex = visibleClusterIndex;
-        record.instanceIndex = instanceIndex;
-        record.viewId = viewId;
-        record.localGroupId = localGroupId;
-        record.localPageIndex = voxelSegment.pageIndex;
-        record.pageLocalClusterIndex = pageLocalClusterIndex;
-        if (clusterHasSkinnedCubes)
-        {
-            skinnedWorkRecords[baseSlot] = record;
+            CLodVoxelRasterWorkRecord record;
+            record.visibleClusterIndex = visibleClusterIndex;
+            record.instanceIndex = instanceIndex;
+            record.viewId = viewId;
+            record.localGroupId = localGroupId;
+            record.localPageIndex = voxelSegment.pageIndex;
+            record.pageLocalClusterIndex = pageLocalClusterIndex;
+            record.firstCubeOffset = firstCubeOffset;
+            record.cubeCount = rangeCubeCount;
+            if (rangeHasSkinnedCubes)
+            {
+                skinnedWorkRecords[baseSlot] = record;
+            }
+            else
+            {
+                rigidWorkRecords[baseSlot] = record;
+            }
+            ++appendedCount;
         }
-        else
-        {
-            rigidWorkRecords[baseSlot] = record;
-        }
-        ++appendedCount;
     }
 
     if (appendedCount != 0u)
