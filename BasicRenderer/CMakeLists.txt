@@ -133,6 +133,7 @@ endif()
 find_package(slang CONFIG REQUIRED)
 
 option(BASICRENDERER_ENABLE_DIRECTSTORAGE "Enable DirectStorage integration when the SDK is available" ON)
+option(BASICRENDERER_ENABLE_NVPERF "Enable NVIDIA Nsight Perf SDK startup diagnostics and future profiling hooks" OFF)
 set(BASICRENDERER_DIRECTSTORAGE_SDK_ROOT "" CACHE PATH "Optional DirectStorage SDK root containing include/dstorage.h and a dstorage import library")
 
 set(BASICRENDERER_HAS_DIRECTSTORAGE FALSE)
@@ -1020,6 +1021,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
   $<$<CONFIG:Release>:BUILD_TYPE=BUILD_TYPE_RELEASE>
   $<$<CONFIG:RelWithDebInfo>:BUILD_TYPE=BUILD_TYPE_RELEASE_DEBUG>
     BASICRENDERER_HAS_DIRECTSTORAGE=$<IF:$<BOOL:${BASICRENDERER_HAS_DIRECTSTORAGE}>,1,0>
+    BASICRENDERER_ENABLE_NVPERF=$<IF:$<AND:$<BOOL:${BASICRENDERER_ENABLE_NVPERF}>,$<TARGET_EXISTS:NVPerf::Host>>,1,0>
 )
 target_compile_definitions(${BASICRENDERER_DEMO_TARGET} PRIVATE
   BUILD_TYPE_DEBUG=0
@@ -1122,6 +1124,16 @@ if(TARGET BasicRenderer_DirectStorage)
     target_link_libraries(${PROJECT_NAME} PRIVATE BasicRenderer_DirectStorage)
 endif()
 
+if(BASICRENDERER_ENABLE_NVPERF)
+    if(TARGET NVPerf::Host)
+        target_link_libraries(${PROJECT_NAME} PRIVATE NVPerf::Host)
+        target_link_libraries(${BASICRENDERER_DEMO_TARGET} PRIVATE NVPerf::Host)
+        message(STATUS "BasicRenderer: NVIDIA Nsight Perf SDK integration enabled")
+    else()
+        message(WARNING "BasicRenderer: BASICRENDERER_ENABLE_NVPERF was requested, but NVPerf::Host is unavailable")
+    endif()
+endif()
+
 target_link_libraries(${BASICRENDERER_DEMO_TARGET}
 PRIVATE
     ${PROJECT_NAME}
@@ -1148,6 +1160,17 @@ if(BASICRENDERER_DIRECTSTORAGE_CORE_DLL)
         "${DIRECTSTORAGE_CORE_DEST_FILE}"
         FALSE
         "directstoragecore_dll"
+    )
+endif()
+
+if(BASICRENDERER_ENABLE_NVPERF AND NVPERF_GRFX_HOST_DLL)
+    add_custom_command(TARGET ${BASICRENDERER_DEMO_TARGET} POST_BUILD
+        COMMENT "Copying NVIDIA Nsight Perf SDK host DLL"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${BASICRENDERER_DEMO_TARGET}>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${NVPERF_GRFX_HOST_DLL}"
+            "$<TARGET_FILE_DIR:${BASICRENDERER_DEMO_TARGET}>/nvperf_grfx_host.dll"
+        VERBATIM
     )
 endif()
 

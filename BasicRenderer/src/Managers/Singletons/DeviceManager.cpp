@@ -9,6 +9,7 @@
 #include <rhi_debug.h>
 
 #include "Managers/Singletons/SettingsManager.h"
+#include "Telemetry/NvPerfIntegration.h"
 
 namespace br {
 
@@ -40,6 +41,27 @@ bool IsStreamlineDisabledByEnvironment() {
     const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
     free(value);
     return disabled;
+}
+
+bool IsTruthyEnvironmentValue(const char* name) {
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+        return false;
+    }
+
+    std::string text(value);
+    free(value);
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text == "1" || text == "true" || text == "yes" || text == "on";
+}
+
+bool IsNvPerfCaptureRequestedByEnvironment() {
+    return IsTruthyEnvironmentValue("BASICRENDERER_NVPERF_CAPTURE");
+}
+
+bool IsNvPerfD3D12DebugLayerAllowedByEnvironment() {
+    return IsTruthyEnvironmentValue("BASICRENDERER_NVPERF_ALLOW_D3D12_DEBUG_LAYER");
 }
 
 bool IsDiagnosticsBuild() {
@@ -110,7 +132,11 @@ void DeviceManager::Initialize() {
         enableStreamline = false;
     }
 
-    const bool enableDebug = IsDiagnosticsBuild();
+    bool enableDebug = IsDiagnosticsBuild();
+    if (enableDebug && IsNvPerfCaptureRequestedByEnvironment() && !IsNvPerfD3D12DebugLayerAllowedByEnvironment()) {
+        spdlog::info("DeviceManager::Initialize disabling D3D12 debug layer for NVPerf capture");
+        enableDebug = false;
+    }
 
     bool enableRuntimeInstrumentation = false;
     bool enableSynchronousRecording = false;
@@ -177,6 +203,8 @@ void DeviceManager::Initialize() {
     m_graphicsQueue = m_device->GetQueue(rhi::QueueKind::Graphics);
     m_computeQueue = m_device->GetQueue(rhi::QueueKind::Compute);
     m_copyQueue = m_device->GetQueue(rhi::QueueKind::Copy);
+
+    telemetry::nvperf::LogStartupProbe(m_backend, m_device.Get(), m_graphicsQueue);
 
     rhi::DebugInstrumentationCapabilities instrumentationCapabilities{};
     if (rhi::IsOk(rhi::debug::GetInstrumentationCapabilities(m_device.Get(), instrumentationCapabilities))) {

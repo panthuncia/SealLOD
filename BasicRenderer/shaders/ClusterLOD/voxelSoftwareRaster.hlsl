@@ -771,12 +771,6 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 {
     const uint workIndex = groupId.x;
     const uint GI = groupThreadID.x;
-    StructuredBuffer<uint> counter = ResourceDescriptorHeap[CLOD_RASTER_VOXEL_WORK_COUNTER_DESCRIPTOR_INDEX];
-    const uint workCount = min(counter[0], CLOD_RASTER_VOXEL_WORK_CAPACITY);
-    if (workIndex >= workCount)
-    {
-        return;
-    }
 
     StructuredBuffer<CLodVoxelRasterWorkRecord> workRecords = ResourceDescriptorHeap[CLOD_RASTER_VOXEL_WORK_RECORDS_DESCRIPTOR_INDEX];
     const CLodVoxelRasterWorkRecord work = workRecords[workIndex];

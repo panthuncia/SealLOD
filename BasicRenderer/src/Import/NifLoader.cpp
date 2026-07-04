@@ -82,6 +82,19 @@ void AccumulateBRNiflyChildTimingStats(LoadTimingStats& stats, const BRNiflyClie
     stats.brniflyChildJsonDumpMs += brniflyTiming.childJsonDumpMs;
 }
 
+std::string ReadEnvironmentString(const char* name)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return {};
+    }
+
+    std::string result(value);
+    std::free(value);
+    return result;
+}
+
 std::string Hex64(std::uint64_t value)
 {
     std::ostringstream out;
@@ -269,7 +282,7 @@ std::optional<fs::path> FindObjectReyesConfigPath()
         return std::nullopt;
     };
 
-    if (const char* overridePath = std::getenv("SARP_OBJECT_REYES_CONFIG"); overridePath && overridePath[0] != '\0') {
+    if (const std::string overridePath = ReadEnvironmentString("SARP_OBJECT_REYES_CONFIG"); !overridePath.empty()) {
         fs::path candidate = fs::path(overridePath);
         if (candidate.is_relative()) {
             if (auto current = fs::current_path(ec); !ec) {
@@ -464,8 +477,8 @@ ObjectReyesConfig LoadObjectReyesConfig()
                     config.tripleTapStochasticTexturePaths);
             }
         }
-        if (const char* envStorage = std::getenv("SARP_OBJECT_REYES_HEIGHT_ATLAS_STORAGE");
-            envStorage && envStorage[0] != '\0') {
+        if (const std::string envStorage = ReadEnvironmentString("SARP_OBJECT_REYES_HEIGHT_ATLAS_STORAGE");
+            !envStorage.empty()) {
             config.heightAtlasStorage = NormalizeObjectReyesHeightAtlasStorageSetting(envStorage);
         }
         if (config.atlasBakeResolution < 256u || config.atlasBakeResolution > 8192u) {

@@ -31,6 +31,7 @@
 #include "Managers/Singletons/ResourceManager.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/RenderContext.h"
+#include "Telemetry/NvPerfIntegration.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "Render/PassBuilders.h"
 #include "Resources/Buffers/DynamicBuffer.h"
@@ -2261,7 +2262,8 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
             completedValue);
         uint32_t waitTimeouts = 0u;
         while (completedValue < targetValue) {
-            const rhi::Result waitResult = m_frameFence->HostWait(targetValue, 1000);
+            const bool nvperfCaptureServiced = br::telemetry::nvperf::ServicePendingGpuOperations();
+            const rhi::Result waitResult = m_frameFence->HostWait(targetValue, nvperfCaptureServiced ? 100 : 1000);
             completedValue = m_frameFence->GetCompletedValue();
             if (waitResult != rhi::Result::WaitTimeout) {
                 if (waitResult != rhi::Result::Ok) {
@@ -3239,13 +3241,25 @@ void Renderer::Render() {
             ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "before RenderGraph::Execute");
             spdlog::info("Renderer: frame {} entering RenderGraph::Execute", m_totalFramesRendered);
         }
+        const rhi::Backend activeBackend = deviceManager.GetBackend();
         try {
+            br::telemetry::nvperf::BeginFrameCapture(activeBackend, deviceManager.GetDevice(), graphicsQueue, m_totalFramesRendered);
+            passExecutionContext.beginGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName) {
+                br::telemetry::nvperf::BeginPassRange(activeBackend, commandList, queue, queueName, passName);
+            };
+            passExecutionContext.endGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue) {
+                br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
+            };
             currentRenderGraph->Execute(passExecutionContext); // Main render graph execution
+            passExecutionContext.beginGpuPassRange = {};
+            passExecutionContext.endGpuPassRange = {};
             if (renderGraphBatchTraceEnabled) {
                 spdlog::info("Renderer: frame {} completed RenderGraph::Execute", m_totalFramesRendered);
             }
         }
         catch (const std::exception& ex) {
+            passExecutionContext.beginGpuPassRange = {};
+            passExecutionContext.endGpuPassRange = {};
             spdlog::critical("Renderer: frame {} RenderGraph::Execute threw: {}", m_totalFramesRendered, ex.what());
             WriteRendererExceptionNote(
                 "RenderGraphExecute",
@@ -3281,6 +3295,7 @@ void Renderer::Render() {
     runCapturedStage("SignalFence", [&]() {
         ZoneScopedN("Renderer::Render::SignalFence");
         SignalFence(graphicsQueue, renderedFrameIndex);
+        br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
     });
 
     AdvanceFrameIndex();

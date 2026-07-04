@@ -1,0 +1,1420 @@
+#include "Telemetry/NvPerfIntegration.h"
+
+#include <spdlog/spdlog.h>
+
+#if BASICRENDERER_ENABLE_NVPERF
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include <nvperf_d3d12_host.h>
+#include <nvperf_d3d12_target.h>
+#include <nvperf_host.h>
+#include <nvperf_target.h>
+#include <nvperf_vulkan_host.h>
+#include <nvperf_vulkan_target.h>
+#include <rhi_interop_dx12.h>
+#include <rhi_interop_vulkan.h>
+#include <wrl/client.h>
+#endif
+
+namespace br::telemetry::nvperf {
+namespace {
+
+#if BASICRENDERER_ENABLE_NVPERF
+bool InitializeNvPerf();
+
+const char* StatusName(NVPA_Status status)
+{
+    const char* statusName = nullptr;
+    const char* comment = nullptr;
+    NVPW_NVPAStatusToString(status, &statusName, &comment);
+    return statusName ? statusName : "NVPA_STATUS_UNKNOWN";
+}
+
+bool LogIfFailed(NVPA_Status status, const char* operation)
+{
+    if (status == NVPA_STATUS_SUCCESS) {
+        return false;
+    }
+
+    spdlog::warn("NVPerf: {} failed with {}", operation, StatusName(status));
+    return true;
+}
+
+bool IsTruthyEnv(const char* name)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return false;
+    }
+
+    std::string text(value);
+    std::free(value);
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text == "1" || text == "true" || text == "yes" || text == "on";
+}
+
+std::string ReadEnvString(const char* name)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return {};
+    }
+
+    std::string result(value);
+    std::free(value);
+    return result;
+}
+
+std::string CsvEscape(std::string_view text)
+{
+    bool needsQuotes = false;
+    for (char ch : text) {
+        if (ch == '"' || ch == ',' || ch == '\n' || ch == '\r') {
+            needsQuotes = true;
+            break;
+        }
+    }
+    if (!needsQuotes) {
+        return std::string(text);
+    }
+
+    std::string escaped;
+    escaped.reserve(text.size() + 2);
+    escaped.push_back('"');
+    for (char ch : text) {
+        if (ch == '"') {
+            escaped.push_back('"');
+        }
+        escaped.push_back(ch);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+struct MetricSpec {
+    const char* name = nullptr;
+    uint8_t metricType = NVPW_METRIC_TYPE_COUNTER;
+    uint8_t rollupOp = NVPW_ROLLUP_OP_SUM;
+    uint16_t submetric = NVPW_SUBMETRIC_NONE;
+};
+
+struct SelectedMetric {
+    MetricSpec spec{};
+    NVPW_MetricEvalRequest request{};
+};
+
+constexpr std::array<MetricSpec, 4> kDefaultMetrics{ {
+    { "gpu__time_duration", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "sm__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "dram__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+} };
+
+struct QueueCapture {
+    rhi::Queue queue{};
+    ID3D12CommandQueue* nativeQueue = nullptr;
+    Microsoft::WRL::ComPtr<ID3D12Fence> syncFence;
+    HANDLE syncEvent = nullptr;
+    uint64_t syncFenceValue = 0;
+    std::string queueName;
+    std::vector<uint8_t> counterDataImage;
+    std::vector<uint8_t> counterDataScratch;
+    bool sessionActive = false;
+    bool passActive = false;
+    bool allPassesSubmitted = false;
+    bool decoded = false;
+    size_t nextPassIndex = 0;
+    uint16_t targetNestingLevel = 1;
+};
+
+struct D3D12PassProfiler {
+    bool envChecked = false;
+    bool requested = false;
+    bool initialized = false;
+    bool failed = false;
+    bool finished = false;
+    bool csvHeaderWritten = false;
+    uint64_t captureStartFrame = 0;
+    std::string chipName;
+    std::string controllerQueueName = "Graphics";
+    ID3D12Device* nativeDevice = nullptr;
+    std::filesystem::path csvPath;
+    std::vector<SelectedMetric> metrics;
+    std::vector<uint8_t> configImage;
+    std::vector<uint8_t> counterDataPrefix;
+    size_t configPassCount = 0;
+    size_t traceBufferSize = 0;
+    size_t maxRangesPerPass = 512;
+    size_t captureStartDelayFrames = 120;
+    size_t traceBufferCount = 0;
+    uint32_t syncTimeoutMs = 10000;
+    std::mutex mutex;
+    std::unordered_map<ID3D12CommandQueue*, QueueCapture> queues;
+    std::unordered_map<ID3D12GraphicsCommandList*, uint32_t> activeCommandListRanges;
+};
+
+D3D12PassProfiler& Profiler()
+{
+    static D3D12PassProfiler profiler;
+    return profiler;
+}
+
+size_t ReadEnvSizeT(const char* name, size_t fallback)
+{
+    const std::string text = ReadEnvString(name);
+    if (text.empty()) {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+    if (end == text.c_str()) {
+        spdlog::warn("NVPerf: could not parse {}='{}'; using {}", name, text, fallback);
+        return fallback;
+    }
+    return static_cast<size_t>(value);
+}
+
+void ReleaseQueueSyncObjects(QueueCapture& queueCapture)
+{
+    queueCapture.syncFence.Reset();
+    queueCapture.syncFenceValue = 0;
+    if (queueCapture.syncEvent) {
+        CloseHandle(queueCapture.syncEvent);
+        queueCapture.syncEvent = nullptr;
+    }
+}
+
+bool EnsureQueueSyncObjects(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
+{
+    if (queueCapture.syncFence && queueCapture.syncEvent) {
+        return true;
+    }
+
+    if (!profiler.nativeDevice) {
+        spdlog::warn("NVPerf: cannot create profiler synchronization fence without a D3D12 device");
+        return false;
+    }
+
+    HRESULT hr = profiler.nativeDevice->CreateFence(
+        0,
+        D3D12_FENCE_FLAG_NONE,
+        IID_PPV_ARGS(queueCapture.syncFence.GetAddressOf()));
+    if (FAILED(hr)) {
+        spdlog::warn("NVPerf: failed to create profiler synchronization fence hr=0x{:08x}", static_cast<unsigned int>(hr));
+        return false;
+    }
+
+    queueCapture.syncEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!queueCapture.syncEvent) {
+        spdlog::warn("NVPerf: failed to create profiler synchronization event error={}", GetLastError());
+        queueCapture.syncFence.Reset();
+        return false;
+    }
+
+    return true;
+}
+
+bool SynchronizeQueueAfterProfilerPass(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
+{
+    if (!EnsureQueueSyncObjects(profiler, queueCapture)) {
+        return false;
+    }
+
+    const uint64_t fenceValue = ++queueCapture.syncFenceValue;
+    HRESULT hr = queueCapture.nativeQueue->Signal(queueCapture.syncFence.Get(), fenceValue);
+    if (FAILED(hr)) {
+        spdlog::warn(
+            "NVPerf: failed to signal profiler synchronization fence for queue '{}' value={} hr=0x{:08x}",
+            queueCapture.queueName,
+            fenceValue,
+            static_cast<unsigned int>(hr));
+        return false;
+    }
+
+    if (queueCapture.syncFence->GetCompletedValue() >= fenceValue) {
+        return true;
+    }
+
+    hr = queueCapture.syncFence->SetEventOnCompletion(fenceValue, queueCapture.syncEvent);
+    if (FAILED(hr)) {
+        spdlog::warn(
+            "NVPerf: failed to arm profiler synchronization fence for queue '{}' value={} hr=0x{:08x}",
+            queueCapture.queueName,
+            fenceValue,
+            static_cast<unsigned int>(hr));
+        return false;
+    }
+
+    const DWORD waitResult = WaitForSingleObject(queueCapture.syncEvent, profiler.syncTimeoutMs);
+    if (waitResult != WAIT_OBJECT_0) {
+        spdlog::warn(
+            "NVPerf: profiler synchronization timed out for queue '{}' value={} completed={} timeoutMs={} waitResult={}",
+            queueCapture.queueName,
+            fenceValue,
+            queueCapture.syncFence->GetCompletedValue(),
+            profiler.syncTimeoutMs,
+            waitResult);
+        return false;
+    }
+
+    spdlog::debug(
+        "NVPerf: synchronized profiler pass for queue '{}' value={}",
+        queueCapture.queueName,
+        fenceValue);
+    return true;
+}
+
+void ServicePendingGpuOperationsForQueue(QueueCapture& queueCapture, const char* reason, uint32_t numOperations, uint32_t timeoutMs)
+{
+    NVPW_D3D12_Queue_ServicePendingGpuOperations_Params service{ NVPW_D3D12_Queue_ServicePendingGpuOperations_Params_STRUCT_SIZE };
+    service.pCommandQueue = queueCapture.nativeQueue;
+    service.numOperations = numOperations;
+    service.timeout = timeoutMs;
+    const NVPA_Status status = NVPW_D3D12_Queue_ServicePendingGpuOperations(&service);
+    if (status != NVPA_STATUS_SUCCESS) {
+        spdlog::debug(
+            "NVPerf: service pending GPU operations for queue '{}' reason='{}' returned {}",
+            queueCapture.queueName,
+            reason,
+            StatusName(status));
+        return;
+    }
+    if (service.timeoutExpired) {
+        spdlog::debug(
+            "NVPerf: service pending GPU operations for queue '{}' reason='{}' timed out without blocking",
+            queueCapture.queueName,
+            reason);
+    }
+}
+
+std::optional<size_t> FindMetricIndex(NVPW_MetricsEvaluator* evaluator, const MetricSpec& spec)
+{
+    NVPW_MetricsEvaluator_GetMetricNames_Params names{ NVPW_MetricsEvaluator_GetMetricNames_Params_STRUCT_SIZE };
+    names.pMetricsEvaluator = evaluator;
+    names.metricType = spec.metricType;
+    if (LogIfFailed(NVPW_MetricsEvaluator_GetMetricNames(&names), "NVPW_MetricsEvaluator_GetMetricNames")) {
+        return std::nullopt;
+    }
+
+    for (size_t i = 0; i < names.numMetrics; ++i) {
+        const char* metricName = names.pMetricNames + names.pMetricNameBeginIndices[i];
+        if (metricName && std::strcmp(metricName, spec.name) == 0) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+bool BuildD3D12ProfilerConfig(D3D12PassProfiler& profiler, const char* chipName, const uint8_t* counterAvailability, size_t counterAvailabilitySize)
+{
+    profiler.metrics.clear();
+    profiler.configImage.clear();
+    profiler.counterDataPrefix.clear();
+
+    NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params scratchParams{ NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params_STRUCT_SIZE };
+    scratchParams.pChipName = chipName;
+    if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize(&scratchParams), "NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize")) {
+        return false;
+    }
+
+    std::vector<uint8_t> evaluatorScratch(scratchParams.scratchBufferSize);
+    NVPW_D3D12_MetricsEvaluator_Initialize_Params evalInit{ NVPW_D3D12_MetricsEvaluator_Initialize_Params_STRUCT_SIZE };
+    evalInit.pScratchBuffer = evaluatorScratch.data();
+    evalInit.scratchBufferSize = evaluatorScratch.size();
+    evalInit.pChipName = chipName;
+    if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_Initialize(&evalInit), "NVPW_D3D12_MetricsEvaluator_Initialize")) {
+        return false;
+    }
+    NVPW_MetricsEvaluator* evaluator = evalInit.pMetricsEvaluator;
+
+    std::vector<NVPW_RawCounterRequest> rawCounterRequests;
+    std::unordered_set<std::string> rawCounterNames;
+
+    for (const MetricSpec& spec : kDefaultMetrics) {
+        const auto metricIndex = FindMetricIndex(evaluator, spec);
+        if (!metricIndex) {
+            spdlog::warn("NVPerf: metric '{}' is unavailable on chip '{}'", spec.name, chipName);
+            continue;
+        }
+
+        SelectedMetric metric{};
+        metric.spec = spec;
+        metric.request.metricIndex = *metricIndex;
+        metric.request.metricType = spec.metricType;
+        metric.request.rollupOp = spec.rollupOp;
+        metric.request.submetric = spec.submetric;
+
+        NVPW_MetricsEvaluator_GetMetricRawDependencies_Params deps{ NVPW_MetricsEvaluator_GetMetricRawDependencies_Params_STRUCT_SIZE };
+        deps.pMetricsEvaluator = evaluator;
+        deps.pMetricEvalRequests = &metric.request;
+        deps.numMetricEvalRequests = 1;
+        deps.metricEvalRequestStructSize = NVPW_MetricEvalRequest_STRUCT_SIZE;
+        deps.metricEvalRequestStrideSize = sizeof(NVPW_MetricEvalRequest);
+        if (LogIfFailed(NVPW_MetricsEvaluator_GetMetricRawDependencies(&deps), "NVPW_MetricsEvaluator_GetMetricRawDependencies(count)")) {
+            continue;
+        }
+
+        std::vector<const char*> dependencies(deps.numRawDependencies);
+        deps.ppRawDependencies = dependencies.data();
+        deps.numRawDependencies = dependencies.size();
+        if (LogIfFailed(NVPW_MetricsEvaluator_GetMetricRawDependencies(&deps), "NVPW_MetricsEvaluator_GetMetricRawDependencies(values)")) {
+            continue;
+        }
+
+        for (const char* dependency : dependencies) {
+            if (!dependency || !rawCounterNames.insert(dependency).second) {
+                continue;
+            }
+        }
+
+        profiler.metrics.push_back(metric);
+    }
+
+    NVPW_MetricsEvaluator_Destroy_Params evalDestroy{ NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
+    evalDestroy.pMetricsEvaluator = evaluator;
+    (void)NVPW_MetricsEvaluator_Destroy(&evalDestroy);
+
+    if (profiler.metrics.empty() || rawCounterRequests.empty()) {
+        rawCounterRequests.reserve(rawCounterNames.size());
+        for (const std::string& rawCounterName : rawCounterNames) {
+            NVPW_RawCounterRequest request{};
+            request.pRawCounterName = rawCounterName.c_str();
+            request.domain = NVPW_RAW_COUNTER_DOMAIN_INVALID;
+            request.keepInstances = false;
+            rawCounterRequests.push_back(request);
+        }
+    }
+
+    if (profiler.metrics.empty() || rawCounterRequests.empty()) {
+        spdlog::warn("NVPerf: no requested pass metrics could be configured");
+        return false;
+    }
+
+    NVPW_D3D12_RawCounterConfig_Create_Params rawConfigCreate{ NVPW_D3D12_RawCounterConfig_Create_Params_STRUCT_SIZE };
+    rawConfigCreate.pChipName = chipName;
+    rawConfigCreate.activityKind = NVPA_ACTIVITY_KIND_PROFILER;
+    if (LogIfFailed(NVPW_D3D12_RawCounterConfig_Create(&rawConfigCreate), "NVPW_D3D12_RawCounterConfig_Create")) {
+        return false;
+    }
+    NVPW_RawCounterConfig* rawConfig = rawConfigCreate.pRawCounterConfig;
+
+    NVPW_RawCounterConfig_SetCounterAvailability_Params availability{ NVPW_RawCounterConfig_SetCounterAvailability_Params_STRUCT_SIZE };
+    availability.pRawCounterConfig = rawConfig;
+    availability.pCounterAvailabilityImage = counterAvailability;
+    if (counterAvailability && counterAvailabilitySize > 0) {
+        (void)NVPW_RawCounterConfig_SetCounterAvailability(&availability);
+    }
+
+    NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains_Params domainCount{ NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains_Params_STRUCT_SIZE };
+    domainCount.pRawCounterConfig = rawConfig;
+    if (LogIfFailed(NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains(&domainCount), "NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains(count)")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+    std::vector<NVPW_RawCounterDomain> domains(domainCount.numAvailableDomains);
+    NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains_Params domainValues{ NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains_Params_STRUCT_SIZE };
+    domainValues.pRawCounterConfig = rawConfig;
+    domainValues.numAvailableDomains = domains.size();
+    domainValues.pAvailableDomains = domains.data();
+    if (LogIfFailed(NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains(&domainValues), "NVPW_RawCounterConfig_GetAllAvailableRawCounterDomains(values)")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+    domains.resize(domainValues.numAvailableDomains);
+    NVPW_RawCounterConfig_BeginPassGroup_Params beginPassGroup{ NVPW_RawCounterConfig_BeginPassGroup_Params_STRUCT_SIZE };
+    beginPassGroup.pRawCounterConfig = rawConfig;
+    beginPassGroup.numDomains = domains.size();
+    beginPassGroup.pDomains = domains.data();
+    if (LogIfFailed(NVPW_RawCounterConfig_BeginPassGroup(&beginPassGroup), "NVPW_RawCounterConfig_BeginPassGroup")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_RawCounterConfig_AddRawCounters_Params addRaw{ NVPW_RawCounterConfig_AddRawCounters_Params_STRUCT_SIZE };
+    addRaw.pRawCounterConfig = rawConfig;
+    addRaw.rawCounterRequestStructSize = NVPW_RAW_COUNTER_REQUEST_STRUCT_SIZE;
+    addRaw.numRawCounterRequests = rawCounterRequests.size();
+    addRaw.pRawCounterRequests = rawCounterRequests.data();
+    if (LogIfFailed(NVPW_RawCounterConfig_AddRawCounters(&addRaw), "NVPW_RawCounterConfig_AddRawCounters")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_RawCounterConfig_EndPassGroup_Params endPassGroup{ NVPW_RawCounterConfig_EndPassGroup_Params_STRUCT_SIZE };
+    endPassGroup.pRawCounterConfig = rawConfig;
+    endPassGroup.numDomains = domains.size();
+    endPassGroup.pDomains = domains.data();
+    if (LogIfFailed(NVPW_RawCounterConfig_EndPassGroup(&endPassGroup), "NVPW_RawCounterConfig_EndPassGroup")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_RawCounterConfig_GenerateConfigImage_Params generate{ NVPW_RawCounterConfig_GenerateConfigImage_Params_STRUCT_SIZE };
+    generate.pRawCounterConfig = rawConfig;
+    if (LogIfFailed(NVPW_RawCounterConfig_GenerateConfigImage(&generate), "NVPW_RawCounterConfig_GenerateConfigImage")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_RawCounterConfig_GetConfigImage_Params configImage{ NVPW_RawCounterConfig_GetConfigImage_Params_STRUCT_SIZE };
+    configImage.pRawCounterConfig = rawConfig;
+    if (LogIfFailed(NVPW_RawCounterConfig_GetConfigImage(&configImage), "NVPW_RawCounterConfig_GetConfigImage(size)")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+    profiler.configImage.resize(configImage.bytesCopied);
+    configImage.bytesAllocated = profiler.configImage.size();
+    configImage.pBuffer = profiler.configImage.data();
+    if (LogIfFailed(NVPW_RawCounterConfig_GetConfigImage(&configImage), "NVPW_RawCounterConfig_GetConfigImage(data)")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_RawCounterConfig_GetNumPasses_Params passes{ NVPW_RawCounterConfig_GetNumPasses_Params_STRUCT_SIZE };
+    passes.pRawCounterConfig = rawConfig;
+    if (!LogIfFailed(NVPW_RawCounterConfig_GetNumPasses(&passes), "NVPW_RawCounterConfig_GetNumPasses")) {
+        profiler.configPassCount = passes.numPasses;
+    }
+
+    NVPW_CounterDataBuilder_Create_Params builderCreate{ NVPW_CounterDataBuilder_Create_Params_STRUCT_SIZE };
+    builderCreate.pChipName = chipName;
+    if (LogIfFailed(NVPW_CounterDataBuilder_Create(&builderCreate), "NVPW_CounterDataBuilder_Create")) {
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+    NVPA_CounterDataBuilder* builder = builderCreate.pCounterDataBuilder;
+
+    NVPW_CounterDataBuilder_AddRawCounters_Params builderAdd{ NVPW_CounterDataBuilder_AddRawCounters_Params_STRUCT_SIZE };
+    builderAdd.pCounterDataBuilder = builder;
+    builderAdd.rawCounterRequestStructSize = NVPW_RAW_COUNTER_REQUEST_STRUCT_SIZE;
+    builderAdd.numRawCounterRequests = rawCounterRequests.size();
+    builderAdd.pRawCounterRequests = rawCounterRequests.data();
+    if (LogIfFailed(NVPW_CounterDataBuilder_AddRawCounters(&builderAdd), "NVPW_CounterDataBuilder_AddRawCounters")) {
+        NVPW_CounterDataBuilder_Destroy_Params destroyBuilder{ NVPW_CounterDataBuilder_Destroy_Params_STRUCT_SIZE };
+        destroyBuilder.pCounterDataBuilder = builder;
+        (void)NVPW_CounterDataBuilder_Destroy(&destroyBuilder);
+        NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+        destroy.pRawCounterConfig = rawConfig;
+        (void)NVPW_RawCounterConfig_Destroy(&destroy);
+        return false;
+    }
+
+    NVPW_CounterDataBuilder_GetCounterDataPrefix_Params prefix{ NVPW_CounterDataBuilder_GetCounterDataPrefix_Params_STRUCT_SIZE };
+    prefix.pCounterDataBuilder = builder;
+    if (LogIfFailed(NVPW_CounterDataBuilder_GetCounterDataPrefix(&prefix), "NVPW_CounterDataBuilder_GetCounterDataPrefix(size)")) {
+        return false;
+    }
+    profiler.counterDataPrefix.resize(prefix.bytesCopied);
+    prefix.bytesAllocated = profiler.counterDataPrefix.size();
+    prefix.pBuffer = profiler.counterDataPrefix.data();
+    if (LogIfFailed(NVPW_CounterDataBuilder_GetCounterDataPrefix(&prefix), "NVPW_CounterDataBuilder_GetCounterDataPrefix(data)")) {
+        return false;
+    }
+
+    NVPW_CounterDataBuilder_Destroy_Params destroyBuilder{ NVPW_CounterDataBuilder_Destroy_Params_STRUCT_SIZE };
+    destroyBuilder.pCounterDataBuilder = builder;
+    (void)NVPW_CounterDataBuilder_Destroy(&destroyBuilder);
+    NVPW_RawCounterConfig_Destroy_Params destroy{ NVPW_RawCounterConfig_Destroy_Params_STRUCT_SIZE };
+    destroy.pRawCounterConfig = rawConfig;
+    (void)NVPW_RawCounterConfig_Destroy(&destroy);
+
+    NVPW_D3D12_Profiler_CalcTraceBufferSize_Params traceSize{ NVPW_D3D12_Profiler_CalcTraceBufferSize_Params_STRUCT_SIZE };
+    traceSize.maxRangesPerPass = profiler.maxRangesPerPass;
+    traceSize.avgRangeNameLength = 96;
+    if (LogIfFailed(NVPW_D3D12_Profiler_CalcTraceBufferSize(&traceSize), "NVPW_D3D12_Profiler_CalcTraceBufferSize")) {
+        return false;
+    }
+    profiler.traceBufferSize = traceSize.traceBufferSize;
+
+    spdlog::info(
+        "NVPerf: pass capture configured chip='{}' metrics={} rawCounters={} configPasses={} maxRangesPerPass={}",
+        chipName,
+        profiler.metrics.size(),
+        rawCounterRequests.size(),
+        profiler.configPassCount,
+        profiler.maxRangesPerPass);
+    return true;
+}
+
+bool InitializeQueueCapture(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
+{
+    NVPW_D3D12_Profiler_CounterDataImageOptions options{ NVPW_D3D12_Profiler_CounterDataImageOptions_STRUCT_SIZE };
+    options.pCounterDataPrefix = profiler.counterDataPrefix.data();
+    options.counterDataPrefixSize = profiler.counterDataPrefix.size();
+    options.maxNumRanges = static_cast<uint32_t>(profiler.maxRangesPerPass);
+    options.maxNumRangeTreeNodes = static_cast<uint32_t>(profiler.maxRangesPerPass);
+    options.maxRangeNameLength = 128;
+
+    NVPW_D3D12_Profiler_CounterDataImage_CalculateSize_Params imageSize{ NVPW_D3D12_Profiler_CounterDataImage_CalculateSize_Params_STRUCT_SIZE };
+    imageSize.counterDataImageOptionsSize = NVPW_D3D12_Profiler_CounterDataImageOptions_STRUCT_SIZE;
+    imageSize.pOptions = &options;
+    if (LogIfFailed(NVPW_D3D12_Profiler_CounterDataImage_CalculateSize(&imageSize), "NVPW_D3D12_Profiler_CounterDataImage_CalculateSize")) {
+        return false;
+    }
+
+    queueCapture.counterDataImage.assign(imageSize.counterDataImageSize, 0);
+    NVPW_D3D12_Profiler_CounterDataImage_Initialize_Params imageInit{ NVPW_D3D12_Profiler_CounterDataImage_Initialize_Params_STRUCT_SIZE };
+    imageInit.counterDataImageOptionsSize = NVPW_D3D12_Profiler_CounterDataImageOptions_STRUCT_SIZE;
+    imageInit.pOptions = &options;
+    imageInit.counterDataImageSize = queueCapture.counterDataImage.size();
+    imageInit.pCounterDataImage = queueCapture.counterDataImage.data();
+    if (LogIfFailed(NVPW_D3D12_Profiler_CounterDataImage_Initialize(&imageInit), "NVPW_D3D12_Profiler_CounterDataImage_Initialize")) {
+        return false;
+    }
+
+    NVPW_D3D12_Profiler_CounterDataImage_CalculateScratchBufferSize_Params scratchSize{ NVPW_D3D12_Profiler_CounterDataImage_CalculateScratchBufferSize_Params_STRUCT_SIZE };
+    scratchSize.counterDataImageSize = queueCapture.counterDataImage.size();
+    scratchSize.pCounterDataImage = queueCapture.counterDataImage.data();
+    if (LogIfFailed(NVPW_D3D12_Profiler_CounterDataImage_CalculateScratchBufferSize(&scratchSize), "NVPW_D3D12_Profiler_CounterDataImage_CalculateScratchBufferSize")) {
+        return false;
+    }
+
+    queueCapture.counterDataScratch.assign(scratchSize.counterDataScratchBufferSize, 0);
+    NVPW_D3D12_Profiler_CounterDataImage_InitializeScratchBuffer_Params scratchInit{ NVPW_D3D12_Profiler_CounterDataImage_InitializeScratchBuffer_Params_STRUCT_SIZE };
+    scratchInit.counterDataImageSize = queueCapture.counterDataImage.size();
+    scratchInit.pCounterDataImage = queueCapture.counterDataImage.data();
+    scratchInit.counterDataScratchBufferSize = queueCapture.counterDataScratch.size();
+    scratchInit.pCounterDataScratchBuffer = queueCapture.counterDataScratch.data();
+    if (LogIfFailed(NVPW_D3D12_Profiler_CounterDataImage_InitializeScratchBuffer(&scratchInit), "NVPW_D3D12_Profiler_CounterDataImage_InitializeScratchBuffer")) {
+        return false;
+    }
+
+    NVPW_D3D12_Profiler_Queue_BeginSession_Params beginSession{ NVPW_D3D12_Profiler_Queue_BeginSession_Params_STRUCT_SIZE };
+    beginSession.pCommandQueue = queueCapture.nativeQueue;
+    beginSession.numTraceBuffers = profiler.traceBufferCount;
+    beginSession.traceBufferSize = profiler.traceBufferSize;
+    beginSession.maxRangesPerPass = profiler.maxRangesPerPass;
+    beginSession.maxLaunchesPerPass = 0;
+    if (LogIfFailed(NVPW_D3D12_Profiler_Queue_BeginSession(&beginSession), "NVPW_D3D12_Profiler_Queue_BeginSession")) {
+        return false;
+    }
+
+    queueCapture.sessionActive = true;
+    spdlog::info("NVPerf: pass capture session began for queue '{}'", queueCapture.queueName);
+    return true;
+}
+
+bool EnsureQueuePassActive(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
+{
+    if (queueCapture.allPassesSubmitted || queueCapture.decoded) {
+        return false;
+    }
+
+    if (!queueCapture.sessionActive && !InitializeQueueCapture(profiler, queueCapture)) {
+        profiler.failed = true;
+        return false;
+    }
+
+    if (queueCapture.passActive) {
+        return true;
+    }
+
+    NVPW_D3D12_Profiler_Queue_SetConfig_Params setConfig{ NVPW_D3D12_Profiler_Queue_SetConfig_Params_STRUCT_SIZE };
+    setConfig.pCommandQueue = queueCapture.nativeQueue;
+    setConfig.pConfig = profiler.configImage.data();
+    setConfig.configSize = profiler.configImage.size();
+    setConfig.minNestingLevel = 1;
+    setConfig.numNestingLevels = 1;
+    setConfig.passIndex = queueCapture.nextPassIndex;
+    setConfig.targetNestingLevel = queueCapture.targetNestingLevel;
+    spdlog::info(
+        "NVPerf: queue '{}' setting profiler config passIndex={} targetNestingLevel={}",
+        queueCapture.queueName,
+        setConfig.passIndex,
+        setConfig.targetNestingLevel);
+    if (LogIfFailed(NVPW_D3D12_Profiler_Queue_SetConfig(&setConfig), "NVPW_D3D12_Profiler_Queue_SetConfig")) {
+        profiler.failed = true;
+        return false;
+    }
+
+    NVPW_D3D12_Profiler_Queue_BeginPass_Params beginPass{ NVPW_D3D12_Profiler_Queue_BeginPass_Params_STRUCT_SIZE };
+    beginPass.pCommandQueue = queueCapture.nativeQueue;
+    spdlog::info("NVPerf: queue '{}' beginning profiler pass", queueCapture.queueName);
+    if (LogIfFailed(NVPW_D3D12_Profiler_Queue_BeginPass(&beginPass), "NVPW_D3D12_Profiler_Queue_BeginPass")) {
+        profiler.failed = true;
+        return false;
+    }
+
+    queueCapture.passActive = true;
+    return true;
+}
+
+std::string GetRangeName(const std::vector<uint8_t>& counterDataImage, size_t rangeIndex)
+{
+    NVPW_Profiler_CounterData_GetRangeDescriptions_Params desc{ NVPW_Profiler_CounterData_GetRangeDescriptions_Params_STRUCT_SIZE };
+    desc.pCounterDataImage = counterDataImage.data();
+    desc.rangeIndex = rangeIndex;
+    if (LogIfFailed(NVPW_Profiler_CounterData_GetRangeDescriptions(&desc), "NVPW_Profiler_CounterData_GetRangeDescriptions(count)")) {
+        return {};
+    }
+    std::vector<const char*> descriptions(desc.numDescriptions);
+    desc.ppDescriptions = descriptions.data();
+    desc.numDescriptions = descriptions.size();
+    if (LogIfFailed(NVPW_Profiler_CounterData_GetRangeDescriptions(&desc), "NVPW_Profiler_CounterData_GetRangeDescriptions(values)")) {
+        return {};
+    }
+    if (descriptions.empty() || descriptions.back() == nullptr) {
+        return {};
+    }
+    return descriptions.back();
+}
+
+bool AppendQueueCsvRows(D3D12PassProfiler& profiler, const QueueCapture& queueCapture)
+{
+    NVPW_CounterData_GetNumRanges_Params numRanges{ NVPW_CounterData_GetNumRanges_Params_STRUCT_SIZE };
+    numRanges.pCounterDataImage = queueCapture.counterDataImage.data();
+    if (LogIfFailed(NVPW_CounterData_GetNumRanges(&numRanges), "NVPW_CounterData_GetNumRanges")) {
+        return false;
+    }
+
+    if (numRanges.numRanges == 0) {
+        spdlog::warn("NVPerf: no ranges were collected for queue '{}'", queueCapture.queueName);
+        return true;
+    }
+
+    NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params scratchParams{ NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params_STRUCT_SIZE };
+    scratchParams.pChipName = profiler.chipName.c_str();
+    if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize(&scratchParams), "NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize(csv)")) {
+        return false;
+    }
+    std::vector<uint8_t> scratch(scratchParams.scratchBufferSize);
+
+    NVPW_D3D12_MetricsEvaluator_Initialize_Params evalInit{ NVPW_D3D12_MetricsEvaluator_Initialize_Params_STRUCT_SIZE };
+    evalInit.pScratchBuffer = scratch.data();
+    evalInit.scratchBufferSize = scratch.size();
+    evalInit.pCounterDataImage = queueCapture.counterDataImage.data();
+    evalInit.counterDataImageSize = queueCapture.counterDataImage.size();
+    if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_Initialize(&evalInit), "NVPW_D3D12_MetricsEvaluator_Initialize(csv)")) {
+        return false;
+    }
+    NVPW_MetricsEvaluator* evaluator = evalInit.pMetricsEvaluator;
+
+    const std::filesystem::path parentPath = profiler.csvPath.parent_path();
+    if (!parentPath.empty()) {
+        std::filesystem::create_directories(parentPath);
+    }
+    const bool writeHeader = !std::filesystem::exists(profiler.csvPath) || std::filesystem::file_size(profiler.csvPath) == 0;
+    std::ofstream out(profiler.csvPath, std::ios::app);
+    if (!out) {
+        spdlog::warn("NVPerf: failed to open CSV '{}'", profiler.csvPath.string());
+        return false;
+    }
+
+    if (writeHeader) {
+        out << "capture_start_frame,queue,range_index,pass_name";
+        for (const auto& metric : profiler.metrics) {
+            out << ',' << CsvEscape(metric.spec.name);
+        }
+        out << '\n';
+    }
+
+    std::vector<NVPW_MetricEvalRequest> requests;
+    requests.reserve(profiler.metrics.size());
+    for (const auto& metric : profiler.metrics) {
+        requests.push_back(metric.request);
+    }
+    std::vector<double> values(requests.size(), 0.0);
+
+    for (size_t rangeIndex = 0; rangeIndex < numRanges.numRanges; ++rangeIndex) {
+        std::fill(values.begin(), values.end(), 0.0);
+        NVPW_MetricsEvaluator_EvaluateToGpuValues_Params eval{ NVPW_MetricsEvaluator_EvaluateToGpuValues_Params_STRUCT_SIZE };
+        eval.pMetricsEvaluator = evaluator;
+        eval.pMetricEvalRequests = requests.data();
+        eval.numMetricEvalRequests = requests.size();
+        eval.metricEvalRequestStructSize = NVPW_MetricEvalRequest_STRUCT_SIZE;
+        eval.metricEvalRequestStrideSize = sizeof(NVPW_MetricEvalRequest);
+        eval.pCounterDataImage = queueCapture.counterDataImage.data();
+        eval.counterDataImageSize = queueCapture.counterDataImage.size();
+        eval.rangeIndex = rangeIndex;
+        eval.pMetricValues = values.data();
+        if (LogIfFailed(NVPW_MetricsEvaluator_EvaluateToGpuValues(&eval), "NVPW_MetricsEvaluator_EvaluateToGpuValues")) {
+            continue;
+        }
+
+        const std::string rangeName = GetRangeName(queueCapture.counterDataImage, rangeIndex);
+        out << profiler.captureStartFrame
+            << ',' << CsvEscape(queueCapture.queueName)
+            << ',' << rangeIndex
+            << ',' << CsvEscape(rangeName.empty() ? "<unnamed>" : rangeName);
+        for (double value : values) {
+            out << ',' << value;
+        }
+        out << '\n';
+    }
+
+    NVPW_MetricsEvaluator_Destroy_Params destroy{ NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
+    destroy.pMetricsEvaluator = evaluator;
+    (void)NVPW_MetricsEvaluator_Destroy(&destroy);
+
+    spdlog::info(
+        "NVPerf: wrote {} pass metric rows for queue '{}' to '{}'",
+        numRanges.numRanges,
+        queueCapture.queueName,
+        profiler.csvPath.string());
+    return true;
+}
+
+bool DecodeQueueCapture(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
+{
+    size_t decodeIterations = 0;
+    for (;;) {
+        NVPW_D3D12_Profiler_Queue_DecodeCounters_Params decode{ NVPW_D3D12_Profiler_Queue_DecodeCounters_Params_STRUCT_SIZE };
+        decode.pCommandQueue = queueCapture.nativeQueue;
+        decode.counterDataImageSize = queueCapture.counterDataImage.size();
+        decode.pCounterDataImage = queueCapture.counterDataImage.data();
+        decode.counterDataScratchBufferSize = queueCapture.counterDataScratch.size();
+        decode.pCounterDataScratchBuffer = queueCapture.counterDataScratch.data();
+        if (LogIfFailed(NVPW_D3D12_Profiler_Queue_DecodeCounters(&decode), "NVPW_D3D12_Profiler_Queue_DecodeCounters")) {
+            return false;
+        }
+
+        if (decode.numRangesDropped > 0 || decode.numTraceBytesDropped > 0) {
+            spdlog::warn(
+                "NVPerf: queue '{}' decode dropped ranges={} traceBytes={}",
+                queueCapture.queueName,
+                decode.numRangesDropped,
+                decode.numTraceBytesDropped);
+        }
+        if (decode.allPassesCollected) {
+            break;
+        }
+        if (decode.onePassCollected) {
+            spdlog::debug(
+                "NVPerf: queue '{}' decoded profiler pass {}",
+                queueCapture.queueName,
+                decode.passIndexDecoded);
+        }
+        else {
+            ServicePendingGpuOperationsForQueue(queueCapture, "Decode", 16, 10);
+        }
+        if (++decodeIterations > 2048) {
+            spdlog::warn("NVPerf: queue '{}' decode exceeded iteration guard", queueCapture.queueName);
+            return false;
+        }
+    }
+
+    if (!AppendQueueCsvRows(profiler, queueCapture)) {
+        return false;
+    }
+    queueCapture.decoded = true;
+    return true;
+}
+
+bool PrepareProfilerIfRequested(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue, uint64_t frameNumber)
+{
+    auto& profiler = Profiler();
+    if (!profiler.envChecked) {
+        profiler.envChecked = true;
+        profiler.requested = IsTruthyEnv("BASICRENDERER_NVPERF_CAPTURE");
+        std::string queueOverride = ReadEnvString("BASICRENDERER_NVPERF_QUEUE");
+        std::transform(queueOverride.begin(), queueOverride.end(), queueOverride.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (queueOverride == "compute" || queueOverride == "async_compute" || queueOverride == "async-compute") {
+            profiler.controllerQueueName = "Compute";
+        }
+        else if (!queueOverride.empty() && queueOverride != "graphics" && queueOverride != "direct") {
+            spdlog::warn("NVPerf: unrecognized BASICRENDERER_NVPERF_QUEUE='{}'; using Graphics", queueOverride);
+        }
+        profiler.captureStartDelayFrames = ReadEnvSizeT("BASICRENDERER_NVPERF_START_FRAME", profiler.captureStartDelayFrames);
+        profiler.traceBufferCount = ReadEnvSizeT("BASICRENDERER_NVPERF_TRACE_BUFFERS", 5);
+        profiler.syncTimeoutMs = static_cast<uint32_t>(ReadEnvSizeT("BASICRENDERER_NVPERF_SYNC_TIMEOUT_MS", profiler.syncTimeoutMs));
+        const std::string csvOverride = ReadEnvString("BASICRENDERER_NVPERF_CSV");
+        profiler.csvPath = csvOverride.empty()
+            ? std::filesystem::path("logs") / "nvperf_pass_metrics.csv"
+            : std::filesystem::path(csvOverride);
+    }
+
+    if (!profiler.requested || profiler.failed || profiler.finished) {
+        return false;
+    }
+    if (frameNumber < profiler.captureStartDelayFrames) {
+        return false;
+    }
+    if (backend != rhi::Backend::D3D12) {
+        if (!profiler.failed) {
+            spdlog::warn("NVPerf: pass metric capture is currently implemented for D3D12 only");
+        }
+        profiler.failed = true;
+        return false;
+    }
+    if (profiler.initialized) {
+        return true;
+    }
+    if (!InitializeNvPerf()) {
+        profiler.failed = true;
+        return false;
+    }
+
+    ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
+    ID3D12CommandQueue* nativeGraphicsQueue = rhi::dx12::get_queue(graphicsQueue);
+    if (!nativeDevice || !nativeGraphicsQueue) {
+        spdlog::warn("NVPerf: pass metric capture could not get native D3D12 device/queue");
+        profiler.failed = true;
+        return false;
+    }
+    profiler.nativeDevice = nativeDevice;
+
+    NVPW_D3D12_LoadDriver_Params loadParams{ NVPW_D3D12_LoadDriver_Params_STRUCT_SIZE };
+    if (LogIfFailed(NVPW_D3D12_LoadDriver(&loadParams), "NVPW_D3D12_LoadDriver(pass capture)")) {
+        profiler.failed = true;
+        return false;
+    }
+
+    NVPW_D3D12_Device_GetDeviceIndex_Params indexParams{ NVPW_D3D12_Device_GetDeviceIndex_Params_STRUCT_SIZE };
+    indexParams.pDevice = nativeDevice;
+    if (LogIfFailed(NVPW_D3D12_Device_GetDeviceIndex(&indexParams), "NVPW_D3D12_Device_GetDeviceIndex(pass capture)")) {
+        profiler.failed = true;
+        return false;
+    }
+
+    NVPW_Device_GetNames_Params namesParams{ NVPW_Device_GetNames_Params_STRUCT_SIZE };
+    namesParams.deviceIndex = indexParams.deviceIndex;
+    if (LogIfFailed(NVPW_Device_GetNames(&namesParams), "NVPW_Device_GetNames(pass capture)") || !namesParams.pChipName) {
+        profiler.failed = true;
+        return false;
+    }
+    profiler.chipName = namesParams.pChipName;
+
+    NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params availabilitySize{ NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params_STRUCT_SIZE };
+    availabilitySize.pCommandQueue = nativeGraphicsQueue;
+    if (LogIfFailed(NVPW_D3D12_Profiler_Queue_GetCounterAvailability(&availabilitySize), "NVPW_D3D12_Profiler_Queue_GetCounterAvailability(size)")) {
+        profiler.failed = true;
+        return false;
+    }
+    std::vector<uint8_t> counterAvailability(availabilitySize.counterAvailabilityImageSize);
+    const uint8_t* counterAvailabilityImage = nullptr;
+    size_t counterAvailabilityImageSize = 0;
+    NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params availability{ NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params_STRUCT_SIZE };
+    availability.pCommandQueue = nativeGraphicsQueue;
+    availability.counterAvailabilityImageSize = counterAvailability.size();
+    availability.pCounterAvailabilityImage = counterAvailability.data();
+    const NVPA_Status availabilityStatus = NVPW_D3D12_Profiler_Queue_GetCounterAvailability(&availability);
+    if (availabilityStatus == NVPA_STATUS_SUCCESS) {
+        counterAvailabilityImage = counterAvailability.data();
+        counterAvailabilityImageSize = availability.counterAvailabilityImageSize;
+    }
+    else {
+        spdlog::warn(
+            "NVPerf: counter availability image query failed with {}; continuing without availability filtering",
+            StatusName(availabilityStatus));
+    }
+
+    if (!BuildD3D12ProfilerConfig(profiler, profiler.chipName.c_str(), counterAvailabilityImage, counterAvailabilityImageSize)) {
+        profiler.failed = true;
+        return false;
+    }
+
+    profiler.captureStartFrame = frameNumber;
+    profiler.traceBufferCount = std::max<size_t>(profiler.traceBufferCount, 5);
+    profiler.initialized = true;
+    spdlog::info(
+        "NVPerf: pass metric capture armed at frame {} queue='{}' traceBuffers={} output='{}'",
+        frameNumber,
+        profiler.controllerQueueName,
+        profiler.traceBufferCount,
+        profiler.csvPath.string());
+    return true;
+}
+
+bool InitializeNvPerf()
+{
+    static bool initialized = false;
+    static bool available = false;
+
+    if (initialized) {
+        return available;
+    }
+    initialized = true;
+
+    NVPW_InitializeHost_Params hostParams{ NVPW_InitializeHost_Params_STRUCT_SIZE };
+    const NVPA_Status hostStatus = NVPW_InitializeHost(&hostParams);
+    if (LogIfFailed(hostStatus, "NVPW_InitializeHost")) {
+        return false;
+    }
+
+    NVPW_InitializeTarget_Params targetParams{ NVPW_InitializeTarget_Params_STRUCT_SIZE };
+    const NVPA_Status targetStatus = NVPW_InitializeTarget(&targetParams);
+    if (LogIfFailed(targetStatus, "NVPW_InitializeTarget")) {
+        return false;
+    }
+
+    available = true;
+    spdlog::info("NVPerf: host and target libraries initialized");
+    return true;
+}
+
+void LogHostMetricSmokeTest(rhi::Backend backend)
+{
+    NVPW_GetSupportedChipNames_Params chipParams{ NVPW_GetSupportedChipNames_Params_STRUCT_SIZE };
+    if (LogIfFailed(NVPW_GetSupportedChipNames(&chipParams), "NVPW_GetSupportedChipNames")) {
+        return;
+    }
+
+    const char* firstChip = chipParams.numChipNames > 0 && chipParams.ppChipNames ? chipParams.ppChipNames[0] : nullptr;
+    spdlog::info(
+        "NVPerf: supported virtual chip count={} firstChip='{}'",
+        chipParams.numChipNames,
+        firstChip ? firstChip : "<none>");
+
+    if (!firstChip) {
+        return;
+    }
+
+    size_t scratchBufferSize = 0;
+    if (backend == rhi::Backend::Vulkan) {
+        NVPW_VK_MetricsEvaluator_CalculateScratchBufferSize_Params scratchParams{ NVPW_VK_MetricsEvaluator_CalculateScratchBufferSize_Params_STRUCT_SIZE };
+        scratchParams.pChipName = firstChip;
+        if (LogIfFailed(NVPW_VK_MetricsEvaluator_CalculateScratchBufferSize(&scratchParams), "NVPW_VK_MetricsEvaluator_CalculateScratchBufferSize")) {
+            return;
+        }
+        scratchBufferSize = scratchParams.scratchBufferSize;
+    }
+    else {
+        NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params scratchParams{ NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize_Params_STRUCT_SIZE };
+        scratchParams.pChipName = firstChip;
+        if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize(&scratchParams), "NVPW_D3D12_MetricsEvaluator_CalculateScratchBufferSize")) {
+            return;
+        }
+        scratchBufferSize = scratchParams.scratchBufferSize;
+    }
+
+    std::vector<uint8_t> scratch(scratchBufferSize);
+    NVPW_MetricsEvaluator* evaluator = nullptr;
+    if (backend == rhi::Backend::Vulkan) {
+        NVPW_VK_MetricsEvaluator_Initialize_Params initParams{ NVPW_VK_MetricsEvaluator_Initialize_Params_STRUCT_SIZE };
+        initParams.pScratchBuffer = scratch.data();
+        initParams.scratchBufferSize = scratch.size();
+        initParams.pChipName = firstChip;
+        if (LogIfFailed(NVPW_VK_MetricsEvaluator_Initialize(&initParams), "NVPW_VK_MetricsEvaluator_Initialize")) {
+            return;
+        }
+        evaluator = initParams.pMetricsEvaluator;
+    }
+    else {
+        NVPW_D3D12_MetricsEvaluator_Initialize_Params initParams{ NVPW_D3D12_MetricsEvaluator_Initialize_Params_STRUCT_SIZE };
+        initParams.pScratchBuffer = scratch.data();
+        initParams.scratchBufferSize = scratch.size();
+        initParams.pChipName = firstChip;
+        if (LogIfFailed(NVPW_D3D12_MetricsEvaluator_Initialize(&initParams), "NVPW_D3D12_MetricsEvaluator_Initialize")) {
+            return;
+        }
+        evaluator = initParams.pMetricsEvaluator;
+    }
+
+    NVPW_MetricsEvaluator_GetMetricNames_Params metricParams{ NVPW_MetricsEvaluator_GetMetricNames_Params_STRUCT_SIZE };
+    metricParams.pMetricsEvaluator = evaluator;
+    if (!LogIfFailed(NVPW_MetricsEvaluator_GetMetricNames(&metricParams), "NVPW_MetricsEvaluator_GetMetricNames")) {
+        const char* firstMetric = metricParams.numMetrics > 0 && metricParams.pMetricNames && metricParams.pMetricNameBeginIndices
+            ? metricParams.pMetricNames + metricParams.pMetricNameBeginIndices[0]
+            : nullptr;
+        spdlog::info(
+            "NVPerf: metrics evaluator ready for backend={} metricCount={} firstMetric='{}'",
+            backend == rhi::Backend::Vulkan ? "Vulkan" : "D3D12",
+            metricParams.numMetrics,
+            firstMetric ? firstMetric : "<none>");
+    }
+
+    NVPW_MetricsEvaluator_Destroy_Params destroyParams{ NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
+    destroyParams.pMetricsEvaluator = evaluator;
+    (void)NVPW_MetricsEvaluator_Destroy(&destroyParams);
+}
+
+void LogD3D12DeviceProbe(rhi::Device device, rhi::Queue graphicsQueue)
+{
+    ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
+    ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(graphicsQueue);
+    if (!nativeDevice || !nativeQueue) {
+        spdlog::warn("NVPerf: D3D12 native device or graphics queue is unavailable");
+        return;
+    }
+
+    NVPW_D3D12_LoadDriver_Params loadParams{ NVPW_D3D12_LoadDriver_Params_STRUCT_SIZE };
+    if (LogIfFailed(NVPW_D3D12_LoadDriver(&loadParams), "NVPW_D3D12_LoadDriver")) {
+        return;
+    }
+
+    NVPW_D3D12_Device_GetDeviceIndex_Params indexParams{ NVPW_D3D12_Device_GetDeviceIndex_Params_STRUCT_SIZE };
+    indexParams.pDevice = nativeDevice;
+    if (LogIfFailed(NVPW_D3D12_Device_GetDeviceIndex(&indexParams), "NVPW_D3D12_Device_GetDeviceIndex")) {
+        return;
+    }
+
+    NVPW_Device_GetNames_Params namesParams{ NVPW_Device_GetNames_Params_STRUCT_SIZE };
+    namesParams.deviceIndex = indexParams.deviceIndex;
+    const NVPA_Status namesStatus = NVPW_Device_GetNames(&namesParams);
+
+    NVPW_D3D12_Profiler_IsGpuSupported_Params supportParams{ NVPW_D3D12_Profiler_IsGpuSupported_Params_STRUCT_SIZE };
+    supportParams.deviceIndex = indexParams.deviceIndex;
+    const NVPA_Status supportStatus = NVPW_D3D12_Profiler_IsGpuSupported(&supportParams);
+
+    NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params availabilityParams{ NVPW_D3D12_Profiler_Queue_GetCounterAvailability_Params_STRUCT_SIZE };
+    availabilityParams.pCommandQueue = nativeQueue;
+    const NVPA_Status availabilityStatus = NVPW_D3D12_Profiler_Queue_GetCounterAvailability(&availabilityParams);
+
+    spdlog::info(
+        "NVPerf: D3D12 probe deviceIndex={} device='{}' chip='{}' namesStatus={} profilerSupported={} supportStatus={} arch={} sli={} cmp={} wsl={} sku={} counterAvailabilityStatus={} counterAvailabilityBytes={}",
+        indexParams.deviceIndex,
+        namesStatus == NVPA_STATUS_SUCCESS && namesParams.pDeviceName ? namesParams.pDeviceName : "<unknown>",
+        namesStatus == NVPA_STATUS_SUCCESS && namesParams.pChipName ? namesParams.pChipName : "<unknown>",
+        StatusName(namesStatus),
+        supportStatus == NVPA_STATUS_SUCCESS && supportParams.isSupported,
+        StatusName(supportStatus),
+        static_cast<uint32_t>(supportParams.gpuArchitectureSupportLevel),
+        static_cast<uint32_t>(supportParams.sliSupportLevel),
+        static_cast<uint32_t>(supportParams.cmpSupportLevel),
+        static_cast<uint32_t>(supportParams.wslSupportLevel),
+        static_cast<uint32_t>(supportParams.skuSupportLevel),
+        StatusName(availabilityStatus),
+        availabilityParams.counterAvailabilityImageSize);
+}
+
+void LogVulkanDeviceProbe(rhi::Device device, rhi::Queue graphicsQueue)
+{
+#if BASICRHI_HAS_VULKAN_HEADERS
+    VkInstance instance = rhi::vulkan::get_instance(device);
+    VkPhysicalDevice physicalDevice = rhi::vulkan::get_physical_device(device);
+    VkDevice nativeDevice = rhi::vulkan::get_device(device);
+    VkQueue nativeQueue = rhi::vulkan::get_queue(graphicsQueue);
+    auto getDeviceProcAddr = rhi::vulkan::get_device_proc_addr();
+    if (!instance || !physicalDevice || !nativeDevice || !nativeQueue || !getDeviceProcAddr) {
+        spdlog::warn("NVPerf: Vulkan native handles are unavailable");
+        return;
+    }
+
+    NVPW_VK_LoadDriver_Params loadParams{ NVPW_VK_LoadDriver_Params_STRUCT_SIZE };
+    loadParams.instance = instance;
+    if (LogIfFailed(NVPW_VK_LoadDriver(&loadParams), "NVPW_VK_LoadDriver")) {
+        return;
+    }
+
+    NVPW_VK_Device_GetDeviceIndex_Params indexParams{ NVPW_VK_Device_GetDeviceIndex_Params_STRUCT_SIZE };
+    indexParams.instance = instance;
+    indexParams.physicalDevice = physicalDevice;
+    indexParams.device = nativeDevice;
+    indexParams.pfnGetDeviceProcAddr = reinterpret_cast<void*>(getDeviceProcAddr);
+    if (LogIfFailed(NVPW_VK_Device_GetDeviceIndex(&indexParams), "NVPW_VK_Device_GetDeviceIndex")) {
+        return;
+    }
+
+    NVPW_Device_GetNames_Params namesParams{ NVPW_Device_GetNames_Params_STRUCT_SIZE };
+    namesParams.deviceIndex = indexParams.deviceIndex;
+    const NVPA_Status namesStatus = NVPW_Device_GetNames(&namesParams);
+
+    NVPW_VK_Profiler_IsGpuSupported_Params supportParams{ NVPW_VK_Profiler_IsGpuSupported_Params_STRUCT_SIZE };
+    supportParams.deviceIndex = indexParams.deviceIndex;
+    const NVPA_Status supportStatus = NVPW_VK_Profiler_IsGpuSupported(&supportParams);
+
+    NVPW_VK_Profiler_Queue_GetCounterAvailability_Params availabilityParams{ NVPW_VK_Profiler_Queue_GetCounterAvailability_Params_STRUCT_SIZE };
+    availabilityParams.instance = instance;
+    availabilityParams.physicalDevice = physicalDevice;
+    availabilityParams.device = nativeDevice;
+    availabilityParams.queue = nativeQueue;
+    availabilityParams.pfnGetDeviceProcAddr = reinterpret_cast<void*>(getDeviceProcAddr);
+    const NVPA_Status availabilityStatus = NVPW_VK_Profiler_Queue_GetCounterAvailability(&availabilityParams);
+
+    spdlog::info(
+        "NVPerf: Vulkan probe deviceIndex={} device='{}' chip='{}' namesStatus={} profilerSupported={} supportStatus={} arch={} sli={} cmp={} wsl={} sku={} counterAvailabilityStatus={} counterAvailabilityBytes={}",
+        indexParams.deviceIndex,
+        namesStatus == NVPA_STATUS_SUCCESS && namesParams.pDeviceName ? namesParams.pDeviceName : "<unknown>",
+        namesStatus == NVPA_STATUS_SUCCESS && namesParams.pChipName ? namesParams.pChipName : "<unknown>",
+        StatusName(namesStatus),
+        supportStatus == NVPA_STATUS_SUCCESS && supportParams.isSupported,
+        StatusName(supportStatus),
+        static_cast<uint32_t>(supportParams.gpuArchitectureSupportLevel),
+        static_cast<uint32_t>(supportParams.sliSupportLevel),
+        static_cast<uint32_t>(supportParams.cmpSupportLevel),
+        static_cast<uint32_t>(supportParams.wslSupportLevel),
+        static_cast<uint32_t>(supportParams.skuSupportLevel),
+        StatusName(availabilityStatus),
+        availabilityParams.counterAvailabilityImageSize);
+#else
+    (void)device;
+    (void)graphicsQueue;
+    spdlog::warn("NVPerf: Vulkan probe is unavailable because Vulkan headers are not enabled");
+#endif
+}
+#endif
+
+} // namespace
+
+void LogStartupProbe(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    if (!InitializeNvPerf()) {
+        return;
+    }
+
+    LogHostMetricSmokeTest(backend);
+
+    switch (backend) {
+    case rhi::Backend::D3D12:
+        LogD3D12DeviceProbe(device, graphicsQueue);
+        break;
+    case rhi::Backend::Vulkan:
+        LogVulkanDeviceProbe(device, graphicsQueue);
+        break;
+    default:
+        spdlog::warn("NVPerf: skipping live device probe for unsupported backend {}", static_cast<uint32_t>(backend));
+        break;
+    }
+#else
+    (void)backend;
+    (void)device;
+    (void)graphicsQueue;
+#endif
+}
+
+bool CaptureRequestedByEnvironment()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    return IsTruthyEnv("BASICRENDERER_NVPERF_CAPTURE");
+#else
+    return false;
+#endif
+}
+
+bool ServicePendingGpuOperations()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (!profiler.initialized || profiler.failed || profiler.finished) {
+        return false;
+    }
+
+    bool serviced = false;
+    for (auto& [nativeQueue, queueCapture] : profiler.queues) {
+        (void)nativeQueue;
+        if (!queueCapture.sessionActive) {
+            continue;
+        }
+        ServicePendingGpuOperationsForQueue(queueCapture, "FrameWait", 16, 0);
+        serviced = true;
+    }
+    return serviced;
+#else
+    return false;
+#endif
+}
+
+void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue, uint64_t frameNumber)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    (void)PrepareProfilerIfRequested(backend, device, graphicsQueue, frameNumber);
+#else
+    (void)backend;
+    (void)device;
+    (void)graphicsQueue;
+    (void)frameNumber;
+#endif
+}
+
+void EndFrameCapture(rhi::Backend backend, rhi::Queue graphicsQueue, uint64_t frameNumber)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    (void)backend;
+    (void)graphicsQueue;
+    (void)frameNumber;
+
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (!profiler.initialized || profiler.failed || profiler.finished) {
+        return;
+    }
+
+    bool anyActive = false;
+    bool allSubmitted = !profiler.queues.empty();
+    for (auto& [nativeQueue, queueCapture] : profiler.queues) {
+        (void)nativeQueue;
+        anyActive = anyActive || queueCapture.sessionActive;
+        if (queueCapture.passActive) {
+            NVPW_D3D12_Profiler_Queue_EndPass_Params endPass{ NVPW_D3D12_Profiler_Queue_EndPass_Params_STRUCT_SIZE };
+            endPass.pCommandQueue = queueCapture.nativeQueue;
+            if (LogIfFailed(NVPW_D3D12_Profiler_Queue_EndPass(&endPass), "NVPW_D3D12_Profiler_Queue_EndPass")) {
+                profiler.failed = true;
+                return;
+            }
+            queueCapture.nextPassIndex = endPass.passIndex;
+            queueCapture.targetNestingLevel = endPass.targetNestingLevel;
+            queueCapture.allPassesSubmitted = endPass.allPassesSubmitted != 0;
+            queueCapture.passActive = false;
+            spdlog::info(
+                "NVPerf: queue '{}' ended profiler pass nextPassIndex={} targetNestingLevel={} allPassesSubmitted={}",
+                queueCapture.queueName,
+                queueCapture.nextPassIndex,
+                queueCapture.targetNestingLevel,
+                queueCapture.allPassesSubmitted);
+            ServicePendingGpuOperationsForQueue(queueCapture, "EndPass", 16, 0);
+        }
+        allSubmitted = allSubmitted && queueCapture.allPassesSubmitted;
+    }
+
+    if (!anyActive || !allSubmitted) {
+        return;
+    }
+
+    bool allDecoded = true;
+    for (auto& [nativeQueue, queueCapture] : profiler.queues) {
+        (void)nativeQueue;
+        if (!queueCapture.sessionActive) {
+            continue;
+        }
+
+        const bool decoded = DecodeQueueCapture(profiler, queueCapture);
+        if (!decoded) {
+            allDecoded = false;
+        }
+
+        NVPW_D3D12_Profiler_Queue_EndSession_Params endSession{ NVPW_D3D12_Profiler_Queue_EndSession_Params_STRUCT_SIZE };
+        endSession.pCommandQueue = queueCapture.nativeQueue;
+        endSession.timeout = profiler.syncTimeoutMs;
+        if (LogIfFailed(NVPW_D3D12_Profiler_Queue_EndSession(&endSession), "NVPW_D3D12_Profiler_Queue_EndSession")) {
+            profiler.failed = true;
+            return;
+        }
+        if (endSession.timeoutExpired) {
+            spdlog::warn(
+                "NVPerf: end session timed out for queue '{}' timeoutMs={}",
+                queueCapture.queueName,
+                profiler.syncTimeoutMs);
+            profiler.failed = true;
+            return;
+        }
+        queueCapture.sessionActive = false;
+        ReleaseQueueSyncObjects(queueCapture);
+    }
+
+    profiler.finished = allDecoded;
+    if (profiler.finished) {
+        spdlog::info(
+            "NVPerf: pass metric capture complete startFrame={} endFrame={} output='{}'",
+            profiler.captureStartFrame,
+            frameNumber,
+            profiler.csvPath.string());
+    }
+#else
+    (void)backend;
+    (void)graphicsQueue;
+    (void)frameNumber;
+#endif
+}
+
+void BeginPassRange(rhi::Backend backend, rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (backend != rhi::Backend::D3D12 || !profiler.initialized || profiler.failed || profiler.finished) {
+        return;
+    }
+
+    const char* resolvedQueueName = queueName && queueName[0] != '\0' ? queueName : "Unknown";
+    if (std::strcmp(resolvedQueueName, profiler.controllerQueueName.c_str()) != 0) {
+        return;
+    }
+
+    ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(queue);
+    ID3D12GraphicsCommandList* nativeCommandList = rhi::dx12::get_cmd_list(commandList);
+    if (!nativeQueue || !nativeCommandList) {
+        return;
+    }
+
+    auto& queueCapture = profiler.queues[nativeQueue];
+    if (!queueCapture.nativeQueue) {
+        queueCapture.queue = queue;
+        queueCapture.nativeQueue = nativeQueue;
+        queueCapture.queueName = resolvedQueueName;
+    }
+
+    if (!EnsureQueuePassActive(profiler, queueCapture)) {
+        return;
+    }
+
+    NVPW_D3D12_Profiler_CommandList_PushRange_Params push{ NVPW_D3D12_Profiler_CommandList_PushRange_Params_STRUCT_SIZE };
+    push.pCommandList = nativeCommandList;
+    push.pRangeName = passName && passName[0] != '\0' ? passName : "<unnamed>";
+    push.rangeNameLength = std::strlen(push.pRangeName);
+    if (!LogIfFailed(NVPW_D3D12_Profiler_CommandList_PushRange(&push), "NVPW_D3D12_Profiler_CommandList_PushRange")) {
+        ++profiler.activeCommandListRanges[nativeCommandList];
+    }
+#else
+    (void)backend;
+    (void)commandList;
+    (void)queue;
+    (void)queueName;
+    (void)passName;
+#endif
+}
+
+void EndPassRange(rhi::Backend backend, rhi::CommandList commandList, rhi::Queue queue)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    (void)queue;
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (backend != rhi::Backend::D3D12 || !profiler.initialized || profiler.failed || profiler.finished) {
+        return;
+    }
+
+    ID3D12GraphicsCommandList* nativeCommandList = rhi::dx12::get_cmd_list(commandList);
+    if (!nativeCommandList) {
+        return;
+    }
+
+    auto rangeIt = profiler.activeCommandListRanges.find(nativeCommandList);
+    if (rangeIt == profiler.activeCommandListRanges.end() || rangeIt->second == 0) {
+        return;
+    }
+
+    NVPW_D3D12_Profiler_CommandList_PopRange_Params pop{ NVPW_D3D12_Profiler_CommandList_PopRange_Params_STRUCT_SIZE };
+    pop.pCommandList = nativeCommandList;
+    if (!LogIfFailed(NVPW_D3D12_Profiler_CommandList_PopRange(&pop), "NVPW_D3D12_Profiler_CommandList_PopRange")) {
+        --rangeIt->second;
+        if (rangeIt->second == 0) {
+            profiler.activeCommandListRanges.erase(rangeIt);
+        }
+    }
+#else
+    (void)backend;
+    (void)commandList;
+    (void)queue;
+#endif
+}
+
+} // namespace br::telemetry::nvperf
