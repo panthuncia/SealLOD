@@ -535,7 +535,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 20.f, 15.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 20.f, 6.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

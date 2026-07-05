@@ -78,7 +78,7 @@ static uint32_t BytesToMatrixIndex(size_t byteOffset) {
 SkeletonManager::SkeletonManager() {
     m_lifetimeToken = std::make_shared<std::atomic_bool>(true);
     m_inverseBindMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
-    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneTransformsPacked");
+    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneSkinMatricesPacked");
     // TODO: This only exists to project skinned voxel samples back to object-space for voxel sample reconstruction.
     // Maybe we could avoid this if we changed the normal skinning path as well?
     m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked");
@@ -234,18 +234,19 @@ void SkeletonManager::UpdateInstanceTransforms(Skeleton& inst) {
         return;
 
     const size_t bytes = rec.boneCount * sizeof(DirectX::XMMATRIX);
-    BUFFER_UPLOAD(inst.GetBoneMatrices().data(), bytes,
-        rg::runtime::UploadTarget::FromShared(m_boneTransforms),
-        rec.transformsView->GetOffset());
-
+    std::vector<DirectX::XMMATRIX> skinMatrices(rec.boneCount);
     std::vector<DirectX::XMMATRIX> inverseSkinMatrices(rec.boneCount);
     const auto boneMatrices = inst.GetBoneMatrices();
     const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
     for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
+        skinMatrices[boneIndex] = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
         inverseSkinMatrices[boneIndex] = DirectX::XMMatrixInverse(
             nullptr,
-            DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]));
+            skinMatrices[boneIndex]);
     }
+    BUFFER_UPLOAD(skinMatrices.data(), bytes,
+        rg::runtime::UploadTarget::FromShared(m_boneTransforms),
+        rec.transformsView->GetOffset());
     BUFFER_UPLOAD(inverseSkinMatrices.data(), bytes,
         rg::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
         rec.inverseSkinView->GetOffset());
@@ -284,6 +285,7 @@ void SkeletonManager::UpdateAllDirtyInstances() {
     struct PendingSkeletonUpload {
         Skeleton* skeleton = nullptr;
         InstanceRecord* record = nullptr;
+        std::vector<DirectX::XMMATRIX> skinMatrices;
         std::vector<DirectX::XMMATRIX> inverseSkinMatrices;
     };
 
@@ -294,7 +296,7 @@ void SkeletonManager::UpdateAllDirtyInstances() {
             continue;
         }
         if (entry.record->dirty || entry.skeleton->IsPoseDirty()) {
-            pending.push_back({ entry.skeleton, entry.record, {} });
+            pending.push_back({ entry.skeleton, entry.record, {}, {} });
         }
     }
 
@@ -306,14 +308,16 @@ void SkeletonManager::UpdateAllDirtyInstances() {
         [&pending](size_t i) {
             auto& upload = pending[i];
             auto& rec = *upload.record;
+            upload.skinMatrices.resize(rec.boneCount);
             upload.inverseSkinMatrices.resize(rec.boneCount);
 
             const auto boneMatrices = upload.skeleton->GetBoneMatrices();
             const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
             for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
+                upload.skinMatrices[boneIndex] = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
                 upload.inverseSkinMatrices[boneIndex] = DirectX::XMMatrixInverse(
                     nullptr,
-                    DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]));
+                    upload.skinMatrices[boneIndex]);
             }
         });
 
@@ -326,7 +330,7 @@ void SkeletonManager::UpdateAllDirtyInstances() {
         auto& rec = *upload.record;
         boneMatrixSpans.push_back({
             rec.transformsView->GetOffset(),
-            upload.skeleton->GetBoneMatrices().data(),
+            upload.skinMatrices.data(),
             rec.boneCount
         });
         inverseSkinSpans.push_back({

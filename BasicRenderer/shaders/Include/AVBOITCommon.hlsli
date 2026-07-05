@@ -136,9 +136,9 @@ float3 SampleIntegratedTransmittanceAtSliceCoordinate(
     return lerp(previousTransmittance, currentTransmittance, sliceLerpFactor);
 }
 
-bool LoadAVBOITShadingSample(VisBufferPSInput input, uint2 pixel, bool isBackface, uint primID, out ClodShadingSample sample)
-{
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+bool LoadAVBOITShadingSample(VisBufferPSInput input, uint2 pixel, bool isBackface, out ClodShadingSample sample)
+{
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
 
@@ -174,9 +174,16 @@ bool LoadAVBOITShadingSample(VisBufferPSInput input, uint2 pixel, bool isBackfac
     sample.materialFlags = materialFlags;
     sample.materialInputs = materialInputs;
     return true;
-#else
-    return ResolveClodShadingSampleFromVisKeyWithFace(PackVisKey(input.linearDepth, input.visibleClusterIndex, primID), pixel, isBackface, sample);
-#endif
 }
+#else
+bool LoadAVBOITShadingSample(VisBufferPSInput input, uint2 pixel, bool isBackface, uint primID, out ClodShadingSample sample)
+{
+    return ResolveClodShadingSampleFromVisKeyWithFace(
+        PackVisKey(input.linearDepth, input.visibleClusterIndex, primID),
+        pixel,
+        isBackface,
+        sample);
+}
+#endif
 
 #endif // CLOD_AVBOIT_VBOIT_COMMON_HLSLI

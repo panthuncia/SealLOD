@@ -24,13 +24,21 @@ AVBOITShadeOutput MakeAVBOITShadeOutput(float4 accumulation, float4 normalizatio
 }
 
 [shader("pixel")]
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace)
+#else
 AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace, uint primID : SV_PrimitiveID)
+#endif
 {
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodAVBOITConfig> configBuffer = ResourceDescriptorHeap[CLOD_RASTER_AVBOIT_VBOIT_CONFIG_DESCRIPTOR_INDEX];
 
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#else
+    const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#endif
     const CLodAVBOITConfig config = configBuffer[0];
     if (viewRasterInfo.opaqueVisibilitySRVDescriptorIndex == 0xFFFFFFFFu ||
         config.shadingTransmittanceSRVDescriptorIndex == 0xFFFFFFFFu ||
@@ -49,7 +57,11 @@ AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : S
     }
 
 #if defined(PSO_ALPHA_TEST)
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     TestAlpha(input.texcoord, input.materialDataIndex);
+#else
+    TestAlpha(input.texcoord, input.materialDataIndex);
+#endif
 #endif
 
     Texture2D<uint64_t> opaqueVisibility =
@@ -74,7 +86,11 @@ AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : S
     float linearDepth;
     {
         ClodShadingSample sample;
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+        if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, sample))
+#else
         if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, primID, sample))
+#endif
         {
             return MakeAVBOITShadeOutput(0.0f.xxxx, 0.0f.xxxx, 0.0f.xxxx);
         }

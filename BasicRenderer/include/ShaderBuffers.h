@@ -637,7 +637,9 @@ struct VisibleClusterInfo {
 };
 
 struct SkinningInstanceGPUInfo {
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores final bone * inverseBind skin matrices.
     uint32_t transformOffsetMatrices = 0;
+    // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint32_t invBindOffsetMatrices = 0;
     uint32_t inverseSkinOffsetMatrices = 0;
     uint32_t boneCount = 0;

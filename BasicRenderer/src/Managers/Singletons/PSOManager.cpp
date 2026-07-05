@@ -1959,6 +1959,7 @@ PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
 
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
     std::vector<DxcDefine> defines = {};
+    defines.push_back({ L"CLOD_ENABLE_SOURCE_GROUP_VALIDATION", L"0" });
     if (rasterFlags & MaterialRasterFlags::MaterialRasterFlagsAlphaTest) {
         DxcDefine macro;
         macro.Value = L"1";

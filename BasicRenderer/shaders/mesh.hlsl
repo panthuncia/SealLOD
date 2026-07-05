@@ -200,11 +200,7 @@ struct ReyesShadowVisVertex
     float linearDepth;
 #if defined(PSO_ALPHA_TEST)
     float2 texcoord;
-    uint materialDataIndex;
 #endif
-    uint visibleClusterIndex;
-    uint viewID;
-    uint shadowClipmapIndex;
 };
 
 groupshared ReyesShadowVisVertex gs_reyesShadowVertices[kClodReyesShadowMaxOutputVertices];
@@ -362,11 +358,7 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
 #if defined(PSO_SKINNED)
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
-    float4x4 skinMatrix = BuildSkinMatrix(setup.meshInstanceBuffer.skinningInstanceSlot, skinning);
-    vertex.position = mul(float4(vertex.position, 1.0f), skinMatrix).xyz;
-    vertex.normal = mul(vertex.normal, (float3x3)skinMatrix);
-    vertex.tangent.xyz = mul(vertex.tangent.xyz, (float3x3)skinMatrix);
-    vertex.skinning = skinning;
+    ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
 #else
     if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) == 0u)
     {
@@ -375,11 +367,7 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
 
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
-    float4x4 skinMatrix = BuildSkinMatrix(setup.meshInstanceBuffer.skinningInstanceSlot, skinning);
-    vertex.position = mul(float4(vertex.position, 1.0f), skinMatrix).xyz;
-    vertex.normal = mul(vertex.normal, (float3x3)skinMatrix);
-    vertex.tangent.xyz = mul(vertex.tangent.xyz, (float3x3)skinMatrix);
-    vertex.skinning = skinning;
+    ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
 #endif
 }
 
@@ -432,10 +420,7 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     result.position = mul(viewPosition, viewCamera.projection);
     result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
     result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
-    result.visibleClusterIndex = clusterIndex;
     result.linearDepth = -viewPosition.z;
-    result.viewID = viewID;
-    result.shadowClipmapIndex = shadowClipmapIndex;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
     float3x3 normalMatrix = (float3x3)normalMatrixBuffer[objectBuffer.normalMatrixBufferIndex].value;
@@ -443,11 +428,21 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     result.normalWorldSpace = normalize(mul(vertex.normal, normalMatrix));
     result.color = vertex.color;
     result.materialDataIndex = materialDataIndex;
+    result.visibleClusterIndex = clusterIndex;
+    result.viewID = viewID;
+    result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
 #if defined(PSO_ALPHA_TEST)
     result.texcoord = vertex.texcoord;
+#endif
 #if !defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+#if defined(PSO_ALPHA_TEST)
     result.materialDataIndex = materialDataIndex;
+#endif
+    result.visibleClusterIndex = clusterIndex;
+    result.viewID = viewID;
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
 #endif
 
@@ -640,7 +635,7 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     uint clusterIndex,
     ClodViewRasterInfo rasterInfo)
 {
-    // Decode position and normal from per-meshlet compressed streams
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     Vertex vertex = (Vertex)0;
     vertex.position = DecodeCompressedPosition(
         meshletLocalVertex,
@@ -673,7 +668,6 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         setup.meshBuffer.materialDataIndex,
         rasterInfo);
 
-#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     result.uvSet01.xy = vertex.texcoord;
     result.uvSet01.zw = DecodeCompressedUV(meshletLocalVertex, 1u, setup);
     result.uvSet23.xy = DecodeCompressedUV(meshletLocalVertex, 2u, setup);
@@ -682,9 +676,47 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     result.uvSet45.zw = DecodeCompressedUV(meshletLocalVertex, 5u, setup);
     result.uvSet67.xy = DecodeCompressedUV(meshletLocalVertex, 6u, setup);
     result.uvSet67.zw = DecodeCompressedUV(meshletLocalVertex, 7u, setup);
-#endif
 
     return result;
+#else
+    float3 position = DecodeCompressedPosition(
+        meshletLocalVertex,
+        setup.positionBitstreamBase,
+        setup.positionBitOffset,
+        setup.bitsX,
+        setup.bitsY,
+        setup.bitsZ,
+        setup.compressedPositionQuantExp,
+        setup.minQ,
+        setup.pagePoolSlabDescriptorIndex);
+    if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) != 0u)
+    {
+        SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
+        skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
+        position = ApplySkinningToPosition(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, position);
+    }
+
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    Camera viewCamera = cameras[viewID];
+    float4 worldPosition = mul(float4(position, 1.0f), setup.objectBuffer.model);
+    float4 viewPosition = mul(worldPosition, viewCamera.view);
+
+    VisBufferPSInput result = (VisBufferPSInput)0;
+    result.position = mul(viewPosition, viewCamera.projection);
+    result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
+    result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
+    result.linearDepth = -viewPosition.z;
+#if defined(PSO_ALPHA_TEST)
+    result.texcoord = DecodeCompressedUV(meshletLocalVertex, 0u, setup);
+    result.materialDataIndex = setup.meshBuffer.materialDataIndex;
+#endif
+    result.visibleClusterIndex = clusterIndex;
+    result.viewID = viewID;
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    result.shadowClipmapIndex = shadowClipmapIndex;
+#endif
+    return result;
+#endif
 }
 
 void EmitMeshletVisBufferForViewCLod(
@@ -707,12 +739,6 @@ void EmitMeshletVisBufferForViewCLod(
 
     WriteTriangles(uGroupThreadID, setup, outputTriangles);
 }
-
-struct VisibilityPerPrimitive
-{
-    uint triangleIndex : SV_PrimitiveID;
-    //uint viewID : TEXCOORD0;
-};
 
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
 void CacheMeshletVisBufferVerticesForViewCLod(
@@ -755,7 +781,9 @@ void EmitCachedMeshletVisBufferVerticesForViewCLod(
 #endif
         vertex.visibleClusterIndex = clusterIndex;
         vertex.viewID = viewID;
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
         vertex.shadowClipmapIndex = shadowClipmapIndex;
+#endif
         outputVertices[i] = vertex;
     }
 }
@@ -949,11 +977,13 @@ VisBufferPSInput ReyesShadowVisVertexToPSInput(ReyesShadowVisVertex vertex)
     output.linearDepth = vertex.linearDepth;
 #if defined(PSO_ALPHA_TEST)
     output.texcoord = vertex.texcoord;
-    output.materialDataIndex = vertex.materialDataIndex;
+    output.materialDataIndex = gs_reyesShadowSetup.meshBuffer.materialDataIndex;
 #endif
-    output.visibleClusterIndex = vertex.visibleClusterIndex;
-    output.viewID = vertex.viewID;
-    output.shadowClipmapIndex = vertex.shadowClipmapIndex;
+    output.visibleClusterIndex = gs_reyesShadowDiceEntry.visibleClusterIndex;
+    output.viewID = gs_reyesShadowSetup.viewID;
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    output.shadowClipmapIndex = gs_reyesShadowSetup.virtualShadowPayload;
+#endif
     return output;
 }
 
@@ -1012,12 +1042,14 @@ void EmitFilteredMeshletTriangles(
 }
 #endif
 
-void EmitPrimitiveIDs(uint uGroupThreadID, MeshletSetup setup, out primitives VisibilityPerPrimitive primitiveInfo[MS_MESHLET_SIZE])
+void EmitPrimitiveIDs(
+    uint uGroupThreadID,
+    MeshletSetup setup,
+    out primitives VisibilityPerPrimitive primitiveInfo[MS_MESHLET_SIZE])
 {
     for (uint t = uGroupThreadID; t < setup.triCount; t += MS_THREAD_GROUP_SIZE)
     {
         primitiveInfo[t].triangleIndex = t;
-		//primitiveInfo[t].viewID = setup.viewID;
     }
 }
 
@@ -1668,31 +1700,19 @@ void ClusterLODReyesVirtualShadowMSMain(
                 gs_reyesShadowVertices[vertexBase + 0u].linearDepth = visVertex0.linearDepth;
 #if defined(PSO_ALPHA_TEST)
                 gs_reyesShadowVertices[vertexBase + 0u].texcoord = visVertex0.texcoord;
-                gs_reyesShadowVertices[vertexBase + 0u].materialDataIndex = visVertex0.materialDataIndex;
 #endif
-                gs_reyesShadowVertices[vertexBase + 0u].visibleClusterIndex = visVertex0.visibleClusterIndex;
-                gs_reyesShadowVertices[vertexBase + 0u].viewID = visVertex0.viewID;
-                gs_reyesShadowVertices[vertexBase + 0u].shadowClipmapIndex = visVertex0.shadowClipmapIndex;
 
                 gs_reyesShadowVertices[vertexBase + 1u].position = visVertex1.position;
                 gs_reyesShadowVertices[vertexBase + 1u].linearDepth = visVertex1.linearDepth;
 #if defined(PSO_ALPHA_TEST)
                 gs_reyesShadowVertices[vertexBase + 1u].texcoord = visVertex1.texcoord;
-                gs_reyesShadowVertices[vertexBase + 1u].materialDataIndex = visVertex1.materialDataIndex;
 #endif
-                gs_reyesShadowVertices[vertexBase + 1u].visibleClusterIndex = visVertex1.visibleClusterIndex;
-                gs_reyesShadowVertices[vertexBase + 1u].viewID = visVertex1.viewID;
-                gs_reyesShadowVertices[vertexBase + 1u].shadowClipmapIndex = visVertex1.shadowClipmapIndex;
 
                 gs_reyesShadowVertices[vertexBase + 2u].position = visVertex2.position;
                 gs_reyesShadowVertices[vertexBase + 2u].linearDepth = visVertex2.linearDepth;
 #if defined(PSO_ALPHA_TEST)
                 gs_reyesShadowVertices[vertexBase + 2u].texcoord = visVertex2.texcoord;
-                gs_reyesShadowVertices[vertexBase + 2u].materialDataIndex = visVertex2.materialDataIndex;
 #endif
-                gs_reyesShadowVertices[vertexBase + 2u].visibleClusterIndex = visVertex2.visibleClusterIndex;
-                gs_reyesShadowVertices[vertexBase + 2u].viewID = visVertex2.viewID;
-                gs_reyesShadowVertices[vertexBase + 2u].shadowClipmapIndex = visVertex2.shadowClipmapIndex;
 
                 gs_reyesShadowTriangles[triangleOutputIndex] = reverseWinding
                     ? uint3(vertexBase + 0u, vertexBase + 2u, vertexBase + 1u)

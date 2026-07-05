@@ -37,12 +37,25 @@ struct VisBufferPSInput
 #else
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD1;
-    nointerpolation uint materialDataIndex : TEXCOORD2; // convenience for alpha test
-#endif
+    nointerpolation uint materialDataIndex : TEXCOORD2;
     nointerpolation uint visibleClusterIndex : TEXCOORD3;
     nointerpolation uint viewID : TEXCOORD4;
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     nointerpolation uint shadowClipmapIndex : TEXCOORD5;
 #endif
+#else
+    nointerpolation uint visibleClusterIndex : TEXCOORD1;
+    nointerpolation uint viewID : TEXCOORD2;
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    nointerpolation uint shadowClipmapIndex : TEXCOORD3;
+#endif
+#endif
+#endif
+};
+
+struct VisibilityPerPrimitive
+{
+    uint triangleIndex : SV_PrimitiveID;
 };
 
 struct ClodViewRasterInfo
@@ -1017,7 +1030,9 @@ struct MaterialInputs
 
 struct SkinningInstanceGPUInfo
 {
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores final bone * inverseBind skin matrices.
     uint transformOffsetMatrices;
+    // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint invBindOffsetMatrices;
     uint inverseSkinOffsetMatrices;
     uint boneCount;

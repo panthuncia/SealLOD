@@ -7,13 +7,21 @@
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 
 [shader("pixel")]
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace)
+#else
 void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace, uint primID : SV_PrimitiveID)
+#endif
 {
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodAVBOITConfig> configBuffer = ResourceDescriptorHeap[CLOD_RASTER_AVBOIT_VBOIT_CONFIG_DESCRIPTOR_INDEX];
 
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#else
+    const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[input.viewID];
+#endif
     const CLodAVBOITConfig config = configBuffer[0];
 #if defined(CLOD_AVBOIT_VBOIT_OCCUPANCY_ONLY)
     if (viewRasterInfo.opaqueVisibilitySRVDescriptorIndex == 0xFFFFFFFFu ||
@@ -41,7 +49,11 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
     }
 
 #if defined(PSO_ALPHA_TEST)
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     TestAlpha(input.texcoord, input.materialDataIndex);
+#else
+    TestAlpha(input.texcoord, input.materialDataIndex);
+#endif
 #endif
 
     Texture2D<uint64_t> opaqueVisibility =
@@ -60,7 +72,11 @@ void AVBOITCapturePSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFa
     }
 
     ClodShadingSample sample;
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, sample))
+#else
     if (!LoadAVBOITShadingSample(input, pixel, !isFrontFace, primID, sample))
+#endif
     {
         return;
     }

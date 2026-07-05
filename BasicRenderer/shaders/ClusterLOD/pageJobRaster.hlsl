@@ -130,7 +130,7 @@ void WG_PageJobBuild(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-            localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+            localPos = ApplySkinningToPosition(meshInst.skinningInstanceSlot, skinning, localPos);
         }
         float4 clipPos = mul(float4(localPos, 1.0f), modelViewProjection);
         float invW = 1.0f / clipPos.w;
@@ -382,7 +382,7 @@ void WG_PageJobRasterPage(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-            localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+            localPos = ApplySkinningToPosition(meshInst.skinningInstanceSlot, skinning, localPos);
         }
         float4 localPos4 = float4(localPos, 1.0f);
         float4 clipPos = mul(localPos4, modelViewProjection);
