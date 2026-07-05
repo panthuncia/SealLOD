@@ -7,6 +7,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <imgui.h>
 #include <random>
+#include <cmath>
 #include <io.h>        // _pipe, _dup2, _read, _close
 #include <fcntl.h>     // _O_BINARY
 #include <thread>
@@ -16,6 +17,7 @@
 #include <pix3.h>
 #include <stacktrace>
 #include <sstream>      // ostringstream for formatting
+#include <vector>
 //#include <tracy/Tracy.hpp>
 
 #include "Mesh/Mesh.h"
@@ -493,8 +495,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    renderer.GetCurrentScene()->AppendScene(needles->Clone());
+    constexpr int NeedleCloneCount = 120;
+    constexpr float NeedleDistributionRadius = 80.0f;
+    constexpr float NeedleMinSpacing = 10.0f;
+    constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
+    constexpr int MaxNeedlePlacementAttempts = 10000;
+    constexpr uint32_t NeedleSkeletonVariantCount = 8;
 
+    std::mt19937 needleRng{ 1337 };
+    std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
+    std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
+    std::vector<point> needlePositions;
+    needlePositions.reserve(NeedleCloneCount);
+
+    for (int attempt = 0;
+        needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
+        ++attempt) {
+        const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
+        const float angle = needleAngleDist(needleRng);
+        const point candidate{
+            radius * std::cos(angle),
+            0.0f,
+            radius * std::sin(angle)
+        };
+
+        bool hasEnoughSpacing = true;
+        for (const point& existing : needlePositions) {
+            const float dx = candidate.x - existing.x;
+            const float dz = candidate.z - existing.z;
+            if (dx * dx + dz * dz < NeedleMinSpacingSq) {
+                hasEnoughSpacing = false;
+                break;
+            }
+        }
+
+        if (hasEnoughSpacing) {
+            needlePositions.push_back(candidate);
+        }
+    }
+
+    SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
+    for (const point& position : needlePositions) {
+        needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
+        auto needleClone = needles->Clone();
+        needleClone->AssignSkeletonVariants(needleSkeletonVariants);
+        renderer.GetCurrentScene()->AppendScene(needleClone);
+    }
 	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
@@ -535,7 +581,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 20.f, 6.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 100.f, 6.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

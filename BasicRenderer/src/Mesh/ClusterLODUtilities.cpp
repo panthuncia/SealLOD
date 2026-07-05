@@ -5160,20 +5160,95 @@ namespace
 			}
 		}
 
-		uint32_t voxelTraversalErrorRaises = 0u;
-		for (ClusterLODGroup& group : state.groups)
+		std::vector<uint32_t> parentRefCounts(state.groups.size(), 0u);
+		std::vector<uint32_t> nonVoxelParentRefCounts(state.groups.size(), 0u);
+		std::vector<float> voxelParentRepresentationErrorForGroup(state.groups.size(), 0.0f);
+		for (const ClusterLODGroup& group : state.groups)
 		{
-			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
-				!std::isfinite(group.representationError) ||
-				group.representationError <= 0.0f ||
-				IsTerminalErrorSentinel(group.bounds.error) ||
-				group.bounds.error >= group.representationError)
+			if (group.firstSegment + group.segmentCount > state.segments.size())
 			{
 				continue;
 			}
 
-			group.bounds.error = group.representationError;
-			voxelTraversalErrorRaises++;
+			const bool parentIsVoxel = (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
+			const float parentVoxelRepresentationError =
+				parentIsVoxel && std::isfinite(group.representationError) && group.representationError > 0.0f
+				? group.representationError
+				: 0.0f;
+			for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+			{
+				const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+				if (segment.refinedGroup < 0)
+				{
+					continue;
+				}
+
+				const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+				if (childGroupIndex < parentRefCounts.size())
+				{
+					parentRefCounts[childGroupIndex]++;
+					if (parentIsVoxel)
+					{
+						voxelParentRepresentationErrorForGroup[childGroupIndex] = std::max(
+							voxelParentRepresentationErrorForGroup[childGroupIndex],
+							parentVoxelRepresentationError);
+					}
+					else
+					{
+						nonVoxelParentRefCounts[childGroupIndex]++;
+					}
+				}
+			}
+		}
+
+		uint32_t voxelTraversalBoundaryRewrites = 0u;
+		uint32_t voxelTraversalRootSentinelsPreserved = 0u;
+		for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(state.groups.size()); ++groupIndex)
+		{
+			ClusterLODGroup& group = state.groups[groupIndex];
+			const bool hasVoxelParentBoundary =
+				groupIndex < voxelParentRepresentationErrorForGroup.size() &&
+				std::isfinite(voxelParentRepresentationErrorForGroup[groupIndex]) &&
+				voxelParentRepresentationErrorForGroup[groupIndex] > 0.0f;
+			const bool hasNonVoxelParent =
+				groupIndex < nonVoxelParentRefCounts.size() &&
+				nonVoxelParentRefCounts[groupIndex] != 0u;
+			const bool isRootGroup =
+				groupIndex < parentRefCounts.size() &&
+				parentRefCounts[groupIndex] == 0u;
+
+			if (!hasVoxelParentBoundary)
+			{
+				if (isRootGroup &&
+					(group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u &&
+					IsTerminalErrorSentinel(group.bounds.error))
+				{
+					voxelTraversalRootSentinelsPreserved++;
+				}
+				continue;
+			}
+
+			if (isRootGroup && IsTerminalErrorSentinel(group.bounds.error))
+			{
+				voxelTraversalRootSentinelsPreserved++;
+				continue;
+			}
+
+			float traversalBoundary = voxelParentRepresentationErrorForGroup[groupIndex];
+			if (hasNonVoxelParent && groupIndex < originalGroupErrors.size())
+			{
+				const float originalGroupError = originalGroupErrors[groupIndex];
+				if (std::isfinite(originalGroupError) && originalGroupError > 0.0f)
+				{
+					traversalBoundary = std::max(traversalBoundary, originalGroupError);
+				}
+			}
+
+			if (std::isfinite(traversalBoundary) && traversalBoundary > 0.0f)
+			{
+				group.bounds.error = traversalBoundary;
+				voxelTraversalBoundaryRewrites++;
+			}
 		}
 
 		uint32_t parentTraversalErrorRaises = 0u;
@@ -5329,7 +5404,7 @@ namespace
 		const uint32_t totalVoxelCubes = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
 
 		spdlog::info(
-			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} traversal_error_underreports={} voxel_error_raises={} parent_error_raises={} failed={} coverage_bvh_builds={} coverage_bvh_reuses={} source_coverage(queries={} candidates={} tests={} out_of_cell={}) timing_ms(analysis={:.2f} source={:.2f} coverage_bvh={:.2f} voxelize={:.2f} pack={:.2f})",
+			"ClusterLOD voxel fallback: analyzed={} valid={} auto_candidates={} accepted_seeds={} forced={} propagated={} voxel_groups={} triangle_groups={} payloads={} clusters={} cubes={} traversal_error_underreports={} voxel_boundary_rewrites={} parent_error_raises={} failed={} coverage_bvh_builds={} coverage_bvh_reuses={} source_coverage(queries={} candidates={} tests={} out_of_cell={}) timing_ms(analysis={:.2f} source={:.2f} coverage_bvh={:.2f} voxelize={:.2f} pack={:.2f})",
 			stats.analyzedGroups,
 			stats.validGroups,
 			stats.autoCandidateGroups,
@@ -5342,7 +5417,7 @@ namespace
 			totalVoxelClusters,
 			totalVoxelCubes,
 			voxelTraversalErrorUnderreports,
-			voxelTraversalErrorRaises,
+			voxelTraversalBoundaryRewrites,
 			parentTraversalErrorRaises,
 			stats.failedBuilds,
 			stats.coverageBvhBuilds,
@@ -5356,6 +5431,12 @@ namespace
 			static_cast<double>(stats.coverageBvhUs) / 1000.0,
 			static_cast<double>(stats.voxelizeUs) / 1000.0,
 			static_cast<double>(stats.packUs) / 1000.0);
+		if (voxelTraversalRootSentinelsPreserved != 0u)
+		{
+			spdlog::debug(
+				"ClusterLOD voxel fallback preserved {} root terminal sentinel traversal errors after voxel boundary rewrites",
+				voxelTraversalRootSentinelsPreserved);
+		}
 	}
 
 	void BuildClusterLODTraversalHierarchy(ClusterLODBuildState& state, uint32_t preferredNodeWidth)

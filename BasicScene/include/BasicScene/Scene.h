@@ -21,6 +21,27 @@
 class DynamicGloballyIndexedResource;
 class Material;
 
+class SkeletonVariantSet {
+public:
+    explicit SkeletonVariantSet(std::uint32_t variantCount = 1);
+
+    std::uint32_t GetVariantCount() const noexcept { return m_variantCount; }
+    std::shared_ptr<Skeleton> GetVariant(const std::shared_ptr<Skeleton>& skeleton, std::uint32_t variantIndex);
+
+private:
+    struct VariantRecord {
+        std::shared_ptr<Skeleton> baseSkeleton;
+        std::vector<std::shared_ptr<Skeleton>> variants;
+    };
+
+    std::uint32_t m_variantCount = 1;
+    std::unordered_map<const Skeleton*, VariantRecord> m_variantsByBase;
+};
+
+struct SkeletonVariantAssignmentOptions {
+    std::uint32_t seed = 1337;
+};
+
 class Scene {
 public:
     Scene();
@@ -75,6 +96,8 @@ public:
     void Activate(ManagerInterface managerInterface);
     void Deactivate();
     bool SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t meshInstanceIndex, std::shared_ptr<Material> material);
+    void AssignSkeletonVariants(SkeletonVariantSet& variantSet, const SkeletonVariantAssignmentOptions& options = {});
+    bool AssignSkeletonVariant(flecs::entity entity, SkeletonVariantSet& variantSet, std::uint32_t variantIndex);
 
     void ProcessEntitySkins(bool overrideExistingSkins = false);
     std::shared_ptr<Scene> Clone() const;

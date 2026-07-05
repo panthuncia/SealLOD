@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <execution>
+#include <functional>
 #include <limits>
 #include <flecs.h>
 #include <BasicScene/SceneWorldManager.h>
@@ -63,10 +64,12 @@ namespace {
 			world.component<Components::GlobalMeshLibrary>().add(flecs::Exclusive);
 			world.component<Components::DrawStats>("DrawStats").add(flecs::Exclusive);
 			world.component<Components::RenderBridgeSceneDiff>().add(flecs::Exclusive);
+			world.component<Components::RenderBridgeDirtyState>().add(flecs::Exclusive);
 			world.component<Components::ActiveScene>().add(flecs::OnInstantiate, flecs::Inherit);
 			world.add<Components::GlobalMeshLibrary>();
 			world.set<Components::DrawStats>({ 0, {} });
 			world.set<Components::RenderBridgeSceneDiff>({});
+			world.set<Components::RenderBridgeDirtyState>({});
 
 			flecs::entity game = world.pipeline()
 				.with(flecs::System)
@@ -96,6 +99,7 @@ namespace {
 				.event(flecs::OnSet)
 				.each([](flecs::entity e, Components::MeshInstances&) {
 					e.add<Components::RenderBridgeContentDirty>();
+					e.world().get_mut<Components::RenderBridgeDirtyState>().renderables = true;
 				});
 			world.observer<Components::MeshInstances>()
 				.event(flecs::OnRemove)
@@ -107,6 +111,12 @@ namespace {
 					}
 				});
 			world.observer<Components::Camera>()
+				.event(flecs::OnSet)
+				.each([](flecs::entity e, Components::Camera&) {
+					e.add<Components::RenderBridgeContentDirty>();
+					e.world().get_mut<Components::RenderBridgeDirtyState>().cameras = true;
+				});
+			world.observer<Components::Camera>()
 				.event(flecs::OnRemove)
 				.each([](flecs::entity e, Components::Camera&) {
 					if (const auto* stableSceneID = e.try_get<Components::StableSceneID>()) {
@@ -114,6 +124,12 @@ namespace {
 						diff.removedCameraIDs.push_back(stableSceneID->value);
 						++diff.generation;
 					}
+				});
+			world.observer<Components::Light>()
+				.event(flecs::OnSet)
+				.each([](flecs::entity e, Components::Light&) {
+					e.add<Components::RenderBridgeContentDirty>();
+					e.world().get_mut<Components::RenderBridgeDirtyState>().lights = true;
 				});
 			world.observer<Components::Light>()
 				.event(flecs::OnRemove)
@@ -128,6 +144,10 @@ namespace {
 				.event(flecs::OnSet)
 				.each([](flecs::entity e, Components::Name&) {
 					e.add<Components::RenderBridgeContentDirty>();
+					auto& dirtyState = e.world().get_mut<Components::RenderBridgeDirtyState>();
+					dirtyState.renderables = dirtyState.renderables || e.has<Components::MeshInstances>();
+					dirtyState.cameras = dirtyState.cameras || e.has<Components::Camera>();
+					dirtyState.lights = dirtyState.lights || e.has<Components::Light>();
 				});
 
 			// Transform system: only recompute matrices for dirty entities
@@ -146,6 +166,10 @@ namespace {
 					}
 					e.remove<Components::TransformDirty>();
 					e.add<Components::TransformUpdatedThisFrame>();
+					auto& dirtyState = e.world().get_mut<Components::RenderBridgeDirtyState>();
+					dirtyState.renderables = dirtyState.renderables || e.has<Components::MeshInstances>();
+					dirtyState.cameras = dirtyState.cameras || e.has<Components::Camera>();
+					dirtyState.lights = dirtyState.lights || e.has<Components::Light>();
 				});
 		});
 	}
@@ -242,6 +266,40 @@ namespace {
 }
 
 std::atomic<uint64_t> Scene::globalSceneCount = 0;
+
+SkeletonVariantSet::SkeletonVariantSet(std::uint32_t variantCount)
+	: m_variantCount((std::max)(1u, variantCount))
+{
+}
+
+std::shared_ptr<Skeleton> SkeletonVariantSet::GetVariant(const std::shared_ptr<Skeleton>& skeleton, std::uint32_t variantIndex)
+{
+	if (!skeleton) {
+		return nullptr;
+	}
+
+	auto baseSkeleton = skeleton->GetBaseSkeletonShared();
+	if (!baseSkeleton) {
+		return nullptr;
+	}
+
+	variantIndex %= m_variantCount;
+	auto& record = m_variantsByBase[baseSkeleton.get()];
+	if (!record.baseSkeleton) {
+		record.baseSkeleton = baseSkeleton;
+		record.variants.resize(m_variantCount);
+	}
+	else if (record.variants.size() < m_variantCount) {
+		record.variants.resize(m_variantCount);
+	}
+
+	auto& variant = record.variants[variantIndex];
+	if (!variant) {
+		variant = baseSkeleton->CopySkeleton();
+	}
+
+	return variant;
+}
 
 Scene::Scene(){
 	m_sceneID = globalSceneCount.fetch_add(1, std::memory_order_relaxed);
@@ -391,7 +449,7 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 				auto skinInst = meshInstance->GetSkin();
 				m_managerInterface.GetSkeletonManager()->AcquireSkinningInstance(skinInst);
 				meshInstance->SetSkinningInstanceSlot(skinInst->GetSkinningInstanceSlot());
-				if (skinInst->GetAnimationCount() > 0u) {
+				if (skinInst->GetAnimationCount() > 0u && skinInst->GetActiveAnimationIndex() == size_t(-1)) {
 					skinInst->SetAnimation(0); // TODO: Animation selection
 				}
 				meshInstance->SyncSkinningStateFromSkeleton();
@@ -891,6 +949,73 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 	meshInstances->BumpGeneration();
 	entity.add<Components::RenderBridgeContentDirty>();
 	return true;
+}
+
+bool Scene::AssignSkeletonVariant(flecs::entity entity, SkeletonVariantSet& variantSet, std::uint32_t variantIndex) {
+	if (!entity.is_alive()) {
+		return false;
+	}
+
+	auto* meshInstances = entity.try_get_mut<Components::MeshInstances>();
+	if (!meshInstances) {
+		return false;
+	}
+
+	bool assigned = false;
+	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> variantsByBase;
+	for (const auto& meshInstance : meshInstances->meshInstances) {
+		if (!meshInstance || !meshInstance->HasSkin()) {
+			continue;
+		}
+
+		auto currentSkeleton = meshInstance->GetSkin();
+		auto baseSkeleton = currentSkeleton ? currentSkeleton->GetBaseSkeletonShared() : nullptr;
+		if (!baseSkeleton) {
+			continue;
+		}
+
+		auto& variant = variantsByBase[baseSkeleton.get()];
+		if (!variant) {
+			variant = variantSet.GetVariant(baseSkeleton, variantIndex);
+		}
+		if (!variant) {
+			continue;
+		}
+
+		meshInstance->SetSkeleton(variant);
+		if (variant->GetAnimationCount() > 0u && variant->GetActiveAnimationIndex() == size_t(-1)) {
+			variant->SetAnimation(0);
+			meshInstance->SyncSkinningStateFromSkeleton();
+		}
+		assigned = true;
+	}
+
+	if (!assigned) {
+		return false;
+	}
+
+	meshInstances->BumpGeneration();
+	entity.add<Components::Skinned>();
+	entity.add<Components::RenderBridgeContentDirty>();
+	return true;
+}
+
+void Scene::AssignSkeletonVariants(SkeletonVariantSet& variantSet, const SkeletonVariantAssignmentOptions& options) {
+	const std::uint32_t variantCount = variantSet.GetVariantCount();
+	VisitSceneDescendants(ECSSceneRoot, [&](flecs::entity entity) {
+		if (!entity.has<Components::MeshInstances>()) {
+			return;
+		}
+
+		std::uint64_t stableValue = entity.id();
+		if (const auto* stableSceneID = entity.try_get<Components::StableSceneID>()) {
+			stableValue = stableSceneID->value;
+		}
+
+		const std::uint64_t hashInput = stableValue ^ (static_cast<std::uint64_t>(options.seed) << 32u);
+		const auto variantIndex = static_cast<std::uint32_t>(std::hash<std::uint64_t>{}(hashInput) % variantCount);
+		AssignSkeletonVariant(entity, variantSet, variantIndex);
+	});
 }
 
 flecs::entity Scene::GetRoot() const {

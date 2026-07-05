@@ -279,7 +279,6 @@ namespace
 			return summary;
 		}
 
-		int32_t coarsestDepth = groups[0].depth;
 		for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
 			const auto& group = groups[groupIndex];
 			summary.firstGroupVertexByLocal[groupIndex] = group.firstGroupVertex;
@@ -300,29 +299,6 @@ namespace
 				hint.segmentCount = group.segmentCount;
 				hint.pageCount = group.pageCount;
 			}
-			coarsestDepth = std::max(coarsestDepth, group.depth);
-		}
-
-		uint32_t runStart = std::numeric_limits<uint32_t>::max();
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < static_cast<uint32_t>(groups.size()); ++groupLocalIndex) {
-			const bool isCoarsest = groups[groupLocalIndex].depth == coarsestDepth;
-			if (isCoarsest) {
-				if (runStart == std::numeric_limits<uint32_t>::max()) {
-					runStart = groupLocalIndex;
-				}
-				continue;
-			}
-
-			if (runStart != std::numeric_limits<uint32_t>::max()) {
-				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart });
-				runStart = std::numeric_limits<uint32_t>::max();
-			}
-		}
-
-		if (runStart != std::numeric_limits<uint32_t>::max()) {
-			summary.coarsestRanges.push_back({
-				runStart,
-				static_cast<uint32_t>(groups.size()) - runStart });
 		}
 
 		const uint32_t localGroupCount = static_cast<uint32_t>(groups.size());
@@ -343,6 +319,28 @@ namespace
 
 				summary.parentGroupByLocal[refinedGroupLocalU32] = static_cast<int32_t>(groupLocalIndex);
 			}
+		}
+
+		uint32_t runStart = std::numeric_limits<uint32_t>::max();
+		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
+			const bool isCoarsestRoot = summary.parentGroupByLocal[groupLocalIndex] < 0;
+			if (isCoarsestRoot) {
+				if (runStart == std::numeric_limits<uint32_t>::max()) {
+					runStart = groupLocalIndex;
+				}
+				continue;
+			}
+
+			if (runStart != std::numeric_limits<uint32_t>::max()) {
+				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart });
+				runStart = std::numeric_limits<uint32_t>::max();
+			}
+		}
+
+		if (runStart != std::numeric_limits<uint32_t>::max()) {
+			summary.coarsestRanges.push_back({
+				runStart,
+				localGroupCount - runStart });
 		}
 
 		return summary;

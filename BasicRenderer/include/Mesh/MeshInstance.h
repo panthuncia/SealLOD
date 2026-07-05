@@ -95,7 +95,7 @@ private:
     PerMeshInstanceCB m_perMeshInstanceBufferData = {};
     std::shared_ptr<Mesh> m_mesh;
     std::shared_ptr<Material> m_materialOverride;
-    std::shared_ptr<Skeleton> m_skeleton; // Instance-specific skeleton
+    std::shared_ptr<Skeleton> m_skeleton; // Runtime skeleton; may be shared by a skeleton variant set.
     MeshManager* m_pCurrentMeshManager = nullptr;
     SkeletonManager* m_pCurrentSkeletonManager = nullptr;
     std::weak_ptr<std::atomic_bool> m_skeletonManagerLifetime;

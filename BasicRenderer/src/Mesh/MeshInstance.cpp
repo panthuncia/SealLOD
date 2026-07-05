@@ -105,6 +105,13 @@ void MeshInstance::SetSkeleton(std::shared_ptr<Skeleton> skeleton) {
 
     ReleaseSkinningInstance_();
 	m_skeleton = skeleton;
+    if (m_skeleton != nullptr) {
+        m_skeleton->SetAnimationSpeed(m_animationSpeed);
+        if (m_pCurrentSkeletonManager != nullptr) {
+            m_pCurrentSkeletonManager->AcquireSkinningInstance(m_skeleton);
+            m_perMeshInstanceBufferData.skinningInstanceSlot = m_skeleton->GetSkinningInstanceSlot();
+        }
+    }
     SyncSkinningStateFromSkeleton();
 }
 

@@ -154,6 +154,12 @@ namespace Components {
         uint64_t generation = 0;
     };
 
+    struct RenderBridgeDirtyState {
+        bool renderables = true;
+        bool cameras = true;
+        bool lights = true;
+    };
+
     struct Name {
         Name() = default;
         Name(std::string name) : name(std::move(name)) {}

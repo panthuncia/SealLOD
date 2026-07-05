@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -37,7 +38,9 @@
 #include "Import/BRNiflyClient.h"
 
 #include <pxr/usd/sdf/layer.h>
+#include <pxr/usd/usd/primFlags.h>
 #include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usdGeom/mesh.h>
 
 namespace fs = std::filesystem;
 
@@ -101,6 +104,72 @@ static const char* NodeKindName(uint32_t kind) {
     case 2u: return "segment-leaf";
     default: return "invalid";
     }
+}
+
+static pxr::UsdTimeCode GetUsdGeometrySampleTime(const pxr::UsdStageRefPtr& stage) {
+    if (stage && stage->HasAuthoredTimeCodeRange()) {
+        return pxr::UsdTimeCode(stage->GetStartTimeCode());
+    }
+
+    return pxr::UsdTimeCode::Default();
+}
+
+static uint64_t CountUsdMeshSourceTriangles(
+    const pxr::UsdGeomMesh& mesh,
+    pxr::UsdTimeCode geomTimeCode) {
+    pxr::VtArray<int> faceVertCounts;
+    if (!mesh.GetFaceVertexCountsAttr().Get(&faceVertCounts, geomTimeCode)) {
+        return 0;
+    }
+
+    pxr::VtArray<int> holeIndices;
+    if (mesh.GetHoleIndicesAttr()) {
+        mesh.GetHoleIndicesAttr().Get(&holeIndices, geomTimeCode);
+    }
+
+    std::vector<uint8_t> holedFaces(faceVertCounts.size(), 0u);
+    for (int holeFaceIndex : holeIndices) {
+        if (holeFaceIndex >= 0 && static_cast<size_t>(holeFaceIndex) < holedFaces.size()) {
+            holedFaces[static_cast<size_t>(holeFaceIndex)] = 1u;
+        }
+    }
+
+    uint64_t triangleCount = 0;
+    for (size_t faceIndex = 0; faceIndex < faceVertCounts.size(); ++faceIndex) {
+        if (holedFaces[faceIndex] != 0u) {
+            continue;
+        }
+
+        const int faceVertexCount = faceVertCounts[faceIndex];
+        if (faceVertexCount >= 3) {
+            triangleCount += static_cast<uint64_t>(faceVertexCount - 2);
+        }
+    }
+
+    return triangleCount;
+}
+
+static uint64_t CountUsdStageSourceTriangles(const pxr::UsdStageRefPtr& stage) {
+    if (!stage) {
+        return 0;
+    }
+
+    const pxr::UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
+    uint64_t triangleCount = 0;
+
+    std::function<void(const pxr::UsdPrim&)> visitPrim = [&](const pxr::UsdPrim& prim) {
+        const pxr::UsdGeomMesh mesh(prim);
+        if (mesh) {
+            triangleCount += CountUsdMeshSourceTriangles(mesh, geomTimeCode);
+        }
+
+        for (const pxr::UsdPrim& child : prim.GetFilteredChildren(pxr::UsdTraverseInstanceProxies())) {
+            visitPrim(child);
+        }
+    };
+
+    visitPrim(stage->GetPseudoRoot());
+    return triangleCount;
 }
 
 static bool SphereFinite(const DirectX::XMFLOAT4& s) {
@@ -692,11 +761,15 @@ static bool ProcessFile(const fs::path& path) {
         switch (fmt) {
         case AssetFormat::USD: {
             spdlog::info("  Opening USD stage...");
-            auto result = USDGeometryExtractor::ExtractAllFromStage(pxr::UsdStage::Open(pathStr), {}, g_usdTessellationFactor);
-            spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}",
+            auto stage = pxr::UsdStage::Open(pathStr);
+            const uint64_t sourceTriangles = CountUsdStageSourceTriangles(stage);
+            spdlog::info("  USD source geometry: triangles={} (scene instances included)", sourceTriangles);
+            auto result = USDGeometryExtractor::ExtractAllFromStage(stage, {}, g_usdTessellationFactor);
+            spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
                          result.submeshesProcessed,
-                         result.cachesBuilt);
+                         result.cachesBuilt,
+                         sourceTriangles);
             for (size_t i = 0; i < result.submeshes.size(); ++i) {
                 WriteClusterLODReport(canonical, "USD submesh " + std::to_string(i), result.submeshes[i]);
             }
@@ -707,8 +780,13 @@ static bool ProcessFile(const fs::path& path) {
         case AssetFormat::GlTF: {
             spdlog::info("  Loading glTF...");
             auto result = GlTFGeometryExtractor::ExtractAll(pathStr);
-            spdlog::info("  glTF result: primitives extracted: {}",
-                         result.primitives.size());
+            uint64_t extractedTriangles = 0;
+            for (const auto& primitive : result.primitives) {
+                extractedTriangles += primitive.result.ingest.GetIndices().size() / 3ull;
+            }
+            spdlog::info("  glTF result: primitives extracted: {}, extracted_triangles={}",
+                         result.primitives.size(),
+                         extractedTriangles);
             for (const auto& primitive : result.primitives) {
                 WriteClusterLODReport(
                     canonical,
@@ -748,11 +826,14 @@ static bool ProcessFile(const fs::path& path) {
                 return false;
             }
 
+            const uint64_t sourceTriangles = CountUsdStageSourceTriangles(stage);
+            spdlog::info("  NIF/USD source geometry: triangles={} (scene instances included)", sourceTriangles);
             auto result = USDGeometryExtractor::ExtractAllFromStage(stage, package->sourceIdentifier, g_usdTessellationFactor);
-            spdlog::info("  NIF/USD result: meshes={}, submeshes={}, caches_built={}",
+            spdlog::info("  NIF/USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
                          result.submeshesProcessed,
-                         result.cachesBuilt);
+                         result.cachesBuilt,
+                         sourceTriangles);
             for (size_t i = 0; i < result.submeshes.size(); ++i) {
                 WriteClusterLODReport(canonical, "NIF/USD submesh " + std::to_string(i), result.submeshes[i]);
             }
@@ -763,8 +844,13 @@ static bool ProcessFile(const fs::path& path) {
         case AssetFormat::Assimp: {
             spdlog::info("  Loading via Assimp...");
             auto result = AssimpGeometryExtractor::ExtractAll(pathStr);
-            spdlog::info("  Assimp result: meshes extracted: {}",
-                         result.meshes.size());
+            uint64_t extractedTriangles = 0;
+            for (const auto& mesh : result.meshes) {
+                extractedTriangles += mesh.result.ingest.GetIndices().size() / 3ull;
+            }
+            spdlog::info("  Assimp result: meshes extracted: {}, extracted_triangles={}",
+                         result.meshes.size(),
+                         extractedTriangles);
             for (const auto& mesh : result.meshes) {
                 WriteClusterLODReport(canonical, "Assimp mesh " + std::to_string(mesh.meshIndex), mesh.result);
             }

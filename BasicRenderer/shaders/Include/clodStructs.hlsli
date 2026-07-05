@@ -196,7 +196,7 @@ struct ClusterLODGroup
     uint pageCount;   // number of group-owned page-map slots / streamable pages
     int parentGroupId; // mesh-local group index of the parent group (-1 for root)
     float maxParentError; // max error of any parent group that refines into this group
-    float representationError; // voxel payload quality/diagnostic error; not used for runtime LOD cut
+    float representationError; // voxel payload quality/diagnostic error; builder uses it to derive cut boundaries
 };
 
 static const uint CLOD_NODE_INTERNAL = 0u;

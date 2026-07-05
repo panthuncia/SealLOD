@@ -462,8 +462,24 @@ void SceneRenderBridge::EnsureExportQueries(flecs::world& sceneWorld) const {
     m_exportCameraQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Camera>()
         .with<Components::Active>()
         .build();
+    m_exportDirtyCameraQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Camera>()
+        .with<Components::Active>()
+        .with<Components::RenderBridgeContentDirty>()
+        .build();
+    m_exportTransformUpdatedCameraQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Camera>()
+        .with<Components::Active>()
+        .with<Components::TransformUpdatedThisFrame>()
+        .build();
     m_exportLightQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Light>()
         .with<Components::Active>()
+        .build();
+    m_exportDirtyLightQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Light>()
+        .with<Components::Active>()
+        .with<Components::RenderBridgeContentDirty>()
+        .build();
+    m_exportTransformUpdatedLightQuery = sceneWorld.query_builder<Components::StableSceneID, Components::Matrix, Components::Light>()
+        .with<Components::Active>()
+        .with<Components::TransformUpdatedThisFrame>()
         .build();
     m_cachedExportSceneID = sceneID;
 }
@@ -473,13 +489,18 @@ void SceneRenderBridge::InvalidateExportQueries() {
     m_exportDirtyRenderableQuery = {};
     m_exportTransformUpdatedRenderableQuery = {};
     m_exportCameraQuery = {};
+    m_exportDirtyCameraQuery = {};
+    m_exportTransformUpdatedCameraQuery = {};
     m_exportLightQuery = {};
+    m_exportDirtyLightQuery = {};
+    m_exportTransformUpdatedLightQuery = {};
     m_cachedExportSceneID = 0;
     m_needsFullRenderableExport = true;
 }
 
 SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snapshotSequence, uint64_t sourceFrameNumber) const {
     ZoneScopedN("SceneRenderBridge::ExportSnapshot");
+    bool fullRenderableExport = false;
 
     SceneFrameSnapshot snapshot;
     snapshot.sceneID = scene.GetSceneID();
@@ -530,14 +551,22 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
         sceneDiff->removedLightIDs.clear();
     }
 
+    auto* dirtyState = sceneWorld.try_get_mut<Components::RenderBridgeDirtyState>();
+    fullRenderableExport = m_needsFullRenderableExport;
+    if (!fullRenderableExport) {
+        snapshot.aliveSetsComplete = false;
+        snapshot.aliveSetsChanged = false;
+    }
+    const bool renderableChangesPending = fullRenderableExport || dirtyState == nullptr || dirtyState->renderables;
+    const bool lightChangesPending = fullRenderableExport || dirtyState == nullptr || dirtyState->lights;
+
     {
         ZoneScopedN("SceneRenderBridge::ExportSnapshot::Renderables");
         snapshot.aliveRenderableIDs.reserve(m_lastRenderableCount);
         snapshot.changedRenderables.reserve(m_lastChangedRenderableCount);
         std::unordered_set<uint64_t> emittedRenderableIDs;
-        emittedRenderableIDs.reserve(m_lastChangedRenderableCount);
+        emittedRenderableIDs.reserve(fullRenderableExport ? m_lastChangedRenderableCount : 256u);
         std::vector<flecs::entity> dirtyRenderableEntities;
-        const bool fullRenderableExport = m_needsFullRenderableExport;
 
         auto emitRenderable = [&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::MeshInstances& meshInstances) {
             const bool transformChanged = src.has<Components::TransformUpdatedThisFrame>();
@@ -579,6 +608,7 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
             }
         };
 
+        if (renderableChangesPending) {
         if (fullRenderableExport) {
             m_exportRenderableQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::MeshInstances& meshInstances) {
                 if (src.has<Components::RenderBridgeContentDirty>()) {
@@ -600,6 +630,10 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
             });
             m_lastRenderableCount = m_lastExportedAliveRenderableIDs.size();
         }
+        }
+        else {
+            m_lastRenderableCount = m_lastExportedAliveRenderableIDs.size();
+        }
 
         if (!dirtyRenderableEntities.empty()) {
             sceneWorld.defer_begin();
@@ -610,12 +644,52 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
         }
 
         m_lastChangedRenderableCount = snapshot.changedRenderables.size();
+        if (dirtyState && renderableChangesPending) {
+            dirtyState->renderables = false;
+        }
     }
 
     {
         ZoneScopedN("SceneRenderBridge::ExportSnapshot::Cameras");
         snapshot.aliveCameraIDs.reserve(m_lastCameraCount);
+        std::vector<flecs::entity> dirtyCameraEntities;
+        std::unordered_set<uint64_t> emittedCameraIDs;
+        emittedCameraIDs.reserve(4);
+
+        auto emitCamera = [&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Camera& camera) {
+            if (!emittedCameraIDs.insert(stableSceneID.value).second) {
+                return;
+            }
+            const bool isNew = !m_lastExportedAliveCameraIDs.contains(stableSceneID.value);
+            if (isNew) {
+                snapshot.aliveSetsChanged = true;
+                m_lastExportedAliveCameraIDs.insert(stableSceneID.value);
+            }
+
+            SnapshotCamera snapshotCamera;
+            snapshotCamera.stableID = stableSceneID.value;
+            snapshotCamera.matrix = matrix;
+            snapshotCamera.camera = camera;
+            snapshotCamera.primary = src.has<Components::PrimaryCamera>();
+            if (const auto* externalMatrices = src.try_get<Components::ExternalCameraMatrices>()) {
+                snapshotCamera.useExternalMatrices = true;
+                snapshotCamera.externalMatrices = *externalMatrices;
+            }
+            if (const auto* name = src.try_get<Components::Name>()) {
+                snapshotCamera.name = name->name;
+            }
+            if (snapshotCamera.primary) {
+                snapshot.hasPrimaryCamera = true;
+                snapshot.primaryCameraStableID = snapshotCamera.stableID;
+            }
+            snapshot.changedCameras.push_back(std::move(snapshotCamera));
+        };
+
+        if (fullRenderableExport) {
         m_exportCameraQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Camera& camera) {
+        if (src.has<Components::RenderBridgeContentDirty>()) {
+            dirtyCameraEntities.push_back(src);
+        }
         snapshot.aliveCameraIDs.insert(stableSceneID.value);
 
         // Always export cameras — they're few and often change (jitter, movement)
@@ -638,12 +712,81 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
         snapshot.changedCameras.push_back(std::move(snapshotCamera));
         });
         m_lastCameraCount = snapshot.aliveCameraIDs.size();
+        }
+        else {
+            if (scene.HasUsablePrimaryCamera()) {
+                auto primaryCamera = scene.GetPrimaryCamera();
+                const auto* stableSceneID = primaryCamera.try_get<Components::StableSceneID>();
+                const auto* matrix = primaryCamera.try_get<Components::Matrix>();
+                const auto* camera = primaryCamera.try_get<Components::Camera>();
+                if (stableSceneID && matrix && camera) {
+                    if (primaryCamera.has<Components::RenderBridgeContentDirty>()) {
+                        dirtyCameraEntities.push_back(primaryCamera);
+                    }
+                    emitCamera(primaryCamera, *stableSceneID, *matrix, *camera);
+                }
+            }
+            else if (dirtyState == nullptr || dirtyState->cameras) {
+                m_exportDirtyCameraQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Camera& camera) {
+                    dirtyCameraEntities.push_back(src);
+                    emitCamera(src, stableSceneID, matrix, camera);
+                });
+                m_exportTransformUpdatedCameraQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Camera& camera) {
+                    emitCamera(src, stableSceneID, matrix, camera);
+                });
+            }
+            m_lastCameraCount = m_lastExportedAliveCameraIDs.size();
+        }
+
+        if (!dirtyCameraEntities.empty()) {
+            sceneWorld.defer_begin();
+            for (auto entity : dirtyCameraEntities) {
+                entity.remove<Components::RenderBridgeContentDirty>();
+            }
+            sceneWorld.defer_end();
+        }
+        if (dirtyState) {
+            dirtyState->cameras = false;
+        }
     }
 
     {
         ZoneScopedN("SceneRenderBridge::ExportSnapshot::Lights");
         snapshot.aliveLightIDs.reserve(m_lastLightCount);
+        std::vector<flecs::entity> dirtyLightEntities;
+        std::unordered_set<uint64_t> emittedLightIDs;
+        emittedLightIDs.reserve(4);
+
+        auto emitLight = [&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Light& light) {
+            if (!emittedLightIDs.insert(stableSceneID.value).second) {
+                return;
+            }
+            const bool isNew = !m_lastExportedAliveLightIDs.contains(stableSceneID.value);
+            if (isNew) {
+                snapshot.aliveSetsChanged = true;
+                m_lastExportedAliveLightIDs.insert(stableSceneID.value);
+            }
+
+            SnapshotLight snapshotLight;
+            snapshotLight.stableID = stableSceneID.value;
+            snapshotLight.matrix = matrix;
+            snapshotLight.light = light;
+            snapshotLight.skipShadowPass = src.has<Components::SkipShadowPass>();
+            if (const auto* frustumPlanes = src.try_get<Components::FrustumPlanes>()) {
+                snapshotLight.frustumPlanes = *frustumPlanes;
+            }
+            if (const auto* name = src.try_get<Components::Name>()) {
+                snapshotLight.name = name->name;
+            }
+            snapshot.changedLights.push_back(std::move(snapshotLight));
+        };
+
+        if (lightChangesPending) {
+        if (fullRenderableExport) {
         m_exportLightQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Light& light) {
+        if (src.has<Components::RenderBridgeContentDirty>()) {
+            dirtyLightEntities.push_back(src);
+        }
         snapshot.aliveLightIDs.insert(stableSceneID.value);
 
         const bool transformChanged = src.has<Components::TransformUpdatedThisFrame>();
@@ -665,6 +808,32 @@ SceneFrameSnapshot SceneRenderBridge::ExportSnapshot(Scene& scene, uint64_t snap
         }
         });
         m_lastLightCount = snapshot.aliveLightIDs.size();
+        }
+        else {
+            m_exportDirtyLightQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Light& light) {
+                dirtyLightEntities.push_back(src);
+                emitLight(src, stableSceneID, matrix, light);
+            });
+            m_exportTransformUpdatedLightQuery.each([&](flecs::entity src, const Components::StableSceneID& stableSceneID, const Components::Matrix& matrix, const Components::Light& light) {
+                emitLight(src, stableSceneID, matrix, light);
+            });
+            m_lastLightCount = m_lastExportedAliveLightIDs.size();
+        }
+        }
+        else {
+            m_lastLightCount = m_lastExportedAliveLightIDs.size();
+        }
+
+        if (!dirtyLightEntities.empty()) {
+            sceneWorld.defer_begin();
+            for (auto entity : dirtyLightEntities) {
+                entity.remove<Components::RenderBridgeContentDirty>();
+            }
+            sceneWorld.defer_end();
+        }
+        if (dirtyState && lightChangesPending) {
+            dirtyState->lights = false;
+        }
     }
 
     if (!snapshot.removedRenderableIDs.empty() || !snapshot.removedCameraIDs.empty() || !snapshot.removedLightIDs.empty()) {

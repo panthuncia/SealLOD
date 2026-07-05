@@ -48,7 +48,11 @@ private:
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::MeshInstances> m_exportDirtyRenderableQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::MeshInstances> m_exportTransformUpdatedRenderableQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportCameraQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportDirtyCameraQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Camera> m_exportTransformUpdatedCameraQuery;
     mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportLightQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportDirtyLightQuery;
+    mutable flecs::query<Components::StableSceneID, Components::Matrix, Components::Light> m_exportTransformUpdatedLightQuery;
     mutable uint64_t m_cachedExportSceneID = 0;
 
     // Export-side generation cache for detecting mesh changes without scene-side flags
