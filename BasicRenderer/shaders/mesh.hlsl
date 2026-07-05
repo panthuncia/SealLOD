@@ -267,11 +267,7 @@ float3 DecodeCompressedPosition(
     uint meshletLocalVertex,
     uint positionBitstreamBase,
     uint positionBitOffset,
-    uint bitsX,
-    uint bitsY,
-    uint bitsZ,
     uint quantExp,
-    int3 minQ,
     uint pagePoolSlabDescriptorIndex)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[pagePoolSlabDescriptorIndex];
@@ -335,7 +331,10 @@ SkinningInfluences DecodePackedJoints(uint meshletLocalVertex, MeshletSetup setu
     ByteAddressBuffer slab = ResourceDescriptorHeap[setup.pagePoolSlabDescriptorIndex];
     uint addr = setup.jointArrayBase + (setup.vertexAttributeOffset + meshletLocalVertex) * 32u;
     skinning.joints0 = LoadUint4(addr, slab);
-    skinning.joints1 = LoadUint4(addr + 16u, slab);
+    if (setup.boneCount > 4u)
+    {
+        skinning.joints1 = LoadUint4(addr + 16u, slab);
+    }
     return skinning;
 }
 
@@ -349,7 +348,10 @@ SkinningInfluences DecodePackedWeights(uint meshletLocalVertex, MeshletSetup set
     ByteAddressBuffer slab = ResourceDescriptorHeap[setup.pagePoolSlabDescriptorIndex];
     uint addr = setup.weightArrayBase + (setup.vertexAttributeOffset + meshletLocalVertex) * 32u;
     skinning.weights0 = LoadFloat4(addr, slab);
-    skinning.weights1 = LoadFloat4(addr + 16u, slab);
+    if (setup.boneCount > 4u)
+    {
+        skinning.weights1 = LoadFloat4(addr + 16u, slab);
+    }
     return skinning;
 }
 
@@ -417,7 +419,7 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     float4 viewPosition = mul(worldPosition, viewCamera.view);
 
     VisBufferPSInput result = (VisBufferPSInput)0;
-    result.position = mul(viewPosition, viewCamera.projection);
+    result.position = mul(worldPosition, viewCamera.viewProjection);
     result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
     result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
     result.linearDepth = -viewPosition.z;
@@ -641,11 +643,7 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         meshletLocalVertex,
         setup.positionBitstreamBase,
         setup.positionBitOffset,
-        setup.bitsX,
-        setup.bitsY,
-        setup.bitsZ,
         setup.compressedPositionQuantExp,
-        setup.minQ,
         setup.pagePoolSlabDescriptorIndex);
     vertex.normal = DecodeCompressedNormal(
         meshletLocalVertex,
@@ -683,11 +681,7 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         meshletLocalVertex,
         setup.positionBitstreamBase,
         setup.positionBitOffset,
-        setup.bitsX,
-        setup.bitsY,
-        setup.bitsZ,
         setup.compressedPositionQuantExp,
-        setup.minQ,
         setup.pagePoolSlabDescriptorIndex);
     if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) != 0u)
     {
@@ -702,7 +696,7 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     float4 viewPosition = mul(worldPosition, viewCamera.view);
 
     VisBufferPSInput result = (VisBufferPSInput)0;
-    result.position = mul(viewPosition, viewCamera.projection);
+    result.position = mul(worldPosition, viewCamera.viewProjection);
     result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
     result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
     result.linearDepth = -viewPosition.z;
@@ -1118,7 +1112,8 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup
 
     setup.meshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
-    setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
+    setup.meshInstanceBuffer = LoadMeshTemplateForDrawRecord(drawRecord);
     setup.viewID = CLodVisibleClusterViewID(packedCluster);
     setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
     setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);
@@ -1126,7 +1121,7 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
     setup.meshBuffer = perMeshBuffer[setup.meshInstanceBuffer.perMeshBufferIndex];
-    setup.objectBuffer = LoadInstanceTransformForDraw(drawRecordIndex);
+    setup.objectBuffer = LoadInstanceTransformForDrawRecord(drawRecord);
 
     // Use pre-resolved page address from VisibleCluster
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
@@ -1137,30 +1132,35 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup
         return false;
     }
 
-    CLodPageHeader hdr = LoadPageHeader(pageSlabDesc, pageSlabOff);
+    ByteAddressBuffer pageSlab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDesc)];
+    const uint4 hdr0 = pageSlab.Load4(pageSlabOff + 0u);
+    const uint4 hdr1 = pageSlab.Load4(pageSlabOff + 16u);
+    const uint hdrTriangleStreamOffset = pageSlab.Load(pageSlabOff + 48u);
 
     // meshletIndex is now page-local
-    if (setup.meshletIndex >= hdr.meshletCount)
+    if (setup.meshletIndex >= hdr0.x)
     {
         failureReason = CLOD_RASTER_INIT_FAILURE_MESHLET_OOB;
         return false;
     }
 
-    // Load per-meshlet descriptor
-    CLodMeshletDescriptor desc = LoadMeshletDescriptor(
-        pageSlabDesc, pageSlabOff, hdr.descriptorOffset, setup.meshletIndex);
+    const uint descAddr = pageSlabOff + hdr1.x + setup.meshletIndex * CLOD_MESHLET_DESCRIPTOR_STRIDE;
+    const uint4 desc0 = pageSlab.Load4(descAddr + 0u);
+    const uint descBitsAndVertexCount = pageSlab.Load(descAddr + 28u);
+    const uint2 descTriCountAndBoneCount = pageSlab.Load2(descAddr + 32u);
 #if CLOD_ENABLE_SOURCE_GROUP_VALIDATION
+    const uint descSourceGroupLocalIndex = pageSlab.Load(descAddr + 40u);
     const uint expectedGroupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
-    foundSourceGroupLocalIndex = desc.sourceGroupLocalIndex;
+    foundSourceGroupLocalIndex = descSourceGroupLocalIndex;
     sourceGroupMismatch =
-        desc.sourceGroupLocalIndex != 0xFFFFFFFFu &&
-        desc.sourceGroupLocalIndex != expectedGroupLocalIndex;
+        descSourceGroupLocalIndex != 0xFFFFFFFFu &&
+        descSourceGroupLocalIndex != expectedGroupLocalIndex;
 #else
 #endif
 
     setup.meshlet = (Meshlet)0;
-    setup.vertCount = CLodDescVertexCount(desc);
-    setup.triCount = CLodDescTriangleCount(desc);
+    setup.vertCount = (descBitsAndVertexCount >> 24u) & 0xFFu;
+    setup.triCount = descTriCountAndBoneCount.x & 0xFFFFu;
     if (!HasValidMeshShaderOutputCounts(setup.vertCount, setup.triCount))
     {
         failureReason = CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS;
@@ -1169,31 +1169,41 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup
     setup.vertOffset = 0;
 
     // Per-meshlet page stream addressing from descriptor
-    setup.bitsX = CLodDescBitsX(desc);
-    setup.bitsY = CLodDescBitsY(desc);
-    setup.bitsZ = CLodDescBitsZ(desc);
-    setup.minQ = int3(desc.minQx, desc.minQy, desc.minQz);
-    setup.positionBitOffset = desc.positionBitOffset;
-    setup.vertexAttributeOffset = desc.vertexAttributeOffset;
-    setup.triangleByteOffset = desc.triangleByteOffset;
-    setup.boneListOffset = desc.boneListOffset;
-    setup.boneCount = CLodDescBoneCount(desc);
-    setup.pageAttributeMask = hdr.attributeMask;
-    setup.uvSetCount = hdr.uvSetCount;
+    setup.positionBitOffset = desc0.x;
+    setup.vertexAttributeOffset = desc0.y;
+    setup.triangleByteOffset = desc0.z;
+    setup.boneCount = descTriCountAndBoneCount.y;
+    setup.pageAttributeMask = hdr0.z;
+    setup.uvSetCount = hdr0.w;
 
     // Page-level stream base offsets (absolute in slab)
     setup.pageByteOffset = pageSlabOff;
-    setup.positionBitstreamBase = pageSlabOff + hdr.positionBitstreamOffset;
-    setup.normalArrayBase = pageSlabOff + hdr.normalArrayOffset;
-    setup.colorArrayBase = pageSlabOff + hdr.colorArrayOffset;
-    setup.jointArrayBase = pageSlabOff + hdr.jointArrayOffset;
-    setup.weightArrayBase = pageSlabOff + hdr.weightArrayOffset;
-    setup.uvDescriptorBase = pageSlabOff + hdr.uvDescriptorOffset;
-    setup.uvBitstreamDirectoryBase = pageSlabOff + hdr.uvBitstreamDirectoryOffset;
-    setup.triangleStreamBase = pageSlabOff + hdr.triangleStreamOffset;
-    setup.boneIndexStreamBase = pageSlabOff + hdr.boneIndexStreamOffset;
+    setup.positionBitstreamBase = pageSlabOff + hdr1.z;
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+    setup.normalArrayBase = pageSlabOff + hdr1.w;
+#endif
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    const uint4 hdr2 = pageSlab.Load4(pageSlabOff + 32u);
+    setup.colorArrayBase = pageSlabOff + hdr2.x;
+    setup.jointArrayBase = pageSlabOff + hdr2.y;
+    setup.weightArrayBase = pageSlabOff + hdr2.z;
+    setup.uvBitstreamDirectoryBase = pageSlabOff + hdr2.w;
+#elif defined(PSO_SKINNED) || defined(PSO_ALPHA_TEST) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+    const uint4 hdr2 = pageSlab.Load4(pageSlabOff + 32u);
+#if defined(PSO_SKINNED)
+    setup.jointArrayBase = pageSlabOff + hdr2.y;
+    setup.weightArrayBase = pageSlabOff + hdr2.z;
+#endif
+#if defined(PSO_ALPHA_TEST) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+    setup.uvBitstreamDirectoryBase = pageSlabOff + hdr2.w;
+#endif
+#endif
+#if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+    setup.uvDescriptorBase = pageSlabOff + hdr1.y;
+#endif
+    setup.triangleStreamBase = pageSlabOff + hdrTriangleStreamOffset;
 
-    setup.compressedPositionQuantExp = hdr.compressedPositionQuantExp;
+    setup.compressedPositionQuantExp = hdr0.y;
     setup.pagePoolSlabDescriptorIndex = pageSlabDesc;
 
     // Non-CLod fields unused
@@ -1419,11 +1429,7 @@ Vertex DecodeReyesSourceVertex(MeshletSetup setup, uint meshletLocalVertex, uint
         meshletLocalVertex,
         setup.positionBitstreamBase,
         setup.positionBitOffset,
-        setup.bitsX,
-        setup.bitsY,
-        setup.bitsZ,
         setup.compressedPositionQuantExp,
-        setup.minQ,
         setup.pagePoolSlabDescriptorIndex);
     vertex.normal = DecodeCompressedNormal(
         meshletLocalVertex,
