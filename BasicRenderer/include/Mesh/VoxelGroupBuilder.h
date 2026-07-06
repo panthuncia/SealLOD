@@ -41,10 +41,6 @@ public:
 	void SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap);
 
 	bool IsValid() const;
-	void QueryAABB(
-		const DirectX::XMFLOAT3& aabbMin,
-		const DirectX::XMFLOAT3& aabbMax,
-		std::vector<uint32_t>& outTriangleIndices) const;
 	bool IntersectNearest(
 		int32_t refinedGroupFilter,
 		const DirectX::XMFLOAT3& origin,
@@ -65,18 +61,6 @@ public:
 	bool DoubleSidedTriangles() const { return m_doubleSidedTriangles; }
 
 private:
-	struct Node
-	{
-		DirectX::XMFLOAT3 boundsMin{};
-		DirectX::XMFLOAT3 boundsMax{};
-		uint32_t firstTriangle = 0;
-		uint32_t triangleCount = 0;
-		uint32_t leftChild = UINT32_MAX;
-		uint32_t rightChild = UINT32_MAX;
-	};
-
-	uint32_t BuildNode(uint32_t firstTriangle, uint32_t triangleCount);
-
 	struct EmbreeScene;
 
 	const std::vector<std::byte>* m_vertices = nullptr;
@@ -87,8 +71,6 @@ private:
 	const std::vector<int32_t>* m_triangleRefinedGroupIds = nullptr;
 	bool m_doubleSidedTriangles = false;
 	std::vector<std::vector<int32_t>> m_refinedGroupDomainMap;
-	std::vector<uint32_t> m_triangleOrder;
-	std::vector<Node> m_nodes;
 	std::unique_ptr<EmbreeScene> m_embreeScene;
 };
 
@@ -111,9 +93,10 @@ struct VoxelizeTrianglesInput
 	// source/candidate voxel payloads.
 	const VoxelSourceTriangleBVH* coverageSourceTriangles = nullptr;
 	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr;
+	int32_t terminalCoverageRefinedGroupOverride = std::numeric_limits<int32_t>::min();
 
-	// Optional already-voxelized sources. These are re-sampled as volumes when
-	// building a coarser voxel parent.
+	// Optional already-voxelized sources. These only define candidate output
+	// cells; coverage is evaluated from triangle sources.
 	const std::vector<const VoxelGroupPayload*>* sourceVoxelPayloads = nullptr;
 	const std::vector<VoxelSourcePayloadInstance>* sourceVoxelPayloadInstances = nullptr;
 
@@ -121,7 +104,6 @@ struct VoxelizeTrianglesInput
 	// cells. Coverage for these candidates is evaluated from triangle sources.
 	const std::vector<VoxelSourceCandidatePayload>* candidateVoxelPayloads = nullptr;
 	const std::vector<VoxelSourcePayloadInstance>* candidateVoxelPayloadInstances = nullptr;
-	bool keepZeroCoverageSourceCells = false;
 
 	// World-space AABB of the geometry to voxelize.
 	DirectX::XMFLOAT3 aabbMin{};
@@ -133,7 +115,6 @@ struct VoxelizeTrianglesInput
 
 	// Number of rays cast per active cell for opacity sampling.
 	uint32_t raysPerCell = 64;
-	ClusterLODVoxelPruningMode pruningMode = ClusterLODVoxelPruningMode::None;
 
 	// Output selection. Both default to true for compatibility with existing callers.
 	bool emitRenderPayload = true;
@@ -164,7 +145,6 @@ struct VoxelizeTrianglesResult
 		int32_t refinedGroup = -1;
 		uint32_t candidateKeys = 0;
 		uint32_t triangleOwnedCells = 0;
-		uint32_t voxelOwnedCells = 0;
 		uint32_t candidateOwnedCells = 0;
 		uint32_t candidateOnlyCells = 0;
 		uint32_t positiveCoverageCells = 0;

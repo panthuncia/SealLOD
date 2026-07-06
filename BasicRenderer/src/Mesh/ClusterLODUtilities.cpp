@@ -4358,21 +4358,6 @@ namespace
 		return IsTerminalErrorSentinel(error) ? kClusterLODStructuralTraversalError : error;
 	}
 
-	const char* VoxelPruningModeName(ClusterLODVoxelPruningMode mode)
-	{
-		switch (mode)
-		{
-		case ClusterLODVoxelPruningMode::None:
-			return "none";
-		case ClusterLODVoxelPruningMode::Coverage:
-			return "coverage";
-		case ClusterLODVoxelPruningMode::Spatial:
-			return "spatial";
-		default:
-			return "unknown";
-		}
-	}
-
 	void LogVoxelTriangleTagHistogram(
 		const char* label,
 		uint32_t groupIndex,
@@ -4762,8 +4747,7 @@ namespace
 		const ClusterLODBuildState& state,
 		uint32_t groupIndex,
 		size_t vertexStrideBytes,
-		VoxelFallbackGroupBuildInput& buildInput,
-		const std::vector<uint8_t>* requiredVoxelSourceMask = nullptr)
+		VoxelFallbackGroupBuildInput& buildInput)
 	{
 		if (groupIndex >= state.groups.size() || groupIndex >= state.groupVertexChunks.size())
 		{
@@ -4777,7 +4761,6 @@ namespace
 		buildInput.sourceVoxelGroupIndices.clear();
 		buildInput.voxelVertexCount = 0;
 		buildInput.sourcePrimitiveCountForCubeBudget = 0;
-		(void)requiredVoxelSourceMask;
 
 		const std::vector<uint32_t> refinedChildren = CollectUniqueRefinedChildren(state, groupIndex);
 
@@ -5124,6 +5107,10 @@ namespace
 			bool acceptedBudgetOverflowForQuality = false;
 			PackedVoxelGroupBuildResult packed{};
 			float packedVoxelRepresentationError = 0.0f;
+			uint32_t lastPositiveCoverageCellCount = 0u;
+			uint32_t lastCandidateCellCount = 0u;
+			uint32_t lastTriangleCandidateCellCount = 0u;
+			uint32_t lastVoxelCandidateCellCount = 0u;
 			VoxelFallbackGroupBuildInput qualityTriangleSourceInput;
 			bool useQualityTriangleSources = false;
 			const bool sourceVoxelsTooCoarseForSeed =
@@ -5133,7 +5120,7 @@ namespace
 				voxelWidth > 1.0e-8f &&
 				voxelWidth < maxSourceVoxelWidth;
 			if (sourceVoxelsTooCoarseForSeed &&
-				BuildVoxelFallbackCoverageSourceGeometry(state, groupIndex, vertexStrideBytes, qualityTriangleSourceInput, &requiredVoxelSourceMask) &&
+				BuildVoxelFallbackCoverageSourceGeometry(state, groupIndex, vertexStrideBytes, qualityTriangleSourceInput) &&
 				!qualityTriangleSourceInput.voxelTriangleIndices.empty())
 			{
 				useQualityTriangleSources = true;
@@ -5170,10 +5157,10 @@ namespace
 					payloadFitsBudget,
 					buildInput.analysis.voxelBudget,
 					buildInput.analysis.cubeBudget,
-					0u,
-					0u,
-					0u,
-					0u);
+					lastPositiveCoverageCellCount,
+					lastCandidateCellCount,
+					lastTriangleCandidateCellCount,
+					lastVoxelCandidateCellCount);
 			};
 			auto packCurrentPayload = [&]() {
 				PackVoxelGroupInput packInput{};
@@ -5276,18 +5263,21 @@ namespace
 				voxelInput.doubleSidedTriangles = settings.doubleSidedVoxelSourceNormals;
 				voxelInput.coverageSourceTriangles = voxelCoverageSourceTriangles;
 				voxelInput.coverageMaterialSampler = coverageMaterialSampler;
+				voxelInput.terminalCoverageRefinedGroupOverride = static_cast<int32_t>(groupIndex);
 				voxelInput.sourceVoxelPayloadInstances = sourceVoxelPayloadInstances.empty() ? nullptr : &sourceVoxelPayloadInstances;
 				voxelInput.candidateVoxelPayloadInstances = candidateVoxelPayloadInstances.empty() ? nullptr : &candidateVoxelPayloadInstances;
-				voxelInput.keepZeroCoverageSourceCells = settings.voxelFallbackCarryZeroCoverage;
 				voxelInput.aabbMin = buildInput.analysis.aabbMin;
 				voxelInput.aabbMax = buildInput.analysis.aabbMax;
 				voxelInput.voxelWidth = voxelWidth;
 				voxelInput.resolution = resolution;
 				voxelInput.raysPerCell = settings.voxelRaysPerCell;
-				voxelInput.pruningMode = settings.voxelFallbackPruningMode;
 				const auto voxelizeStart = std::chrono::steady_clock::now();
 				VoxelizeTrianglesResult voxelResult = VoxelizeTrianglesDetailed(voxelInput);
 				stats.voxelizeUs += elapsedUsSince(voxelizeStart);
+				lastPositiveCoverageCellCount = voxelResult.positiveCoverageCellCount;
+				lastCandidateCellCount = voxelResult.candidateCellCount;
+				lastTriangleCandidateCellCount = voxelResult.triangleCandidateCellCount;
+				lastVoxelCandidateCellCount = voxelResult.voxelCandidateCellCount;
 				{
 					ZoneScopedN("ClusterLODUtilities::VoxelFallback::ReleaseVoxelSourceInstances");
 					sourceVoxelPayloadInstances.clear();
@@ -5298,7 +5288,7 @@ namespace
 				stats.sourceCoverageTests += voxelResult.sourceCoverageTriangleTestCount;
 				stats.sourceCoverageOutOfCell += voxelResult.sourceCoverageOutOfCellRejectionCount;
 				spdlog::debug(
-					"ClusterLOD voxel build detail: group={} depth={} attempt={} resolution={} voxel_width={} target_voxel_width={} representation_error={} child_cut_acceptance_error={} max_source_voxel_width={} inherited_min_voxel_width={} max_quality_voxel_width={} pruning={} source_tris={} source_voxel_groups={} coverage_source_tris={} coverage_source_vertices={} source_primitives={} cube_budget={} tri_candidates={} voxel_candidates={} candidates={} positive_cells={} total_coverage={} max_coverage={} source_cells={} render_cells={} pruned={} source_coverage_queries={} source_coverage_candidates={} source_coverage_tests={} source_coverage_out_of_cell={}",
+					"ClusterLOD voxel build detail: group={} depth={} attempt={} resolution={} voxel_width={} target_voxel_width={} representation_error={} child_cut_acceptance_error={} max_source_voxel_width={} inherited_min_voxel_width={} max_quality_voxel_width={} source_tris={} source_voxel_groups={} coverage_source_tris={} coverage_source_vertices={} source_primitives={} cube_budget={} tri_candidates={} voxel_candidates={} candidates={} positive_cells={} total_coverage={} max_coverage={} source_cells={} render_cells={} pruned={} source_coverage_queries={} source_coverage_candidates={} source_coverage_tests={} source_coverage_out_of_cell={}",
 					groupIndex,
 					group.depth,
 					attempt,
@@ -5310,7 +5300,6 @@ namespace
 					maxSourceVoxelWidth,
 					inheritedMinVoxelWidth,
 					maxQualityVoxelWidth,
-					VoxelPruningModeName(settings.voxelFallbackPruningMode),
 					voxelSourceInput.voxelTriangleIndices.size() / 3ull,
 					useQualityTriangleSources ? 0ull : buildInput.sourceVoxelGroupIndices.size(),
 					sharedCoverageBuildInput.voxelTriangleIndices.size() / 3ull,
@@ -5333,14 +5322,13 @@ namespace
 				for (const VoxelizeTrianglesResult::RefinedGroupStats& stats : voxelResult.refinedGroupStats)
 				{
 					spdlog::debug(
-						"ClusterLOD voxel refined detail: group={} depth={} attempt={} refined_group={} candidates={} tri_owned={} voxel_owned={} candidate_owned={} candidate_only={} positive={} zero_dropped={} emitted={} total_coverage={} max_coverage={}",
+						"ClusterLOD voxel refined detail: group={} depth={} attempt={} refined_group={} candidates={} tri_owned={} candidate_owned={} candidate_only={} positive={} zero_dropped={} emitted={} total_coverage={} max_coverage={}",
 						groupIndex,
 						group.depth,
 						attempt,
 						stats.refinedGroup,
 						stats.candidateKeys,
 						stats.triangleOwnedCells,
-						stats.voxelOwnedCells,
 						stats.candidateOwnedCells,
 						stats.candidateOnlyCells,
 						stats.positiveCoverageCells,
@@ -8124,13 +8112,11 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		VoxelizeTrianglesInput voxelInput{};
 		voxelInput.sourceVoxelPayloadInstances = &sourceInstances;
 		voxelInput.candidateVoxelPayloadInstances = &sourceInstances;
-		voxelInput.keepZeroCoverageSourceCells = true;
 		voxelInput.aabbMin = aabbMin;
 		voxelInput.aabbMax = aabbMax;
 		voxelInput.voxelWidth = voxelWidth;
 		voxelInput.resolution = resolution;
 		voxelInput.raysPerCell = std::max(1u, settings.voxelRaysPerCell);
-		voxelInput.pruningMode = settings.voxelFallbackPruningMode;
 		voxelInput.emitSourcePayload = false;
 		VoxelizeTrianglesResult voxelResult = VoxelizeTrianglesDetailed(voxelInput);
 		if (voxelResult.renderPayload.activeCells.empty())
@@ -8595,13 +8581,11 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	voxelInput.triangleIndices = &indices;
 	voxelInput.doubleSidedTriangles = settings.doubleSidedVoxelSourceNormals;
 	voxelInput.coverageSourceTriangles = coverageSourceTriangles.IsValid() ? &coverageSourceTriangles : nullptr;
-	voxelInput.keepZeroCoverageSourceCells = settings.voxelFallbackCarryZeroCoverage;
 	voxelInput.aabbMin = aabbMin;
 	voxelInput.aabbMax = aabbMax;
 	voxelInput.voxelWidth = voxelWidth;
 	voxelInput.resolution = voxelResolution;
 	voxelInput.raysPerCell = settings.voxelRaysPerCell;
-	voxelInput.pruningMode = settings.voxelFallbackPruningMode;
 	voxelInput.emitSourcePayload = false;
 	VoxelizeTrianglesResult voxelResult;
 	{

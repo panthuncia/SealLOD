@@ -18,14 +18,12 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings()
     settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
     settings.voxelGridBaseResolution = 32u;
     settings.voxelMinResolution = 0u;
-    settings.voxelRaysPerCell = 64u;
+    settings.voxelRaysPerCell = 8u;
     settings.voxelFallbackScalingFactor = 2.5f;
     settings.voxelFallbackMaxRetryCount = 10u;
     settings.voxelFallbackGrowthFactor = 1.1f;
     settings.voxelFallbackAcceptanceBias = 1.0f;
     settings.voxelFallbackOpacityThreshold = 0.0f;
-    settings.voxelFallbackCarryZeroCoverage = false;
-    settings.voxelFallbackPruningMode = ClusterLODVoxelPruningMode::Coverage;
 
     return settings;
 }

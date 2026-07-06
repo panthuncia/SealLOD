@@ -35,21 +35,6 @@ namespace {
 		}
 	}
 
-	const char* ToVoxelPruningModeString(ClusterLODVoxelPruningMode mode)
-	{
-		switch (mode)
-		{
-		case ClusterLODVoxelPruningMode::None:
-			return "none";
-		case ClusterLODVoxelPruningMode::Coverage:
-			return "coverage";
-		case ClusterLODVoxelPruningMode::Spatial:
-			return "spatial";
-		default:
-			return "unknown";
-		}
-	}
-
 		std::mutex& GetCacheSaveMutexForIdentity(const MeshCacheIdentity& identity)
 		{
 			static std::mutex cacheMutexTableGuard;
@@ -161,7 +146,7 @@ namespace {
 		std::call_once(logOnce, [buildHash]() {
 			const ClusterLODBuilderSettings effectiveSettings = ApplyClusterLODBuilderEnvironmentOverrides({});
 			spdlog::info(
-				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} voxel_pruning='{}' env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}' env_pruning='{}'",
+				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
 				buildHash,
 				!effectiveSettings.disableSloppyFallback,
 				effectiveSettings.sloppyFallbackErrorFactor,
@@ -171,15 +156,13 @@ namespace {
 				effectiveSettings.voxelRaysPerCell,
 				effectiveSettings.voxelFallbackScalingFactor,
 				effectiveSettings.voxelFallbackOpacityThreshold,
-				ToVoxelPruningModeString(effectiveSettings.voxelFallbackPruningMode),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_MODE"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_GRID"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_RAYS"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SCALE"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_PRUNING"));
+				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD"));
 		});
 	}
 }

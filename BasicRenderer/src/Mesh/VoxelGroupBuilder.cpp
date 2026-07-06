@@ -28,8 +28,6 @@ namespace
 	// Helpers
 
 	using br::mesh::sggx::CompressSGGXToAxial;
-	using br::mesh::sggx::DecodeAxialSGGX;
-	using br::mesh::sggx::DecodeOctahedralAxis;
 	using br::mesh::sggx::EncodeAxialSGGX;
 	using br::mesh::sggx::Float3;
 	using br::mesh::sggx::SGGXFromNormal;
@@ -144,18 +142,6 @@ namespace
 
 	Float3 ToFloat3(const DirectX::XMFLOAT3& v) { return { v.x, v.y, v.z }; }
 	DirectX::XMFLOAT3 ToXM(const Float3& v) { return { v.x, v.y, v.z }; }
-	Float3 MinFloat3(const Float3& a, const Float3& b) { return { std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z) }; }
-	Float3 MaxFloat3(const Float3& a, const Float3& b) { return { std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z) }; }
-	Float3 AxisExtent(const Float3& minValue, const Float3& maxValue) { return maxValue - minValue; }
-	float AxisValue(const Float3& v, uint32_t axis)
-	{
-		switch (axis)
-		{
-		case 0: return v.x;
-		case 1: return v.y;
-		default: return v.z;
-		}
-	}
 	Float3 TriangleNormal(const Float3& a, const Float3& b, const Float3& c)
 	{
 		return (b - a).cross(c - a).normalized();
@@ -168,40 +154,6 @@ namespace
 			return normal * -1.0f;
 		}
 		return normal;
-	}
-
-	struct TriangleBounds
-	{
-		Float3 boundsMin{};
-		Float3 boundsMax{};
-		Float3 centroid{};
-	};
-
-	TriangleBounds ComputeTriangleBounds(
-		const std::vector<std::byte>& vertices,
-		size_t vertexStrideBytes,
-		const std::vector<uint32_t>& triangleIndices,
-		uint32_t triangleIndex)
-	{
-		const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
-		const uint32_t i0 = triangleIndices[triangleBase + 0u];
-		const uint32_t i1 = triangleIndices[triangleBase + 1u];
-		const uint32_t i2 = triangleIndices[triangleBase + 2u];
-		const Float3 v0 = ReadPosition(vertices, vertexStrideBytes, i0);
-		const Float3 v1 = ReadPosition(vertices, vertexStrideBytes, i1);
-		const Float3 v2 = ReadPosition(vertices, vertexStrideBytes, i2);
-		TriangleBounds bounds{};
-		bounds.boundsMin = MinFloat3(v0, MinFloat3(v1, v2));
-		bounds.boundsMax = MaxFloat3(v0, MaxFloat3(v1, v2));
-		bounds.centroid = (v0 + v1 + v2) * (1.0f / 3.0f);
-		return bounds;
-	}
-
-	bool AABBOverlap(const Float3& aMin, const Float3& aMax, const Float3& bMin, const Float3& bMax)
-	{
-		return aMin.x <= bMax.x && aMax.x >= bMin.x &&
-			aMin.y <= bMax.y && aMax.y >= bMin.y &&
-			aMin.z <= bMax.z && aMax.z >= bMin.z;
 	}
 
 	bool PointInsideAABB(const Float3& p, const Float3& boxMin, const Float3& boxMax, float epsilon)
@@ -268,49 +220,6 @@ namespace
 		}
 
 		return dominantBoneIndex;
-	}
-
-	uint32_t ComputeDominantBoneIndexForCell(
-		const VoxelizeTrianglesInput& input,
-		const std::vector<uint32_t>& overlappingTriangleIndices)
-	{
-		if (input.skinningVertices == nullptr || input.skinningVertices->empty() ||
-			input.skinningVertexStrideBytes == 0 || input.triangleIndices == nullptr)
-		{
-			return CLOD_VOXEL_STATIC_BONE_INDEX;
-		}
-
-		std::unordered_map<uint32_t, float> boneWeights;
-		boneWeights.reserve(8);
-
-		for (uint32_t triangleIndex : overlappingTriangleIndices)
-		{
-			const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
-			if (triangleBase + 2u >= input.triangleIndices->size())
-			{
-				continue;
-			}
-
-			const uint32_t vertexIndices[3] = {
-				(*input.triangleIndices)[triangleBase + 0u],
-				(*input.triangleIndices)[triangleBase + 1u],
-				(*input.triangleIndices)[triangleBase + 2u]
-			};
-
-			for (uint32_t vertexIndex : vertexIndices)
-			{
-				PackedSkinningInfluences influences{};
-				if (!ReadSkinningInfluences(*input.skinningVertices, input.skinningVertexStrideBytes, vertexIndex, influences))
-				{
-					continue;
-				}
-
-				AccumulateInfluenceSet(influences.joints0, influences.weights0, boneWeights);
-				AccumulateInfluenceSet(influences.joints1, influences.weights1, boneWeights);
-			}
-		}
-
-		return SelectDominantBoneIndex(boneWeights);
 	}
 
 	uint32_t ComputeDominantBoneIndexForSourceTriangle(
@@ -420,51 +329,6 @@ namespace
 		return true;
 	}
 
-	// Möller-Trumbore ray-triangle intersection
-	bool RayTriangleIntersect(const Float3& origin, const Float3& dir,
-		const Float3& v0, const Float3& v1, const Float3& v2,
-		float tMax,
-		float& outT,
-		float* outU = nullptr,
-		float* outV = nullptr)
-	{
-		constexpr float kEpsilon = 1e-8f;
-		Float3 e1 = v1 - v0;
-		Float3 e2 = v2 - v0;
-		Float3 h = dir.cross(e2);
-		float a = e1.dot(h);
-		if (std::abs(a) < kEpsilon)
-			return false;
-
-		float f = 1.0f / a;
-		Float3 s = origin - v0;
-		float u = f * s.dot(h);
-		if (u < 0.0f || u > 1.0f)
-			return false;
-
-		Float3 q = s.cross(e1);
-		float v = f * dir.dot(q);
-		if (v < 0.0f || u + v > 1.0f)
-			return false;
-
-		float t = f * e2.dot(q);
-		if (t > kEpsilon && t < tMax)
-		{
-			outT = t;
-			if (outU != nullptr)
-			{
-				*outU = u;
-			}
-			if (outV != nullptr)
-			{
-				*outV = v;
-			}
-			return true;
-		}
-
-		return false;
-	}
-
 	// Deterministic ray set generation for a unit cube [0,1]^3
 	struct Ray
 	{
@@ -559,24 +423,6 @@ namespace
 			outDir = outDir * (1.0f / outTMax);
 	}
 
-	// Rasterize triangles into a grid, returning per-cell triangle index lists.
-	struct CellTriEntry
-	{
-		uint64_t cellKey = 0;
-		std::vector<uint32_t> triangleIndices; // indices into the flat triangle array (triangle index, not vertex index)
-	};
-
-	struct VoxelSourceCellRef
-	{
-		uint32_t payloadIndex = 0;
-		uint32_t cellIndex = 0;
-		Float3 aabbMin{};
-		Float3 aabbMax{};
-		int32_t refinedGroup = -1;
-	};
-
-	using PmrVoxelSourceCellRefVector = std::pmr::vector<VoxelSourceCellRef>;
-
 	constexpr size_t kMaxDenseVoxelRasterCells = 512ull * 512ull * 512ull;
 	constexpr uint32_t kVoxelRasterBrickDim = 16u;
 	constexpr uint32_t kVoxelRasterBrickCellCount = kVoxelRasterBrickDim * kVoxelRasterBrickDim * kVoxelRasterBrickDim;
@@ -607,27 +453,16 @@ namespace
 		}
 	};
 
-	enum class BrickRasterRecordKind : uint8_t
-	{
-		Source,
-		Candidate
-	};
-
 	struct BrickRasterRecord
 	{
 		uint32_t brickIndex = 0u;
-		uint32_t payloadIndex = 0u;
-		uint32_t cellIndex = 0u;
 		uint32_t xMin = 0u;
 		uint32_t yMin = 0u;
 		uint32_t zMin = 0u;
 		uint32_t xMax = 0u;
 		uint32_t yMax = 0u;
 		uint32_t zMax = 0u;
-		Float3 aabbMin{};
-		Float3 aabbMax{};
 		int32_t refinedGroup = -1;
-		BrickRasterRecordKind kind = BrickRasterRecordKind::Source;
 	};
 
 	struct BrickSpan
@@ -642,8 +477,6 @@ namespace
 	{
 		uint64_t cellKey = 0u;
 		VoxelRasterBrickOutput* owner = nullptr;
-		uint32_t sourceRefFirst = 0u;
-		uint32_t sourceRefCount = 0u;
 		uint32_t candidateGroupFirst = 0u;
 		uint32_t candidateGroupCount = 0u;
 
@@ -651,8 +484,6 @@ namespace
 		{
 			cellKey = key;
 			owner = cellOwner;
-			sourceRefFirst = 0u;
-			sourceRefCount = 0u;
 			candidateGroupFirst = 0u;
 			candidateGroupCount = 0u;
 		}
@@ -662,14 +493,12 @@ namespace
 	{
 		std::pmr::memory_resource* resource = GetVoxelizationScratchResource();
 		std::pmr::vector<VoxelRasterCellData> cells{ resource };
-		PmrUInt32Vector sourceRecordIndices{ resource };
 		PmrInt32Vector candidateRefinedGroups{ resource };
 		uint32_t activeCellCount = 0u;
 
 		void Begin()
 		{
 			activeCellCount = 0u;
-			sourceRecordIndices.clear();
 			candidateRefinedGroups.clear();
 		}
 
@@ -699,7 +528,6 @@ namespace
 		PmrUInt64Vector cellTriKeys{ resource };
 		PmrUInt64Vector candidateKeys{ resource };
 		std::pmr::vector<PmrUInt64Vector> perTriangleCells{ resource };
-		std::vector<VoxelSourcePayloadInstance> sourceVoxelPayloads;
 		std::vector<VoxelSourcePayloadInstance> candidateVoxelPayloads;
 		std::pmr::vector<VoxelCoverageWorkResult> coverageWorkResults{ resource };
 		std::pmr::vector<BrickRasterRecord> voxelRasterRecords{ resource };
@@ -715,7 +543,6 @@ namespace
 		uint32_t voxelRasterCellGeneration = 0u;
 		std::pmr::unordered_map<uint64_t, VoxelRasterCellData*> voxelRasterCellMap{ resource };
 		bool voxelRasterUsesDenseLookup = false;
-		uint32_t voxelRasterSourceCellCount = 0u;
 		uint32_t voxelRasterCandidateCellCount = 0u;
 
 		void Begin()
@@ -728,7 +555,6 @@ namespace
 
 			cellTriKeys.clear();
 			candidateKeys.clear();
-			sourceVoxelPayloads.clear();
 			candidateVoxelPayloads.clear();
 			voxelRasterRecords.clear();
 			voxelRasterBinnedRecords.clear();
@@ -739,7 +565,6 @@ namespace
 			voxelRasterActiveCells.clear();
 			voxelRasterCellMap.clear();
 			voxelRasterUsesDenseLookup = false;
-			voxelRasterSourceCellCount = 0u;
 			voxelRasterCandidateCellCount = 0u;
 			if (++voxelRasterCellGeneration == 0u)
 			{
@@ -809,21 +634,6 @@ namespace
 			(input.candidateVoxelPayloadInstances != nullptr && !input.candidateVoxelPayloadInstances->empty());
 	}
 
-	Float3 VoxelCellMin(const VoxelGroupPayload& payload, const VoxelCell& cell)
-	{
-		return {
-			payload.aabbMin.x + static_cast<float>(cell.x) * payload.voxelWidth,
-			payload.aabbMin.y + static_cast<float>(cell.y) * payload.voxelWidth,
-			payload.aabbMin.z + static_cast<float>(cell.z) * payload.voxelWidth
-		};
-	}
-
-	Float3 VoxelCellMax(const VoxelGroupPayload& payload, const VoxelCell& cell)
-	{
-		const Float3 cellMin = VoxelCellMin(payload, cell);
-		return cellMin + Float3(payload.voxelWidth, payload.voxelWidth, payload.voxelWidth);
-	}
-
 	Float3 TransformPoint3x4(const ClusterLODAssemblyTransform& transform, const Float3& point)
 	{
 		return {
@@ -831,38 +641,6 @@ namespace
 			transform.row1.x * point.x + transform.row1.y * point.y + transform.row1.z * point.z + transform.row1.w,
 			transform.row2.x * point.x + transform.row2.y * point.y + transform.row2.z * point.z + transform.row2.w
 		};
-	}
-
-	void TransformAabb3x4(
-		const ClusterLODAssemblyTransform& transform,
-		const Float3& localMin,
-		const Float3& localMax,
-		Float3& outMin,
-		Float3& outMax)
-	{
-		outMin = Float3(
-			std::numeric_limits<float>::max(),
-			std::numeric_limits<float>::max(),
-			std::numeric_limits<float>::max());
-		outMax = Float3(
-			std::numeric_limits<float>::lowest(),
-			std::numeric_limits<float>::lowest(),
-			std::numeric_limits<float>::lowest());
-
-		for (uint32_t corner = 0; corner < 8u; ++corner)
-		{
-			const Float3 p(
-				(corner & 1u) != 0u ? localMax.x : localMin.x,
-				(corner & 2u) != 0u ? localMax.y : localMin.y,
-				(corner & 4u) != 0u ? localMax.z : localMin.z);
-			const Float3 tp = TransformPoint3x4(transform, p);
-			outMin.x = std::min(outMin.x, tp.x);
-			outMin.y = std::min(outMin.y, tp.y);
-			outMin.z = std::min(outMin.z, tp.z);
-			outMax.x = std::max(outMax.x, tp.x);
-			outMax.y = std::max(outMax.y, tp.y);
-			outMax.z = std::max(outMax.z, tp.z);
-		}
 	}
 
 	struct VoxelPayloadRasterContext
@@ -920,13 +698,6 @@ namespace
 		outMax = center + context.extent;
 	}
 
-	int32_t ResolveInstanceRefinedGroup(const VoxelSourcePayloadInstance& instance, const VoxelCell& sourceCell)
-	{
-		return instance.refinedGroupOverride != std::numeric_limits<int32_t>::min()
-			? instance.refinedGroupOverride
-			: sourceCell.refinedGroup;
-	}
-
 	uint32_t VoxelRasterBrickResolution(uint32_t resolution)
 	{
 		return (resolution + kVoxelRasterBrickDim - 1u) / kVoxelRasterBrickDim;
@@ -946,7 +717,6 @@ namespace
 
 	void EmitVoxelRasterRecordsForPayloads(
 		const std::vector<VoxelSourcePayloadInstance>& payloadInstances,
-		BrickRasterRecordKind kind,
 		const Float3& aabbMin,
 		float voxelWidth,
 		uint32_t resolution,
@@ -959,8 +729,6 @@ namespace
 
 		const float invCellSize = 1.0f / voxelWidth;
 		const uint32_t brickResolution = VoxelRasterBrickResolution(resolution);
-		std::pmr::vector<VoxelPayloadRasterContext> payloadContexts{ scratch.resource };
-		payloadContexts.resize(payloadInstances.size());
 
 		for (uint32_t payloadIndex = 0u; payloadIndex < static_cast<uint32_t>(payloadInstances.size()); ++payloadIndex)
 		{
@@ -971,11 +739,8 @@ namespace
 				continue;
 			}
 
-			const float expansionRadius = kind == BrickRasterRecordKind::Candidate
-				? std::max(0.0f, payloadInstance.expansionRadius)
-				: 0.0f;
-			payloadContexts[payloadIndex] = BuildVoxelPayloadRasterContext(*payload, payloadInstance.localToTarget, expansionRadius);
-			const VoxelPayloadRasterContext& rasterContext = payloadContexts[payloadIndex];
+			const float expansionRadius = std::max(0.0f, payloadInstance.expansionRadius);
+			const VoxelPayloadRasterContext rasterContext = BuildVoxelPayloadRasterContext(*payload, payloadInstance.localToTarget, expansionRadius);
 			const bool hasRefinedGroupOverride = payloadInstance.refinedGroupOverride != std::numeric_limits<int32_t>::min();
 			const int32_t refinedGroupOverride = payloadInstance.refinedGroupOverride;
 			const uint32_t cellCount = static_cast<uint32_t>(std::min<size_t>(payload->activeCells.size(), std::numeric_limits<uint32_t>::max()));
@@ -1014,18 +779,13 @@ namespace
 							const uint32_t brickXMax = std::min(brickXMin + kVoxelRasterBrickDim - 1u, resolution - 1u);
 							scratch.voxelRasterRecords.push_back(BrickRasterRecord{
 								.brickIndex = VoxelRasterBrickIndex(bx, by, bz, brickResolution),
-								.payloadIndex = payloadIndex,
-								.cellIndex = cellIndex,
 								.xMin = std::max(cxMin, brickXMin),
 								.yMin = std::max(cyMin, brickYMin),
 								.zMin = std::max(czMin, brickZMin),
 								.xMax = std::min(cxMax, brickXMax),
 								.yMax = std::min(cyMax, brickYMax),
 								.zMax = std::min(czMax, brickZMax),
-								.aabbMin = sourceMin,
-								.aabbMax = sourceMax,
-								.refinedGroup = refinedGroup,
-								.kind = kind });
+								.refinedGroup = refinedGroup });
 						}
 					}
 				}
@@ -1084,8 +844,6 @@ namespace
 			};
 
 			std::array<uint32_t, kVoxelRasterBrickCellCount> localCellIndices{};
-			std::array<uint32_t, kVoxelRasterBrickCellCount> sourceRefCounts{};
-			std::array<uint32_t, kVoxelRasterBrickCellCount> sourceRefWriteOffsets{};
 			std::array<uint32_t, kVoxelRasterBrickCellCount> candidateGroupCounts{};
 			std::array<uint32_t, kVoxelRasterBrickCellCount> candidateGroupWriteOffsets{};
 			localCellIndices.fill(std::numeric_limits<uint32_t>::max());
@@ -1093,47 +851,10 @@ namespace
 			candidateGroupEmissions.reserve(std::min<size_t>(span.recordCount, 256u));
 
 			{
-				ZoneScopedN("VoxelRaster::RasterizeBrick::SourceRefs");
-				for (size_t recordOffset = 0u; recordOffset < span.recordCount; ++recordOffset)
-				{
-					const BrickRasterRecord& record = scratch.voxelRasterBinnedRecords[span.firstRecord + recordOffset];
-					if (record.kind != BrickRasterRecordKind::Source)
-					{
-						continue;
-					}
-
-					for (uint32_t z = record.zMin; z <= record.zMax; ++z)
-					{
-						const uint64_t zKey = static_cast<uint64_t>(z) << 32u;
-						for (uint32_t y = record.yMin; y <= record.yMax; ++y)
-						{
-							const uint64_t yzKey = zKey | (static_cast<uint64_t>(y) << 16u);
-							for (uint32_t x = record.xMin; x <= record.xMax; ++x)
-							{
-								const uint64_t cellKey = yzKey | static_cast<uint64_t>(x);
-								const uint32_t localCellIndex = VoxelRasterLocalCellIndex(x, y, z);
-								(void)TouchVoxelRasterLocalCell(
-									output,
-									localCellIndices,
-									cellKey,
-									localCellIndex);
-								++sourceRefCounts[localCellIndex];
-							}
-						}
-					}
-				}
-			}
-
-			{
 				ZoneScopedN("VoxelRaster::RasterizeBrick::CandidateGroups");
 				for (size_t recordOffset = 0u; recordOffset < span.recordCount; ++recordOffset)
 				{
 					const BrickRasterRecord& record = scratch.voxelRasterBinnedRecords[span.firstRecord + recordOffset];
-					if (record.kind != BrickRasterRecordKind::Candidate)
-					{
-						continue;
-					}
-
 					for (uint32_t z = record.zMin; z <= record.zMax; ++z)
 					{
 						const uint64_t zKey = static_cast<uint64_t>(z) << 32u;
@@ -1178,7 +899,6 @@ namespace
 					}
 				}
 
-				uint32_t sourceRefTotal = 0u;
 				uint32_t candidateGroupTotal = 0u;
 				for (uint32_t localCellIndex = 0u; localCellIndex < kVoxelRasterBrickCellCount; ++localCellIndex)
 				{
@@ -1189,16 +909,11 @@ namespace
 					}
 
 					VoxelRasterCellData& cell = output.cells[outputCellIndex];
-					cell.sourceRefFirst = sourceRefTotal;
-					cell.sourceRefCount = sourceRefCounts[localCellIndex];
-					sourceRefTotal += sourceRefCounts[localCellIndex];
-
 					cell.candidateGroupFirst = candidateGroupTotal;
 					cell.candidateGroupCount = candidateGroupCounts[localCellIndex];
 					candidateGroupTotal += candidateGroupCounts[localCellIndex];
 				}
 
-				output.sourceRecordIndices.resize(sourceRefTotal);
 				output.candidateRefinedGroups.resize(candidateGroupTotal);
 				for (const CandidateGroupEmission& emission : candidateGroupEmissions)
 				{
@@ -1207,46 +922,17 @@ namespace
 					output.candidateRefinedGroups[cell.candidateGroupFirst + candidateGroupWriteOffsets[emission.localCellIndex]++] = emission.refinedGroup;
 				}
 			}
-
-			{
-				ZoneScopedN("VoxelRaster::RasterizeBrick::WriteSourceRefs");
-				for (size_t recordOffset = 0u; recordOffset < span.recordCount; ++recordOffset)
-				{
-					const size_t recordIndex = span.firstRecord + recordOffset;
-					const BrickRasterRecord& record = scratch.voxelRasterBinnedRecords[recordIndex];
-					if (record.kind != BrickRasterRecordKind::Source)
-					{
-						continue;
-					}
-
-					const uint32_t compactRecordIndex = static_cast<uint32_t>(recordIndex);
-					for (uint32_t z = record.zMin; z <= record.zMax; ++z)
-					{
-						for (uint32_t y = record.yMin; y <= record.yMax; ++y)
-						{
-							for (uint32_t x = record.xMin; x <= record.xMax; ++x)
-							{
-								const uint32_t localCellIndex = VoxelRasterLocalCellIndex(x, y, z);
-								const uint32_t outputCellIndex = localCellIndices[localCellIndex];
-								VoxelRasterCellData& cell = output.cells[outputCellIndex];
-								output.sourceRecordIndices[cell.sourceRefFirst + sourceRefWriteOffsets[localCellIndex]++] = compactRecordIndex;
-							}
-						}
-					}
-				}
-			}
 		});
 	}
 
 	void RasterizeVoxelPayloadsToBricks(
-		const std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads,
 		const std::vector<VoxelSourcePayloadInstance>& candidateVoxelPayloads,
 		const Float3& aabbMin,
 		float voxelWidth,
 		uint32_t resolution,
 		VoxelizeScratchState& scratch)
 	{
-		if (resolution == 0u || voxelWidth <= 0.0f || (sourceVoxelPayloads.empty() && candidateVoxelPayloads.empty()))
+		if (resolution == 0u || voxelWidth <= 0.0f || candidateVoxelPayloads.empty())
 		{
 			return;
 		}
@@ -1261,8 +947,7 @@ namespace
 
 		{
 			ZoneScopedN("VoxelRaster::BuildBrickRecords");
-			EmitVoxelRasterRecordsForPayloads(sourceVoxelPayloads, BrickRasterRecordKind::Source, aabbMin, voxelWidth, resolution, scratch);
-			EmitVoxelRasterRecordsForPayloads(candidateVoxelPayloads, BrickRasterRecordKind::Candidate, aabbMin, voxelWidth, resolution, scratch);
+			EmitVoxelRasterRecordsForPayloads(candidateVoxelPayloads, aabbMin, voxelWidth, resolution, scratch);
 		}
 		if (scratch.voxelRasterRecords.empty())
 		{
@@ -1332,10 +1017,6 @@ namespace
 				for (uint32_t cellIndex = 0u; cellIndex < output->activeCellCount; ++cellIndex)
 				{
 					VoxelRasterCellData& cell = output->cells[cellIndex];
-					if (cell.sourceRefCount != 0u)
-					{
-						++scratch.voxelRasterSourceCellCount;
-					}
 					if (cell.candidateGroupCount != 0u)
 					{
 						++scratch.voxelRasterCandidateCellCount;
@@ -1492,46 +1173,6 @@ namespace
 	}
 
 
-	bool RayAABBIntersect(const Float3& origin, const Float3& dir, const Float3& boxMin, const Float3& boxMax, float tMax, float& outT)
-	{
-		float tMin = 0.0f;
-		float tFar = tMax;
-		const float originValues[3] = { origin.x, origin.y, origin.z };
-		const float dirValues[3] = { dir.x, dir.y, dir.z };
-		const float minValues[3] = { boxMin.x, boxMin.y, boxMin.z };
-		const float maxValues[3] = { boxMax.x, boxMax.y, boxMax.z };
-
-		for (uint32_t axis = 0; axis < 3u; ++axis)
-		{
-			if (std::abs(dirValues[axis]) < 1.0e-8f)
-			{
-				if (originValues[axis] < minValues[axis] || originValues[axis] > maxValues[axis])
-				{
-					return false;
-				}
-				continue;
-			}
-
-			const float invDir = 1.0f / dirValues[axis];
-			float nearT = (minValues[axis] - originValues[axis]) * invDir;
-			float farT = (maxValues[axis] - originValues[axis]) * invDir;
-			if (nearT > farT)
-			{
-				std::swap(nearT, farT);
-			}
-
-			tMin = std::max(tMin, nearT);
-			tFar = std::min(tFar, farT);
-			if (tMin > tFar)
-			{
-				return false;
-			}
-		}
-
-		outT = tMin;
-		return tFar >= 0.0f && tMin < tMax;
-	}
-
 	bool RayAABBInterval(const Float3& origin, const Float3& dir, const Float3& boxMin, const Float3& boxMax, float tMax, float& outTEnter, float& outTExit)
 	{
 		float tMin = 0.0f;
@@ -1664,116 +1305,6 @@ namespace
 			}
 		}
 		return true;
-	}
-
-	// Per-cell coverage sampling via ray tracing against triangles.
-	CellCoverageSample SampleCellCoverageTriangles(
-		const std::vector<std::byte>& vertices,
-		size_t vertexStrideBytes,
-		const std::vector<uint32_t>& meshTriangleIndices,
-		const std::vector<uint32_t>& cellTriangleIndices,
-		const Float3& cellWorldMin,
-		const Float3& cellWorldMax,
-		const std::vector<Ray>& rays,
-		bool doubleSidedTriangles,
-		const VoxelCoverageMaterialSampler* materialSampler)
-	{
-		CellCoverageSample sample{};
-		if (rays.empty() || cellTriangleIndices.empty())
-			return sample;
-
-		const Float3 cellExtent = cellWorldMax - cellWorldMin;
-
-		for (const Ray& ray : rays)
-		{
-			Float3 origin, dir;
-			float tMax;
-			MapRayToWorldCell(ray, cellWorldMin, cellExtent, origin, dir, tMax);
-			if (tMax < 1e-12f)
-				continue;
-
-			uint32_t nearestTriangleIndex = std::numeric_limits<uint32_t>::max();
-			float nearestT = tMax;
-			Float3 nearestNormal{};
-			DirectX::XMFLOAT2 nearestUv{};
-			float nearestWeight = 1.0f;
-			for (uint32_t triLocalIdx : cellTriangleIndices)
-			{
-				const uint32_t i0 = meshTriangleIndices[triLocalIdx * 3 + 0];
-				const uint32_t i1 = meshTriangleIndices[triLocalIdx * 3 + 1];
-				const uint32_t i2 = meshTriangleIndices[triLocalIdx * 3 + 2];
-
-				const Float3 v0 = ReadPosition(vertices, vertexStrideBytes, i0);
-				const Float3 v1 = ReadPosition(vertices, vertexStrideBytes, i1);
-				const Float3 v2 = ReadPosition(vertices, vertexStrideBytes, i2);
-
-				float hitT = 0.0f;
-				float hitU = 0.0f;
-				float hitV = 0.0f;
-				if (RayTriangleIntersect(origin, dir, v0, v1, v2, nearestT, hitT, &hitU, &hitV))
-				{
-					const Float3 n0 = ReadNormal(vertices, vertexStrideBytes, i0);
-					const Float3 n1 = ReadNormal(vertices, vertexStrideBytes, i1);
-					const Float3 n2 = ReadNormal(vertices, vertexStrideBytes, i2);
-					const float hitW = 1.0f - hitU - hitV;
-					const Float3 interpolatedNormal = n0 * hitW + n1 * hitU + n2 * hitV;
-					Float3 candidateNormal = interpolatedNormal.lengthSq() > 1.0e-20f
-						? interpolatedNormal.normalized()
-						: TriangleNormal(v0, v1, v2);
-					candidateNormal = OrientHitNormalForSidedness(candidateNormal, TriangleNormal(v0, v1, v2), dir, doubleSidedTriangles);
-					const DirectX::XMFLOAT2 uv0 = ReadTexcoord(vertices, vertexStrideBytes, i0);
-					const DirectX::XMFLOAT2 uv1 = ReadTexcoord(vertices, vertexStrideBytes, i1);
-					const DirectX::XMFLOAT2 uv2 = ReadTexcoord(vertices, vertexStrideBytes, i2);
-					DirectX::XMFLOAT2 candidateUv = InterpolateUv(
-						uv0,
-						uv1,
-						uv2,
-						hitW,
-						hitU,
-						hitV);
-					float candidateWeight = 1.0f;
-					VoxelCoverageHit materialHit{
-						.triangleIndex = triLocalIdx,
-						.position = ToXM(origin + dir * hitT),
-						.normal = ToXM(candidateNormal),
-						.uv = candidateUv,
-						.trianglePositions = { ToXM(v0), ToXM(v1), ToXM(v2) },
-						.triangleUvs = { uv0, uv1, uv2 },
-						.barycentrics = { hitW, hitU, hitV },
-					};
-					if (!ApplyCoverageMaterialSample(materialSampler, materialHit, candidateNormal, candidateWeight))
-					{
-						continue;
-					}
-
-					nearestT = hitT;
-					nearestTriangleIndex = triLocalIdx;
-					nearestNormal = candidateNormal;
-					nearestUv = candidateUv;
-					nearestWeight = candidateWeight;
-				}
-			}
-
-			if (nearestTriangleIndex != std::numeric_limits<uint32_t>::max())
-			{
-				++sample.hitCount;
-				if (sample.representativeTriangleIndex == std::numeric_limits<uint32_t>::max())
-				{
-					sample.representativeTriangleIndex = nearestTriangleIndex;
-				}
-				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal;
-				sample.normalSamples.push_back(nearestNormal);
-				AddCoverageUvSample(sample, nearestUv, nearestWeight);
-			}
-		}
-
-		sample.coverage = static_cast<float>(sample.hitCount) / static_cast<float>(rays.size());
-		if (!sample.normalSamples.empty())
-		{
-			sample.accumulatedSGGX = BuildSGGXFromNormals(sample.normalSamples);
-			sample.sggxWeight = 1.0f;
-		}
-		return sample;
 	}
 
 	CellCoverageSample SampleCellCoverageSourceTriangles(
@@ -1924,74 +1455,6 @@ namespace
 		{
 			sample.accumulatedSGGX = BuildSGGXFromNormals(sample.normalSamples);
 			sample.sggxWeight = 1.0f;
-		}
-		return sample;
-	}
-
-	CellCoverageSample SampleCellCoverageVoxels(
-		const std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads,
-		const std::vector<VoxelSourceCellRef>& cellVoxelRefs,
-		const Float3& cellWorldMin,
-		const Float3& cellWorldMax,
-		uint32_t& outDominantBoneIndex)
-	{
-		CellCoverageSample sample{};
-		outDominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
-		if (cellVoxelRefs.empty())
-		{
-			return sample;
-		}
-
-		const Float3 cellExtent = cellWorldMax - cellWorldMin;
-		const float cellVolume = cellExtent.x * cellExtent.y * cellExtent.z;
-		if (cellVolume <= 1.0e-20f)
-		{
-			return sample;
-		}
-
-		std::unordered_map<uint32_t, float> boneWeights;
-		boneWeights.reserve(8);
-
-		for (const VoxelSourceCellRef& cellRef : cellVoxelRefs)
-		{
-			if (cellRef.payloadIndex >= sourceVoxelPayloads.size())
-			{
-				continue;
-			}
-			const VoxelGroupPayload* payload = sourceVoxelPayloads[cellRef.payloadIndex].payload;
-			if (payload == nullptr || cellRef.cellIndex >= payload->activeCells.size())
-			{
-				continue;
-			}
-
-			const VoxelCell& sourceCell = payload->activeCells[cellRef.cellIndex];
-			const Float3 sourceMin = cellRef.aabbMin;
-			const Float3 sourceMax = cellRef.aabbMax;
-			const float overlapX = std::max(0.0f, std::min(cellWorldMax.x, sourceMax.x) - std::max(cellWorldMin.x, sourceMin.x));
-			const float overlapY = std::max(0.0f, std::min(cellWorldMax.y, sourceMax.y) - std::max(cellWorldMin.y, sourceMin.y));
-			const float overlapZ = std::max(0.0f, std::min(cellWorldMax.z, sourceMax.z) - std::max(cellWorldMin.z, sourceMin.z));
-			const float weightedCoverage = (overlapX * overlapY * overlapZ / cellVolume) * std::clamp(sourceCell.opacity, 0.0f, 1.0f);
-			if (weightedCoverage <= 0.0f)
-			{
-				continue;
-			}
-
-			sample.coverage += weightedCoverage;
-			sample.accumulatedNormal = sample.accumulatedNormal + DecodeOctahedralAxis(sourceCell.sggxAxisAndSigmas.x, sourceCell.sggxAxisAndSigmas.y) * weightedCoverage;
-			sample.accumulatedSGGX = sample.accumulatedSGGX + DecodeAxialSGGX(sourceCell.sggxAxisAndSigmas) * weightedCoverage;
-			sample.sggxWeight += weightedCoverage;
-			AddCoverageUvSample(sample, sourceCell.uv, weightedCoverage);
-			if (sourceCell.dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
-			{
-				boneWeights[sourceCell.dominantBoneIndex] += weightedCoverage;
-			}
-		}
-
-		sample.coverage = std::clamp(sample.coverage, 0.0f, 1.0f);
-		sample.hitCount = sample.coverage > 0.0f ? 1u : 0u;
-		if (!boneWeights.empty())
-		{
-			outDominantBoneIndex = SelectDominantBoneIndex(boneWeights);
 		}
 		return sample;
 	}
@@ -2147,68 +1610,6 @@ namespace
 		return removedCount;
 	}
 
-	uint32_t PruneCellsBySpatialCoverage(std::vector<VoxelCell>& cells)
-	{
-		if (cells.empty())
-		{
-			return 0u;
-		}
-
-		const size_t originalCount = cells.size();
-		cells.erase(std::remove_if(cells.begin(), cells.end(), [](const VoxelCell& cell) {
-			const float coverage = std::clamp(cell.opacity, 0.0f, 1.0f);
-			if (coverage >= 1.0f)
-			{
-				return false;
-			}
-			if (coverage <= 0.0f)
-			{
-				return true;
-			}
-
-			uint32_t hash = 2166136261u;
-			auto mix = [&hash](uint32_t value)
-			{
-				hash ^= value;
-				hash *= 16777619u;
-			};
-			mix(cell.x);
-			mix(cell.y);
-			mix(cell.z);
-			mix(static_cast<uint32_t>(cell.refinedGroup));
-			hash ^= hash >> 16u;
-			hash *= 0x7feb352du;
-			hash ^= hash >> 15u;
-			hash *= 0x846ca68bu;
-			hash ^= hash >> 16u;
-
-			const float stochasticCoverage = static_cast<float>(hash >> 8u) * (1.0f / 16777216.0f);
-			return stochasticCoverage >= coverage;
-		}), cells.end());
-
-		std::sort(cells.begin(), cells.end(), [](const VoxelCell& lhs, const VoxelCell& rhs) {
-			const uint64_t lhsCell = PackCell(lhs.x, lhs.y, lhs.z);
-			const uint64_t rhsCell = PackCell(rhs.x, rhs.y, rhs.z);
-			return lhsCell == rhsCell ? lhs.refinedGroup < rhs.refinedGroup : lhsCell < rhsCell;
-		});
-
-		return static_cast<uint32_t>(std::min<size_t>(originalCount - cells.size(), std::numeric_limits<uint32_t>::max()));
-	}
-
-	uint32_t PruneCellsByCoverage(std::vector<VoxelCell>& cells, ClusterLODVoxelPruningMode pruningMode)
-	{
-		switch (pruningMode)
-		{
-		case ClusterLODVoxelPruningMode::None:
-			return 0u;
-		case ClusterLODVoxelPruningMode::Coverage:
-			return PruneCellsByPureCoverage(cells);
-		case ClusterLODVoxelPruningMode::Spatial:
-		default:
-			return PruneCellsBySpatialCoverage(cells);
-		}
-	}
-
 	// Morton code: 10-bit per axis -> 30-bit interleaved
 	uint32_t ExpandBits10(uint32_t v)
 	{
@@ -2295,8 +1696,6 @@ void VoxelSourceTriangleBVH::Build(
 	m_triangleIndices = triangleIndices;
 	m_triangleRefinedGroupIds = triangleRefinedGroupIds;
 	m_doubleSidedTriangles = doubleSidedTriangles;
-	m_triangleOrder.clear();
-	m_nodes.clear();
 	m_embreeScene.reset();
 
 	if (vertices == nullptr || triangleIndices == nullptr || vertexStrideBytes < sizeof(float) * 3u || triangleIndices->size() < 3u || (triangleIndices->size() % 3u) != 0u)
@@ -2306,14 +1705,6 @@ void VoxelSourceTriangleBVH::Build(
 
 	const uint32_t triangleCount = static_cast<uint32_t>(std::min<size_t>(triangleIndices->size() / 3u, std::numeric_limits<uint32_t>::max()));
 	TracyPlot("CLOD.Voxel.BVH.Triangles", static_cast<int64_t>(triangleCount));
-	m_triangleOrder.resize(triangleCount);
-	std::iota(m_triangleOrder.begin(), m_triangleOrder.end(), 0u);
-	m_nodes.reserve(std::max<uint32_t>(1u, triangleCount * 2u));
-	{
-		ZoneScopedN("VoxelSourceTriangleBVH::Build::CpuTree");
-		BuildNode(0u, triangleCount);
-	}
-	TracyPlot("CLOD.Voxel.BVH.Nodes", static_cast<int64_t>(m_nodes.size()));
 
 	RTCDevice device = GetVoxelCoverageEmbreeDevice();
 	if (device == nullptr)
@@ -2427,7 +1818,7 @@ void VoxelSourceTriangleBVH::Build(
 
 bool VoxelSourceTriangleBVH::IsValid() const
 {
-	return m_vertices != nullptr && m_triangleIndices != nullptr && !m_triangleOrder.empty() && !m_nodes.empty();
+	return m_vertices != nullptr && m_triangleIndices != nullptr && m_embreeScene != nullptr && !m_embreeScene->refinedGroupScenes.empty();
 }
 
 void VoxelSourceTriangleBVH::SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap)
@@ -2568,136 +1959,6 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 	return false;
 }
 
-uint32_t VoxelSourceTriangleBVH::BuildNode(uint32_t firstTriangle, uint32_t triangleCount)
-{
-	const uint32_t nodeIndex = static_cast<uint32_t>(m_nodes.size());
-	m_nodes.push_back(Node{});
-	Node& node = m_nodes.back();
-	node.firstTriangle = firstTriangle;
-	node.triangleCount = triangleCount;
-
-	Float3 boundsMin(
-		std::numeric_limits<float>::max(),
-		std::numeric_limits<float>::max(),
-		std::numeric_limits<float>::max());
-	Float3 boundsMax(
-		-std::numeric_limits<float>::max(),
-		-std::numeric_limits<float>::max(),
-		-std::numeric_limits<float>::max());
-	Float3 centroidMin = boundsMin;
-	Float3 centroidMax = boundsMax;
-
-	for (uint32_t offset = 0; offset < triangleCount; ++offset)
-	{
-		const uint32_t triangleIndex = m_triangleOrder[firstTriangle + offset];
-		const TriangleBounds triangleBounds = ComputeTriangleBounds(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, triangleIndex);
-		boundsMin = MinFloat3(boundsMin, triangleBounds.boundsMin);
-		boundsMax = MaxFloat3(boundsMax, triangleBounds.boundsMax);
-		centroidMin = MinFloat3(centroidMin, triangleBounds.centroid);
-		centroidMax = MaxFloat3(centroidMax, triangleBounds.centroid);
-	}
-
-	node.boundsMin = ToXM(boundsMin);
-	node.boundsMax = ToXM(boundsMax);
-
-	constexpr uint32_t kLeafTriangleCount = 8u;
-	if (triangleCount <= kLeafTriangleCount)
-	{
-		return nodeIndex;
-	}
-
-	const Float3 centroidExtent = AxisExtent(centroidMin, centroidMax);
-	uint32_t splitAxis = 0u;
-	if (centroidExtent.y > centroidExtent.x && centroidExtent.y >= centroidExtent.z)
-	{
-		splitAxis = 1u;
-	}
-	else if (centroidExtent.z > centroidExtent.x && centroidExtent.z > centroidExtent.y)
-	{
-		splitAxis = 2u;
-	}
-
-	const uint32_t mid = firstTriangle + triangleCount / 2u;
-	auto begin = m_triangleOrder.begin() + firstTriangle;
-	auto middle = m_triangleOrder.begin() + mid;
-	auto end = m_triangleOrder.begin() + firstTriangle + triangleCount;
-	std::nth_element(begin, middle, end, [&](uint32_t lhs, uint32_t rhs)
-		{
-			const TriangleBounds lhsBounds = ComputeTriangleBounds(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, lhs);
-			const TriangleBounds rhsBounds = ComputeTriangleBounds(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, rhs);
-			return AxisValue(lhsBounds.centroid, splitAxis) < AxisValue(rhsBounds.centroid, splitAxis);
-		});
-
-	const uint32_t leftCount = mid - firstTriangle;
-	const uint32_t rightCount = triangleCount - leftCount;
-	if (leftCount == 0u || rightCount == 0u)
-	{
-		return nodeIndex;
-	}
-
-	const uint32_t leftChild = BuildNode(firstTriangle, leftCount);
-	const uint32_t rightChild = BuildNode(mid, rightCount);
-	m_nodes[nodeIndex].leftChild = leftChild;
-	m_nodes[nodeIndex].rightChild = rightChild;
-	m_nodes[nodeIndex].triangleCount = 0u;
-	return nodeIndex;
-}
-
-void VoxelSourceTriangleBVH::QueryAABB(
-	const DirectX::XMFLOAT3& aabbMin,
-	const DirectX::XMFLOAT3& aabbMax,
-	std::vector<uint32_t>& outTriangleIndices) const
-{
-	outTriangleIndices.clear();
-	if (!IsValid())
-	{
-		return;
-	}
-
-	const Float3 queryMin = ToFloat3(aabbMin);
-	const Float3 queryMax = ToFloat3(aabbMax);
-	std::vector<uint32_t> stack;
-	stack.push_back(0u);
-	while (!stack.empty())
-	{
-		const uint32_t nodeIndex = stack.back();
-		stack.pop_back();
-		if (nodeIndex >= m_nodes.size())
-		{
-			continue;
-		}
-
-		const Node& node = m_nodes[nodeIndex];
-		if (!AABBOverlap(ToFloat3(node.boundsMin), ToFloat3(node.boundsMax), queryMin, queryMax))
-		{
-			continue;
-		}
-
-		if (node.triangleCount > 0u)
-		{
-			for (uint32_t offset = 0; offset < node.triangleCount; ++offset)
-			{
-				const uint32_t triangleIndex = m_triangleOrder[node.firstTriangle + offset];
-				const TriangleBounds triangleBounds = ComputeTriangleBounds(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, triangleIndex);
-				if (AABBOverlap(triangleBounds.boundsMin, triangleBounds.boundsMax, queryMin, queryMax))
-				{
-					outTriangleIndices.push_back(triangleIndex);
-				}
-			}
-			continue;
-		}
-
-		if (node.leftChild != UINT32_MAX)
-		{
-			stack.push_back(node.leftChild);
-		}
-		if (node.rightChild != UINT32_MAX)
-		{
-			stack.push_back(node.rightChild);
-		}
-	}
-}
-
 // Public API: VoxelizeTriangles
 VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& input)
 {
@@ -2761,24 +2022,6 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 			scratch);
 	}
 
-	std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads = scratch.sourceVoxelPayloads;
-	if (hasVoxelSources)
-	{
-		ZoneScopedN("VoxelGroupBuilder::VoxelizeTrianglesDetailed::VoxelSources");
-		if (input.sourceVoxelPayloadInstances != nullptr)
-		{
-			sourceVoxelPayloads = *input.sourceVoxelPayloadInstances;
-		}
-		else if (input.sourceVoxelPayloads != nullptr)
-		{
-			sourceVoxelPayloads.reserve(input.sourceVoxelPayloads->size());
-			for (const VoxelGroupPayload* payload : *input.sourceVoxelPayloads)
-			{
-				sourceVoxelPayloads.push_back(VoxelSourcePayloadInstance{ .payload = payload });
-			}
-		}
-	}
-
 	std::vector<VoxelSourcePayloadInstance>& candidateVoxelPayloads = scratch.candidateVoxelPayloads;
 	if (hasCandidateVoxelSources)
 	{
@@ -2798,10 +2041,25 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 			}
 		}
 	}
-	if (hasVoxelSources || hasCandidateVoxelSources)
+	else if (hasVoxelSources)
+	{
+		ZoneScopedN("VoxelGroupBuilder::VoxelizeTrianglesDetailed::SourceVoxelCandidateSources");
+		if (input.sourceVoxelPayloadInstances != nullptr)
+		{
+			candidateVoxelPayloads = *input.sourceVoxelPayloadInstances;
+		}
+		else if (input.sourceVoxelPayloads != nullptr)
+		{
+			candidateVoxelPayloads.reserve(input.sourceVoxelPayloads->size());
+			for (const VoxelGroupPayload* payload : *input.sourceVoxelPayloads)
+			{
+				candidateVoxelPayloads.push_back(VoxelSourcePayloadInstance{ .payload = payload });
+			}
+		}
+	}
+	if (!candidateVoxelPayloads.empty())
 	{
 		RasterizeVoxelPayloadsToBricks(
-			sourceVoxelPayloads,
 			candidateVoxelPayloads,
 			aabbMin,
 			input.voxelWidth,
@@ -2810,7 +2068,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 	}
 	detailedResult.triangleCandidateCellCount = static_cast<uint32_t>(std::min<size_t>(scratch.cellTriKeys.size(), std::numeric_limits<uint32_t>::max()));
 	detailedResult.voxelCandidateCellCount = static_cast<uint32_t>(std::min<size_t>(
-		static_cast<size_t>(scratch.voxelRasterSourceCellCount) + static_cast<size_t>(scratch.voxelRasterCandidateCellCount),
+		scratch.voxelRasterCandidateCellCount,
 		std::numeric_limits<uint32_t>::max()));
 	TracyPlot("CLOD.Voxelize.TriangleCandidateCells", static_cast<int64_t>(detailedResult.triangleCandidateCellCount));
 	TracyPlot("CLOD.Voxelize.VoxelCandidateCells", static_cast<int64_t>(detailedResult.voxelCandidateCellCount));
@@ -2901,21 +2159,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 		VoxelRasterCellData* rasterCell = FindVoxelRasterCell(scratch, key, input.resolution);
 		const bool hasTriCell = triIt != cellTriMap.end() && triIt->second.generation == scratch.generation;
 		const bool hasRasterOwner = rasterCell != nullptr && rasterCell->owner != nullptr;
-		const bool hasVoxelCell = hasRasterOwner && rasterCell->sourceRefCount != 0u;
 		const bool hasCandidateCell = hasRasterOwner && rasterCell->candidateGroupCount != 0u;
-		auto getSourceRecord = [&](uint32_t sourceRefOffset) -> const BrickRasterRecord& {
-			const uint32_t sourceRecordIndex =
-				rasterCell->owner->sourceRecordIndices[rasterCell->sourceRefFirst + sourceRefOffset];
-			return scratch.voxelRasterBinnedRecords[sourceRecordIndex];
-		};
-		auto makeSourceCellRef = [](const BrickRasterRecord& record) {
-			return VoxelSourceCellRef{
-				record.payloadIndex,
-				record.cellIndex,
-				record.aabbMin,
-				record.aabbMax,
-				record.refinedGroup };
-		};
 		std::vector<int32_t> refinedGroups;
 		if (hasTriCell && hasTriangleSources)
 		{
@@ -2925,23 +2169,6 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				if (input.triangleRefinedGroupIds != nullptr && triangleIndex < input.triangleRefinedGroupIds->size())
 				{
 					refinedGroup = (*input.triangleRefinedGroupIds)[triangleIndex];
-				}
-				AddUniqueRefinedGroup(refinedGroups, refinedGroup);
-			}
-		}
-		if (hasVoxelCell)
-		{
-			for (uint32_t sourceRefOffset = 0u; sourceRefOffset < rasterCell->sourceRefCount; ++sourceRefOffset)
-			{
-				const BrickRasterRecord& sourceRecord = getSourceRecord(sourceRefOffset);
-				int32_t refinedGroup = -1;
-				if (sourceRecord.payloadIndex < sourceVoxelPayloads.size())
-				{
-					const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[sourceRecord.payloadIndex].payload;
-					if (sourcePayload != nullptr && sourceRecord.cellIndex < sourcePayload->activeCells.size())
-					{
-						refinedGroup = sourceRecord.refinedGroup;
-					}
 				}
 				AddUniqueRefinedGroup(refinedGroups, refinedGroup);
 			}
@@ -2970,7 +2197,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				rays);
 			VoxelizeTrianglesResult::RefinedGroupStats& stats = getRefinedGroupStats(refinedGroup);
 			++stats.candidateKeys;
-			const bool hasOnlyCandidateSource = !hasTriCell && !hasVoxelCell && hasCandidateCell;
+			const bool hasOnlyCandidateSource = !hasTriCell && hasCandidateCell;
 			if (hasOnlyCandidateSource)
 			{
 				++stats.candidateOnlyCells;
@@ -2998,32 +2225,6 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				++stats.triangleOwnedCells;
 			}
 
-			std::vector<VoxelSourceCellRef> ownedVoxelRefs;
-			if (hasVoxelCell)
-			{
-				ownedVoxelRefs.reserve(rasterCell->sourceRefCount);
-				for (uint32_t sourceRefOffset = 0u; sourceRefOffset < rasterCell->sourceRefCount; ++sourceRefOffset)
-				{
-					const BrickRasterRecord& sourceRecord = getSourceRecord(sourceRefOffset);
-					int32_t cellRefinedGroup = -1;
-					if (sourceRecord.payloadIndex < sourceVoxelPayloads.size())
-					{
-						const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[sourceRecord.payloadIndex].payload;
-						if (sourcePayload != nullptr && sourceRecord.cellIndex < sourcePayload->activeCells.size())
-						{
-							cellRefinedGroup = sourceRecord.refinedGroup;
-						}
-					}
-					if (cellRefinedGroup == refinedGroup)
-					{
-						ownedVoxelRefs.push_back(makeSourceCellRef(sourceRecord));
-					}
-				}
-			}
-			if (!ownedVoxelRefs.empty())
-			{
-				++stats.voxelOwnedCells;
-			}
 			if (hasCandidateCell)
 			{
 				const PmrInt32Vector& candidateRefinedGroups = rasterCell->owner->candidateRefinedGroups;
@@ -3039,9 +2240,14 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 			uint32_t dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
 			if (hasCoverageSourceTriangles)
 			{
+				const int32_t coverageRefinedGroup =
+					refinedGroup < 0 &&
+					input.terminalCoverageRefinedGroupOverride != std::numeric_limits<int32_t>::min()
+					? input.terminalCoverageRefinedGroupOverride
+					: refinedGroup;
 				coverage = SampleCellCoverageSourceTriangles(
 					*input.coverageSourceTriangles,
-					refinedGroup,
+					coverageRefinedGroup,
 					cellMin,
 					cellMax,
 					rays,
@@ -3055,44 +2261,6 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					dominantBoneIndex = ComputeDominantBoneIndexForSourceTriangle(*input.coverageSourceTriangles, coverage.representativeTriangleIndex);
 				}
 			}
-			if (coverage.coverage <= 0.0f && !ownedTriangles.empty())
-			{
-				coverage = SampleCellCoverageTriangles(
-					*input.vertices, input.vertexStrideBytes,
-					*input.triangleIndices,
-					ownedTriangles,
-					cellMin, cellMax,
-					rays,
-					input.doubleSidedTriangles,
-					input.coverageMaterialSampler);
-				dominantBoneIndex = ComputeDominantBoneIndexForCell(input, ownedTriangles);
-			}
-
-			if (!ownedVoxelRefs.empty())
-			{
-				uint32_t voxelDominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
-				CellCoverageSample voxelCoverage = SampleCellCoverageVoxels(
-					sourceVoxelPayloads,
-					ownedVoxelRefs,
-					cellMin,
-					cellMax,
-					voxelDominantBoneIndex);
-				if (!hasCoverageSourceTriangles && voxelCoverage.coverage > coverage.coverage)
-				{
-					coverage = voxelCoverage;
-					dominantBoneIndex = voxelDominantBoneIndex;
-				}
-				else
-				{
-					coverage.accumulatedNormal = coverage.accumulatedNormal + voxelCoverage.accumulatedNormal;
-					coverage.accumulatedSGGX = coverage.accumulatedSGGX + voxelCoverage.accumulatedSGGX;
-					coverage.sggxWeight += voxelCoverage.sggxWeight;
-					coverage.accumulatedUv.x += voxelCoverage.accumulatedUv.x;
-					coverage.accumulatedUv.y += voxelCoverage.accumulatedUv.y;
-					coverage.uvWeight += voxelCoverage.uvWeight;
-					coverage.uvSamples.insert(coverage.uvSamples.end(), voxelCoverage.uvSamples.begin(), voxelCoverage.uvSamples.end());
-				}
-			}
 
 			if (coverage.coverage > 0.0f)
 			{
@@ -3103,7 +2271,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				stats.totalCoverage += coverage.coverage;
 				stats.maxCoverage = std::max(stats.maxCoverage, coverage.coverage);
 			}
-			if (coverage.coverage <= 0.0f && !input.keepZeroCoverageSourceCells)
+			if (coverage.coverage <= 0.0f)
 			{
 				++stats.zeroCoverageDroppedCells;
 				continue;
@@ -3152,7 +2320,6 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				dst.refinedGroup = src.refinedGroup;
 				dst.candidateKeys += src.candidateKeys;
 				dst.triangleOwnedCells += src.triangleOwnedCells;
-				dst.voxelOwnedCells += src.voxelOwnedCells;
 				dst.candidateOwnedCells += src.candidateOwnedCells;
 				dst.candidateOnlyCells += src.candidateOnlyCells;
 				dst.positiveCoverageCells += src.positiveCoverageCells;
@@ -3235,7 +2402,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 	if (input.emitRenderPayload)
 	{
 		ZoneScopedN("VoxelGroupBuilder::VoxelizeTrianglesDetailed::PruneCoverage");
-		detailedResult.prunedCellCount = PruneCellsByCoverage(detailedResult.renderPayload.activeCells, input.pruningMode);
+		detailedResult.prunedCellCount = PruneCellsByPureCoverage(detailedResult.renderPayload.activeCells);
 	}
 	TracyPlot("CLOD.Voxelize.SourceCells", static_cast<int64_t>(detailedResult.sourcePayload.activeCells.size()));
 	TracyPlot("CLOD.Voxelize.RenderCells", static_cast<int64_t>(detailedResult.renderPayload.activeCells.size()));

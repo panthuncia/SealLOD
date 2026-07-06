@@ -75,13 +75,11 @@ VoxelGroupPayload MeshIngestBuilder::BuildVoxelOnlyPayload(
 	voxelInput.doubleSidedTriangles = m_clusterLODBuilderSettings.doubleSidedVoxelSourceNormals;
 	voxelInput.coverageSourceTriangles = coverageSourceTriangles.IsValid() ? &coverageSourceTriangles : nullptr;
 	voxelInput.coverageMaterialSampler = coverageMaterialSampler;
-	voxelInput.keepZeroCoverageSourceCells = m_clusterLODBuilderSettings.voxelFallbackCarryZeroCoverage;
 	voxelInput.aabbMin = grid.aabbMin;
 	voxelInput.aabbMax = grid.aabbMax;
 	voxelInput.voxelWidth = grid.voxelWidth;
 	voxelInput.resolution = grid.resolution;
 	voxelInput.raysPerCell = m_clusterLODBuilderSettings.voxelRaysPerCell;
-	voxelInput.pruningMode = m_clusterLODBuilderSettings.voxelFallbackPruningMode;
 	voxelInput.emitSourcePayload = false;
 	return VoxelizeTrianglesDetailed(voxelInput).renderPayload;
 }
