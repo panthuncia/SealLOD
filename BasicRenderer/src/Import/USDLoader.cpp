@@ -227,6 +227,7 @@ namespace USDLoader {
 		std::unordered_map<std::string, std::vector<std::shared_ptr<Mesh>>> meshCache;
 		std::unordered_map<std::string, PreprocessedMeshRecord> preprocessedMeshCache;
 		std::unordered_map<std::string, std::string> skippedPreprocessedMeshReasons;
+		std::vector<std::shared_ptr<Mesh>> stageAssemblyMeshes;
 		std::unordered_map<std::string, std::shared_ptr<TextureAsset>> textureCache;
 		std::unordered_set<std::string> unresolvedTextureCache;
 		std::vector<std::string> textureSearchRoots;
@@ -239,10 +240,11 @@ namespace USDLoader {
 
 		void Clear() {
 			materialTemplateCache.clear();
-            resolvedMaterialCache.clear();
+			resolvedMaterialCache.clear();
 			meshCache.clear();
 			preprocessedMeshCache.clear();
 			skippedPreprocessedMeshReasons.clear();
+			stageAssemblyMeshes.clear();
 			textureCache.clear();
 			unresolvedTextureCache.clear();
 			textureSearchRoots.clear();
@@ -3435,6 +3437,16 @@ namespace USDLoader {
 		}
 	}
 
+	std::optional<CLodCacheLoader::MeshCacheIdentity> BuildPointInstancerAssemblyIdentity(
+		const UsdStageRefPtr& stage,
+		const std::string& sourceIdentifier,
+		UsdTimeCode geomTimeCode);
+
+	void TryLoadPointInstancerAssemblyMesh(
+		const UsdStageRefPtr& stage,
+		UsdTimeCode geomTimeCode,
+		const std::string& sourceIdentifier);
+
 	void PreprocessAllMeshes(
 		const UsdStageRefPtr& stage,
 		double metersPerUnit,
@@ -3761,6 +3773,115 @@ namespace USDLoader {
 					workItem.inferredDoubleSided,
 					workItem.mesh.GetPrim().GetName().GetString());
 			}
+		}
+
+		TryLoadPointInstancerAssemblyMesh(stage, geomTimeCode, sourceIdentifierOverride);
+	}
+
+	std::optional<CLodCacheLoader::MeshCacheIdentity> BuildPointInstancerAssemblyIdentity(
+		const UsdStageRefPtr& stage,
+		const std::string& sourceIdentifier,
+		UsdTimeCode geomTimeCode)
+	{
+		if (!stage) {
+			return std::nullopt;
+		}
+
+		auto pathHasAnyPrefix = [](const SdfPath& path, const std::vector<SdfPath>& prefixes) {
+			for (const SdfPath& prefix : prefixes) {
+				if (path.HasPrefix(prefix)) {
+					return true;
+				}
+			}
+			return false;
+		};
+
+		std::vector<SdfPath> prototypeRoots;
+		std::set<std::string> prototypeRootStrings;
+		bool hasPointInstancer = false;
+		auto instancerRange = UsdPrimRange(stage->GetPseudoRoot());
+		for (auto primIt = instancerRange.begin(); primIt != instancerRange.end(); ++primIt) {
+			UsdGeomPointInstancer pointInstancer(*primIt);
+			if (!pointInstancer) {
+				continue;
+			}
+
+			hasPointInstancer = true;
+			SdfPathVector targets;
+			if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+				for (const SdfPath& target : targets) {
+					if (prototypeRootStrings.insert(target.GetString()).second) {
+						prototypeRoots.push_back(target);
+					}
+				}
+			}
+		}
+		if (!hasPointInstancer) {
+			return std::nullopt;
+		}
+
+		UsdGeomMesh firstRootMesh;
+		auto meshRange = UsdPrimRange(stage->GetPseudoRoot());
+		for (auto primIt = meshRange.begin(); primIt != meshRange.end(); ++primIt) {
+			UsdGeomMesh mesh(*primIt);
+			if (mesh && !pathHasAnyPrefix(mesh.GetPrim().GetPath(), prototypeRoots)) {
+				firstRootMesh = mesh;
+				break;
+			}
+		}
+
+		CLodCacheLoader::MeshCacheIdentity assemblyIdentity{};
+		if (firstRootMesh) {
+			assemblyIdentity = CLodCacheLoader::BuildIdentity(firstRootMesh, stage, "CLodAssembly", geomTimeCode, sourceIdentifier);
+		}
+		else {
+			assemblyIdentity.sourceIdentifier = sourceIdentifier;
+			if (assemblyIdentity.sourceIdentifier.empty() && stage->GetRootLayer()) {
+				assemblyIdentity.sourceIdentifier = stage->GetRootLayer()->GetIdentifier();
+			}
+			assemblyIdentity.subsetName = "CLodAssembly";
+		}
+
+		const UsdPrim defaultPrim = stage->GetDefaultPrim();
+		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=3";
+		return assemblyIdentity;
+	}
+
+	void TryLoadPointInstancerAssemblyMesh(
+		const UsdStageRefPtr& stage,
+		UsdTimeCode geomTimeCode,
+		const std::string& sourceIdentifier)
+	{
+		auto tryIdentity = [&](const std::string& identitySource) -> bool {
+			auto identity = BuildPointInstancerAssemblyIdentity(stage, identitySource, geomTimeCode);
+			if (!identity) {
+				return false;
+			}
+
+			auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
+			if (!prebuilt || prebuilt->assemblyInstances.empty()) {
+				return false;
+			}
+
+			MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
+			auto mesh = ingest.Build(Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
+			if (!mesh) {
+				return false;
+			}
+
+			loadingCache.stageAssemblyMeshes.push_back(std::move(mesh));
+			spdlog::info(
+				"USD point-instancer CLod assembly cache loaded for synthetic stage renderable using source id '{}'.",
+				identitySource);
+			return true;
+		};
+
+		if (tryIdentity(sourceIdentifier)) {
+			return;
+		}
+		if (!sourceIdentifier.empty()) {
+			(void)tryIdentity({});
 		}
 	}
 
@@ -4384,6 +4505,21 @@ namespace USDLoader {
 		const std::string& directory,
 		UsdSkelCache& skelCache,
 		bool isUSDZ) {
+		if (!loadingCache.stageAssemblyMeshes.empty()) {
+			auto entity = scene->CreateRenderableEntityECS(
+				loadingCache.stageAssemblyMeshes,
+				L"__CLodAssembly");
+			if (!entity.is_valid()) {
+				spdlog::warn("USD point-instancer CLod assembly mesh was loaded, but synthetic entity creation failed.");
+			}
+			else {
+				spdlog::info(
+					"USD point-instancer CLod assembly renderable created with {} mesh(es); skipping expanded stage hierarchy.",
+					loadingCache.stageAssemblyMeshes.size());
+			}
+			return;
+		}
+
 		std::unordered_set<std::string> prototypeRootsToSkip;
         const UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
 

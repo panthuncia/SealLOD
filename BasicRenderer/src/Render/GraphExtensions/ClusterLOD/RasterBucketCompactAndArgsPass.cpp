@@ -17,6 +17,7 @@
 
 RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> visibleClustersCounterBuffer,
     std::shared_ptr<Buffer> compactedBaseCounterBuffer,
     std::shared_ptr<Buffer> readBaseCounterBuffer,
@@ -25,6 +26,7 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     std::shared_ptr<Buffer> offsetsBuffer,
     std::shared_ptr<Buffer> writeCursorBuffer,
     std::shared_ptr<Buffer> compactedClustersBuffer,
+    std::shared_ptr<Buffer> compactedClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> indirectArgsBuffer,
     std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
     std::shared_ptr<Buffer> reyesOwnershipBitsetBuffer,
@@ -35,6 +37,7 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     bool buildSoftwareRasterDispatch,
     bool runWhenComputeSWRasterEnabledOnly)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
     , m_compactedBaseCounterBuffer(std::move(compactedBaseCounterBuffer))
     , m_readBaseCounterBuffer(std::move(readBaseCounterBuffer))
@@ -43,6 +46,7 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     , m_offsetsBuffer(std::move(offsetsBuffer))
     , m_writeCursorBuffer(std::move(writeCursorBuffer))
     , m_compactedClustersBuffer(std::move(compactedClustersBuffer))
+    , m_compactedClusterTransformIndicesBuffer(std::move(compactedClusterTransformIndicesBuffer))
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
     , m_reyesOwnershipBitsetBuffer(std::move(reyesOwnershipBitsetBuffer))
@@ -81,6 +85,7 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
 void RasterBucketCompactAndArgsPass::DeclareResourceUsages(ComputePassBuilder* builder) {
     builder->WithShaderResource(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_visibleClustersCounterBuffer,
             m_compactedBaseCounterBuffer,
             m_histogramBuffer,
@@ -96,6 +101,7 @@ void RasterBucketCompactAndArgsPass::DeclareResourceUsages(ComputePassBuilder* b
             Builtin::Material::TextureStreamingFeedbackBuffer,
             m_writeCursorBuffer,
             m_compactedClustersBuffer,
+            m_compactedClusterTransformIndicesBuffer,
             m_indirectArgsBuffer,
             m_sortedToUnsortedMappingBuffer)
         .WithIndirectArguments(m_indirectCommand);
@@ -170,11 +176,13 @@ PassReturn RasterBucketCompactAndArgsPass::Execute(PassExecutionContext& executi
     unsigned int rc[NumMiscUintRootConstants] = {};
     rc[CLOD_COMPACTION_READ_BASE_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     rc[CLOD_COMPACTION_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    rc[CLOD_COMPACTION_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     rc[CLOD_COMPACTION_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetSRVInfo(0).slot.index;
     rc[CLOD_COMPACTION_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = m_histogramBuffer->GetSRVInfo(0).slot.index;
     rc[CLOD_COMPACTION_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX] = m_offsetsBuffer->GetSRVInfo(0).slot.index;
     rc[CLOD_COMPACTION_RASTER_BUCKETS_WRITE_CURSOR_DESCRIPTOR_INDEX] = m_writeCursorBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rc[CLOD_COMPACTION_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_compactedClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rc[CLOD_COMPACTION_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rc[CLOD_COMPACTION_RASTER_BUCKETS_INDIRECT_ARGS_DESCRIPTOR_INDEX] = m_indirectArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rc[CLOD_COMPACTION_APPEND_BASE_COUNTER_DESCRIPTOR_INDEX] = m_compactedBaseCounterBuffer->GetSRVInfo(0).slot.index;
     rc[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetUAVShaderVisibleInfo(0).slot.index;

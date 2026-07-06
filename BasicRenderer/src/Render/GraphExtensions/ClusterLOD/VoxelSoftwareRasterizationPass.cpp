@@ -17,6 +17,7 @@
 
 VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> rigidVoxelWorkRecordsBuffer,
     std::shared_ptr<Buffer> rigidVoxelWorkCounterBuffer,
     std::shared_ptr<Buffer> skinnedVoxelWorkRecordsBuffer,
@@ -32,6 +33,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     std::shared_ptr<ResourceGroup> slabResourceGroup,
     uint32_t voxelWorkCapacity)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_voxelWorkRecordsBuffers{ std::move(rigidVoxelWorkRecordsBuffer), std::move(skinnedVoxelWorkRecordsBuffer) }
     , m_voxelWorkCounterBuffers{ std::move(rigidVoxelWorkCounterBuffer), std::move(skinnedVoxelWorkCounterBuffer) }
     , m_voxelIndirectArgsBuffers{ std::move(rigidVoxelIndirectArgsBuffer), std::move(skinnedVoxelIndirectArgsBuffer) }
@@ -128,6 +130,9 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
             m_voxelWorkCounterBuffers[0],
             m_voxelWorkCounterBuffers[1],
             m_viewRasterInfoBuffer)
+        .WithShaderResource(
+            Builtin::CLod::AssemblyTransforms,
+            m_visibleClusterTransformIndicesBuffer)
         .WithUnorderedAccess(
             m_voxelIndirectArgsBuffers[0],
             m_voxelIndirectArgsBuffers[1],
@@ -227,6 +232,8 @@ PassReturn VoxelSoftwareRasterizationPass::Execute(PassExecutionContext& executi
     uint32_t misc[NumMiscUintRootConstants] = {};
     misc[CLOD_RASTER_VOXEL_WORK_CAPACITY] = m_voxelWorkCapacity;
     misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+        m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     if (m_telemetryBuffer && IsCLodWorkGraphTelemetryEnabled()) {
         misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;

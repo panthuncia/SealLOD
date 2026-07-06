@@ -12,6 +12,7 @@ class RasterBucketCompactAndArgsPass : public ComputePass {
 public:
     RasterBucketCompactAndArgsPass(
         std::shared_ptr<Buffer> visibleClustersBuffer,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> visibleClustersCounterBuffer,
         std::shared_ptr<Buffer> compactedBaseCounterBuffer,
         std::shared_ptr<Buffer> readBaseCounterBuffer,
@@ -20,6 +21,7 @@ public:
         std::shared_ptr<Buffer> offsetsBuffer,
         std::shared_ptr<Buffer> writeCursorBuffer,
         std::shared_ptr<Buffer> compactedClustersBuffer,
+        std::shared_ptr<Buffer> compactedClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> indirectArgsBuffer,
         std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
         std::shared_ptr<Buffer> reyesOwnershipBitsetBuffer,
@@ -42,6 +44,7 @@ private:
     rhi::CommandSignaturePtr m_compactionCommandSignature;
 
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_compactedBaseCounterBuffer;
     std::shared_ptr<Buffer> m_readBaseCounterBuffer;
@@ -50,6 +53,7 @@ private:
     std::shared_ptr<Buffer> m_offsetsBuffer;
     std::shared_ptr<Buffer> m_writeCursorBuffer;
     std::shared_ptr<Buffer> m_compactedClustersBuffer;
+    std::shared_ptr<Buffer> m_compactedClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_indirectArgsBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;
     std::shared_ptr<Buffer> m_reyesOwnershipBitsetBuffer;

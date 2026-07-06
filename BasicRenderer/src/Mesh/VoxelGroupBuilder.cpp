@@ -521,6 +521,9 @@ namespace
 	{
 		uint32_t payloadIndex = 0;
 		uint32_t cellIndex = 0;
+		Float3 aabbMin{};
+		Float3 aabbMax{};
+		int32_t refinedGroup = -1;
 	};
 
 	void AddUniqueRefinedGroup(std::vector<int32_t>& refinedGroups, int32_t refinedGroup)
@@ -533,12 +536,14 @@ namespace
 
 	bool HasVoxelSources(const VoxelizeTrianglesInput& input)
 	{
-		return input.sourceVoxelPayloads != nullptr && !input.sourceVoxelPayloads->empty();
+		return (input.sourceVoxelPayloads != nullptr && !input.sourceVoxelPayloads->empty()) ||
+			(input.sourceVoxelPayloadInstances != nullptr && !input.sourceVoxelPayloadInstances->empty());
 	}
 
 	bool HasCandidateVoxelSources(const VoxelizeTrianglesInput& input)
 	{
-		return input.candidateVoxelPayloads != nullptr && !input.candidateVoxelPayloads->empty();
+		return (input.candidateVoxelPayloads != nullptr && !input.candidateVoxelPayloads->empty()) ||
+			(input.candidateVoxelPayloadInstances != nullptr && !input.candidateVoxelPayloadInstances->empty());
 	}
 
 	Float3 VoxelCellMin(const VoxelGroupPayload& payload, const VoxelCell& cell)
@@ -554,6 +559,54 @@ namespace
 	{
 		const Float3 cellMin = VoxelCellMin(payload, cell);
 		return cellMin + Float3(payload.voxelWidth, payload.voxelWidth, payload.voxelWidth);
+	}
+
+	Float3 TransformPoint3x4(const ClusterLODAssemblyTransform& transform, const Float3& point)
+	{
+		return {
+			transform.row0.x * point.x + transform.row0.y * point.y + transform.row0.z * point.z + transform.row0.w,
+			transform.row1.x * point.x + transform.row1.y * point.y + transform.row1.z * point.z + transform.row1.w,
+			transform.row2.x * point.x + transform.row2.y * point.y + transform.row2.z * point.z + transform.row2.w
+		};
+	}
+
+	void TransformAabb3x4(
+		const ClusterLODAssemblyTransform& transform,
+		const Float3& localMin,
+		const Float3& localMax,
+		Float3& outMin,
+		Float3& outMax)
+	{
+		outMin = Float3(
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max());
+		outMax = Float3(
+			std::numeric_limits<float>::lowest(),
+			std::numeric_limits<float>::lowest(),
+			std::numeric_limits<float>::lowest());
+
+		for (uint32_t corner = 0; corner < 8u; ++corner)
+		{
+			const Float3 p(
+				(corner & 1u) != 0u ? localMax.x : localMin.x,
+				(corner & 2u) != 0u ? localMax.y : localMin.y,
+				(corner & 4u) != 0u ? localMax.z : localMin.z);
+			const Float3 tp = TransformPoint3x4(transform, p);
+			outMin.x = std::min(outMin.x, tp.x);
+			outMin.y = std::min(outMin.y, tp.y);
+			outMin.z = std::min(outMin.z, tp.z);
+			outMax.x = std::max(outMax.x, tp.x);
+			outMax.y = std::max(outMax.y, tp.y);
+			outMax.z = std::max(outMax.z, tp.z);
+		}
+	}
+
+	int32_t ResolveInstanceRefinedGroup(const VoxelSourcePayloadInstance& instance, const VoxelCell& sourceCell)
+	{
+		return instance.refinedGroupOverride != std::numeric_limits<int32_t>::min()
+			? instance.refinedGroupOverride
+			: sourceCell.refinedGroup;
 	}
 
 	std::unordered_map<uint64_t, std::vector<uint32_t>> RasterizeTrianglesToGrid(
@@ -664,7 +717,7 @@ namespace
 	}
 
 	std::unordered_map<uint64_t, std::vector<VoxelSourceCellRef>> RasterizeVoxelPayloadsToGrid(
-		const std::vector<const VoxelGroupPayload*>& sourceVoxelPayloads,
+		const std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads,
 		const Float3& aabbMin,
 		float voxelWidth,
 		uint32_t resolution)
@@ -678,7 +731,8 @@ namespace
 		const float invCellSize = 1.0f / voxelWidth;
 		for (uint32_t payloadIndex = 0; payloadIndex < static_cast<uint32_t>(sourceVoxelPayloads.size()); ++payloadIndex)
 		{
-			const VoxelGroupPayload* payload = sourceVoxelPayloads[payloadIndex];
+			const VoxelSourcePayloadInstance& payloadInstance = sourceVoxelPayloads[payloadIndex];
+			const VoxelGroupPayload* payload = payloadInstance.payload;
 			if (payload == nullptr || payload->voxelWidth <= 0.0f)
 			{
 				continue;
@@ -687,8 +741,14 @@ namespace
 			for (uint32_t cellIndex = 0; cellIndex < static_cast<uint32_t>(payload->activeCells.size()); ++cellIndex)
 			{
 				const VoxelCell& sourceCell = payload->activeCells[cellIndex];
-				const Float3 sourceMin = VoxelCellMin(*payload, sourceCell);
-				const Float3 sourceMax = VoxelCellMax(*payload, sourceCell);
+				Float3 sourceMin{};
+				Float3 sourceMax{};
+				TransformAabb3x4(
+					payloadInstance.localToTarget,
+					VoxelCellMin(*payload, sourceCell),
+					VoxelCellMax(*payload, sourceCell),
+					sourceMin,
+					sourceMax);
 				const uint32_t cxMin = ToCellCoord(sourceMin.x, aabbMin.x, invCellSize, resolution);
 				const uint32_t cyMin = ToCellCoord(sourceMin.y, aabbMin.y, invCellSize, resolution);
 				const uint32_t czMin = ToCellCoord(sourceMin.z, aabbMin.z, invCellSize, resolution);
@@ -702,7 +762,12 @@ namespace
 					{
 						for (uint32_t cx = cxMin; cx <= cxMax; ++cx)
 						{
-							cellVoxelMap[PackCell(cx, cy, cz)].push_back(VoxelSourceCellRef{ payloadIndex, cellIndex });
+							cellVoxelMap[PackCell(cx, cy, cz)].push_back(VoxelSourceCellRef{
+								payloadIndex,
+								cellIndex,
+								sourceMin,
+								sourceMax,
+								ResolveInstanceRefinedGroup(payloadInstance, sourceCell) });
 						}
 					}
 				}
@@ -713,7 +778,7 @@ namespace
 	}
 
 	std::unordered_map<uint64_t, std::vector<int32_t>> RasterizeVoxelCandidatePayloadsToGrid(
-		const std::vector<VoxelSourceCandidatePayload>& sourceVoxelPayloads,
+		const std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads,
 		const Float3& aabbMin,
 		float voxelWidth,
 		uint32_t resolution)
@@ -725,7 +790,7 @@ namespace
 		}
 
 		const float invCellSize = 1.0f / voxelWidth;
-		for (const VoxelSourceCandidatePayload& candidatePayload : sourceVoxelPayloads)
+		for (const VoxelSourcePayloadInstance& candidatePayload : sourceVoxelPayloads)
 		{
 			const VoxelGroupPayload* payload = candidatePayload.payload;
 			if (payload == nullptr || payload->voxelWidth <= 0.0f)
@@ -736,8 +801,16 @@ namespace
 			const float expansionRadius = std::max(0.0f, candidatePayload.expansionRadius);
 			for (const VoxelCell& sourceCell : payload->activeCells)
 			{
-				const Float3 sourceMin = VoxelCellMin(*payload, sourceCell) - Float3(expansionRadius, expansionRadius, expansionRadius);
-				const Float3 sourceMax = VoxelCellMax(*payload, sourceCell) + Float3(expansionRadius, expansionRadius, expansionRadius);
+				Float3 sourceMin{};
+				Float3 sourceMax{};
+				TransformAabb3x4(
+					candidatePayload.localToTarget,
+					VoxelCellMin(*payload, sourceCell),
+					VoxelCellMax(*payload, sourceCell),
+					sourceMin,
+					sourceMax);
+				sourceMin = sourceMin - Float3(expansionRadius, expansionRadius, expansionRadius);
+				sourceMax = sourceMax + Float3(expansionRadius, expansionRadius, expansionRadius);
 				const uint32_t cxMin = ToCellCoord(sourceMin.x, aabbMin.x, invCellSize, resolution);
 				const uint32_t cyMin = ToCellCoord(sourceMin.y, aabbMin.y, invCellSize, resolution);
 				const uint32_t czMin = ToCellCoord(sourceMin.z, aabbMin.z, invCellSize, resolution);
@@ -751,7 +824,9 @@ namespace
 					{
 						for (uint32_t cx = cxMin; cx <= cxMax; ++cx)
 						{
-							AddUniqueRefinedGroup(candidateCells[PackCell(cx, cy, cz)], sourceCell.refinedGroup);
+							AddUniqueRefinedGroup(
+								candidateCells[PackCell(cx, cy, cz)],
+								ResolveInstanceRefinedGroup(candidatePayload, sourceCell));
 						}
 					}
 				}
@@ -1198,7 +1273,7 @@ namespace
 	}
 
 	CellCoverageSample SampleCellCoverageVoxels(
-		const std::vector<const VoxelGroupPayload*>& sourceVoxelPayloads,
+		const std::vector<VoxelSourcePayloadInstance>& sourceVoxelPayloads,
 		const std::vector<VoxelSourceCellRef>& cellVoxelRefs,
 		const Float3& cellWorldMin,
 		const Float3& cellWorldMax,
@@ -1227,15 +1302,15 @@ namespace
 			{
 				continue;
 			}
-			const VoxelGroupPayload* payload = sourceVoxelPayloads[cellRef.payloadIndex];
+			const VoxelGroupPayload* payload = sourceVoxelPayloads[cellRef.payloadIndex].payload;
 			if (payload == nullptr || cellRef.cellIndex >= payload->activeCells.size())
 			{
 				continue;
 			}
 
 			const VoxelCell& sourceCell = payload->activeCells[cellRef.cellIndex];
-			const Float3 sourceMin = VoxelCellMin(*payload, sourceCell);
-			const Float3 sourceMax = VoxelCellMax(*payload, sourceCell);
+			const Float3 sourceMin = cellRef.aabbMin;
+			const Float3 sourceMax = cellRef.aabbMax;
 			const float overlapX = std::max(0.0f, std::min(cellWorldMax.x, sourceMax.x) - std::max(cellWorldMin.x, sourceMin.x));
 			const float overlapY = std::max(0.0f, std::min(cellWorldMax.y, sourceMax.y) - std::max(cellWorldMin.y, sourceMin.y));
 			const float overlapZ = std::max(0.0f, std::min(cellWorldMax.z, sourceMax.z) - std::max(cellWorldMin.z, sourceMin.z));
@@ -1855,19 +1930,45 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 			input.resolution);
 	}
 
-	std::vector<const VoxelGroupPayload*> sourceVoxelPayloads;
+	std::vector<VoxelSourcePayloadInstance> sourceVoxelPayloads;
 	std::unordered_map<uint64_t, std::vector<VoxelSourceCellRef>> cellVoxelMap;
 	if (hasVoxelSources)
 	{
-		sourceVoxelPayloads = *input.sourceVoxelPayloads;
+		if (input.sourceVoxelPayloadInstances != nullptr)
+		{
+			sourceVoxelPayloads = *input.sourceVoxelPayloadInstances;
+		}
+		else if (input.sourceVoxelPayloads != nullptr)
+		{
+			sourceVoxelPayloads.reserve(input.sourceVoxelPayloads->size());
+			for (const VoxelGroupPayload* payload : *input.sourceVoxelPayloads)
+			{
+				sourceVoxelPayloads.push_back(VoxelSourcePayloadInstance{ .payload = payload });
+			}
+		}
 		cellVoxelMap = RasterizeVoxelPayloadsToGrid(sourceVoxelPayloads, aabbMin, input.voxelWidth, input.resolution);
 	}
 
 	std::unordered_map<uint64_t, std::vector<int32_t>> candidateVoxelMap;
 	if (hasCandidateVoxelSources)
 	{
+		std::vector<VoxelSourcePayloadInstance> candidateVoxelPayloads;
+		if (input.candidateVoxelPayloadInstances != nullptr)
+		{
+			candidateVoxelPayloads = *input.candidateVoxelPayloadInstances;
+		}
+		else if (input.candidateVoxelPayloads != nullptr)
+		{
+			candidateVoxelPayloads.reserve(input.candidateVoxelPayloads->size());
+			for (const VoxelSourceCandidatePayload& payload : *input.candidateVoxelPayloads)
+			{
+				candidateVoxelPayloads.push_back(VoxelSourcePayloadInstance{
+					.payload = payload.payload,
+					.expansionRadius = payload.expansionRadius });
+			}
+		}
 		candidateVoxelMap = RasterizeVoxelCandidatePayloadsToGrid(
-			*input.candidateVoxelPayloads,
+			candidateVoxelPayloads,
 			aabbMin,
 			input.voxelWidth,
 			input.resolution);
@@ -1971,10 +2072,10 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				int32_t refinedGroup = -1;
 				if (cellRef.payloadIndex < sourceVoxelPayloads.size())
 				{
-					const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[cellRef.payloadIndex];
+					const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[cellRef.payloadIndex].payload;
 					if (sourcePayload != nullptr && cellRef.cellIndex < sourcePayload->activeCells.size())
 					{
-						refinedGroup = sourcePayload->activeCells[cellRef.cellIndex].refinedGroup;
+						refinedGroup = cellRef.refinedGroup;
 					}
 				}
 				AddUniqueRefinedGroup(refinedGroups, refinedGroup);
@@ -2040,10 +2141,10 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					int32_t cellRefinedGroup = -1;
 					if (cellRef.payloadIndex < sourceVoxelPayloads.size())
 					{
-						const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[cellRef.payloadIndex];
+						const VoxelGroupPayload* sourcePayload = sourceVoxelPayloads[cellRef.payloadIndex].payload;
 						if (sourcePayload != nullptr && cellRef.cellIndex < sourcePayload->activeCells.size())
 						{
-							cellRefinedGroup = sourcePayload->activeCells[cellRef.cellIndex].refinedGroup;
+							cellRefinedGroup = cellRef.refinedGroup;
 						}
 					}
 					if (cellRefinedGroup == refinedGroup)

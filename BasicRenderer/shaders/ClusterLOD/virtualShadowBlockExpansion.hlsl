@@ -167,6 +167,7 @@ bool VsmBuildBlockMeta(
 
 void VsmLoadClusterScreenCoverage(
     uint4 packedCluster,
+    uint assemblyTransformIndex,
     uint GI,
     out bool outHasClipmapInfo,
     out CLodVirtualShadowClipmapInfo outClipmapInfo)
@@ -179,7 +180,7 @@ void VsmLoadClusterScreenCoverage(
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
     const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    const PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+    const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
 
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
@@ -255,7 +256,10 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> sourceClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
+    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
 
     if (GI == 0u)
     {
@@ -266,7 +270,7 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     bool hasClipmapInfo = false;
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    VsmLoadClusterScreenCoverage(packedCluster, GI, hasClipmapInfo, clipmapInfo);
+    VsmLoadClusterScreenCoverage(packedCluster, sourceClusterTransformIndex, GI, hasClipmapInfo, clipmapInfo);
     GroupMemoryBarrierWithGroupSync();
 
     if (GI == 0u && hasClipmapInfo)
@@ -338,7 +342,10 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> sourceClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
+    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
 
     if (GI == 0u)
     {
@@ -351,7 +358,7 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
 
     bool hasClipmapInfo = false;
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    VsmLoadClusterScreenCoverage(packedCluster, GI, hasClipmapInfo, clipmapInfo);
+    VsmLoadClusterScreenCoverage(packedCluster, sourceClusterTransformIndex, GI, hasClipmapInfo, clipmapInfo);
     GroupMemoryBarrierWithGroupSync();
 
     if (GI == 0u && hasClipmapInfo)
@@ -434,12 +441,15 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
 
     RWByteAddressBuffer expandedClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> expandedClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
 
     if (overflowedBlockTracking)
     {
         if (GI == 0u)
         {
             CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex, packedCluster);
+            expandedClusterTransformIndices[gs_outputBaseIndex] = sourceClusterTransformIndex;
         }
         return;
     }
@@ -450,6 +460,7 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
 
     CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex + GI, packedCluster);
+    expandedClusterTransformIndices[gs_outputBaseIndex + GI] = sourceClusterTransformIndex;
 }
 
 [shader("compute")]

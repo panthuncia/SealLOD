@@ -18,6 +18,7 @@ class VoxelSoftwareRasterizationPass : public ComputePass, public IDynamicDeclar
 public:
     VoxelSoftwareRasterizationPass(
         std::shared_ptr<Buffer> visibleClustersBuffer,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> rigidVoxelWorkRecordsBuffer,
         std::shared_ptr<Buffer> rigidVoxelWorkCounterBuffer,
         std::shared_ptr<Buffer> skinnedVoxelWorkRecordsBuffer,
@@ -49,6 +50,7 @@ private:
     PipelineState m_skinnedTelemetryRasterPso;
     rhi::CommandSignaturePtr m_dispatchCommandSignature;
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkRecordsBuffers;
     std::array<std::shared_ptr<Buffer>, 2> m_voxelWorkCounterBuffers;
     std::array<std::shared_ptr<Buffer>, 2> m_voxelIndirectArgsBuffers;

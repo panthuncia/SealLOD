@@ -686,7 +686,7 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 40u;
+constexpr std::uint32_t kPayloadCacheVersion = 41u;
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -1793,6 +1793,8 @@ void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
     writer.PodVector(data.nodes);
     writer.PodVector(data.lodNodeRanges);
     writer.PodVector(data.lodLevelRoots);
+    writer.PodVector(data.assemblyTransforms);
+    writer.PodVector(data.assemblyInstances);
     writer.Pod(data.maxDepth);
     writer.Pod(data.maxTraversalDepth);
 }
@@ -1819,6 +1821,8 @@ bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
         reader.PodVector(data.nodes) &&
         reader.PodVector(data.lodNodeRanges) &&
         reader.PodVector(data.lodLevelRoots) &&
+        reader.PodVector(data.assemblyTransforms) &&
+        reader.PodVector(data.assemblyInstances) &&
         reader.Pod(data.maxDepth) &&
         reader.Pod(data.maxTraversalDepth);
 }

@@ -18,6 +18,7 @@
 #include <stacktrace>
 #include <sstream>      // ostringstream for formatting
 #include <vector>
+#include <filesystem>
 //#include <tracy/Tracy.hpp>
 
 #include "Mesh/Mesh.h"
@@ -401,7 +402,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //tracy::SetThreadName("Main");
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/log.txt");
+    std::filesystem::create_directories("logs");
+    std::filesystem::remove("logs/log.txt");
+    auto file_logger = spdlog::basic_logger_mt("file_logger", "logs/log.txt", true);
     spdlog::set_default_logger(file_logger);
     file_logger->flush_on(spdlog::level::info);
 
@@ -492,55 +495,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
         renderer.SetCurrentScene(baseScene);
+    	renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 120;
-    constexpr float NeedleDistributionRadius = 80.0f;
-    constexpr float NeedleMinSpacing = 10.0f;
-    constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
-    constexpr int MaxNeedlePlacementAttempts = 10000;
-    constexpr uint32_t NeedleSkeletonVariantCount = 8;
+    //constexpr int NeedleCloneCount = 120;
+    //constexpr float NeedleDistributionRadius = 80.0f;
+    //constexpr float NeedleMinSpacing = 10.0f;
+    //constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
+    //constexpr int MaxNeedlePlacementAttempts = 10000;
+    //constexpr uint32_t NeedleSkeletonVariantCount = 1;
 
-    std::mt19937 needleRng{ 1337 };
-    std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
-    std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
-    std::vector<point> needlePositions;
-    needlePositions.reserve(NeedleCloneCount);
+    //std::mt19937 needleRng{ 1337 };
+    //std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
+    //std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
+    //std::vector<point> needlePositions;
+    //needlePositions.reserve(NeedleCloneCount);
 
-    for (int attempt = 0;
-        needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
-        ++attempt) {
-        const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
-        const float angle = needleAngleDist(needleRng);
-        const point candidate{
-            radius * std::cos(angle),
-            0.0f,
-            radius * std::sin(angle)
-        };
+    //for (int attempt = 0;
+    //    needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
+    //    ++attempt) {
+    //    const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
+    //    const float angle = needleAngleDist(needleRng);
+    //    const point candidate{
+    //        radius * std::cos(angle),
+    //        0.0f,
+    //        radius * std::sin(angle)
+    //    };
 
-        bool hasEnoughSpacing = true;
-        for (const point& existing : needlePositions) {
-            const float dx = candidate.x - existing.x;
-            const float dz = candidate.z - existing.z;
-            if (dx * dx + dz * dz < NeedleMinSpacingSq) {
-                hasEnoughSpacing = false;
-                break;
-            }
-        }
+    //    bool hasEnoughSpacing = true;
+    //    for (const point& existing : needlePositions) {
+    //        const float dx = candidate.x - existing.x;
+    //        const float dz = candidate.z - existing.z;
+    //        if (dx * dx + dz * dz < NeedleMinSpacingSq) {
+    //            hasEnoughSpacing = false;
+    //            break;
+    //        }
+    //    }
 
-        if (hasEnoughSpacing) {
-            needlePositions.push_back(candidate);
-        }
-    }
+    //    if (hasEnoughSpacing) {
+    //        needlePositions.push_back(candidate);
+    //    }
+    //}
 
-    SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
-    for (const point& position : needlePositions) {
-        needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
-        auto needleClone = needles->Clone();
-        needleClone->AssignSkeletonVariants(needleSkeletonVariants);
-        renderer.GetCurrentScene()->AppendScene(needleClone);
-    }
+    //SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
+    //for (const point& position : needlePositions) {
+    //    needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
+    //    auto needleClone = needles->Clone();
+    //    needleClone->AssignSkeletonVariants(needleSkeletonVariants);
+    //    renderer.GetCurrentScene()->AppendScene(needleClone);
+    //}
 	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
@@ -581,7 +585,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 100.f, 6.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 0.f, 6.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

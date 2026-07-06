@@ -20,6 +20,7 @@ struct CLodVisibleClusterCapacity {
 };
 
 struct VisibleClustersBufferTag {};
+struct VisibleClusterTransformIndicesBufferTag {};
 struct VisibleClustersCounterTag {};
 struct CLodWorkGraphTelemetryBufferTag {};
 struct CLodReyesDiceQueueTag {};

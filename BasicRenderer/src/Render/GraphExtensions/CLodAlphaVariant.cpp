@@ -583,6 +583,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
             std::make_shared<ClusterRasterizationPass>(
                 occupancyPassInputs,
                 extension.m_compactedVisibleClustersBuffer,
+                extension.m_compactedVisibleClusterTransformIndicesBuffer,
                 extension.m_rasterBucketsHistogramBuffer,
                 extension.m_rasterBucketsIndirectArgsBuffer,
                 extension.m_sortedToUnsortedMappingBuffer,
@@ -681,6 +682,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
         std::make_shared<ClusterRasterizationPass>(
             rasterizePassInputs,
             extension.m_compactedVisibleClustersBuffer,
+            extension.m_compactedVisibleClusterTransformIndicesBuffer,
             extension.m_rasterBucketsHistogramBuffer,
             extension.m_rasterBucketsIndirectArgsBuffer,
             extension.m_sortedToUnsortedMappingBuffer,
@@ -778,6 +780,7 @@ void CLodAlphaVariant::AppendSinglePassResolveTail(
             std::make_shared<ClusterRasterizationPass>(
                 shadePassInputs,
                 extension.m_compactedVisibleClustersBuffer,
+                extension.m_compactedVisibleClusterTransformIndicesBuffer,
                 extension.m_rasterBucketsHistogramBuffer,
                 extension.m_rasterBucketsIndirectArgsBuffer,
                 extension.m_sortedToUnsortedMappingBuffer,

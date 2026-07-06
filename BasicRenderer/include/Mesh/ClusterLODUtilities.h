@@ -3,6 +3,8 @@
 #include "Mesh/ClusterLODTypes.h"
 #include "Mesh/VoxelGroupBuilder.h"
 
+#include <span>
+
 ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,
 	unsigned int vertexSize,
@@ -33,3 +35,22 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	const VoxelGroupPayload& payload,
 	const ClusterLODBuilderSettings& settings,
 	uint32_t maxCubesPerCluster = CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+
+struct ClusterLODAssemblyPart
+{
+	const ClusterLODPrebuildArtifacts* artifacts = nullptr;
+};
+
+struct ClusterLODAssemblyInstanceSpec
+{
+	uint32_t partIndex = 0;
+	uint32_t rootNode = 0;
+	ClusterLODAssemblyTransform transform{};
+	uint32_t flags = 0;
+};
+
+ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
+	std::span<const ClusterLODAssemblyPart> parts,
+	std::span<const ClusterLODAssemblyInstanceSpec> instances,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t preferredNodeWidth = 8u);

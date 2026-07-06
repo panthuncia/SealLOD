@@ -153,6 +153,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::string stablePassIdentifier,
     HierarchicalCullingPassInputs inputs,
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> visibleClustersCounterBuffer,
     std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> voxelRasterWorkBuffer,
@@ -161,6 +162,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
     uint32_t voxelRasterWorkCapacity,
     std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
+    std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
     std::shared_ptr<Buffer> histogramIndirectCommand,
     std::shared_ptr<Buffer> workGraphTelemetryBuffer,
@@ -179,6 +181,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
     , m_swVisibleClustersCounterBuffer(std::move(swVisibleClustersCounterBuffer))
     , m_voxelRasterWorkBuffer(std::move(voxelRasterWorkBuffer))
@@ -187,6 +190,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_skinnedVoxelRasterWorkCounterBuffer(std::move(skinnedVoxelRasterWorkCounterBuffer))
     , m_voxelRasterWorkCapacity(voxelRasterWorkCapacity)
     , m_pageJobVisibleClustersBuffer(std::move(pageJobVisibleClustersBuffer))
+    , m_pageJobVisibleClusterTransformIndicesBuffer(std::move(pageJobVisibleClusterTransformIndicesBuffer))
     , m_pageJobVisibleClustersCounterBuffer(std::move(pageJobVisibleClustersCounterBuffer))
     , m_histogramIndirectCommand(std::move(histogramIndirectCommand))
     , m_workGraphTelemetryBuffer(std::move(workGraphTelemetryBuffer))
@@ -218,7 +222,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_clodOnlyWorkloads = inputs.clodOnlyWorkloads;
     m_useShadowCascadeViews = inputs.useShadowCascadeViews;
 
-    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClustersCounterBuffer) {
+    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
         m_workGraphComputePageJobDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
             1u,
             sizeof(CLodWorkGraphComputePageJobDescriptors),
@@ -399,6 +403,7 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
 
     builder->WithUnorderedAccess(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_visibleClustersCounterBuffer,
             m_voxelRasterWorkBuffer,
             m_voxelRasterWorkCounterBuffer,
@@ -428,6 +433,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CLod::Groups,
             Builtin::CLod::Segments,
             Builtin::CLod::Nodes,
+            Builtin::CLod::AssemblyInstances,
+            Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::StreamingNonResidentBits,
             Builtin::CLod::MeshMetadata,
             CLodLevelInfosBufferId,
@@ -473,8 +480,11 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         builder->WithShaderResource(m_workGraphComputePageJobDescriptorResourceId.c_str());
     }
 
-    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClustersCounterBuffer) {
-        builder->WithUnorderedAccess(m_pageJobVisibleClustersBuffer, m_pageJobVisibleClustersCounterBuffer);
+    if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
+        builder->WithUnorderedAccess(
+            m_pageJobVisibleClustersBuffer,
+            m_pageJobVisibleClusterTransformIndicesBuffer,
+            m_pageJobVisibleClustersCounterBuffer);
     }
 
     if (m_slabResourceGroup) {
@@ -571,6 +581,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
     uint32_t sharedRootConstants[NumMiscUintRootConstants] = {};
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    sharedRootConstants[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT] =
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodForceTraversalDepthRootSettingName)();
@@ -1315,6 +1326,8 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             pageJobDescriptors.visibleClustersUAVDescriptorIndex = m_pageJobVisibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
             pageJobDescriptors.visibleClustersCounterUAVDescriptorIndex =
                 m_pageJobVisibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            pageJobDescriptors.visibleClusterTransformIndicesUAVDescriptorIndex =
+                m_pageJobVisibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
             if (!m_hasCachedPageJobDescriptors || !BytesEqual(pageJobDescriptors, m_cachedPageJobDescriptors)) {
                 m_cachedPageJobDescriptors = pageJobDescriptors;
                 m_hasCachedPageJobDescriptors = true;

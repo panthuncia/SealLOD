@@ -32,6 +32,7 @@ public:
     ClusterRasterizationPass(
         ClusterRasterizationPassInputs inputs,
         std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
         std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
         std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -77,6 +78,7 @@ private:
     std::vector<std::shared_ptr<PixelBuffer>> m_deepVisibilityHeadPointerBuffers;
 
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;

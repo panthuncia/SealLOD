@@ -499,6 +499,12 @@ void Mesh::ReleaseCLodHierarchyCpuData()
 	m_clodGroups.shrink_to_fit();
 	m_clodSegments.clear();
 	m_clodSegments.shrink_to_fit();
+	m_clodNodes.clear();
+	m_clodNodes.shrink_to_fit();
+	m_clodAssemblyTransforms.clear();
+	m_clodAssemblyTransforms.shrink_to_fit();
+	m_clodAssemblyInstances.clear();
+	m_clodAssemblyInstances.shrink_to_fit();
 }
 
 void Mesh::ReleaseCLodGroupChunkMetadataCpuData()
@@ -534,6 +540,8 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodNodes = data.nodes;
 	m_clodLodNodeRanges = data.lodNodeRanges;
 	m_clodLodLevelRoots = data.lodLevelRoots;
+	m_clodAssemblyTransforms = data.assemblyTransforms;
+	m_clodAssemblyInstances = data.assemblyInstances;
 	m_clodTopRootNode = 0;
 	m_perMeshBufferData.boundingSphere = data.objectBoundingSphere;
 	{
@@ -648,6 +656,12 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodLodLevelRoots.empty()) {
 		out.lodLevelRoots = m_clodLodLevelRoots;
 	}
+	if (!m_clodAssemblyTransforms.empty()) {
+		out.assemblyTransforms = m_clodAssemblyTransforms;
+	}
+	if (!m_clodAssemblyInstances.empty()) {
+		out.assemblyInstances = m_clodAssemblyInstances;
+	}
 	out.maxDepth = m_clodMaxDepth;
 	out.maxTraversalDepth = m_clodMaxTraversalDepth;
 	return out;
@@ -700,11 +714,15 @@ uint64_t Mesh::GetGlobalID() const {
 void Mesh::SetCLodBufferViews(
 	std::unique_ptr<BufferView> clusterLODGroupsView,
 	std::unique_ptr<BufferView> clusterLODSegmentsView,
-	std::unique_ptr<BufferView> clusterLODNodesView
+	std::unique_ptr<BufferView> clusterLODNodesView,
+	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView,
+	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView
 ) {
 	m_clusterLODGroupsView = std::move(clusterLODGroupsView);
 	m_clusterLODSegmentsView = std::move(clusterLODSegmentsView);
 	m_clusterLODNodesView = std::move(clusterLODNodesView);
+	m_clusterLODAssemblyTransformsView = std::move(clusterLODAssemblyTransformsView);
+	m_clusterLODAssemblyInstancesView = std::move(clusterLODAssemblyInstancesView);
 
 	auto firstChunkOffsetDiv = [](const auto& chunkViews, uint32_t divisor) -> uint32_t {
 		uint32_t minGroupIndex = std::numeric_limits<uint32_t>::max();

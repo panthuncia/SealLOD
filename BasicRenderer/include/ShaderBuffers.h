@@ -656,6 +656,16 @@ struct MeshInstanceClodOffsets
     uint clodMeshMetadataIndex;
 };
 
+struct CLodRuntimeAssemblyTransform
+{
+    DirectX::XMFLOAT4 modelRow0 = {};
+    DirectX::XMFLOAT4 modelRow1 = {};
+    DirectX::XMFLOAT4 modelRow2 = {};
+    DirectX::XMFLOAT4 prevModelRow0 = {};
+    DirectX::XMFLOAT4 prevModelRow1 = {};
+    DirectX::XMFLOAT4 prevModelRow2 = {};
+};
+
 struct CLodMeshMetadata
 {
     uint groupsBase;
@@ -668,6 +678,10 @@ struct CLodMeshMetadata
     uint lodLevelInfoBase;
     uint lodLevelCount;
     uint maxDepth;
+    uint assemblyTransformBase;
+    uint assemblyTransformCount;
+    uint assemblyInstanceBase;
+    uint assemblyInstanceCount;
 };
 
 struct CLodHierarchyLevelInfo
@@ -858,6 +872,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     UintRootConstant26,
     UintRootConstant27,
     UintRootConstant28,
+    UintRootConstant29,
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
@@ -866,7 +881,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscEnableShadows = UintRootConstant24,
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
-	NumMiscUintRootConstants = UintRootConstant28 + 1
+	NumMiscUintRootConstants = UintRootConstant29 + 1
 };
 
 enum ResourceDescriptorIndicesRootConstants { // Auto-assigned, do not set manually

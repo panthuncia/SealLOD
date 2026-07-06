@@ -25,6 +25,7 @@ constexpr uint32_t kDeepVisibilityAverageFragmentsPerPixel = 5u;
 ClusterRasterizationPass::ClusterRasterizationPass(
     ClusterRasterizationPassInputs inputs,
     std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
     std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
     std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -51,6 +52,7 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer,
     std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
+    , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
@@ -123,9 +125,11 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,
 			Builtin::CLod::GroupPageMap,
-			Builtin::CLod::Segments,
+            Builtin::CLod::Segments,
             Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
             m_compactedVisibleClustersBuffer,
+            m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
             m_viewRasterInfoBuffer,
             m_sortedToUnsortedMappingBuffer)
@@ -462,6 +466,7 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     }
     misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;

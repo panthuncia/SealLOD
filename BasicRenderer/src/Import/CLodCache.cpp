@@ -203,6 +203,8 @@ namespace CLodCache {
 			WriteVectorPod(out, prebuiltData.nodes);
 			WriteVectorPod(out, prebuiltData.lodNodeRanges);
 			WriteVectorPod(out, prebuiltData.lodLevelRoots);
+			WriteVectorPod(out, prebuiltData.assemblyTransforms);
+			WriteVectorPod(out, prebuiltData.assemblyInstances);
 			WritePod(out, prebuiltData.maxDepth);
 			WritePod(out, prebuiltData.maxTraversalDepth);
 
@@ -246,6 +248,8 @@ namespace CLodCache {
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodes)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodNodeRanges)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodLevelRoots)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransforms)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyInstances)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
 
@@ -719,6 +723,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(29));  // voxel attributes are compacted to active occupancy cells + cube active bounds
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // voxel propagation derives traversal boundaries from active parent payload errors
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
+		boost::hash_combine(seed, static_cast<uint32_t>(4));  // micro-instancing assembly metadata ABI + finite structural traversal nodes
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");

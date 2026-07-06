@@ -140,6 +140,32 @@ struct ClusterLODGroup
 };
 
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
+static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
+static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
+
+static constexpr uint32_t CLOD_NODE_INTERNAL = 0u;
+static constexpr uint32_t CLOD_NODE_VOXEL_LEAF = 1u;
+static constexpr uint32_t CLOD_NODE_SEGMENT_LEAF = 2u;
+static constexpr uint32_t CLOD_NODE_INSTANCE_ROOT = 3u;
+static constexpr uint32_t CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
+static constexpr uint32_t CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
+
+struct ClusterLODAssemblyTransform
+{
+	DirectX::XMFLOAT4 row0 = { 1.0f, 0.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT4 row1 = { 0.0f, 1.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT4 row2 = { 0.0f, 0.0f, 1.0f, 0.0f };
+};
+static_assert(sizeof(ClusterLODAssemblyTransform) == 48, "ClusterLODAssemblyTransform must be 48 bytes");
+
+struct ClusterLODAssemblyInstance
+{
+	uint32_t targetRootNode = 0;
+	uint32_t transformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+	uint32_t flags = 0;
+	uint32_t stackDepth = 0;
+};
+static_assert(sizeof(ClusterLODAssemblyInstance) == 16, "ClusterLODAssemblyInstance must be 16 bytes");
 
 static constexpr uint32_t CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;

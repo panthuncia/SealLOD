@@ -30,6 +30,10 @@ struct CLodMeshMetadata
     uint lodLevelInfoBase;
     uint lodLevelCount;
     uint maxDepth;
+    uint assemblyTransformBase;
+    uint assemblyTransformCount;
+    uint assemblyInstanceBase;
+    uint assemblyInstanceCount;
 };
 
 struct CLodHierarchyLevelInfo
@@ -202,8 +206,38 @@ struct ClusterLODGroup
 static const uint CLOD_NODE_INTERNAL = 0u;
 static const uint CLOD_NODE_VOXEL_LEAF = 1u;
 static const uint CLOD_NODE_SEGMENT_LEAF = 2u;
+static const uint CLOD_NODE_INSTANCE_ROOT = 3u;
+static const uint CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
+static const uint CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
+
+struct ClusterLODAssemblyTransform
+{
+    float4 row0;
+    float4 row1;
+    float4 row2;
+};
+
+struct ClusterLODAssemblyInstance
+{
+    uint targetRootNode;
+    uint transformIndex;
+    uint flags;
+    uint stackDepth;
+};
+
+struct CLodRuntimeAssemblyTransform
+{
+    float4 modelRow0;
+    float4 modelRow1;
+    float4 modelRow2;
+    float4 prevModelRow0;
+    float4 prevModelRow1;
+    float4 prevModelRow2;
+};
 
 static const uint CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
+static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
+static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
@@ -481,8 +515,8 @@ static const uint CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGI
 static const uint CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
 static const uint CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
 
-static const uint CLOD_NODE_REPLAY_STRIDE_BYTES    = 12u;  // 3 uints (TraverseNodeRecord)
-static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = 24u;  // 6 uints (MeshletBucketRecord)
+static const uint CLOD_NODE_REPLAY_STRIDE_BYTES    = 16u;  // 4 uints (TraverseNodeRecord)
+static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = 32u;  // 8 uints (MeshletBucketRecord, aligned)
 static const uint CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES = 60u; // sizeof(CLodReyesSplitQueueEntry)
 static const uint CLOD_REYES_DICE_REPLAY_STRIDE_BYTES  = 68u; // sizeof(CLodReyesDiceQueueEntry)
 

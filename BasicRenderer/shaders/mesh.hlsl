@@ -1104,7 +1104,7 @@ void VisibilityBufferMSMain(
     EmitPrimitiveIDs(uGroupThreadID, setup, primitiveInfo);
 }
 
-bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup setup, out uint failureReason, out bool sourceGroupMismatch, out uint foundSourceGroupLocalIndex, in uint bucketMeshletIndex, in uint bucketCount)
+bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTransformIndex, out MeshletSetup setup, out uint failureReason, out bool sourceGroupMismatch, out uint foundSourceGroupLocalIndex, in uint bucketMeshletIndex, in uint bucketCount)
 {
     failureReason = CLOD_RASTER_INIT_FAILURE_NONE;
     sourceGroupMismatch = false;
@@ -1121,7 +1121,7 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, out MeshletSetup
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
     setup.meshBuffer = perMeshBuffer[setup.meshInstanceBuffer.perMeshBufferIndex];
-    setup.objectBuffer = LoadInstanceTransformForDrawRecord(drawRecord);
+    setup.objectBuffer = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, assemblyTransformIndex);
 
     // Use pre-resolved page address from VisibleCluster
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
@@ -1251,9 +1251,19 @@ void ClusterLODBucketMSMain(
 
     if (draw) {
         ByteAddressBuffer compactedClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+        StructuredBuffer<uint> compactedClusterTransformIndices =
+            ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         packedCluster = CLodLoadVisibleClusterPacked(compactedClusters, visibleClusterIndex);
         unsortedClusterIndex = sortedToUnsortedMapping[visibleClusterIndex];
-        draw = InitializeMeshletFromCompactedCluster(packedCluster, setup, initFailureReason, sourceGroupMismatch, foundSourceGroupLocalIndex, linearizedID, count);
+        draw = InitializeMeshletFromCompactedCluster(
+            packedCluster,
+            compactedClusterTransformIndices[visibleClusterIndex],
+            setup,
+            initFailureReason,
+            sourceGroupMismatch,
+            foundSourceGroupLocalIndex,
+            linearizedID,
+            count);
         if (!draw)
         {
             setup = (MeshletSetup)0;
@@ -1510,12 +1520,22 @@ void ClusterLODReyesVirtualShadowMSMain(
             {
                 gs_reyesShadowDiceEntry = diceQueueBuffer[rasterWorkEntry.diceQueueIndex];
                 ByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+                StructuredBuffer<uint> visibleClusterTransformIndices =
+                    ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
                 const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusters, gs_reyesShadowDiceEntry.visibleClusterIndex);
 
                 uint initFailureReason = CLOD_RASTER_INIT_FAILURE_NONE;
                 bool sourceGroupMismatch = false;
                 uint foundSourceGroupLocalIndex = 0xFFFFFFFFu;
-                if (InitializeMeshletFromCompactedCluster(packedCluster, gs_reyesShadowSetup, initFailureReason, sourceGroupMismatch, foundSourceGroupLocalIndex, compactedWorkIndex, gs_reyesShadowPackedWorkGroup.rasterWorkEntryCount))
+                if (InitializeMeshletFromCompactedCluster(
+                        packedCluster,
+                        visibleClusterTransformIndices[gs_reyesShadowDiceEntry.visibleClusterIndex],
+                        gs_reyesShadowSetup,
+                        initFailureReason,
+                        sourceGroupMismatch,
+                        foundSourceGroupLocalIndex,
+                        compactedWorkIndex,
+                        gs_reyesShadowPackedWorkGroup.rasterWorkEntryCount))
                 {
                     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
                     if (shadowClipmapIndex < kCLodVirtualShadowClipmapCount)

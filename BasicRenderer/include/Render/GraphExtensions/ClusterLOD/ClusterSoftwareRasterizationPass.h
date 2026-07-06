@@ -17,6 +17,7 @@ class ClusterSoftwareRasterizationPass : public ComputePass, public IDynamicDecl
 public:
     ClusterSoftwareRasterizationPass(
         std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+        std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
         std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
         std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -39,6 +40,7 @@ public:
 private:
     rhi::CommandSignaturePtr m_rasterizationCommandSignature;
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsIndirectArgsBuffer;
     std::shared_ptr<Buffer> m_sortedToUnsortedMappingBuffer;

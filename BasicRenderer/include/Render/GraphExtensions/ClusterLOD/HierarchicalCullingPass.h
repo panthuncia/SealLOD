@@ -54,6 +54,7 @@ public:
         std::string stablePassIdentifier,
         HierarchicalCullingPassInputs inputs,
         std::shared_ptr<Buffer> visibleClustersBuffer,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> visibleClustersCounterBuffer,
         std::shared_ptr<Buffer> swVisibleClustersCounterBuffer,
         std::shared_ptr<Buffer> voxelRasterWorkBuffer,
@@ -62,6 +63,7 @@ public:
         std::shared_ptr<Buffer> skinnedVoxelRasterWorkCounterBuffer,
         uint32_t voxelRasterWorkCapacity,
         std::shared_ptr<Buffer> pageJobVisibleClustersBuffer,
+        std::shared_ptr<Buffer> pageJobVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> pageJobVisibleClustersCounterBuffer,
         std::shared_ptr<Buffer> histogramIndirectCommand,
         std::shared_ptr<Buffer> workGraphTelemetryBuffer,
@@ -122,6 +124,7 @@ private:
     PipelineState m_createCommandPipelineState;
     PipelineState m_clearPipelineState;
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_swVisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_voxelRasterWorkBuffer;
@@ -132,6 +135,7 @@ private:
     std::string m_voxelRasterQueueDescriptorResourceId;
     uint32_t m_voxelRasterWorkCapacity = 0u;
     std::shared_ptr<Buffer> m_pageJobVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_pageJobVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_pageJobVisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_workGraphComputePageJobDescriptorsBuffer;
     std::string m_workGraphComputePageJobDescriptorResourceId;

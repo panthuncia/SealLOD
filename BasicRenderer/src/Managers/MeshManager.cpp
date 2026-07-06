@@ -52,6 +52,136 @@ std::string NarrowDebugPath(const std::wstring& path)
 	return ws2s(path);
 }
 
+void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& metadata)
+{
+	const auto& groups = mesh.GetCLodGroups();
+	const auto& nodes = mesh.GetCLodNodes();
+	const auto& transforms = mesh.GetCLodAssemblyTransforms();
+	uint32_t proxyGroups = 0u;
+	uint32_t assemblyVoxelGroups = 0u;
+	uint32_t voxelGroups = 0u;
+	uint32_t pageLessProxyGroups = 0u;
+	uint32_t pageLessAssemblyVoxelGroups = 0u;
+	int32_t maxAssemblyVoxelDepth = 0;
+	for (const ClusterLODGroup& group : groups) {
+		if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u) {
+			++voxelGroups;
+		}
+		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u) {
+			++proxyGroups;
+			if (group.pageCount == 0u) {
+				++pageLessProxyGroups;
+			}
+		}
+		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u) {
+			++assemblyVoxelGroups;
+			maxAssemblyVoxelDepth = std::max(maxAssemblyVoxelDepth, group.depth);
+			if (group.pageCount == 0u) {
+				++pageLessAssemblyVoxelGroups;
+			}
+		}
+	}
+
+	const uint32_t rootNode = mesh.GetCLodRootNodeIndex();
+	const ClusterLODNode* root = rootNode < nodes.size() ? &nodes[rootNode] : nullptr;
+	const BoundingSphere objectSphere = mesh.GetPerMeshCBData().boundingSphere;
+	spdlog::info(
+		"CLOD assembly upload detail: mesh={} objectSphere=({},{},{},{}) proxyGroups={} pageLessProxyGroups={} voxelGroups={} assemblyVoxelGroups={} pageLessAssemblyVoxelGroups={} maxAssemblyVoxelDepth={} maxTraversalDepth={} rootNode={} rootKind={} rootLodSphere=({},{},{},{})",
+		mesh.GetGlobalID(),
+		objectSphere.sphere.x,
+		objectSphere.sphere.y,
+		objectSphere.sphere.z,
+		objectSphere.sphere.w,
+		proxyGroups,
+		pageLessProxyGroups,
+		voxelGroups,
+		assemblyVoxelGroups,
+		pageLessAssemblyVoxelGroups,
+		maxAssemblyVoxelDepth,
+		mesh.GetCLodMaxTraversalDepth(),
+		rootNode,
+		root != nullptr ? root->range.isGroup : 0xFFFFFFFFu,
+		root != nullptr ? root->traversalMetric.lodBoundingSphere.x : 0.0f,
+		root != nullptr ? root->traversalMetric.lodBoundingSphere.y : 0.0f,
+		root != nullptr ? root->traversalMetric.lodBoundingSphere.z : 0.0f,
+		root != nullptr ? root->traversalMetric.lodBoundingSphere.w : 0.0f);
+
+	uint32_t loggedAssemblyVoxels = 0u;
+	for (uint32_t groupIndex = 0u; groupIndex < static_cast<uint32_t>(groups.size()) && loggedAssemblyVoxels < 8u; ++groupIndex) {
+		const ClusterLODGroup& group = groups[groupIndex];
+		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u) {
+			continue;
+		}
+		spdlog::info(
+			"CLOD assembly voxel group: mesh={} group={} depth={} parent={} flags=0x{:x} center=({},{},{}) radius={} error={} representationError={} firstSegment={} segmentCount={} terminalSegments={} pageMapBase={} pageCount={}",
+			mesh.GetGlobalID(),
+			groupIndex,
+			group.depth,
+			group.parentGroupId,
+			group.flags,
+			group.bounds.center[0],
+			group.bounds.center[1],
+			group.bounds.center[2],
+			group.bounds.radius,
+			group.bounds.error,
+			group.representationError,
+			group.firstSegment,
+			group.segmentCount,
+			group.terminalSegmentCount,
+			group.pageMapBase,
+			group.pageCount);
+		++loggedAssemblyVoxels;
+	}
+	uint32_t loggedDeepAssemblyVoxels = 0u;
+	for (uint32_t groupIndex = static_cast<uint32_t>(groups.size()); groupIndex > 0u && loggedDeepAssemblyVoxels < 8u; --groupIndex) {
+		const uint32_t localGroupIndex = groupIndex - 1u;
+		const ClusterLODGroup& group = groups[localGroupIndex];
+		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u) {
+			continue;
+		}
+		spdlog::info(
+			"CLOD assembly voxel deep group: mesh={} group={} depth={} parent={} flags=0x{:x} center=({},{},{}) radius={} error={} representationError={} firstSegment={} segmentCount={} terminalSegments={} pageMapBase={} pageCount={}",
+			mesh.GetGlobalID(),
+			localGroupIndex,
+			group.depth,
+			group.parentGroupId,
+			group.flags,
+			group.bounds.center[0],
+			group.bounds.center[1],
+			group.bounds.center[2],
+			group.bounds.radius,
+			group.bounds.error,
+			group.representationError,
+			group.firstSegment,
+			group.segmentCount,
+			group.terminalSegmentCount,
+			group.pageMapBase,
+			group.pageCount);
+		++loggedDeepAssemblyVoxels;
+	}
+
+	for (uint32_t transformIndex = 0u; transformIndex < std::min<uint32_t>(4u, static_cast<uint32_t>(transforms.size())); ++transformIndex) {
+		const ClusterLODAssemblyTransform& transform = transforms[transformIndex];
+		spdlog::info(
+			"CLOD assembly transform: mesh={} localIndex={} globalIndex={} row0=({},{},{},{}) row1=({},{},{},{}) row2=({},{},{},{})",
+			mesh.GetGlobalID(),
+			transformIndex,
+			metadata.assemblyTransformBase + transformIndex,
+			transform.row0.x,
+			transform.row0.y,
+			transform.row0.z,
+			transform.row0.w,
+			transform.row1.x,
+			transform.row1.y,
+			transform.row1.z,
+			transform.row1.w,
+			transform.row2.x,
+			transform.row2.y,
+			transform.row2.z,
+			transform.row2.w);
+	}
+}
+
 size_t ReserveBytesWithImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {
 	if (requestedBytes == 0) {
 		return 0;
@@ -101,6 +231,8 @@ MeshManager::MeshManager() {
 	m_clusterLODSegments = DynamicBuffer::CreateShared(sizeof(ClusterLODGroupSegment), 10000, "clusterLODSegments");
 	//m_clusterLODMeshletBounds = DynamicBuffer::CreateShared(sizeof(BoundingSphere), 10000, "clusterLODMeshletBounds", false, true);
 	m_clusterLODNodes = DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
+	m_clusterLODAssemblyTransforms = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
+	m_clusterLODAssemblyInstances = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
 	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
 	m_clodSharedGroupChunks->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
@@ -116,6 +248,8 @@ MeshManager::MeshManager() {
 	rg::memory::SetResourceUsageHint(*m_clusterLODGroups, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clusterLODSegments, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clusterLODNodes, "Cluster LOD data");
+	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyTransforms, "Cluster LOD data");
+	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyInstances, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clodGroupPageMap, "Cluster LOD streaming");
 
 	m_resources[Builtin::PerMeshBuffer] = m_perMeshBuffers;
@@ -129,6 +263,8 @@ MeshManager::MeshManager() {
 	m_resources[Builtin::CLod::Segments] = m_clusterLODSegments;
 	//m_resources[Builtin::CLod::MeshletBounds] = m_clusterLODMeshletBounds;
 	m_resources[Builtin::CLod::Nodes] = m_clusterLODNodes;
+	m_resources[Builtin::CLod::AssemblyTransforms] = m_clusterLODAssemblyTransforms;
+	m_resources[Builtin::CLod::AssemblyInstances] = m_clusterLODAssemblyInstances;
 	m_resources[Builtin::CLod::GroupPageMap] = m_clodGroupPageMap;
 
 	// Page pool
@@ -435,8 +571,27 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	auto clusterLODSegmentsView = m_clusterLODSegments->AddData(mesh->GetCLodSegments().data(), mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment), sizeof(ClusterLODGroupSegment));
 	
 	auto clusterLODNodesView = m_clusterLODNodes->AddData(mesh->GetCLodNodes().data(), mesh->GetCLodNodes().size() * sizeof(ClusterLODNode), sizeof(ClusterLODNode));
+	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView = nullptr;
+	if (!mesh->GetCLodAssemblyTransforms().empty()) {
+		clusterLODAssemblyTransformsView = m_clusterLODAssemblyTransforms->AddData(
+			mesh->GetCLodAssemblyTransforms().data(),
+			mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform),
+			sizeof(ClusterLODAssemblyTransform));
+	}
+	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView = nullptr;
+	if (!mesh->GetCLodAssemblyInstances().empty()) {
+		clusterLODAssemblyInstancesView = m_clusterLODAssemblyInstances->AddData(
+			mesh->GetCLodAssemblyInstances().data(),
+			mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance),
+			sizeof(ClusterLODAssemblyInstance));
+	}
 	if (!clusterLODGroupsView || !clusterLODSegmentsView || !clusterLODNodesView) {
 		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD hierarchy views for mesh globalID={}", mesh->GetGlobalID());
+		return false;
+	}
+	if ((!mesh->GetCLodAssemblyTransforms().empty() && !clusterLODAssemblyTransformsView) ||
+		(!mesh->GetCLodAssemblyInstances().empty() && !clusterLODAssemblyInstancesView)) {
+		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD assembly views for mesh globalID={}", mesh->GetGlobalID());
 		return false;
 	}
 
@@ -575,6 +730,14 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		clodMeshMetadata.lodLevelInfoBase = hierarchyLevelInfoBase;
 		clodMeshMetadata.lodLevelCount = static_cast<uint32_t>(lodLevelRoots.size());
 		clodMeshMetadata.maxDepth = mesh->GetCLodMaxDepth();
+		clodMeshMetadata.assemblyTransformBase = clusterLODAssemblyTransformsView != nullptr
+			? static_cast<uint32_t>(clusterLODAssemblyTransformsView->GetOffset() / sizeof(ClusterLODAssemblyTransform))
+			: 0u;
+		clodMeshMetadata.assemblyTransformCount = static_cast<uint32_t>(mesh->GetCLodAssemblyTransforms().size());
+		clodMeshMetadata.assemblyInstanceBase = clusterLODAssemblyInstancesView != nullptr
+			? static_cast<uint32_t>(clusterLODAssemblyInstancesView->GetOffset() / sizeof(ClusterLODAssemblyInstance))
+			: 0u;
+		clodMeshMetadata.assemblyInstanceCount = static_cast<uint32_t>(mesh->GetCLodAssemblyInstances().size());
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
 		if (!sharedState->ownedMeshMetadataView) {
 			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
@@ -582,6 +745,63 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		}
 		if (sharedState->ownedMeshMetadataView != nullptr) {
 			sharedState->clodMeshMetadataIndex = static_cast<uint32_t>(sharedState->ownedMeshMetadataView->GetOffset() / sizeof(CLodMeshMetadata));
+		}
+		{
+			const auto& nodes = mesh->GetCLodNodes();
+			const auto& lodLevelRootsForLog = mesh->GetCLodLodLevelRoots();
+			const uint32_t rootNode = mesh->GetCLodRootNodeIndex();
+			const ClusterLODNode* root = rootNode < nodes.size() ? &nodes[rootNode] : nullptr;
+			spdlog::debug(
+				"CLOD mesh upload root: mesh={} groups={} nodes={} rootNode={} rootKind={} rootChildren={} rootError={} rootCullSphere=({},{},{},{}) rootLodSphere=({},{},{},{}) lodLevels={} maxDepth={} maxTraversalDepth={}",
+				mesh->GetGlobalID(),
+				mesh->GetCLodGroups().size(),
+				nodes.size(),
+				rootNode,
+				root != nullptr ? root->range.isGroup : 0xFFFFFFFFu,
+				(root != nullptr && root->range.isGroup == CLOD_NODE_INTERNAL) ? (root->range.countMinusOne + 1u) : 0u,
+				root != nullptr ? root->traversalMetric.maxQuadricError : 0.0f,
+				root != nullptr ? root->traversalMetric.cullingSphere.x : 0.0f,
+				root != nullptr ? root->traversalMetric.cullingSphere.y : 0.0f,
+				root != nullptr ? root->traversalMetric.cullingSphere.z : 0.0f,
+				root != nullptr ? root->traversalMetric.cullingSphere.w : 0.0f,
+				root != nullptr ? root->traversalMetric.lodBoundingSphere.x : 0.0f,
+				root != nullptr ? root->traversalMetric.lodBoundingSphere.y : 0.0f,
+				root != nullptr ? root->traversalMetric.lodBoundingSphere.z : 0.0f,
+				root != nullptr ? root->traversalMetric.lodBoundingSphere.w : 0.0f,
+				lodLevelRootsForLog.size(),
+				mesh->GetCLodMaxDepth(),
+				mesh->GetCLodMaxTraversalDepth());
+			for (uint32_t levelIndex = 0u; levelIndex < std::min<uint32_t>(static_cast<uint32_t>(lodLevelRootsForLog.size()), 8u); ++levelIndex)
+			{
+				const uint32_t levelRootNode = lodLevelRootsForLog[levelIndex];
+				const ClusterLODNode* levelRoot = levelRootNode < nodes.size() ? &nodes[levelRootNode] : nullptr;
+				spdlog::debug(
+					"CLOD mesh upload lod root: mesh={} level={} node={} kind={} children={} error={} lodRadius={}",
+					mesh->GetGlobalID(),
+					levelIndex,
+					levelRootNode,
+					levelRoot != nullptr ? levelRoot->range.isGroup : 0xFFFFFFFFu,
+					(levelRoot != nullptr && levelRoot->range.isGroup == CLOD_NODE_INTERNAL) ? (levelRoot->range.countMinusOne + 1u) : 0u,
+					levelRoot != nullptr ? levelRoot->traversalMetric.maxQuadricError : 0.0f,
+					levelRoot != nullptr ? levelRoot->traversalMetric.lodBoundingSphere.w : 0.0f);
+			}
+		}
+		if (clodMeshMetadata.assemblyInstanceCount != 0u) {
+			const auto& nodes = mesh->GetCLodNodes();
+			const uint32_t rootNode = mesh->GetCLodRootNodeIndex();
+			const ClusterLODNode* root = rootNode < nodes.size() ? &nodes[rootNode] : nullptr;
+			spdlog::info(
+				"CLOD assembly mesh upload: mesh={} groups={} nodes={} rootNode={} rootKind={} rootError={} lodLevels={} assemblyTransforms={} assemblyInstances={}",
+				mesh->GetGlobalID(),
+				mesh->GetCLodGroups().size(),
+				nodes.size(),
+				rootNode,
+				root != nullptr ? root->range.isGroup : 0xFFFFFFFFu,
+				root != nullptr ? root->traversalMetric.maxQuadricError : 0.0f,
+				clodMeshMetadata.lodLevelCount,
+				clodMeshMetadata.assemblyTransformCount,
+				clodMeshMetadata.assemblyInstanceCount);
+			LogCLodAssemblyUploadDetails(*mesh, clodMeshMetadata);
 		}
 
 		sharedState->groupsBase = groupsBase;
@@ -619,9 +839,11 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	}
 
 	mesh->SetCLodBufferViews(
-		std::move(clusterLODGroupsView), 
-		std::move(clusterLODSegmentsView), 
-		std::move(clusterLODNodesView));
+		std::move(clusterLODGroupsView),
+		std::move(clusterLODSegmentsView),
+		std::move(clusterLODNodesView),
+		std::move(clusterLODAssemblyTransformsView),
+		std::move(clusterLODAssemblyInstancesView));
 	mesh->ReleaseCLodChunkUploadData();
 	mesh->ReleaseCLodHierarchyCpuData();
 	mesh->ReleaseCLodGroupChunkMetadataCpuData();
@@ -660,6 +882,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	size_t clodGroupsBytes = 0;
 	size_t clodSegmentsBytes = 0;
 	size_t clodNodesBytes = 0;
+	size_t clodAssemblyTransformsBytes = 0;
+	size_t clodAssemblyInstancesBytes = 0;
 	size_t clodSharedGroupChunkBytes = 0;
 	size_t clodHierarchyLevelInfoBytes = 0;
 	size_t clodMeshMetadataBytes = 0;
@@ -675,6 +899,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
 			clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
 			clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+			clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
+			clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
 			clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
 			clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
 			clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
@@ -699,6 +925,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODGroups->CanAllocateBytes(clodGroupsBytes) &&
 			m_clusterLODSegments->CanAllocateBytes(clodSegmentsBytes) &&
 			m_clusterLODNodes->CanAllocateBytes(clodNodesBytes) &&
+			m_clusterLODAssemblyTransforms->CanAllocateBytes(clodAssemblyTransformsBytes) &&
+			m_clusterLODAssemblyInstances->CanAllocateBytes(clodAssemblyInstancesBytes) &&
 			m_clodSharedGroupChunks->CanAllocateBytes(clodSharedGroupChunkBytes) &&
 			m_clodHierarchyLevelInfos->CanAllocateBytes(clodHierarchyLevelInfoBytes) &&
 			m_clodMeshMetadata->CanAllocateBytes(clodMeshMetadataBytes) &&
@@ -709,6 +937,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 			m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
 			m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+			m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
+			m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
 			m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
 			m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
 			m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
@@ -739,6 +969,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	size_t clodGroupsBytes = 0;
 	size_t clodSegmentsBytes = 0;
 	size_t clodNodesBytes = 0;
+	size_t clodAssemblyTransformsBytes = 0;
+	size_t clodAssemblyInstancesBytes = 0;
 	size_t clodSharedGroupChunkBytes = 0;
 	size_t clodHierarchyLevelInfoBytes = 0;
 	size_t clodMeshMetadataBytes = 0;
@@ -759,6 +991,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 				clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
 				clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
 				clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
+				clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
+				clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
 				clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
 				clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
 				clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
@@ -783,6 +1017,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 		m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 		m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
 		m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
+		m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
+		m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
 		m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
 		m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
 		m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));

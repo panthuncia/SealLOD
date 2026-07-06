@@ -15,11 +15,14 @@
 #include <mutex>
 
 #include <pxr/usd/usd/primRange.h>
+#include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/primvar.h>
+#include <pxr/usd/usdGeom/xformCache.h>
 #include <pxr/usd/usdSkel/bindingAPI.h>
 #include <pxr/usd/usdSkel/skeleton.h>
 #include <pxr/usd/usdSkel/skeletonQuery.h>
@@ -35,6 +38,7 @@
 #include "Import/CLodCacheLoader.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/ClusterLODTypes.h"
+#include "Mesh/ClusterLODUtilities.h"
 #include "Mesh/VertexLayout.h"
 #include "Mesh/VertexFlags.h"
 #include "Mesh/DefaultCLodSettings.h"
@@ -1781,8 +1785,11 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	ingest.ReserveIndices(indices.size());
 	ingest.AppendIndices(indices.data(), indices.size());
 
-	// Build CLod cache if needed
-	if (!prebuiltData.has_value()) {
+	std::shared_ptr<const ClusterLODPrebuildArtifacts> transientArtifacts;
+
+	// Build CLod cache if needed. Assembly construction can request retained
+	// artifacts even on cache hits because it needs page blobs, not metadata only.
+	if (!prebuiltData.has_value() || options.retainClusterLODArtifacts) {
 		spdlog::info("    Building CLod artifacts...");
 		const auto clodBuildBegin = std::chrono::steady_clock::now();
 		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
@@ -1791,6 +1798,7 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		spdlog::info("    CLod artifacts built: {} groups, {} nodes",
 			artifacts.prebuiltData.groups.size(), artifacts.prebuiltData.nodes.size());
 
+		if (!prebuiltData.has_value()) {
 		spdlog::info("    Saving cache to disk...");
 		const auto clodSaveBegin = std::chrono::steady_clock::now();
 		if (CLodCacheLoader::SavePrebuiltLocked(cacheIdentity, artifacts.prebuiltData,
@@ -1812,8 +1820,11 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		}
 		else {
 			spdlog::warn("    Cache save FAILED — using in-memory artifacts only.");
-			prebuiltData = std::move(artifacts.prebuiltData);
+			prebuiltData = artifacts.prebuiltData;
 		}
+		}
+
+		transientArtifacts = std::make_shared<ClusterLODPrebuildArtifacts>(std::move(artifacts));
 	}
 
 	TfToken subdivisionScheme = UsdGeomTokens->catmullClark;
@@ -1830,11 +1841,13 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		std::move(prebuiltData),
 		previewSubdiv || previewTopology,
 		std::move(prototypeGeometry));
+	result.sourcePrimPath = mesh.GetPrim().GetPath().GetString();
 	result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
 	result.objectSurfaceSamplingMode = objectSurfaceSamplingMode;
 	result.objectSurfaceUseTriplanarProjection = options.objectSurfaceUseTriplanarProjection;
 	result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
 	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;
+	result.transientArtifacts = std::move(transientArtifacts);
 	return result;
 }
 
@@ -1873,10 +1886,285 @@ MeshPreprocessResult ExtractSubMesh(
 		options);
 }
 
+ClusterLODAssemblyTransform ClusterLODAssemblyTransformFromUsdMatrix(const GfMatrix4d& matrix)
+{
+	auto transformPoint = [&matrix](double x, double y, double z) {
+		return matrix.Transform(GfVec3d(x, y, z));
+	};
+
+	const GfVec3d origin = transformPoint(0.0, 0.0, 0.0);
+	const GfVec3d basisX = transformPoint(1.0, 0.0, 0.0) - origin;
+	const GfVec3d basisY = transformPoint(0.0, 1.0, 0.0) - origin;
+	const GfVec3d basisZ = transformPoint(0.0, 0.0, 1.0) - origin;
+
+	ClusterLODAssemblyTransform transform{};
+	transform.row0 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[0]),
+		static_cast<float>(basisY[0]),
+		static_cast<float>(basisZ[0]),
+		static_cast<float>(origin[0]));
+	transform.row1 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[1]),
+		static_cast<float>(basisY[1]),
+		static_cast<float>(basisZ[1]),
+		static_cast<float>(origin[1]));
+	transform.row2 = DirectX::XMFLOAT4(
+		static_cast<float>(basisX[2]),
+		static_cast<float>(basisY[2]),
+		static_cast<float>(basisZ[2]),
+		static_cast<float>(origin[2]));
+	return transform;
+}
+
+bool PathHasAnyPrefix(const SdfPath& path, const std::vector<SdfPath>& prefixes)
+{
+	for (const SdfPath& prefix : prefixes) {
+		if (path.HasPrefix(prefix)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void AppendPointInstancerAssemblyCaches(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	StageExtractionResult& result)
+{
+	std::vector<UsdGeomPointInstancer> pointInstancers;
+	std::vector<SdfPath> prototypeRoots;
+	std::set<std::string> prototypeRootStrings;
+
+	auto primRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = primRange.begin(); primIt != primRange.end(); ++primIt) {
+		UsdGeomPointInstancer pointInstancer(*primIt);
+		if (!pointInstancer) {
+			continue;
+		}
+
+		pointInstancers.push_back(pointInstancer);
+		SdfPathVector targets;
+		if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+			for (const SdfPath& target : targets) {
+				if (prototypeRootStrings.insert(target.GetString()).second) {
+					prototypeRoots.push_back(target);
+				}
+			}
+		}
+	}
+
+	if (pointInstancers.empty()) {
+		return;
+	}
+
+	std::unordered_map<std::string, std::vector<size_t>> resultsBySourcePrim;
+	for (size_t resultIndex = 0; resultIndex < result.submeshes.size(); ++resultIndex) {
+		const MeshPreprocessResult& submesh = result.submeshes[resultIndex];
+		if (!submesh.transientArtifacts) {
+			continue;
+		}
+		resultsBySourcePrim[submesh.sourcePrimPath].push_back(resultIndex);
+	}
+	if (resultsBySourcePrim.empty()) {
+		spdlog::warn("USD point-instancer assembly requested, but no transient CLod artifacts were retained.");
+		return;
+	}
+
+	std::vector<ClusterLODAssemblyPart> parts;
+	std::unordered_map<size_t, uint32_t> partByResultIndex;
+	auto addPart = [&](size_t resultIndex) -> uint32_t {
+		const auto existing = partByResultIndex.find(resultIndex);
+		if (existing != partByResultIndex.end()) {
+			return existing->second;
+		}
+
+		const MeshPreprocessResult& submesh = result.submeshes[resultIndex];
+		if (!submesh.transientArtifacts) {
+			throw std::runtime_error("USD assembly part is missing retained CLod artifacts");
+		}
+		const uint32_t partIndex = static_cast<uint32_t>(parts.size());
+		parts.push_back(ClusterLODAssemblyPart{ .artifacts = submesh.transientArtifacts.get() });
+		partByResultIndex.emplace(resultIndex, partIndex);
+		return partIndex;
+	};
+
+	std::vector<ClusterLODAssemblyInstanceSpec> instances;
+	UsdGeomXformCache xformCache(geomTimeCode);
+	UsdGeomMesh firstRootMesh;
+
+	auto rootPrimRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = rootPrimRange.begin(); primIt != rootPrimRange.end(); ++primIt) {
+		UsdGeomMesh mesh(*primIt);
+		if (!mesh || PathHasAnyPrefix(mesh.GetPrim().GetPath(), prototypeRoots)) {
+			continue;
+		}
+
+		const auto found = resultsBySourcePrim.find(mesh.GetPrim().GetPath().GetString());
+		if (found == resultsBySourcePrim.end()) {
+			continue;
+		}
+
+		if (!firstRootMesh) {
+			firstRootMesh = mesh;
+		}
+
+		const ClusterLODAssemblyTransform transform =
+			ClusterLODAssemblyTransformFromUsdMatrix(xformCache.GetLocalToWorldTransform(mesh.GetPrim()));
+		for (size_t resultIndex : found->second) {
+			instances.push_back(ClusterLODAssemblyInstanceSpec{
+				.partIndex = addPart(resultIndex),
+				.rootNode = 0u,
+				.transform = transform,
+				.flags = 0u,
+			});
+		}
+	}
+
+	for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
+		SdfPathVector prototypeTargets;
+		if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
+			continue;
+		}
+
+		VtIntArray protoIndices;
+		if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
+			spdlog::warn("PointInstancer '{}' has no readable protoIndices for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+
+		std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
+		if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
+			spdlog::warn("PointInstancer '{}' mask application to protoIndices failed for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+
+		VtArray<GfMatrix4d> instanceTransforms;
+		if (!pointInstancer.ComputeInstanceTransformsAtTime(
+			&instanceTransforms,
+			geomTimeCode,
+			geomTimeCode,
+			UsdGeomPointInstancer::IncludeProtoXform,
+			UsdGeomPointInstancer::ApplyMask)) {
+			spdlog::warn("PointInstancer '{}' failed to compute CLod assembly instance transforms.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+
+		const size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
+		for (size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
+			const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
+			if (!prototypeRoot) {
+				continue;
+			}
+
+			const GfMatrix4d prototypeRootWorldInverse = xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
+			std::vector<std::pair<std::vector<size_t>, GfMatrix4d>> prototypeMeshes;
+			std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
+				if (prim.IsA<UsdGeomImageable>()) {
+					UsdGeomImageable imageable(prim);
+					if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+						return;
+					}
+				}
+
+				UsdGeomMesh mesh(prim);
+				if (mesh) {
+					const auto found = resultsBySourcePrim.find(mesh.GetPrim().GetPath().GetString());
+					if (found != resultsBySourcePrim.end()) {
+						prototypeMeshes.emplace_back(
+							found->second,
+							xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
+					}
+				}
+
+				for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+					gatherPrototypeMeshes(child);
+				}
+			};
+			gatherPrototypeMeshes(prototypeRoot);
+
+			for (size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+				if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
+					continue;
+				}
+
+				for (const auto& [resultIndices, prototypeLocal] : prototypeMeshes) {
+					const GfMatrix4d composedTransform = prototypeLocal * instanceTransforms[instanceIndex];
+					const ClusterLODAssemblyTransform transform = ClusterLODAssemblyTransformFromUsdMatrix(composedTransform);
+					for (size_t resultIndex : resultIndices) {
+						instances.push_back(ClusterLODAssemblyInstanceSpec{
+							.partIndex = addPart(resultIndex),
+							.rootNode = 0u,
+							.transform = transform,
+							.flags = 0u,
+						});
+					}
+				}
+			}
+		}
+	}
+
+	if (parts.empty() || instances.empty()) {
+		spdlog::warn("USD point-instancer assembly requested, but no assembly parts or instances were produced.");
+		return;
+	}
+
+	try {
+		ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(parts, instances, GetDefaultBuilderSettings(), 8u);
+		CLodCacheLoader::MeshCacheIdentity assemblyIdentity{};
+		if (firstRootMesh) {
+			assemblyIdentity = CLodCacheLoader::BuildIdentity(firstRootMesh, stage, "CLodAssembly", geomTimeCode, sourceIdentifier);
+		}
+		else {
+			assemblyIdentity.sourceIdentifier = sourceIdentifier;
+			if (assemblyIdentity.sourceIdentifier.empty() && stage && stage->GetRootLayer()) {
+				assemblyIdentity.sourceIdentifier = stage->GetRootLayer()->GetIdentifier();
+			}
+			assemblyIdentity.subsetName = "CLodAssembly";
+		}
+		const UsdPrim defaultPrim = stage->GetDefaultPrim();
+		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=3";
+
+		ClusterLODPrebuiltData savedPrebuiltData;
+		if (CLodCacheLoader::SavePrebuiltLocked(
+			assemblyIdentity,
+			assemblyArtifacts.prebuiltData,
+			assemblyArtifacts.cacheBuildData.AsPayload(),
+			&savedPrebuiltData)) {
+			auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(assemblyIdentity);
+			if (diskBackedPrebuilt.has_value()) {
+				savedPrebuiltData = std::move(*diskBackedPrebuilt);
+			}
+
+			MeshIngestBuilder dummyIngest(0u, 0u, 0u, GetDefaultBuilderSettings());
+			MeshPreprocessResult assemblyResult(
+				std::move(dummyIngest),
+				std::move(assemblyIdentity),
+				std::make_optional(std::move(savedPrebuiltData)));
+			assemblyResult.sourcePrimPath = assemblyResult.cacheIdentity.primPath;
+			assemblyResult.transientArtifacts = std::make_shared<ClusterLODPrebuildArtifacts>(std::move(assemblyArtifacts));
+			result.submeshes.push_back(std::move(assemblyResult));
+			result.cachesBuilt++;
+			spdlog::info("  USD CLod assembly cache emitted: parts={}, instances={}.", parts.size(), instances.size());
+		}
+		else {
+			spdlog::warn("  USD CLod assembly cache save failed.");
+		}
+	}
+	catch (const std::exception& e) {
+		spdlog::warn("  USD CLod assembly cache build failed: {}", e.what());
+	}
+}
+
 StageExtractionResult ExtractAllFromStage(
 	const UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier,
-	std::uint32_t tessellationFactor) {
+	std::uint32_t tessellationFactor,
+	const ExtractOptions& options) {
 	StageExtractionResult result;
 
 	if (!stage) {
@@ -1966,7 +2254,7 @@ StageExtractionResult ExtractAllFromStage(
 		if (workItem.subsets.empty()) {
 			MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
 				requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-				workItem.doubleSided, sourceIdentifier, tessellationFactor);
+				workItem.doubleSided, sourceIdentifier, tessellationFactor, options);
 			std::lock_guard lock(resultMutex);
 			result.submeshes.push_back(std::move(submesh));
 		}
@@ -1974,7 +2262,7 @@ StageExtractionResult ExtractAllFromStage(
 			TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessSubsets", workItem.subsets.size(), [&](size_t subsetIndex) {
 				MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
 					requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-					workItem.doubleSided, sourceIdentifier, tessellationFactor);
+					workItem.doubleSided, sourceIdentifier, tessellationFactor, options);
 				std::lock_guard lock(resultMutex);
 				result.submeshes.push_back(std::move(submesh));
 				});
@@ -1985,6 +2273,9 @@ StageExtractionResult ExtractAllFromStage(
 		result.submeshesProcessed += workItem.subsets.empty() ? 1 : workItem.subsets.size();
 	}
 	result.cachesBuilt = result.submeshesProcessed;
+	if (options.buildPointInstancerAssemblyCaches) {
+		AppendPointInstancerAssemblyCaches(stage, sourceIdentifier, geomTimeCode, result);
+	}
 
 	return result;
 }

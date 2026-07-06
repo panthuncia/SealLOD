@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <directxmath.h>
@@ -12,6 +13,14 @@ struct VoxelSourceCandidatePayload
 {
 	const VoxelGroupPayload* payload = nullptr;
 	float expansionRadius = 0.0f;
+};
+
+struct VoxelSourcePayloadInstance
+{
+	const VoxelGroupPayload* payload = nullptr;
+	ClusterLODAssemblyTransform localToTarget{};
+	float expansionRadius = 0.0f;
+	int32_t refinedGroupOverride = std::numeric_limits<int32_t>::min();
 };
 
 class VoxelSourceTriangleBVH
@@ -103,10 +112,12 @@ struct VoxelizeTrianglesInput
 	// Optional already-voxelized sources. These are re-sampled as volumes when
 	// building a coarser voxel parent.
 	const std::vector<const VoxelGroupPayload*>* sourceVoxelPayloads = nullptr;
+	const std::vector<VoxelSourcePayloadInstance>* sourceVoxelPayloadInstances = nullptr;
 
 	// Optional already-voxelized sources used only to define candidate output
 	// cells. Coverage for these candidates is evaluated from triangle sources.
 	const std::vector<VoxelSourceCandidatePayload>* candidateVoxelPayloads = nullptr;
+	const std::vector<VoxelSourcePayloadInstance>* candidateVoxelPayloadInstances = nullptr;
 	bool keepZeroCoverageSourceCells = false;
 
 	// World-space AABB of the geometry to voxelize.

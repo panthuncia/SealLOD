@@ -53,6 +53,8 @@
       "Segments": {},
       "MeshMetadata": {},
       "Nodes": {},
+      "AssemblyTransforms": {},
+      "AssemblyInstances": {},
       "VoxelCubeRecords": {},
       "VoxelAttributeSamples": {},
       "PageTable": {},

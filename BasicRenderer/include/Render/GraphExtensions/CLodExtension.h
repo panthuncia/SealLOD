@@ -83,6 +83,7 @@ private:
     bool m_reyesBudgetLimited = false;
 
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_workGraphTelemetryBuffer;
     std::shared_ptr<Buffer> m_occlusionReplayBuffer;
@@ -118,6 +119,8 @@ private:
 
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
     std::shared_ptr<Buffer> m_compactedVisibleClustersBufferSw;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
+    std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBufferSw;
     std::shared_ptr<Buffer> m_rasterBucketsWriteCursorBuffer;
     // TODO: Raster-bucket indirect args have exhibited invalid data when reused across otherwise separate
     // CLod rasterization paths. Until the root cause is understood, keep HW, compute SW, and SW page-job
@@ -242,8 +245,10 @@ private:
     std::shared_ptr<Buffer> m_shadowRuntimeStateBuffer;
     std::shared_ptr<Buffer> m_shadowStatsBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_swPageJobVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersCounterBuffer;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersBufferPhase2;
+    std::shared_ptr<Buffer> m_swPageJobVisibleClusterTransformIndicesBufferPhase2;
     std::shared_ptr<Buffer> m_swPageJobVisibleClustersCounterBufferPhase2;
     std::shared_ptr<Buffer> m_swPageJobRecordsBuffer;
     std::shared_ptr<Buffer> m_swPageJobRecordsBufferSkinned;
@@ -261,6 +266,7 @@ private:
     std::shared_ptr<Buffer> m_swPageJobClusterTagsBufferPhase2;
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClustersBuffer;
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClustersBufferSw;
+    std::shared_ptr<Buffer> m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
 
     std::unique_ptr<CLodStreamingSystem> m_streamingSystem;
     bool m_providerRegisteredForCurrentRegistry = false;

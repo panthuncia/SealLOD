@@ -293,6 +293,7 @@ void SWRasterClipScanlineConstraint(
 
 void SWRasterCluster(
     uint4 packedCluster,
+    uint assemblyTransformIndex,
     uint unsortedClusterIndex,
     uint GI,
     uint subGroup,
@@ -319,7 +320,7 @@ void SWRasterCluster(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const uint materialDataIndex = perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex;
 
-    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -397,6 +398,39 @@ void SWRasterCluster(
     visBuffer.GetDimensions(visDims.x, visDims.y);
 #endif
     const bool swRasterDebugMode = perFrameBuffer.outputType == OUTPUT_SW_RASTER;
+    const bool assemblyVoxelInheritanceDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE;
+    const bool assemblyPartsDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
+    const bool debugRasterMode = swRasterDebugMode || assemblyVoxelInheritanceDebugMode || assemblyPartsDebugMode;
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+    const ClusterLODGroup group = groups[metadata.groupsBase + CLodVisibleClusterGroupID(packedCluster)];
+    float3 assemblyPartDebugColor = float3(0.08f, 0.10f, 0.12f);
+    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    {
+        assemblyPartDebugColor = float3(1.0f, 0.58f, 0.08f);
+    }
+    else if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        assemblyPartDebugColor = max(HashToColor(assemblyTransformIndex + 17u), 0.18f.xxx);
+    }
+    else if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
+    {
+        assemblyPartDebugColor = float3(0.82f, 0.18f, 1.0f);
+    }
+    const uint directAssemblyPartId = (group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u
+        ? (0x40000000u ^ CLodVisibleClusterGroupID(packedCluster))
+        : (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
+            ? 1u
+            : (0x80000000u + assemblyTransformIndex));
+    const uint2 rasterDebugPayload = swRasterDebugMode
+        ? PackDebugUint(1u)
+        : (assemblyVoxelInheritanceDebugMode
+            ? PackDebugFloat3(assemblyPartDebugColor)
+            : PackDebugUint(directAssemblyPartId));
 
     const bool reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u;
 
@@ -434,7 +468,7 @@ void SWRasterCluster(
         float2 e01 = s1 - s0;
         float2 e02 = s2 - s0;
         float twiceArea = e01.x * e02.y - e01.y * e02.x;
-        if (swRasterDebugMode)
+        if (debugRasterMode)
         {
             if (abs(twiceArea) <= 1e-8f) continue;
 
@@ -536,9 +570,9 @@ void SWRasterCluster(
                             continue;
                         }
 #endif
-                        if (swRasterDebugMode)
+                        if (debugRasterMode)
                         {
-                            WriteDebugPixel(debugVisTex, uint2(px, py), PackDebugUint(1u));
+                            WriteDebugPixel(debugVisTex, uint2(px, py), rasterDebugPayload);
                         }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -585,9 +619,9 @@ void SWRasterCluster(
                             continue;
                         }
 #endif
-                        if (swRasterDebugMode)
+                        if (debugRasterMode)
                         {
-                            WriteDebugPixel(debugVisTex, uint2(px, py), PackDebugUint(1u));
+                            WriteDebugPixel(debugVisTex, uint2(px, py), rasterDebugPayload);
                         }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -635,11 +669,13 @@ void WG_SWRaster(
     uint unsortedClusterIndex = batch.clusterIndices[clusterIdx];
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
-    SWRasterCluster(packedCluster, unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
+    SWRasterCluster(packedCluster, visibleClusterTransformIndices[unsortedClusterIndex], unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
 }
 
 // Non-WG SW raster
@@ -661,6 +697,8 @@ void SWRasterIndirectCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Group
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + clusterIdx;
     ByteAddressBuffer compactedVisibleClusters =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> sortedToUnsortedMapping =
         ResourceDescriptorHeap[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
@@ -668,5 +706,5 @@ void SWRasterIndirectCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Group
 
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
     const uint unsortedClusterIndex = sortedToUnsortedMapping[sortedClusterIndex];
-    SWRasterCluster(packedCluster, unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
+    SWRasterCluster(packedCluster, compactedVisibleClusterTransformIndices[sortedClusterIndex], unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
 }

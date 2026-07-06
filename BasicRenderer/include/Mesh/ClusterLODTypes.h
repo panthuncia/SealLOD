@@ -176,6 +176,8 @@ struct ClusterLODPrebuiltData
 	std::vector<ClusterLODNode> nodes;
 	std::vector<ClusterLODNodeRangeAlloc> lodNodeRanges;
 	std::vector<uint32_t> lodLevelRoots;
+	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
+	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
 	uint32_t maxDepth = 0;
 	uint32_t maxTraversalDepth = 0;
 };
@@ -190,6 +192,7 @@ struct ClusterLODCacheBuildOwnedData
 {
 	std::vector<std::vector<std::vector<std::byte>>> groupPageBlobs;
 	std::vector<std::vector<std::byte>> meshPageBlobs;
+	VoxelGroupMapping voxelGroupMapping;
 
 	ClusterLODCacheBuildPayload AsPayload() const {
 		ClusterLODCacheBuildPayload payload{};

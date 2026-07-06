@@ -89,6 +89,9 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     const auto& visibleClustersBuffer = isPhase2
         ? extension.m_swPageJobVisibleClustersBufferPhase2
         : extension.m_swPageJobVisibleClustersBuffer;
+    const auto& visibleClusterTransformIndicesBuffer = isPhase2
+        ? extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2
+        : extension.m_swPageJobVisibleClusterTransformIndicesBuffer;
     const auto& visibleClustersCounterBuffer = isPhase2
         ? extension.m_swPageJobVisibleClustersCounterBufferPhase2
         : extension.m_swPageJobVisibleClustersCounterBuffer;
@@ -228,6 +231,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob2"),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     visibleClustersBuffer,
+                    visibleClusterTransformIndicesBuffer,
                     visibleClustersCounterBuffer,
                     visibleClustersCounterBuffer,
                     nullptr,
@@ -236,6 +240,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     extension.m_rasterBucketsOffsetsBuffer,
                     writeCursorBuffer,
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     indirectArgsBuffer,
                     extension.m_sortedToUnsortedMappingBuffer,
                     nullptr,
@@ -252,6 +257,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 MakeVariantPassName(traits, "RasterBucketsCompactAndArgsPassPageJob1"),
                 std::make_shared<RasterBucketCompactAndArgsPass>(
                     visibleClustersBuffer,
+                    visibleClusterTransformIndicesBuffer,
                     visibleClustersCounterBuffer,
                     visibleClustersCounterBuffer,
                     nullptr,
@@ -260,6 +266,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     extension.m_rasterBucketsOffsetsBuffer,
                     writeCursorBuffer,
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     indirectArgsBuffer,
                     extension.m_sortedToUnsortedMappingBuffer,
                     nullptr,
@@ -1563,10 +1570,20 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_swPageJobVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(extension.m_maxVisibleClusters * PackedVisibleClusterStrideBytes, true, false, true);
     extension.m_swPageJobVisibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Clusters Buffer"));
 
+    extension.m_swPageJobVisibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        extension.m_maxVisibleClusters,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        true);
+    extension.m_swPageJobVisibleClusterTransformIndicesBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Cluster Transform Indices Buffer"));
+
     extension.m_swPageJobVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     extension.m_swPageJobVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Software Raster Page Job Visible Clusters Counter Buffer"));
 
     extension.m_swPageJobVisibleClustersBufferPhase2 = extension.m_swPageJobVisibleClustersBuffer;
+    extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2 = extension.m_swPageJobVisibleClusterTransformIndicesBuffer;
     extension.m_swPageJobVisibleClustersCounterBufferPhase2 = extension.m_swPageJobVisibleClustersCounterBuffer;
 
     extension.m_swPageJobRecordsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -1624,6 +1641,15 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
 
     extension.m_vsmExpandedVisibleClustersBufferSw = extension.m_vsmExpandedVisibleClustersBuffer;
 
+    extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(
+        vsmExpandedRecordCapacity,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        true);
+    extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw->SetName(MakeVariantResourceName(traits, "Virtual Shadow Expanded Visible Cluster Transform Indices Buffer SW"));
+
     extension.m_shadowVirtualResourcesNeedReset = true;
 }
 
@@ -1676,8 +1702,10 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_shadowRuntimeStateBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowStatsBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobVisibleClustersBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_swPageJobVisibleClusterTransformIndicesBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobVisibleClustersCounterBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobVisibleClustersBufferPhase2, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobVisibleClustersCounterBufferPhase2, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobRecordsBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_swPageJobRecordsBufferSkinned, "Cluster LOD virtual shadow maps");
@@ -1695,6 +1723,7 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_swPageJobClusterTagsBufferPhase2, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBufferSw, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw, "Cluster LOD virtual shadow maps");
 }
 
 void CLodShadowVariant::ReleaseResourceBackings(CLodExtension& extension)
@@ -1717,8 +1746,10 @@ void CLodShadowVariant::ReleaseResourceBackings(CLodExtension& extension)
     releaseTextureBacking(extension.m_shadowDirtyPageHierarchyTexture);
     releaseTextureBacking(extension.m_shadowNonRasterablePageHierarchyTexture);
     releaseBufferBacking(extension.m_swPageJobVisibleClustersBuffer);
+    releaseBufferBacking(extension.m_swPageJobVisibleClusterTransformIndicesBuffer);
     releaseBufferBacking(extension.m_swPageJobVisibleClustersCounterBuffer);
     releaseBufferBacking(extension.m_swPageJobVisibleClustersBufferPhase2);
+    releaseBufferBacking(extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2);
     releaseBufferBacking(extension.m_swPageJobVisibleClustersCounterBufferPhase2);
     releaseBufferBacking(extension.m_swPageJobRecordsBuffer);
     releaseBufferBacking(extension.m_swPageJobRecordsBufferSkinned);
@@ -1736,6 +1767,7 @@ void CLodShadowVariant::ReleaseResourceBackings(CLodExtension& extension)
     releaseBufferBacking(extension.m_swPageJobClusterTagsBufferPhase2);
     releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBuffer);
     releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBufferSw);
+    releaseBufferBacking(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw);
     extension.m_shadowVirtualResourcesNeedReset = true;
 }
 

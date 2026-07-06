@@ -182,6 +182,13 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     VoxelObjectTraverseRecords,
     VoxelRootInternalRecords,
     VoxelRootLeafRecords,
+    DebugInternalErrorRejected,
+    DebugSegmentLeafErrorRejected,
+    DebugVoxelClusterFrustumRejected,
+    DebugVoxelProjectNoValidClip,
+    DebugVoxelProjectNonPositiveDepth,
+    DebugAssemblyVoxelSentinelTransform,
+    DebugAssemblyVoxelNonSentinelTransform,
 
     Count
 };

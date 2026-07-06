@@ -67,6 +67,8 @@ enum OutputType {
 	REYES_SOURCE_BARYCENTRICS = 63,
 	MATERIAL_EVAL_FEATURES = 64,
 	TERRAIN_GRASS_OVERLAY = 65,
+	CLOD_ASSEMBLY_VOXEL_INHERITANCE = 66,
+	CLOD_ASSEMBLY_PARTS = 67,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -136,4 +138,6 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Reyes Source Barycentrics",
 	"Material Eval Features",
 	"Terrain Grass Overlay",
+	"CLod assembly voxel inheritance",
+	"CLod assembly parts",
 };

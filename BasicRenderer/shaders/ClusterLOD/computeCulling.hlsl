@@ -60,12 +60,13 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     }
 
     const uint byteOffset = index * CLOD_NODE_REPLAY_STRIDE_BYTES;
-    const uint2 header = replayBuffer.Load2(byteOffset);
+    const uint4 header = replayBuffer.Load4(byteOffset);
 
     TraverseNodeRecord record = (TraverseNodeRecord)0;
     record.instanceIndex = header.x;
     record.nodeIdPacked = header.y;
-    record.viewId = replayBuffer.Load(byteOffset + 8u);
+    record.viewId = header.z;
+    record.assemblyTransformIndex = header.w;
     outFrontier[index] = record;
 }
 
@@ -88,7 +89,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
 
     const uint byteOffset = CLOD_REPLAY_MESHLET_REGION_OFFSET + index * CLOD_MESHLET_REPLAY_STRIDE_BYTES;
     const uint4 head = replayBuffer.Load4(byteOffset);
-    const uint2 tail = replayBuffer.Load2(byteOffset + 16u);
+    const uint4 tail = replayBuffer.Load4(byteOffset + 16u);
 
     MeshletBucketRecord record = (MeshletBucketRecord)0;
     record.instanceIndex = head.x;
@@ -97,6 +98,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
     record.meshletIndexAndCount = head.w;
     record.pageSlabDescriptorIndex = tail.x;
     record.pageSlabByteOffset = tail.y;
+    record.assemblyTransformIndex = tail.z;
     outFrontier[index] = record;
 }
 
@@ -128,7 +130,8 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     }
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
-    const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
+    const PerObjectBuffer instanceTransform =
+        LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
     const row_major matrix objectModelMatrix = instanceTransform.model;
     StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
@@ -189,6 +192,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     outFrontier[outputIndex].viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
     outFrontier[outputIndex].instanceIndex = drawRecordIndex;
     outFrontier[outputIndex].nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
+    outFrontier[outputIndex].assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
@@ -230,7 +234,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
     const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
-    const PerObjectBuffer instanceTransform = LoadInstanceTransformForDrawRecord(drawRecord);
+    const PerObjectBuffer instanceTransform =
+        LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
@@ -288,6 +293,35 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     if (nodeCulled) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_CULLED_NODE_RECORDS, 1);
+        return;
+    }
+
+    if (node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT) {
+        StructuredBuffer<ClusterLODAssemblyInstance> assemblyInstances =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyInstances)];
+        if (node.range.indexOrOffset < clodMeshMetadata.assemblyInstanceCount) {
+            const ClusterLODAssemblyInstance assemblyInstance =
+                assemblyInstances[clodMeshMetadata.assemblyInstanceBase + node.range.indexOrOffset];
+            if (assemblyInstance.stackDepth <= CLOD_ASSEMBLY_MAX_STACK_DEPTH) {
+                uint outputIndex = 0u;
+                InterlockedAdd(nextCounter[0], 1u, outputIndex);
+                if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+                    TraverseNodeRecord childRecord = (TraverseNodeRecord)0;
+                    childRecord.instanceIndex = rec.instanceIndex;
+                    childRecord.viewId = rec.viewId;
+                    childRecord.nodeIdPacked = PackTraverseNodeId(
+                        assemblyInstance.targetRootNode,
+                        UnpackSourceTag(rec.nodeIdPacked),
+                        1u);
+                    childRecord.assemblyTransformIndex =
+                        assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
+                            ? rec.assemblyTransformIndex
+                            : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
+                    nextFrontier[outputIndex] = childRecord;
+                    WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
+                }
+            }
+        }
         return;
     }
 
@@ -349,6 +383,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             CLodAppendVoxelRasterWorkForLeaf(
                 clodMeshMetadata,
                 rec.instanceIndex,
+                rec.assemblyTransformIndex,
                 rec.viewId,
                 node,
                 leaf.group,
@@ -402,6 +437,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 outRecord.meshletIndexAndCount = PackMeshletIndexAndCount(meshletBase, chunkCount);
                 outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
                 outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
+                outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
                 clusterFrontier[outputIndex] = outRecord;
             }
             meshletBase += chunkCount;
@@ -426,6 +462,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     if (!nodeWantsTraversal) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
+        WGTelemetryAdd(WG_COUNTER_DEBUG_INTERNAL_ERROR_REJECTED, 1);
         return;
     }
 
@@ -472,7 +509,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     if (occlusionCulled) {
         if (!replaySource) {
-            ReplayTryAppendNode(rec.instanceIndex, rec.viewId, UnpackNodeId(rec.nodeIdPacked));
+            ReplayTryAppendNode(rec.instanceIndex, rec.viewId, UnpackNodeId(rec.nodeIdPacked), rec.assemblyTransformIndex);
         }
         return;
     }
@@ -530,6 +567,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         childRecord.instanceIndex = rec.instanceIndex;
         childRecord.viewId = rec.viewId;
         childRecord.nodeIdPacked = PackTraverseNodeId(childNodeId, sourceTag, 1u);
+        childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
         nextFrontier[outputIndex] = childRecord;
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
     }

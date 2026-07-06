@@ -1,6 +1,140 @@
 #include "include/clodResolveCommon.hlsli"
 #include "include/debugPayload.hlsli"
 
+bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)
+{
+    debugColor = 0.0f.xxx;
+
+    if (vis == 0xFFFFFFFFFFFFFFFF ||
+        VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+
+    float visDepth;
+    uint visClusterIndex;
+    uint visPrimitiveIndex;
+    UnpackVisKey(vis, visDepth, visClusterIndex, visPrimitiveIndex);
+
+    if (visClusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE)
+    {
+        return false;
+    }
+
+    if (visClusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
+    {
+        if (VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+        {
+            return false;
+        }
+
+        StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue =
+            ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
+        visClusterIndex = diceQueue[visClusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
+    }
+
+    StructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+
+    ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, visClusterIndex);
+    const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
+    const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
+
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+
+    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    {
+        // Parent assembly LOD selected: this voxel payload represents collapsed child instances.
+        debugColor = float3(1.0f, 0.58f, 0.08f);
+    }
+    else if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        // Traversal crossed an instance root and is rendering the child part.
+        debugColor = max(HashToColor(assemblyTransformIndex + 17u), 0.18f.xxx);
+    }
+    else if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
+    {
+        debugColor = float3(0.82f, 0.18f, 1.0f);
+    }
+    else
+    {
+        // Ordinary/root-space CLod, kept deliberately muted.
+        debugColor = float3(0.08f, 0.10f, 0.12f);
+    }
+
+    return true;
+}
+
+bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
+{
+    directPartId = 0u;
+
+    if (vis == 0xFFFFFFFFFFFFFFFF ||
+        VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+
+    float visDepth;
+    uint visClusterIndex;
+    uint visPrimitiveIndex;
+    UnpackVisKey(vis, visDepth, visClusterIndex, visPrimitiveIndex);
+
+    if (visClusterIndex >= VISBUF_SARP_GRASS_INDEX_BASE)
+    {
+        return false;
+    }
+
+    if (visClusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
+    {
+        if (VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+        {
+            return false;
+        }
+
+        StructuredBuffer<CLodReyesDiceQueueEntry> diceQueue =
+            ResourceDescriptorHeap[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX];
+        visClusterIndex = diceQueue[visClusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
+    }
+
+    ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, visClusterIndex);
+    const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
+    const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
+
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+
+    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    {
+        directPartId = 0x40000000u ^ localGroupId;
+        return true;
+    }
+
+    StructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+    directPartId = assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
+        ? 1u
+        : (0x80000000u + assemblyTransformIndex);
+    return true;
+}
+
 void EvaluateGBufferOptimized(uint2 pixel)
 {
     Texture2D<uint64_t> visibilityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
@@ -107,6 +241,24 @@ void EvaluateGBufferOptimized(uint2 pixel)
         case OUTPUT_GEOMETRY_GROUP:
             payload = PackDebugUint(sample.geometryGroupIndex);
             break;
+        case OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE:
+        {
+            float3 assemblyPartDebugColor;
+            if (CLodAssemblyPartDebugColorFromVisKey(vis, assemblyPartDebugColor))
+            {
+                payload = PackDebugFloat3(assemblyPartDebugColor);
+            }
+            break;
+        }
+        case OUTPUT_CLOD_ASSEMBLY_PARTS:
+        {
+            uint directPartId;
+            if (CLodAssemblyDirectPartIdFromVisKey(vis, directPartId))
+            {
+                payload = PackDebugUint(directPartId);
+            }
+            break;
+        }
         case OUTPUT_MODEL_NORMALS:
             payload = PackDebugFloat3(sample.normalOS * 0.5 + 0.5);
             break;

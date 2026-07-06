@@ -2722,7 +2722,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             };
 
 			spdlog::info(
-				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
+				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={}) debug(internal_error={} segment_leaf_error={} voxel_cluster_frustum={} voxel_project_no_clip={} voxel_project_nonpos_depth={} assembly_voxel_sentinel_xform={} assembly_voxel_non_sentinel_xform={})",
 				requestedFrame,
 				counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
 				counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
@@ -2782,7 +2782,14 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionVoxelSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionReyesSkipped),
-                counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
+                counter(CLodWorkGraphCounterIndex::DebugInternalErrorRejected),
+                counter(CLodWorkGraphCounterIndex::DebugSegmentLeafErrorRejected),
+                counter(CLodWorkGraphCounterIndex::DebugVoxelClusterFrustumRejected),
+                counter(CLodWorkGraphCounterIndex::DebugVoxelProjectNoValidClip),
+                counter(CLodWorkGraphCounterIndex::DebugVoxelProjectNonPositiveDepth),
+                counter(CLodWorkGraphCounterIndex::DebugAssemblyVoxelSentinelTransform),
+                counter(CLodWorkGraphCounterIndex::DebugAssemblyVoxelNonSentinelTransform));
         });
 
     readbackService->RequestReadbackCapture(

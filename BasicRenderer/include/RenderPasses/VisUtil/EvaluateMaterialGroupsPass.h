@@ -36,6 +36,12 @@ public:
             .with<VisibleClustersBufferTag>()
             .build();
 
+        m_visibleClusterTransformIndicesQuery =
+            ecsWorld.query_builder<>()
+            .with<CLodExtensionTypeTag>(visBufferTag)
+            .with<VisibleClusterTransformIndicesBufferTag>()
+            .build();
+
         m_reyesDiceQueueQuery =
             ecsWorld.query_builder<>()
             .with<CLodExtensionTypeTag>(visBufferTag)
@@ -73,6 +79,7 @@ public:
 
     void DeclareResourceUsages(ComputePassBuilder* b) override {
         b->WithShaderResource(ECSResourceResolver(m_visibleClustersQuery));
+        b->WithShaderResource(ECSResourceResolver(m_visibleClusterTransformIndicesQuery));
     	b->WithShaderResource(ECSResourceResolver(m_reyesDiceQueueQuery));
     	b->WithShaderResource(ECSResourceResolver(m_reyesTessTableConfigsQuery));
     	b->WithShaderResource(ECSResourceResolver(m_reyesTessTableVerticesQuery));
@@ -160,14 +167,28 @@ public:
             });
 
         if (visibleClusterResources.size() != 1) {
-            throw std::runtime_error("BuildPixelListPass: Expected exactly one visible cluster buffer resource.");
+            throw std::runtime_error("EvaluateMaterialGroupsPass: Expected exactly one visible cluster buffer resource.");
         }
 
         m_visibleClusterResource = visibleClusterResources[0];
+        m_visibleClusterTransformIndicesResource = nullptr;
         m_reyesDiceQueueResource = nullptr;
         m_reyesTessTableConfigsResource = nullptr;
         m_reyesTessTableVerticesResource = nullptr;
         m_reyesTessTableTrianglesResource = nullptr;
+
+        std::vector<GloballyIndexedResource*> visibleClusterTransformIndexResources;
+        m_visibleClusterTransformIndicesQuery.each([&](flecs::entity e) {
+            if (const auto res = e.try_get<Components::Resource>(); res) {
+                if (const auto resource = std::static_pointer_cast<GloballyIndexedResource>(res->resource.lock()); resource) {
+                    visibleClusterTransformIndexResources.push_back(resource.get());
+                }
+            }
+        });
+        if (visibleClusterTransformIndexResources.size() != 1) {
+            throw std::runtime_error("EvaluateMaterialGroupsPass: Expected exactly one visible cluster transform-index resource.");
+        }
+        m_visibleClusterTransformIndicesResource = visibleClusterTransformIndexResources[0];
 
         std::vector<GloballyIndexedResource*> reyesDiceQueueResources;
         m_reyesDiceQueueQuery.each([&](flecs::entity e) {
@@ -222,6 +243,9 @@ public:
         if (m_visibleClusterResource) {
             m_visibleClusterBufferSRVIndex = m_visibleClusterResource->GetSRVInfo(0).slot.index;
         }
+        m_visibleClusterTransformIndicesBufferSRVIndex = m_visibleClusterTransformIndicesResource
+            ? m_visibleClusterTransformIndicesResource->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
         m_reyesDiceQueueBufferSRVIndex = m_reyesDiceQueueResource
             ? m_reyesDiceQueueResource->GetSRVInfo(0).slot.index
             : 0xFFFFFFFFu;
@@ -281,6 +305,7 @@ public:
             // Set per-pass root constants
             unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
             miscRootConstants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClusterBufferSRVIndex;
+            miscRootConstants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBufferSRVIndex;
             miscRootConstants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = m_reyesDiceQueueBufferSRVIndex;
             miscRootConstants[VISBUF_REYES_PATCH_INDEX_BASE] = m_patchVisibilityIndexBase;
             miscRootConstants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = m_reyesTessTableConfigsBufferSRVIndex;
@@ -318,6 +343,7 @@ public:
 
     void Cleanup() override {
         m_visibleClustersQuery = {};
+        m_visibleClusterTransformIndicesQuery = {};
         m_reyesDiceQueueQuery = {};
         m_reyesTessTableConfigsQuery = {};
         m_reyesTessTableVerticesQuery = {};
@@ -329,17 +355,20 @@ public:
 private:
     Resource* m_materialEvalCmds;
     flecs::query<> m_visibleClustersQuery;
+    flecs::query<> m_visibleClusterTransformIndicesQuery;
     flecs::query<> m_reyesDiceQueueQuery;
     flecs::query<> m_reyesTessTableConfigsQuery;
     flecs::query<> m_reyesTessTableVerticesQuery;
     flecs::query<> m_reyesTessTableTrianglesQuery;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     GloballyIndexedResource* m_visibleClusterResource = nullptr;
+    GloballyIndexedResource* m_visibleClusterTransformIndicesResource = nullptr;
     GloballyIndexedResource* m_reyesDiceQueueResource = nullptr;
     GloballyIndexedResource* m_reyesTessTableConfigsResource = nullptr;
     GloballyIndexedResource* m_reyesTessTableVerticesResource = nullptr;
     GloballyIndexedResource* m_reyesTessTableTrianglesResource = nullptr;
     uint32_t m_visibleClusterBufferSRVIndex = 0;
+    uint32_t m_visibleClusterTransformIndicesBufferSRVIndex = 0xFFFFFFFFu;
     uint32_t m_reyesDiceQueueBufferSRVIndex = 0xFFFFFFFFu;
     uint32_t m_patchVisibilityIndexBase = 0u;
     uint32_t m_reyesTessTableConfigsBufferSRVIndex = 0xFFFFFFFFu;

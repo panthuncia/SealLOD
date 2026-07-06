@@ -19,7 +19,9 @@
 struct MeshPreprocessResult {
 	MeshIngestBuilder ingest;
 	CLodCacheLoader::MeshCacheIdentity cacheIdentity;
+	std::string sourcePrimPath;
 	std::optional<ClusterLODPrebuiltData> prebuiltData;
+	std::shared_ptr<const ClusterLODPrebuildArtifacts> transientArtifacts;
 	br::import::RenderablePrototypeGeometry prototypeGeometry;
 	bool forceDoubleSidedPreview = false;
 	bool geometricDisplacementOptIn = false;

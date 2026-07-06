@@ -17,6 +17,7 @@
 
 ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     std::shared_ptr<Buffer> compactedVisibleClustersBuffer,
+    std::shared_ptr<Buffer> compactedVisibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> rasterBucketsHistogramBuffer,
     std::shared_ptr<Buffer> rasterBucketsIndirectArgsBuffer,
     std::shared_ptr<Buffer> sortedToUnsortedMappingBuffer,
@@ -28,6 +29,7 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     std::shared_ptr<ResourceGroup> slabResourceGroup,
     bool runWhenComputeSWRasterEnabledOnly)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
+    , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
     , m_rasterBucketsIndirectArgsBuffer(std::move(rasterBucketsIndirectArgsBuffer))
     , m_sortedToUnsortedMappingBuffer(std::move(sortedToUnsortedMappingBuffer))
@@ -62,11 +64,16 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
+            Builtin::CLod::Offsets,
+            Builtin::CLod::MeshMetadata,
+            Builtin::CLod::Groups,
+            Builtin::CLod::AssemblyTransforms,
             Builtin::CullingCameraBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
             m_compactedVisibleClustersBuffer,
+            m_compactedVisibleClusterTransformIndicesBuffer,
             m_rasterBucketsHistogramBuffer,
             m_sortedToUnsortedMappingBuffer,
             m_viewRasterInfoBuffer)
@@ -172,6 +179,7 @@ PassReturn ClusterSoftwareRasterizationPass::Execute(PassExecutionContext& execu
     uint32_t misc[NumMiscUintRootConstants] = {};
     misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = m_rasterBucketsHistogramBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_compactedVisibleClustersBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {

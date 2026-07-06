@@ -267,7 +267,7 @@ struct CLodWorkGraphComputePageJobDescriptors
 {
     uint32_t visibleClustersUAVDescriptorIndex = 0xFFFFFFFFu;
     uint32_t visibleClustersCounterUAVDescriptorIndex = 0xFFFFFFFFu;
-    uint32_t pad0 = 0u;
+    uint32_t visibleClusterTransformIndicesUAVDescriptorIndex = 0xFFFFFFFFu;
     uint32_t pad1 = 0u;
 };
 
@@ -1232,8 +1232,8 @@ inline constexpr uint32_t CLodReplayNodeRegionSizeBytes = 50u * 1024u * 1024u;  
 inline constexpr uint32_t CLodReplayMeshletRegionOffset = CLodReplayNodeRegionSizeBytes;
 inline constexpr uint32_t CLodReplayReyesSplitRegionOffset = 2u * CLodReplayNodeRegionSizeBytes;
 inline constexpr uint32_t CLodReplayReyesDiceRegionOffset = 3u * CLodReplayNodeRegionSizeBytes;
-inline constexpr uint32_t CLodNodeReplayStrideBytes = 12u;   // sizeof(TraverseNodeRecord): 3 uints
-inline constexpr uint32_t CLodMeshletReplayStrideBytes = 24u; // sizeof(MeshletBucketRecord): 6 uints
+inline constexpr uint32_t CLodNodeReplayStrideBytes = 16u;   // sizeof(TraverseNodeRecord): 4 uints
+inline constexpr uint32_t CLodMeshletReplayStrideBytes = 32u; // sizeof(MeshletBucketRecord): 8 uints
 inline constexpr uint32_t CLodReyesSplitReplayStrideBytes = sizeof(CLodReyesSplitQueueEntry);
 inline constexpr uint32_t CLodReyesDiceReplayStrideBytes = sizeof(CLodReyesDiceQueueEntry);
 inline constexpr uint32_t CLodVoxelRasterThreadsPerGroup = 64u;

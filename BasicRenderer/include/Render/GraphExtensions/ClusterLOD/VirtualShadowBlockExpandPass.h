@@ -34,12 +34,14 @@ public:
     VirtualShadowBlockExpandPass(
         VirtualShadowBlockExpandMode mode,
         std::shared_ptr<Buffer> sourceVisibleClustersBuffer,
+        std::shared_ptr<Buffer> sourceVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> sourceHistogramBuffer,
         std::shared_ptr<Buffer> sourceIndirectArgsBuffer,
         std::shared_ptr<Buffer> expandedHistogramBuffer,
         std::shared_ptr<Buffer> expandedOffsetsBuffer,
         std::shared_ptr<Buffer> expandedWriteCursorBuffer,
         std::shared_ptr<Buffer> expandedVisibleClustersBuffer,
+        std::shared_ptr<Buffer> expandedVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         uint32_t expandedRecordCapacity,
@@ -48,12 +50,14 @@ public:
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_mode(mode)
         , m_sourceVisibleClustersBuffer(std::move(sourceVisibleClustersBuffer))
+        , m_sourceVisibleClusterTransformIndicesBuffer(std::move(sourceVisibleClusterTransformIndicesBuffer))
         , m_sourceHistogramBuffer(std::move(sourceHistogramBuffer))
         , m_sourceIndirectArgsBuffer(std::move(sourceIndirectArgsBuffer))
         , m_expandedHistogramBuffer(std::move(expandedHistogramBuffer))
         , m_expandedOffsetsBuffer(std::move(expandedOffsetsBuffer))
         , m_expandedWriteCursorBuffer(std::move(expandedWriteCursorBuffer))
         , m_expandedVisibleClustersBuffer(std::move(expandedVisibleClustersBuffer))
+        , m_expandedVisibleClusterTransformIndicesBuffer(std::move(expandedVisibleClusterTransformIndicesBuffer))
         , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
         , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
         , m_expandedRecordCapacity(expandedRecordCapacity)
@@ -110,11 +114,13 @@ public:
                 Builtin::InstanceDrawRecordBuffer,
                 Builtin::PerInstanceTransformBuffer,
                 Builtin::PerObjectBuffer,
+                Builtin::CLod::AssemblyTransforms,
                 Builtin::CullingCameraBuffer,
                 Builtin::SkeletonResources::InverseBindMatrices,
                 Builtin::SkeletonResources::BoneTransforms,
                 Builtin::SkeletonResources::SkinningInstanceInfo,
                 m_sourceVisibleClustersBuffer,
+                m_sourceVisibleClusterTransformIndicesBuffer,
                 m_sourceHistogramBuffer,
                 m_virtualShadowClipmapInfoBuffer)
             .WithUnorderedAccess(
@@ -127,7 +133,8 @@ public:
             builder->WithShaderResource(m_expandedOffsetsBuffer)
                 .WithUnorderedAccess(
                     m_expandedWriteCursorBuffer,
-                    m_expandedVisibleClustersBuffer);
+                    m_expandedVisibleClustersBuffer,
+                    m_expandedVisibleClusterTransformIndicesBuffer);
         }
 
         if (m_slabResourceGroup) {
@@ -208,6 +215,7 @@ public:
         uint32_t misc[NumMiscUintRootConstants] = {};
         misc[CLOD_VSM_BLOCK_EXPAND_SOURCE_HISTOGRAM_DESCRIPTOR_INDEX] = m_sourceHistogramBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_sourceVisibleClustersBuffer->GetSRVInfo(0).slot.index;
+        misc[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_sourceVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX] = m_expandedHistogramBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] =
             m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
@@ -219,6 +227,7 @@ public:
             misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_OFFSETS_DESCRIPTOR_INDEX] = m_expandedOffsetsBuffer->GetSRVInfo(0).slot.index;
             misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_WRITE_CURSOR_DESCRIPTOR_INDEX] = m_expandedWriteCursorBuffer->GetUAVShaderVisibleInfo(0).slot.index;
             misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_expandedVisibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_expandedVisibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         }
 
         const auto apiResource = m_sourceIndirectArgsBuffer->GetAPIResource();
@@ -253,12 +262,14 @@ private:
     PipelineState m_clearPso;
     rhi::CommandSignaturePtr m_commandSignature;
     std::shared_ptr<Buffer> m_sourceVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_sourceVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_sourceHistogramBuffer;
     std::shared_ptr<Buffer> m_sourceIndirectArgsBuffer;
     std::shared_ptr<Buffer> m_expandedHistogramBuffer;
     std::shared_ptr<Buffer> m_expandedOffsetsBuffer;
     std::shared_ptr<Buffer> m_expandedWriteCursorBuffer;
     std::shared_ptr<Buffer> m_expandedVisibleClustersBuffer;
+    std::shared_ptr<Buffer> m_expandedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     uint32_t m_expandedRecordCapacity = 0u;

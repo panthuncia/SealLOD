@@ -40,6 +40,8 @@ struct ExtractOptions {
 	bool objectSurfaceUseTriplanarProjection = false;
 	bool objectSurfaceUseTripleTapStochastic = false;
 	std::string objectSurfaceSamplingConfigHash;
+	bool retainClusterLODArtifacts = false;
+	bool buildPointInstancerAssemblyCaches = false;
 };
 
 void ResetBenchmarkStats();
@@ -95,6 +97,7 @@ StageExtractionResult ExtractAll(const std::string& filePath);
 StageExtractionResult ExtractAllFromStage(
 	const pxr::UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier = {},
-	std::uint32_t tessellationFactor = 1);
+	std::uint32_t tessellationFactor = 1,
+	const ExtractOptions& options = {});
 
 } // namespace USDGeometryExtractor
