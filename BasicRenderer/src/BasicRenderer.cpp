@@ -499,52 +499,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    //constexpr int NeedleCloneCount = 120;
-    //constexpr float NeedleDistributionRadius = 80.0f;
-    //constexpr float NeedleMinSpacing = 10.0f;
-    //constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
-    //constexpr int MaxNeedlePlacementAttempts = 10000;
-    //constexpr uint32_t NeedleSkeletonVariantCount = 1;
+    constexpr int NeedleCloneCount = 0;
+    constexpr float NeedleDistributionRadius = 20.0f;
+    constexpr float NeedleMinSpacing = 10.0f;
+    constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
+    constexpr int MaxNeedlePlacementAttempts = 10000;
+    constexpr uint32_t NeedleSkeletonVariantCount = 1;
 
-    //std::mt19937 needleRng{ 1337 };
-    //std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
-    //std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
-    //std::vector<point> needlePositions;
-    //needlePositions.reserve(NeedleCloneCount);
+    std::mt19937 needleRng{ 1337 };
+    std::uniform_real_distribution<float> needleUnitDist(0.0f, 1.0f);
+    std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
+    std::vector<point> needlePositions;
+    needlePositions.reserve(NeedleCloneCount);
 
-    //for (int attempt = 0;
-    //    needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
-    //    ++attempt) {
-    //    const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
-    //    const float angle = needleAngleDist(needleRng);
-    //    const point candidate{
-    //        radius * std::cos(angle),
-    //        0.0f,
-    //        radius * std::sin(angle)
-    //    };
+    for (int attempt = 0;
+        needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
+        ++attempt) {
+        const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
+        const float angle = needleAngleDist(needleRng);
+        const point candidate{
+            radius * std::cos(angle),
+            0.0f,
+            radius * std::sin(angle)
+        };
 
-    //    bool hasEnoughSpacing = true;
-    //    for (const point& existing : needlePositions) {
-    //        const float dx = candidate.x - existing.x;
-    //        const float dz = candidate.z - existing.z;
-    //        if (dx * dx + dz * dz < NeedleMinSpacingSq) {
-    //            hasEnoughSpacing = false;
-    //            break;
-    //        }
-    //    }
+        bool hasEnoughSpacing = true;
+        for (const point& existing : needlePositions) {
+            const float dx = candidate.x - existing.x;
+            const float dz = candidate.z - existing.z;
+            if (dx * dx + dz * dz < NeedleMinSpacingSq) {
+                hasEnoughSpacing = false;
+                break;
+            }
+        }
 
-    //    if (hasEnoughSpacing) {
-    //        needlePositions.push_back(candidate);
-    //    }
-    //}
+        if (hasEnoughSpacing) {
+            needlePositions.push_back(candidate);
+        }
+    }
 
-    //SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
-    //for (const point& position : needlePositions) {
-    //    needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
-    //    auto needleClone = needles->Clone();
-    //    needleClone->AssignSkeletonVariants(needleSkeletonVariants);
-    //    renderer.GetCurrentScene()->AppendScene(needleClone);
-    //}
+    SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
+    for (const point& position : needlePositions) {
+        needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
+        auto needleClone = needles->Clone();
+        needleClone->AssignSkeletonVariants(needleSkeletonVariants);
+        renderer.GetCurrentScene()->AppendScene(needleClone);
+    }
 	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());

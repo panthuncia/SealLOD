@@ -31,6 +31,7 @@
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <tracy/Tracy.hpp>
 
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Import/GlTFGeometryExtractor.h"
@@ -1154,6 +1155,7 @@ static bool TryConsumeOption(const std::string& arg) {
 // Processing
 
 static bool ProcessFile(const fs::path& path) {
+    ZoneScopedN("CLodCacheTool::ProcessFile");
     auto canonical = fs::weakly_canonical(path);
     auto pathStr   = canonical.string();
     auto fmt       = DetectFormat(canonical);
@@ -1161,21 +1163,31 @@ static bool ProcessFile(const fs::path& path) {
     spdlog::info("---------------------------------------------------");
     spdlog::info("[{}] Processing: {}", FormatName(fmt), pathStr);
     spdlog::info("  File size: {} bytes", fs::file_size(canonical));
+    TracyPlot("CLOD.Tool.FileBytes", static_cast<int64_t>(fs::file_size(canonical)));
 
     auto t0 = std::chrono::steady_clock::now();
 
     try {
         switch (fmt) {
         case AssetFormat::USD: {
+            ZoneScopedN("CLodCacheTool::ProcessFile::USD");
             spdlog::info("  Opening USD stage...");
-            auto stage = pxr::UsdStage::Open(pathStr);
+            pxr::UsdStageRefPtr stage;
+            {
+                ZoneScopedN("CLodCacheTool::USD::OpenStage");
+                stage = pxr::UsdStage::Open(pathStr);
+            }
             const uint64_t sourceTriangles = CountUsdStageSourceTriangles(stage);
             spdlog::info("  USD source geometry: triangles={} (scene instances included)", sourceTriangles);
             WriteUsdAssemblyReport(canonical, "USD source", stage);
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
-            auto result = USDGeometryExtractor::ExtractAllFromStage(stage, {}, g_usdTessellationFactor, extractOptions);
+            USDGeometryExtractor::StageExtractionResult result;
+            {
+                ZoneScopedN("CLodCacheTool::USD::ExtractAllFromStage");
+                result = USDGeometryExtractor::ExtractAllFromStage(stage, {}, g_usdTessellationFactor, extractOptions);
+            }
             spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
                          result.submeshesProcessed,
@@ -1189,6 +1201,7 @@ static bool ProcessFile(const fs::path& path) {
             break;
         }
         case AssetFormat::GlTF: {
+            ZoneScopedN("CLodCacheTool::ProcessFile::GlTF");
             spdlog::info("  Loading glTF...");
             auto result = GlTFGeometryExtractor::ExtractAll(pathStr);
             uint64_t extractedTriangles = 0;
@@ -1209,9 +1222,14 @@ static bool ProcessFile(const fs::path& path) {
             break;
         }
         case AssetFormat::Nif: {
+            ZoneScopedN("CLodCacheTool::ProcessFile::NIF");
             spdlog::info("  Converting NIF through BRNifly...");
             std::string errorMessage;
-            auto package = BRNiflyClient::ConvertNifToUsd(pathStr, {}, &errorMessage);
+            std::optional<BRNiflyClient::UsdAssetPackage> package;
+            {
+                ZoneScopedN("CLodCacheTool::NIF::ConvertNifToUsd");
+                package = BRNiflyClient::ConvertNifToUsd(pathStr, {}, &errorMessage);
+            }
             if (!package) {
                 spdlog::error("  BRNifly conversion failed: {}", errorMessage);
                 return false;
@@ -1243,7 +1261,11 @@ static bool ProcessFile(const fs::path& path) {
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
-            auto result = USDGeometryExtractor::ExtractAllFromStage(stage, package->sourceIdentifier, g_usdTessellationFactor, extractOptions);
+            USDGeometryExtractor::StageExtractionResult result;
+            {
+                ZoneScopedN("CLodCacheTool::NIF::ExtractAllFromStage");
+                result = USDGeometryExtractor::ExtractAllFromStage(stage, package->sourceIdentifier, g_usdTessellationFactor, extractOptions);
+            }
             spdlog::info("  NIF/USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
                          result.submeshesProcessed,
@@ -1257,6 +1279,7 @@ static bool ProcessFile(const fs::path& path) {
             break;
         }
         case AssetFormat::Assimp: {
+            ZoneScopedN("CLodCacheTool::ProcessFile::Assimp");
             spdlog::info("  Loading via Assimp...");
             auto result = AssimpGeometryExtractor::ExtractAll(pathStr);
             uint64_t extractedTriangles = 0;
@@ -1289,6 +1312,7 @@ static bool ProcessFile(const fs::path& path) {
 }
 
 int main(int argc, char* argv[]) {
+    ZoneScopedN("CLodCacheTool::main");
     
     spdlog::set_default_logger(spdlog::stdout_color_mt("CLodCacheTool"));
     spdlog::set_level(spdlog::level::info);
@@ -1324,7 +1348,9 @@ int main(int argc, char* argv[]) {
 
     // Gather files
     std::vector<fs::path> files;
-    for (int i = 1; i < argc; ++i) {
+    {
+        ZoneScopedN("CLodCacheTool::GatherFiles");
+        for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
         if (TryConsumeOption(arg)) {
             spdlog::info("Consumed option: {}", arg);
@@ -1347,6 +1373,7 @@ int main(int argc, char* argv[]) {
         } else {
             files.push_back(p);
         }
+        }
     }
 
     if (files.empty()) {
@@ -1367,11 +1394,16 @@ int main(int argc, char* argv[]) {
     int successes = 0;
     int failures  = 0;
 
-    for (auto& f : files) {
-        if (ProcessFile(f))
-            ++successes;
-        else
-            ++failures;
+    {
+        ZoneScopedN("CLodCacheTool::ProcessFiles");
+        TracyPlot("CLOD.Tool.Files", static_cast<int64_t>(files.size()));
+        for (auto& f : files) {
+            if (ProcessFile(f))
+                ++successes;
+            else
+                ++failures;
+            FrameMarkNamed("CLodCacheToolFile");
+        }
     }
 
     auto totalT1 = std::chrono::steady_clock::now();

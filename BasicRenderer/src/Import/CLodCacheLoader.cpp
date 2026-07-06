@@ -11,6 +11,7 @@
 #include <pxr/usd/sdf/propertySpec.h>
 #include <pxr/usd/usd/attribute.h>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #include "Utilities/CachePathUtilities.h"
 
@@ -221,6 +222,7 @@ MeshCacheIdentity BuildIdentity(
 
 std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& identity)
 {
+	ZoneScopedN("CLodCacheLoader::TryLoadPrebuilt");
 	const auto cacheKey = ToCacheKey(identity);
 	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
 	const auto lookup = CLodCache::BuildCacheLookup(cacheKey, buildHash);
@@ -233,6 +235,7 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 		ws2s(lookup.metadataPath),
 		ws2s(lookup.containerPath));
 	auto cached = CLodCache::TryLoad(cacheKey, buildHash);
+	TracyPlot("CLOD.Cache.TryLoadPrebuilt.Hit", cached.has_value() ? int64_t{ 1 } : int64_t{ 0 });
 	if (!cached.has_value()) {
 		spdlog::debug("  -> cache not found on disk.");
 		return std::nullopt;
@@ -244,6 +247,7 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 
 bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload)
 {
+	ZoneScopedN("CLodCacheLoader::SavePrebuilt");
 	const auto cacheKey = ToCacheKey(identity);
 	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
 	LogBuildConfigOnce(buildHash);
@@ -252,6 +256,7 @@ bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltDat
 
 bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 {
+	ZoneScopedN("CLodCacheLoader::SavePrebuilt::WithSavedData");
 	const auto cacheKey = ToCacheKey(identity);
 	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
 	LogBuildConfigOnce(buildHash);
@@ -260,6 +265,7 @@ bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltDat
 
 bool SavePrebuiltLocked(const MeshCacheIdentity& identity, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload)
 {
+	ZoneScopedN("CLodCacheLoader::SavePrebuiltLocked");
 	spdlog::debug("CLodCacheLoader::SavePrebuiltLocked  src='{}' prim='{}' subset='{}'",
 		identity.sourceIdentifier, identity.primPath, identity.subsetName);
 	std::lock_guard<std::mutex> saveLock(GetCacheSaveMutexForIdentity(identity));
@@ -278,6 +284,7 @@ bool SavePrebuiltLocked(const MeshCacheIdentity& identity, const ClusterLODPrebu
 
 bool SavePrebuiltLocked(const MeshCacheIdentity& identity, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 {
+	ZoneScopedN("CLodCacheLoader::SavePrebuiltLocked::WithSavedData");
 	spdlog::debug("CLodCacheLoader::SavePrebuiltLocked  src='{}' prim='{}' subset='{}'",
 		identity.sourceIdentifier, identity.primPath, identity.subsetName);
 	std::lock_guard<std::mutex> saveLock(GetCacheSaveMutexForIdentity(identity));

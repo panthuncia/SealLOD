@@ -20,6 +20,7 @@
 
 #include <boost/container_hash/hash.hpp>
 #include <spdlog/spdlog.h>
+#include <tracy/Tracy.hpp>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -548,10 +549,12 @@ namespace CLodCache {
 			const ClusterLODCacheBuildPayload& payload,
 			std::vector<ClusterLODGroupDiskLocator>& outPageLocators)
 		{
+			ZoneScopedN("CLodCache::SaveContainerPayload");
 			(void)prebuiltData;
 			const std::vector<std::vector<std::byte>> emptyPageBlobs;
 			const auto& pageBlobs = payload.meshPageBlobs != nullptr ? *payload.meshPageBlobs : emptyPageBlobs;
 			const uint32_t pageCount = static_cast<uint32_t>(pageBlobs.size());
+			TracyPlot("CLOD.Cache.SaveContainer.Pages", static_cast<int64_t>(pageCount));
 			outPageLocators.assign(pageCount, {});
 
 			std::ofstream file(containerPath, std::ios::binary | std::ios::trunc);
@@ -594,6 +597,7 @@ namespace CLodCache {
 				locator.blobSizeBytes = static_cast<uint32_t>(blobSize64);
 				locator.reserved = 0;
 			}
+			TracyPlot("CLOD.Cache.SaveContainer.Bytes", static_cast<int64_t>(file.tellp()));
 
 			if (pageCount > 0) {
 				file.seekp(directoryOffset, std::ios::beg);
@@ -653,6 +657,7 @@ namespace CLodCache {
 	namespace {
 		bool SaveImpl(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData)
 		{
+			ZoneScopedN("CLodCache::SaveImpl");
 			const CacheLookup lookup = BuildCacheLookup(key, buildConfigHash);
 			if (std::filesystem::exists(lookup.metadataPath)) {
 				spdlog::warn(
@@ -677,10 +682,18 @@ namespace CLodCache {
 			cacheSource.buildConfigHash = buildConfigHash;
 			cacheSource.containerFileName = lookup.containerFileName;
 
-			auto blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
-			if (!WriteMetadataBlob(lookup.metadataPath, blob)) {
-				spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(lookup.metadataPath));
-				return false;
+			std::vector<std::byte> blob;
+			{
+				ZoneScopedN("CLodCache::SaveImpl::SerializeMetadata");
+				blob = SerializeMetadata(buildConfigHash, prebuiltData, pageDiskLocators, cacheSource);
+			}
+			TracyPlot("CLOD.Cache.MetadataBytes", static_cast<int64_t>(blob.size()));
+			{
+				ZoneScopedN("CLodCache::SaveImpl::WriteMetadata");
+				if (!WriteMetadataBlob(lookup.metadataPath, blob)) {
+					spdlog::warn("Failed to write CLod cache metadata: {}", ws2s(lookup.metadataPath));
+					return false;
+				}
 			}
 
 			CacheData savedData{};
@@ -764,6 +777,7 @@ namespace CLodCache {
 
 	std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash)
 	{
+		ZoneScopedN("CLodCache::TryLoad");
 		const CacheLookup lookup = BuildCacheLookup(key, expectedBuildConfigHash);
 		if (auto memoryCached = TryLoadMetadataFromMemoryCache(lookup.metadataPath)) {
 			if (memoryCached->buildConfigHash == expectedBuildConfigHash &&
@@ -777,9 +791,20 @@ namespace CLodCache {
 
 		CacheData out;
 		std::vector<std::byte> bytes;
-		if (!ReadMetadataBlob(lookup.metadataPath, bytes) || !DeserializeMetadata(bytes, out)) {
-			spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
-			return std::nullopt;
+		{
+			ZoneScopedN("CLodCache::TryLoad::ReadMetadata");
+			if (!ReadMetadataBlob(lookup.metadataPath, bytes)) {
+				spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
+				return std::nullopt;
+			}
+		}
+		TracyPlot("CLOD.Cache.LoadMetadataBytes", static_cast<int64_t>(bytes.size()));
+		{
+			ZoneScopedN("CLodCache::TryLoad::DeserializeMetadata");
+			if (!DeserializeMetadata(bytes, out)) {
+				spdlog::warn("Failed to deserialize CLod cache blob: {}", ws2s(lookup.metadataPath));
+				return std::nullopt;
+			}
 		}
 
 		if (out.buildConfigHash != expectedBuildConfigHash || out.schemaVersion != kSchemaVersion) {
