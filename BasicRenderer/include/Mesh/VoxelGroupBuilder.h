@@ -36,7 +36,9 @@ public:
 		const std::vector<std::byte>* skinningVertices = nullptr,
 		size_t skinningVertexStrideBytes = 0,
 		const std::vector<int32_t>* triangleRefinedGroupIds = nullptr,
-		bool doubleSidedTriangles = false);
+		bool doubleSidedTriangles = false,
+		bool buildRefinedGroupScenes = true);
+	void SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap);
 
 	bool IsValid() const;
 	void QueryAABB(
@@ -84,6 +86,7 @@ private:
 	const std::vector<uint32_t>* m_triangleIndices = nullptr;
 	const std::vector<int32_t>* m_triangleRefinedGroupIds = nullptr;
 	bool m_doubleSidedTriangles = false;
+	std::vector<std::vector<int32_t>> m_refinedGroupDomainMap;
 	std::vector<uint32_t> m_triangleOrder;
 	std::vector<Node> m_nodes;
 	std::unique_ptr<EmbreeScene> m_embreeScene;

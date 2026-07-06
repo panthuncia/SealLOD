@@ -2017,7 +2017,21 @@ namespace
 		std::vector<VoxelCell> keptCells;
 		keptCells.reserve(cells.size());
 
-		auto appendPrunedSection = [&keptCells](std::vector<VoxelCell>::iterator begin, std::vector<VoxelCell>::iterator end)
+		auto mortonKey = [](const VoxelCell& cell)
+		{
+			auto expandBits = [](uint32_t value)
+			{
+				value &= 1023u;
+				value = (value | (value << 16u)) & 0x030000FFu;
+				value = (value | (value << 8u)) & 0x0300F00Fu;
+				value = (value | (value << 4u)) & 0x030C30C3u;
+				value = (value | (value << 2u)) & 0x09249249u;
+				return value;
+			};
+			return (expandBits(cell.x) << 2u) | (expandBits(cell.y) << 1u) | expandBits(cell.z);
+		};
+
+		auto appendPrunedSection = [&keptCells, &mortonKey](std::vector<VoxelCell>::iterator begin, std::vector<VoxelCell>::iterator end)
 		{
 			float totalCoverage = 0.0f;
 			for (auto it = begin; it != end; ++it)
@@ -2035,9 +2049,47 @@ namespace
 			}
 
 			std::vector<VoxelCell> sectionCells(begin, end);
-			if (targetCellCount < sectionCells.size())
+			std::sort(sectionCells.begin(), sectionCells.end(), [&](const VoxelCell& lhs, const VoxelCell& rhs) {
+				const uint32_t lhsMorton = mortonKey(lhs);
+				const uint32_t rhsMorton = mortonKey(rhs);
+				if (lhsMorton != rhsMorton)
+				{
+					return lhsMorton < rhsMorton;
+				}
+				const uint64_t lhsCell = PackCell(lhs.x, lhs.y, lhs.z);
+				const uint64_t rhsCell = PackCell(rhs.x, rhs.y, rhs.z);
+				return lhsCell < rhsCell;
+			});
+
+			if (targetCellCount >= sectionCells.size())
 			{
-				std::sort(sectionCells.begin(), sectionCells.end(), [](const VoxelCell& lhs, const VoxelCell& rhs) {
+				keptCells.insert(keptCells.end(), sectionCells.begin(), sectionCells.end());
+				return;
+			}
+
+			std::vector<uint8_t> selected(sectionCells.size(), 0u);
+			const float coverageStep = totalCoverage / static_cast<float>(targetCellCount);
+			float nextCoverageThreshold = coverageStep * 0.5f;
+			float runningCoverage = 0.0f;
+			uint32_t keptCount = 0u;
+			for (size_t cellIndex = 0u; cellIndex < sectionCells.size() && keptCount < targetCellCount; ++cellIndex)
+			{
+				runningCoverage += std::clamp(sectionCells[cellIndex].opacity, 0.0f, 1.0f);
+				if (runningCoverage >= nextCoverageThreshold)
+				{
+					selected[cellIndex] = 1u;
+					++keptCount;
+					nextCoverageThreshold += coverageStep;
+				}
+			}
+
+			if (keptCount < targetCellCount)
+			{
+				std::vector<uint32_t> fallbackOrder(sectionCells.size());
+				std::iota(fallbackOrder.begin(), fallbackOrder.end(), 0u);
+				std::sort(fallbackOrder.begin(), fallbackOrder.end(), [&](uint32_t lhsIndex, uint32_t rhsIndex) {
+					const VoxelCell& lhs = sectionCells[lhsIndex];
+					const VoxelCell& rhs = sectionCells[rhsIndex];
 					const float lhsOpacity = std::clamp(lhs.opacity, 0.0f, 1.0f);
 					const float rhsOpacity = std::clamp(rhs.opacity, 0.0f, 1.0f);
 					if (lhsOpacity != rhsOpacity)
@@ -2048,10 +2100,27 @@ namespace
 					const uint64_t rhsCell = PackCell(rhs.x, rhs.y, rhs.z);
 					return lhsCell < rhsCell;
 				});
-				sectionCells.resize(targetCellCount);
+				for (uint32_t cellIndex : fallbackOrder)
+				{
+					if (selected[cellIndex] != 0u)
+					{
+						continue;
+					}
+					selected[cellIndex] = 1u;
+					if (++keptCount >= targetCellCount)
+					{
+						break;
+					}
+				}
 			}
 
-			keptCells.insert(keptCells.end(), sectionCells.begin(), sectionCells.end());
+			for (size_t cellIndex = 0u; cellIndex < sectionCells.size(); ++cellIndex)
+			{
+				if (selected[cellIndex] != 0u)
+				{
+					keptCells.push_back(sectionCells[cellIndex]);
+				}
+			}
 		};
 
 		auto sectionBegin = cells.begin();
@@ -2178,6 +2247,8 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 		std::vector<uint32_t> sourceTriangleIndices;
 	};
 
+	static constexpr int32_t kUnfilteredRefinedGroupScene = std::numeric_limits<int32_t>::min();
+
 	std::vector<DirectX::XMFLOAT3> vertices;
 	std::vector<RefinedGroupScene> refinedGroupScenes;
 
@@ -2213,7 +2284,8 @@ void VoxelSourceTriangleBVH::Build(
 	const std::vector<std::byte>* skinningVertices,
 	size_t skinningVertexStrideBytes,
 	const std::vector<int32_t>* triangleRefinedGroupIds,
-	bool doubleSidedTriangles)
+	bool doubleSidedTriangles,
+	bool buildRefinedGroupScenes)
 {
 	ZoneScopedN("VoxelSourceTriangleBVH::Build");
 	m_vertices = vertices;
@@ -2257,78 +2329,93 @@ void VoxelSourceTriangleBVH::Build(
 		embreeScene->vertices[vertexIndex] = ToXM(ReadPosition(*vertices, vertexStrideBytes, static_cast<uint32_t>(vertexIndex)));
 	}
 
-	std::unordered_map<int32_t, std::vector<uint32_t>> trianglesByRefinedGroup;
-	trianglesByRefinedGroup.reserve(triangleCount);
+	auto buildEmbreeSceneForTriangles = [&](int32_t refinedGroup, std::vector<uint32_t> sourceTriangleIndices) -> bool
 	{
-		ZoneScopedN("VoxelSourceTriangleBVH::Build::GroupTriangles");
-		for (uint32_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex)
+		if (sourceTriangleIndices.empty())
 		{
-			int32_t refinedGroup = -1;
-			if (triangleRefinedGroupIds != nullptr && triangleIndex < triangleRefinedGroupIds->size())
-			{
-				refinedGroup = (*triangleRefinedGroupIds)[triangleIndex];
-			}
-			trianglesByRefinedGroup[refinedGroup].push_back(triangleIndex);
+			return false;
 		}
-	}
-	TracyPlot("CLOD.Voxel.BVH.RefinedGroupScenes", static_cast<int64_t>(trianglesByRefinedGroup.size()));
 
-	embreeScene->refinedGroupScenes.reserve(trianglesByRefinedGroup.size());
-	{
-		ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeScenes");
-		for (auto& [refinedGroup, sourceTriangleIndices] : trianglesByRefinedGroup)
+		std::vector<EmbreeScene::Triangle> embreeTriangles;
+		embreeTriangles.reserve(sourceTriangleIndices.size());
+		for (uint32_t triangleIndex : sourceTriangleIndices)
 		{
-			if (sourceTriangleIndices.empty())
-			{
-				continue;
-			}
+			const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
+			embreeTriangles.push_back(EmbreeScene::Triangle{
+				(*triangleIndices)[triangleBase + 0u],
+				(*triangleIndices)[triangleBase + 1u],
+				(*triangleIndices)[triangleBase + 2u],
+			});
+		}
 
-			std::vector<EmbreeScene::Triangle> embreeTriangles;
-			embreeTriangles.reserve(sourceTriangleIndices.size());
-			for (uint32_t triangleIndex : sourceTriangleIndices)
-			{
-				const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
-				embreeTriangles.push_back(EmbreeScene::Triangle{
-					(*triangleIndices)[triangleBase + 0u],
-					(*triangleIndices)[triangleBase + 1u],
-					(*triangleIndices)[triangleBase + 2u],
-				});
-			}
+		EmbreeScene::RefinedGroupScene refinedGroupScene{};
+		refinedGroupScene.refinedGroup = refinedGroup;
+		refinedGroupScene.sourceTriangleIndices = std::move(sourceTriangleIndices);
+		refinedGroupScene.scene = rtcNewScene(device);
+		RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+		DirectX::XMFLOAT3* embreeVertices = static_cast<DirectX::XMFLOAT3*>(rtcSetNewGeometryBuffer(
+			geometry,
+			RTC_BUFFER_TYPE_VERTEX,
+			0,
+			RTC_FORMAT_FLOAT3,
+			sizeof(DirectX::XMFLOAT3),
+			embreeScene->vertices.size()));
+		if (embreeVertices != nullptr && !embreeScene->vertices.empty())
+		{
+			std::memcpy(embreeVertices, embreeScene->vertices.data(), embreeScene->vertices.size() * sizeof(DirectX::XMFLOAT3));
+		}
 
-			EmbreeScene::RefinedGroupScene refinedGroupScene{};
-			refinedGroupScene.refinedGroup = refinedGroup;
-			refinedGroupScene.sourceTriangleIndices = std::move(sourceTriangleIndices);
-			refinedGroupScene.scene = rtcNewScene(device);
-			RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
-			DirectX::XMFLOAT3* embreeVertices = static_cast<DirectX::XMFLOAT3*>(rtcSetNewGeometryBuffer(
-				geometry,
-				RTC_BUFFER_TYPE_VERTEX,
-				0,
-				RTC_FORMAT_FLOAT3,
-				sizeof(DirectX::XMFLOAT3),
-				embreeScene->vertices.size()));
-			if (embreeVertices != nullptr && !embreeScene->vertices.empty())
-			{
-				std::memcpy(embreeVertices, embreeScene->vertices.data(), embreeScene->vertices.size() * sizeof(DirectX::XMFLOAT3));
-			}
+		EmbreeScene::Triangle* embreeTriangleBuffer = static_cast<EmbreeScene::Triangle*>(rtcSetNewGeometryBuffer(
+			geometry,
+			RTC_BUFFER_TYPE_INDEX,
+			0,
+			RTC_FORMAT_UINT3,
+			sizeof(EmbreeScene::Triangle),
+			embreeTriangles.size()));
+		if (embreeTriangleBuffer != nullptr && !embreeTriangles.empty())
+		{
+			std::memcpy(embreeTriangleBuffer, embreeTriangles.data(), embreeTriangles.size() * sizeof(EmbreeScene::Triangle));
+		}
 
-			EmbreeScene::Triangle* embreeTriangleBuffer = static_cast<EmbreeScene::Triangle*>(rtcSetNewGeometryBuffer(
-				geometry,
-				RTC_BUFFER_TYPE_INDEX,
-				0,
-				RTC_FORMAT_UINT3,
-				sizeof(EmbreeScene::Triangle),
-				embreeTriangles.size()));
-			if (embreeTriangleBuffer != nullptr && !embreeTriangles.empty())
-			{
-				std::memcpy(embreeTriangleBuffer, embreeTriangles.data(), embreeTriangles.size() * sizeof(EmbreeScene::Triangle));
-			}
+		rtcCommitGeometry(geometry);
+		rtcAttachGeometry(refinedGroupScene.scene, geometry);
+		rtcReleaseGeometry(geometry);
+		rtcCommitScene(refinedGroupScene.scene);
+		embreeScene->refinedGroupScenes.push_back(std::move(refinedGroupScene));
+		return true;
+	};
 
-			rtcCommitGeometry(geometry);
-			rtcAttachGeometry(refinedGroupScene.scene, geometry);
-			rtcReleaseGeometry(geometry);
-			rtcCommitScene(refinedGroupScene.scene);
-			embreeScene->refinedGroupScenes.push_back(std::move(refinedGroupScene));
+	std::vector<uint32_t> allTriangleIndices(triangleCount);
+	std::iota(allTriangleIndices.begin(), allTriangleIndices.end(), 0u);
+	{
+		ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeUnfilteredScene");
+		buildEmbreeSceneForTriangles(EmbreeScene::kUnfilteredRefinedGroupScene, std::move(allTriangleIndices));
+	}
+
+	if (buildRefinedGroupScenes)
+	{
+		std::unordered_map<int32_t, std::vector<uint32_t>> trianglesByRefinedGroup;
+		trianglesByRefinedGroup.reserve(triangleCount);
+		{
+			ZoneScopedN("VoxelSourceTriangleBVH::Build::GroupTriangles");
+			for (uint32_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex)
+			{
+				int32_t refinedGroup = -1;
+				if (triangleRefinedGroupIds != nullptr && triangleIndex < triangleRefinedGroupIds->size())
+				{
+					refinedGroup = (*triangleRefinedGroupIds)[triangleIndex];
+				}
+				trianglesByRefinedGroup[refinedGroup].push_back(triangleIndex);
+			}
+		}
+		TracyPlot("CLOD.Voxel.BVH.RefinedGroupScenes", static_cast<int64_t>(trianglesByRefinedGroup.size()));
+
+		{
+			ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeRefinedGroupScenes");
+			for (auto& [refinedGroup, sourceTriangleIndices] : trianglesByRefinedGroup)
+			{
+				buildEmbreeSceneForTriangles(refinedGroup, std::move(sourceTriangleIndices));
+			}
 		}
 	}
 
@@ -2341,6 +2428,16 @@ void VoxelSourceTriangleBVH::Build(
 bool VoxelSourceTriangleBVH::IsValid() const
 {
 	return m_vertices != nullptr && m_triangleIndices != nullptr && !m_triangleOrder.empty() && !m_nodes.empty();
+}
+
+void VoxelSourceTriangleBVH::SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap)
+{
+	m_refinedGroupDomainMap = std::move(refinedGroupDomainMap);
+	for (std::vector<int32_t>& domain : m_refinedGroupDomainMap)
+	{
+		std::sort(domain.begin(), domain.end());
+		domain.erase(std::unique(domain.begin(), domain.end()), domain.end());
+	}
 }
 
 bool VoxelSourceTriangleBVH::IntersectNearest(
@@ -2363,7 +2460,7 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 	const EmbreeScene::RefinedGroupScene* unfilteredScene = nullptr;
 	for (const EmbreeScene::RefinedGroupScene& candidateScene : m_embreeScene->refinedGroupScenes)
 	{
-		if (candidateScene.refinedGroup == -1)
+		if (candidateScene.refinedGroup == EmbreeScene::kUnfilteredRefinedGroupScene)
 		{
 			unfilteredScene = &candidateScene;
 		}
@@ -2373,50 +2470,102 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 			break;
 		}
 	}
+	const bool useDomainFilteredScene =
+		refinedGroupFilter >= 0 &&
+		static_cast<size_t>(refinedGroupFilter) < m_refinedGroupDomainMap.size() &&
+		!m_refinedGroupDomainMap[static_cast<size_t>(refinedGroupFilter)].empty() &&
+		unfilteredScene != nullptr &&
+		unfilteredScene->scene != nullptr;
+	if (useDomainFilteredScene)
+	{
+		scene = unfilteredScene;
+	}
 	// A non-terminal refined group must only trace its exact domain. Falling
 	// back to the unfiltered scene makes each child sample the whole object,
 	// which shows up as duplicated coarse voxel sections.
 	if (scene == nullptr && refinedGroupFilter == -1)
 	{
-		scene = unfilteredScene;
+		for (const EmbreeScene::RefinedGroupScene& candidateScene : m_embreeScene->refinedGroupScenes)
+		{
+			if (candidateScene.refinedGroup == -1)
+			{
+				scene = &candidateScene;
+				break;
+			}
+		}
 	}
 	if (scene == nullptr || scene->scene == nullptr)
 	{
 		return false;
 	}
 
-	RTCRayHit rayHit{};
-	rayHit.ray.org_x = origin.x;
-	rayHit.ray.org_y = origin.y;
-	rayHit.ray.org_z = origin.z;
-	rayHit.ray.dir_x = direction.x;
-	rayHit.ray.dir_y = direction.y;
-	rayHit.ray.dir_z = direction.z;
-	rayHit.ray.tnear = std::max(0.0f, tMin);
-	rayHit.ray.tfar = tMax;
-	rayHit.ray.mask = 0xFFFFFFFFu;
-	rayHit.ray.flags = 0u;
-	rayHit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-	rayHit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
-
-	RTCIntersectArguments args;
-	rtcInitIntersectArguments(&args);
-	rtcIntersect1(scene->scene, &rayHit, &args);
-	if (rayHit.hit.geomID == RTC_INVALID_GEOMETRY_ID || rayHit.hit.primID == RTC_INVALID_GEOMETRY_ID)
+	auto triangleAcceptedByDomain = [&](uint32_t triangleIndex)
 	{
-		return false;
+		if (!useDomainFilteredScene)
+		{
+			return true;
+		}
+		if (m_triangleRefinedGroupIds == nullptr || triangleIndex >= m_triangleRefinedGroupIds->size())
+		{
+			return false;
+		}
+
+		const int32_t triangleGroup = (*m_triangleRefinedGroupIds)[triangleIndex];
+		const std::vector<int32_t>& domain = m_refinedGroupDomainMap[static_cast<size_t>(refinedGroupFilter)];
+		return std::binary_search(domain.begin(), domain.end(), triangleGroup);
+	};
+
+	float traceTMin = std::max(0.0f, tMin);
+	while (traceTMin < tMax)
+	{
+		RTCRayHit rayHit{};
+		rayHit.ray.org_x = origin.x;
+		rayHit.ray.org_y = origin.y;
+		rayHit.ray.org_z = origin.z;
+		rayHit.ray.dir_x = direction.x;
+		rayHit.ray.dir_y = direction.y;
+		rayHit.ray.dir_z = direction.z;
+		rayHit.ray.tnear = traceTMin;
+		rayHit.ray.tfar = tMax;
+		rayHit.ray.mask = 0xFFFFFFFFu;
+		rayHit.ray.flags = 0u;
+		rayHit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+		rayHit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+
+		RTCIntersectArguments args;
+		rtcInitIntersectArguments(&args);
+		rtcIntersect1(scene->scene, &rayHit, &args);
+		if (rayHit.hit.geomID == RTC_INVALID_GEOMETRY_ID || rayHit.hit.primID == RTC_INVALID_GEOMETRY_ID)
+		{
+			return false;
+		}
+
+		if (rayHit.hit.primID >= scene->sourceTriangleIndices.size())
+		{
+			return false;
+		}
+
+		const uint32_t sourceTriangleIndex = scene->sourceTriangleIndices[rayHit.hit.primID];
+		if (triangleAcceptedByDomain(sourceTriangleIndex))
+		{
+			outTriangleIndex = sourceTriangleIndex;
+			outT = rayHit.ray.tfar;
+			outU = rayHit.hit.u;
+			outV = rayHit.hit.v;
+			return true;
+		}
+
+		const float nextTraceTMin = std::max(
+			rayHit.ray.tfar + 1.0e-5f,
+			std::nextafter(traceTMin, std::numeric_limits<float>::infinity()));
+		if (nextTraceTMin <= traceTMin)
+		{
+			return false;
+		}
+		traceTMin = nextTraceTMin;
 	}
 
-	if (rayHit.hit.primID >= scene->sourceTriangleIndices.size())
-	{
-		return false;
-	}
-
-	outTriangleIndex = scene->sourceTriangleIndices[rayHit.hit.primID];
-	outT = rayHit.ray.tfar;
-	outU = rayHit.hit.u;
-	outV = rayHit.hit.v;
-	return true;
+	return false;
 }
 
 uint32_t VoxelSourceTriangleBVH::BuildNode(uint32_t firstTriangle, uint32_t triangleCount)
@@ -2928,7 +3077,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					cellMin,
 					cellMax,
 					voxelDominantBoneIndex);
-				if (voxelCoverage.coverage > coverage.coverage)
+				if (!hasCoverageSourceTriangles && voxelCoverage.coverage > coverage.coverage)
 				{
 					coverage = voxelCoverage;
 					dominantBoneIndex = voxelDominantBoneIndex;
