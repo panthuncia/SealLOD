@@ -733,7 +733,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // mesh quantization heuristic version
 		boost::hash_combine(seed, static_cast<uint32_t>(2));  // UV quantization heuristic version; atlas height UVs use absolute quantization
 		boost::hash_combine(seed, static_cast<uint32_t>(12));  // USD compliance layout + inherited primvar card isolation + mixed Reyes boundary output cleanup + atlas-baked Object Reyes UV stream
-		boost::hash_combine(seed, static_cast<uint32_t>(30));  // voxel cluster records carry precomputed skin queue classification
+		boost::hash_combine(seed, static_cast<uint32_t>(32));  // assembly voxel traversal boundaries derive from parent representation errors
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // voxel propagation derives traversal boundaries from active parent payload errors
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // micro-instancing assembly metadata ABI + finite structural traversal nodes

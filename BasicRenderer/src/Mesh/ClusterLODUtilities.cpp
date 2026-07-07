@@ -8118,15 +8118,9 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	{
 		std::vector<VoxelSourcePayloadInstance> sourceInstances;
 		float maxSourceVoxelWidth = 0.0f;
-		float maxChildTraversalError = 0.0f;
 		sourceInstances.reserve(childGroups.size() * 2ull);
 		for (uint32_t childGroup : childGroups)
 		{
-			const float childError = state.groups[childGroup].bounds.error;
-			if (IsFiniteContentTraversalError(childError))
-			{
-				maxChildTraversalError = std::max(maxChildTraversalError, childError);
-			}
 			for (VoxelSourcePayloadInstance source : assemblyGroupSources[childGroup])
 			{
 				if (source.payload == nullptr || source.payload->activeCells.empty() || source.payload->voxelWidth <= 0.0f)
@@ -8175,7 +8169,9 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 
 		const float growthFactor = std::max(1.01f, settings.voxelFallbackGrowthFactor);
 		const float baseResolution = static_cast<float>(std::max(2u, settings.voxelGridBaseResolution));
-		const float voxelWidth = std::max(maxSourceVoxelWidth * growthFactor, longestExtent / baseResolution);
+		const float voxelWidth = std::max({
+			maxSourceVoxelWidth * growthFactor,
+			longestExtent / baseResolution });
 		const uint32_t resolution = std::max(
 			std::max(2u, settings.voxelMinResolution),
 			static_cast<uint32_t>(std::ceil(longestExtent / std::max(voxelWidth, 1.0e-8f))));
@@ -8242,10 +8238,6 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		const float dz = aabbMax.z - group.bounds.center[2];
 		group.bounds.radius = std::sqrt(dx * dx + dy * dy + dz * dz);
 		group.bounds.error = voxelRepresentationError;
-		if (maxChildTraversalError > 0.0f && group.bounds.error <= maxChildTraversalError)
-		{
-			group.bounds.error = std::nextafter(maxChildTraversalError, std::numeric_limits<float>::infinity());
-		}
 		group.depth = depth;
 		group.flags = CLOD_GROUP_FLAG_IS_VOXEL | CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL;
 		group.firstSegment = static_cast<uint32_t>(state.segments.size());
@@ -8465,51 +8457,63 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		++assemblyDepth;
 	}
 
-	uint32_t proxyBoundaryRaises = 0u;
-	for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(state.groups.size()); ++groupIndex)
+	if (synthesizeVoxelParents && currentLayer.size() == 1u)
 	{
-		ClusterLODGroup& group = state.groups[groupIndex];
-		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) == 0u ||
-			group.parentGroupId < 0)
+		ClusterLODGroup& rootGroup = state.groups[currentLayer.front()];
+		if ((rootGroup.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
 		{
-			continue;
+			rootGroup.bounds.error = std::numeric_limits<float>::max();
 		}
+	}
 
-		const uint32_t parentGroupIndex = static_cast<uint32_t>(group.parentGroupId);
-		if (parentGroupIndex >= state.groups.size())
-		{
-			continue;
-		}
-
+	uint32_t assemblyChildBoundaryRewrites = 0u;
+	for (uint32_t parentGroupIndex = 0; parentGroupIndex < static_cast<uint32_t>(state.groups.size()); ++parentGroupIndex)
+	{
 		const ClusterLODGroup& parentGroup = state.groups[parentGroupIndex];
 		if ((parentGroup.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u ||
-			!IsFiniteContentTraversalError(parentGroup.bounds.error))
+			!std::isfinite(parentGroup.representationError) ||
+			parentGroup.representationError <= 0.0f)
 		{
 			continue;
 		}
 
-		const float proxyBoundaryError = std::nextafter(parentGroup.bounds.error, 0.0f);
-		if (std::isfinite(proxyBoundaryError) && proxyBoundaryError > group.bounds.error)
+		if (parentGroup.firstSegment + parentGroup.segmentCount > state.segments.size())
 		{
-			group.bounds.error = proxyBoundaryError;
-			proxyBoundaryRaises++;
+			continue;
+		}
+
+		for (uint32_t segmentOffset = 0; segmentOffset < parentGroup.segmentCount; ++segmentOffset)
+		{
+			const ClusterLODGroupSegment& segment = state.segments[parentGroup.firstSegment + segmentOffset];
+			if (segment.refinedGroup < 0)
+			{
+				continue;
+			}
+
+			const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+			if (childGroupIndex >= state.groups.size())
+			{
+				continue;
+			}
+
+			ClusterLODGroup& childGroup = state.groups[childGroupIndex];
+			if (IsTerminalErrorSentinel(childGroup.bounds.error))
+			{
+				continue;
+			}
+
+			childGroup.bounds.error = parentGroup.representationError;
+			assemblyChildBoundaryRewrites++;
 		}
 	}
-	if (proxyBoundaryRaises != 0u)
+	if (assemblyChildBoundaryRewrites != 0u)
 	{
 		spdlog::info(
-			"ClusterLOD assembly raised {} proxy traversal errors to assembly voxel boundaries",
-			proxyBoundaryRaises);
+			"ClusterLOD assembly rewrote {} child traversal boundaries from parent voxel representation errors",
+			assemblyChildBoundaryRewrites);
 	}
 
-	if (currentLayer.size() == 1u)
-	{
-		// The root assembly node has no coarser parent boundary. Give it the
-		// same always-eligible traversal sentinel used by root voxel-only
-		// assets; representationError remains finite for reporting/quality.
-		state.groups[currentLayer.front()].bounds.error = std::numeric_limits<float>::max();
-	}
-	else if (!synthesizeVoxelParents)
+	if (!synthesizeVoxelParents)
 	{
 		spdlog::info(
 			"ClusterLOD assembly using direct instance-root traversal: parts={} instances={} proxy_groups={}",
