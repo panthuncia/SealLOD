@@ -8436,21 +8436,6 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			throw std::runtime_error("ClusterLOD assembly: failed to build parent voxel coverage BVH");
 		}
 		assemblyCoverageSourceTriangles.SetRefinedGroupDomainMap(assemblyCoverageDomainMap);
-		uint64_t logicalCoverageTriangleCount = 0u;
-		for (const VoxelSourceTriangleInstance& instance : assemblyCoverageInstances)
-		{
-			if (instance.partIndex >= assemblyCoverageParts.size() ||
-				assemblyCoverageParts[instance.partIndex].triangleIndices == nullptr)
-			{
-				continue;
-			}
-			logicalCoverageTriangleCount += assemblyCoverageParts[instance.partIndex].triangleIndices->size() / 3ull;
-		}
-		TracyPlot("CLOD.Assembly.CoverageTriangles", static_cast<int64_t>(std::min<uint64_t>(logicalCoverageTriangleCount, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))));
-		spdlog::info(
-			"ClusterLOD assembly parent voxel coverage BVH: logical_triangles={} proxy_groups={} mode=embree_instances_domain_filtered",
-			logicalCoverageTriangleCount,
-			currentLayer.size());
 	}
 
 	uint32_t assemblyDepth = 1u;
@@ -8550,14 +8535,14 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	}
 	if (assemblyChildBoundaryRewrites != 0u)
 	{
-		spdlog::info(
+		spdlog::debug(
 			"ClusterLOD assembly rewrote {} child traversal boundaries from parent voxel representation errors",
 			assemblyChildBoundaryRewrites);
 	}
 
 	if (!synthesizeVoxelParents)
 	{
-		spdlog::info(
+		spdlog::debug(
 			"ClusterLOD assembly using direct instance-root traversal: parts={} instances={} proxy_groups={}",
 			parts.size(),
 			instances.size(),
