@@ -24,6 +24,8 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings()
     settings.voxelFallbackGrowthFactor = 1.1f;
     settings.voxelFallbackAcceptanceBias = 1.0f;
     settings.voxelFallbackOpacityThreshold = 0.0f;
+    settings.voxelTailMaxLevels = 4u;
+    settings.voxelTailGrowthFactor = 1.5f;
 
     return settings;
 }

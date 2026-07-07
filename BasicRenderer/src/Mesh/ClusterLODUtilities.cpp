@@ -4307,6 +4307,198 @@ namespace
 		return voxelWidth;
 	}
 
+	uint64_t PackVoxelTailCellKey(uint32_t x, uint32_t y, uint32_t z)
+	{
+		return uint64_t{ x } | (uint64_t{ y } << 21u) | (uint64_t{ z } << 42u);
+	}
+
+	VoxelGroupPayload DownsampleVoxelPayloadDirect(
+		const VoxelGroupPayload& sourcePayload,
+		float voxelWidth,
+		uint32_t resolution,
+		const DirectX::XMFLOAT3& aabbMin,
+		int32_t refinedGroup)
+	{
+		VoxelGroupPayload result{};
+		if (sourcePayload.activeCells.empty() ||
+			sourcePayload.voxelWidth <= 0.0f ||
+			voxelWidth <= 0.0f ||
+			resolution < 2u)
+		{
+			return result;
+		}
+
+		result.resolution = resolution;
+		result.aabbMin = aabbMin;
+		result.aabbMax = DirectX::XMFLOAT3(
+			aabbMin.x + voxelWidth * static_cast<float>(resolution),
+			aabbMin.y + voxelWidth * static_cast<float>(resolution),
+			aabbMin.z + voxelWidth * static_cast<float>(resolution));
+		result.voxelWidth = voxelWidth;
+
+		std::unordered_map<uint64_t, VoxelCell> cells;
+		cells.reserve(sourcePayload.activeCells.size());
+		for (const VoxelCell& sourceCell : sourcePayload.activeCells)
+		{
+			const float centerX = sourcePayload.aabbMin.x + (static_cast<float>(sourceCell.x) + 0.5f) * sourcePayload.voxelWidth;
+			const float centerY = sourcePayload.aabbMin.y + (static_cast<float>(sourceCell.y) + 0.5f) * sourcePayload.voxelWidth;
+			const float centerZ = sourcePayload.aabbMin.z + (static_cast<float>(sourceCell.z) + 0.5f) * sourcePayload.voxelWidth;
+			const auto cellCoord = [&](float value, float minValue) -> uint32_t
+			{
+				const float local = (value - minValue) / voxelWidth;
+				const int32_t coord = static_cast<int32_t>(std::floor(local));
+				return static_cast<uint32_t>(std::clamp<int32_t>(coord, 0, static_cast<int32_t>(resolution) - 1));
+			};
+			const uint32_t x = cellCoord(centerX, aabbMin.x);
+			const uint32_t y = cellCoord(centerY, aabbMin.y);
+			const uint32_t z = cellCoord(centerZ, aabbMin.z);
+			const uint64_t key = PackVoxelTailCellKey(x, y, z);
+
+			VoxelCell& dst = cells[key];
+			if (dst.opacity <= sourceCell.opacity)
+			{
+				dst = sourceCell;
+				dst.x = x;
+				dst.y = y;
+				dst.z = z;
+				dst.refinedGroup = refinedGroup;
+			}
+			else
+			{
+				dst.opacity = std::min(1.0f, dst.opacity + sourceCell.opacity);
+			}
+		}
+
+		result.activeCells.reserve(cells.size());
+		for (auto& [key, cell] : cells)
+		{
+			result.activeCells.push_back(cell);
+		}
+		return result;
+	}
+
+	struct AppendedVoxelGroupResult
+	{
+		uint32_t groupIndex = std::numeric_limits<uint32_t>::max();
+		uint32_t cubeCount = 0u;
+		uint32_t clusterCount = 0u;
+		VoxelGroupPayload renderPayload;
+	};
+
+	bool AppendPackedVoxelGroupToBuildState(
+		ClusterLODBuildState& state,
+		VoxelGroupPayload payload,
+		float voxelRepresentationError,
+		int32_t depth,
+		uint32_t flags,
+		uint32_t refinedChildGroup,
+		const ClusterLODBuilderSettings& settings,
+		AppendedVoxelGroupResult& outResult)
+	{
+		outResult = {};
+		outResult.groupIndex = std::numeric_limits<uint32_t>::max();
+		if (payload.activeCells.empty() || payload.resolution < 2u || payload.voxelWidth <= 0.0f)
+		{
+			return false;
+		}
+
+		const uint32_t firstCluster = static_cast<uint32_t>(state.voxelGroupMapping.packedClusterRecords.size());
+		const uint32_t firstCube = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
+		const uint32_t firstAttribute = static_cast<uint32_t>(state.voxelGroupMapping.packedAttributeSamples.size());
+		PackVoxelGroupInput packInput{};
+		packInput.payload = &payload;
+		packInput.voxelError = voxelRepresentationError;
+		packInput.opacityThreshold = settings.voxelFallbackOpacityThreshold;
+		packInput.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+		packInput.firstCube = firstCube;
+		packInput.firstAttribute = firstAttribute;
+		PackedVoxelGroupBuildResult packed = PackVoxelGroupToCubes(packInput);
+		packed.metadata.firstCluster = firstCluster;
+		BuildVoxelClustersFromCubes(packed, CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+		if (packed.cubeRecords.empty() || packed.clusterRecords.empty())
+		{
+			return false;
+		}
+
+		std::vector<ClusterLODGroupSegment> voxelSegments;
+		std::vector<BoundingSphere> voxelSegmentBounds;
+		SplitVoxelClustersIntoPageSegments(packed, voxelSegments, voxelSegmentBounds);
+		std::vector<std::vector<std::byte>> voxelPageBlobs = BuildVoxelGroupPageBlobs(
+			voxelSegments,
+			packed.clusterRecords,
+			packed.cubeRecords,
+			packed.attributeSamples,
+			firstAttribute);
+		if (voxelSegments.empty() || voxelPageBlobs.empty())
+		{
+			return false;
+		}
+
+		ClusterLODGroup group{};
+		group.bounds.center[0] = 0.5f * (payload.aabbMin.x + payload.aabbMax.x);
+		group.bounds.center[1] = 0.5f * (payload.aabbMin.y + payload.aabbMax.y);
+		group.bounds.center[2] = 0.5f * (payload.aabbMin.z + payload.aabbMax.z);
+		const float dx = payload.aabbMax.x - group.bounds.center[0];
+		const float dy = payload.aabbMax.y - group.bounds.center[1];
+		const float dz = payload.aabbMax.z - group.bounds.center[2];
+		group.bounds.radius = std::sqrt(dx * dx + dy * dy + dz * dz);
+		group.bounds.error = std::numeric_limits<float>::max();
+		group.depth = depth;
+		group.flags = flags;
+		group.firstSegment = static_cast<uint32_t>(state.segments.size());
+		group.segmentCount = static_cast<uint32_t>(voxelSegments.size());
+		group.terminalSegmentCount = 0u;
+		group.pageCount = static_cast<uint32_t>(voxelPageBlobs.size());
+		group.representationError = voxelRepresentationError;
+		for (ClusterLODGroupSegment& segment : voxelSegments)
+		{
+			segment.refinedGroup = static_cast<int32_t>(refinedChildGroup);
+		}
+
+		const uint32_t groupIndex = static_cast<uint32_t>(state.groups.size());
+		state.groups.push_back(group);
+		state.groupChunks.emplace_back();
+		state.groupPageBlobs.push_back(std::move(voxelPageBlobs));
+		state.segments.insert(state.segments.end(), voxelSegments.begin(), voxelSegments.end());
+		state.segmentBounds.insert(state.segmentBounds.end(), voxelSegmentBounds.begin(), voxelSegmentBounds.end());
+		state.voxelCarryPayloads.emplace_back();
+		state.voxelGroupMapping.groupToPayloadIndex.push_back(-1);
+		state.voxelGroupMapping.groupToPackedMetadataIndex.push_back(static_cast<int32_t>(state.voxelGroupMapping.packedGroupMetadata.size()));
+		state.voxelGroupMapping.packedGroupMetadata.push_back(packed.metadata);
+		state.voxelGroupMapping.packedClusterRecords.insert(
+			state.voxelGroupMapping.packedClusterRecords.end(),
+			packed.clusterRecords.begin(),
+			packed.clusterRecords.end());
+		state.voxelGroupMapping.packedCubeRecords.insert(
+			state.voxelGroupMapping.packedCubeRecords.end(),
+			packed.cubeRecords.begin(),
+			packed.cubeRecords.end());
+		state.voxelGroupMapping.packedAttributeSamples.insert(
+			state.voxelGroupMapping.packedAttributeSamples.end(),
+			packed.attributeSamples.begin(),
+			packed.attributeSamples.end());
+		state.groupVertexChunks.emplace_back();
+		state.groupSkinningChunks.emplace_back();
+		state.groupMeshletVertexChunks.emplace_back();
+		state.groupMeshletChunks.emplace_back();
+		state.groupMeshletTriangleChunks.emplace_back();
+		state.groupMeshletRefinedGroupChunks.emplace_back();
+		if (!state.traversalGroupMask.empty())
+		{
+			state.traversalGroupMask.push_back(1u);
+		}
+		if (refinedChildGroup < state.groups.size())
+		{
+			state.groups[refinedChildGroup].parentGroupId = static_cast<int32_t>(groupIndex);
+		}
+
+		outResult.groupIndex = groupIndex;
+		outResult.cubeCount = static_cast<uint32_t>(packed.cubeRecords.size());
+		outResult.clusterCount = static_cast<uint32_t>(packed.clusterRecords.size());
+		outResult.renderPayload = std::move(payload);
+		return true;
+	}
+
 	float GetFiniteVoxelErrorForGroup(const ClusterLODBuildState& state, uint32_t groupIndex)
 	{
 		if (groupIndex >= state.groups.size())
@@ -4893,6 +5085,264 @@ namespace
 			CollectCoverageDomainGroups(state, groupIndex, buildVoxelGroupMask, visitedGroups, domainMap[groupIndex]);
 		}
 		return domainMap;
+	}
+
+	bool ComputePayloadActiveCellAabb(
+		const VoxelGroupPayload& payload,
+		DirectX::XMFLOAT3& outMin,
+		DirectX::XMFLOAT3& outMax)
+	{
+		if (payload.activeCells.empty() || payload.voxelWidth <= 0.0f)
+		{
+			return false;
+		}
+
+		outMin = DirectX::XMFLOAT3(
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max());
+		outMax = DirectX::XMFLOAT3(
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max());
+		for (const VoxelCell& cell : payload.activeCells)
+		{
+			const float minX = payload.aabbMin.x + static_cast<float>(cell.x) * payload.voxelWidth;
+			const float minY = payload.aabbMin.y + static_cast<float>(cell.y) * payload.voxelWidth;
+			const float minZ = payload.aabbMin.z + static_cast<float>(cell.z) * payload.voxelWidth;
+			const float maxX = minX + payload.voxelWidth;
+			const float maxY = minY + payload.voxelWidth;
+			const float maxZ = minZ + payload.voxelWidth;
+			outMin.x = std::min(outMin.x, minX);
+			outMin.y = std::min(outMin.y, minY);
+			outMin.z = std::min(outMin.z, minZ);
+			outMax.x = std::max(outMax.x, maxX);
+			outMax.y = std::max(outMax.y, maxY);
+			outMax.z = std::max(outMax.z, maxZ);
+		}
+		return
+			std::isfinite(outMin.x) && std::isfinite(outMin.y) && std::isfinite(outMin.z) &&
+			std::isfinite(outMax.x) && std::isfinite(outMax.y) && std::isfinite(outMax.z) &&
+			outMax.x > outMin.x && outMax.y > outMin.y && outMax.z > outMin.z;
+	}
+
+	bool BuildPartVoxelTailLevel(
+		ClusterLODBuildState& state,
+		uint32_t childGroupIndex,
+		const VoxelGroupPayload& sourcePayload,
+		const VoxelSourceTriangleBVH* coverageSourceTriangles,
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler,
+		const ClusterLODBuilderSettings& settings,
+		AppendedVoxelGroupResult& outResult)
+	{
+		outResult = {};
+		outResult.groupIndex = std::numeric_limits<uint32_t>::max();
+		if (childGroupIndex >= state.groups.size() ||
+			sourcePayload.activeCells.empty() ||
+			sourcePayload.voxelWidth <= 0.0f)
+		{
+			return false;
+		}
+
+		const float growthFactor = std::max(1.01f, settings.voxelTailGrowthFactor);
+		const float voxelWidth = sourcePayload.voxelWidth * growthFactor;
+		DirectX::XMFLOAT3 aabbMin{};
+		DirectX::XMFLOAT3 aabbMax{};
+		if (!ComputePayloadActiveCellAabb(sourcePayload, aabbMin, aabbMax))
+		{
+			return false;
+		}
+
+		const float extentX = aabbMax.x - aabbMin.x;
+		const float extentY = aabbMax.y - aabbMin.y;
+		const float extentZ = aabbMax.z - aabbMin.z;
+		const float longestExtent = std::max({ extentX, extentY, extentZ });
+		if (!std::isfinite(longestExtent) || longestExtent <= 1.0e-8f)
+		{
+			return false;
+		}
+
+		auto expandAxisToExtent = [](float& minValue, float& maxValue, float targetExtent)
+		{
+			const float currentExtent = maxValue - minValue;
+			if (currentExtent >= targetExtent)
+			{
+				return;
+			}
+			const float center = 0.5f * (minValue + maxValue);
+			minValue = center - 0.5f * targetExtent;
+			maxValue = center + 0.5f * targetExtent;
+		};
+		expandAxisToExtent(aabbMin.x, aabbMax.x, longestExtent);
+		expandAxisToExtent(aabbMin.y, aabbMax.y, longestExtent);
+		expandAxisToExtent(aabbMin.z, aabbMax.z, longestExtent);
+
+		const uint32_t resolution = std::max(
+			std::max(2u, settings.voxelMinResolution),
+			static_cast<uint32_t>(std::ceil(longestExtent / std::max(voxelWidth, 1.0e-8f))));
+		if (resolution < 2u)
+		{
+			return false;
+		}
+
+		const int32_t refinedChildGroup = static_cast<int32_t>(childGroupIndex);
+		VoxelGroupPayload payload{};
+		if (coverageSourceTriangles != nullptr && coverageSourceTriangles->IsValid())
+		{
+			std::vector<VoxelSourcePayloadInstance> sourceInstances;
+			sourceInstances.push_back(VoxelSourcePayloadInstance{
+				.payload = &sourcePayload,
+				.expansionRadius = GetVoxelCandidateExpansionRadiusForPayload(&sourcePayload),
+				.refinedGroupOverride = refinedChildGroup });
+			VoxelizeTrianglesInput voxelInput{};
+			voxelInput.sourceVoxelPayloadInstances = &sourceInstances;
+			voxelInput.candidateVoxelPayloadInstances = &sourceInstances;
+			voxelInput.coverageSourceTriangles = coverageSourceTriangles;
+			voxelInput.coverageMaterialSampler = coverageMaterialSampler;
+			voxelInput.aabbMin = aabbMin;
+			voxelInput.aabbMax = aabbMax;
+			voxelInput.voxelWidth = voxelWidth;
+			voxelInput.resolution = resolution;
+			voxelInput.raysPerCell = std::max(1u, settings.voxelRaysPerCell);
+			voxelInput.emitSourcePayload = false;
+			voxelInput.emitRenderPayload = true;
+			payload = std::move(VoxelizeTrianglesDetailed(voxelInput).renderPayload);
+		}
+		if (payload.activeCells.empty())
+		{
+			payload = DownsampleVoxelPayloadDirect(sourcePayload, voxelWidth, resolution, aabbMin, refinedChildGroup);
+		}
+		if (payload.activeCells.empty())
+		{
+			return false;
+		}
+
+		const int32_t tailDepth = std::max(state.groups[childGroupIndex].depth + 1, state.groups[childGroupIndex].depth);
+		return AppendPackedVoxelGroupToBuildState(
+			state,
+			std::move(payload),
+			ComputeVoxelRepresentationError(voxelWidth),
+			tailDepth,
+			CLOD_GROUP_FLAG_IS_VOXEL,
+			childGroupIndex,
+			settings,
+			outResult);
+	}
+
+	void BuildPartVoxelTailGroups(
+		ClusterLODBuildState& state,
+		const VoxelSourceTriangleBVH* coverageSourceTriangles,
+		const VoxelCoverageMaterialSampler* coverageMaterialSampler,
+		const ClusterLODBuilderSettings& settings)
+	{
+		ZoneScopedN("ClusterLODUtilities::VoxelFallback::BuildPartVoxelTailGroups");
+		if (settings.voxelTailMaxLevels == 0u || settings.voxelTailGrowthFactor <= 1.0f)
+		{
+			return;
+		}
+
+		std::vector<uint32_t> parentRefCounts(state.groups.size(), 0u);
+		for (const ClusterLODGroup& group : state.groups)
+		{
+			if (group.firstSegment + group.segmentCount > state.segments.size())
+			{
+				continue;
+			}
+			for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+			{
+				const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+				if (segment.refinedGroup >= 0 && static_cast<uint32_t>(segment.refinedGroup) < parentRefCounts.size())
+				{
+					parentRefCounts[static_cast<uint32_t>(segment.refinedGroup)]++;
+				}
+			}
+		}
+
+		std::vector<uint32_t> voxelRoots;
+		for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(state.groups.size()); ++groupIndex)
+		{
+			const ClusterLODGroup& group = state.groups[groupIndex];
+			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
+				(group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u ||
+				groupIndex >= parentRefCounts.size() ||
+				parentRefCounts[groupIndex] != 0u ||
+				GetVoxelPackedCubeCountForGroup(state, groupIndex) == 0u)
+			{
+				continue;
+			}
+			voxelRoots.push_back(groupIndex);
+		}
+
+		uint32_t generatedLevels = 0u;
+		uint32_t generatedCubes = 0u;
+		for (uint32_t rootGroupIndex : voxelRoots)
+		{
+			VoxelGroupPayload sourcePayload;
+			if (!BuildVoxelGroupPayloadFromPackedMapping(state.voxelGroupMapping, rootGroupIndex, sourcePayload))
+			{
+				continue;
+			}
+
+			uint32_t childGroupIndex = rootGroupIndex;
+			uint32_t previousCubeCount = GetVoxelPackedCubeCountForGroup(state, childGroupIndex);
+			for (uint32_t level = 0; level < settings.voxelTailMaxLevels; ++level)
+			{
+				if (previousCubeCount <= 64u || sourcePayload.activeCells.empty())
+				{
+					break;
+				}
+
+				AppendedVoxelGroupResult tailResult;
+				if (!BuildPartVoxelTailLevel(
+					state,
+					childGroupIndex,
+					sourcePayload,
+					coverageSourceTriangles,
+					coverageMaterialSampler,
+					settings,
+					tailResult))
+				{
+					break;
+				}
+
+				generatedLevels++;
+				generatedCubes += tailResult.cubeCount;
+				spdlog::debug(
+					"ClusterLOD voxel tail: root={} child={} tail={} level={} voxel_width={} source_cells={} tail_cells={} source_cubes={} tail_cubes={} clusters={}",
+					rootGroupIndex,
+					childGroupIndex,
+					tailResult.groupIndex,
+					level,
+					tailResult.renderPayload.voxelWidth,
+					sourcePayload.activeCells.size(),
+					tailResult.renderPayload.activeCells.size(),
+					previousCubeCount,
+					tailResult.cubeCount,
+					tailResult.clusterCount);
+
+				const bool reducedEnough = tailResult.cubeCount * 5u <= previousCubeCount * 4u;
+				childGroupIndex = tailResult.groupIndex;
+				previousCubeCount = tailResult.cubeCount;
+				sourcePayload = std::move(tailResult.renderPayload);
+				if (!reducedEnough)
+				{
+					break;
+				}
+			}
+		}
+
+		TracyPlot("CLOD.VoxelFallback.TailLevels", static_cast<int64_t>(generatedLevels));
+		TracyPlot("CLOD.VoxelFallback.TailCubes", static_cast<int64_t>(generatedCubes));
+		if (generatedLevels != 0u)
+		{
+			spdlog::debug(
+				"ClusterLOD voxel tail groups: roots={} generated_levels={} generated_cubes={} growth={} max_levels={}",
+				voxelRoots.size(),
+				generatedLevels,
+				generatedCubes,
+				settings.voxelTailGrowthFactor,
+				settings.voxelTailMaxLevels);
+		}
 	}
 
 	bool AppendSharedVoxelCoverageSourceGeometry(
@@ -5875,6 +6325,12 @@ namespace
 				}
 			}
 		}
+
+		BuildPartVoxelTailGroups(
+			state,
+			sharedVoxelCoverageSourceTriangles,
+			coverageMaterialSampler,
+			settings);
 
 		{
 			ZoneScopedN("ClusterLODUtilities::VoxelFallback::ValidateVoxelParentClosure");
@@ -8333,6 +8789,96 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 
 	std::vector<uint32_t> currentLayer;
 	currentLayer.reserve(instances.size());
+
+	DirectX::XMFLOAT3 assemblyInstanceAabbMin(
+		std::numeric_limits<float>::max(),
+		std::numeric_limits<float>::max(),
+		std::numeric_limits<float>::max());
+	DirectX::XMFLOAT3 assemblyInstanceAabbMax(
+		-std::numeric_limits<float>::max(),
+		-std::numeric_limits<float>::max(),
+		-std::numeric_limits<float>::max());
+	for (const ClusterLODAssemblyInstanceSpec& spec : instances)
+	{
+		if (spec.partIndex >= parts.size())
+		{
+			continue;
+		}
+		const ClusterLODPrebuiltData& part = parts[spec.partIndex].artifacts->prebuiltData;
+		if (spec.rootNode >= part.nodes.size())
+		{
+			continue;
+		}
+		const DirectX::XMFLOAT4 sphere = TransformSphere3x4(spec.transform, part.nodes[spec.rootNode].traversalMetric.lodBoundingSphere);
+		assemblyInstanceAabbMin.x = std::min(assemblyInstanceAabbMin.x, sphere.x - sphere.w);
+		assemblyInstanceAabbMin.y = std::min(assemblyInstanceAabbMin.y, sphere.y - sphere.w);
+		assemblyInstanceAabbMin.z = std::min(assemblyInstanceAabbMin.z, sphere.z - sphere.w);
+		assemblyInstanceAabbMax.x = std::max(assemblyInstanceAabbMax.x, sphere.x + sphere.w);
+		assemblyInstanceAabbMax.y = std::max(assemblyInstanceAabbMax.y, sphere.y + sphere.w);
+		assemblyInstanceAabbMax.z = std::max(assemblyInstanceAabbMax.z, sphere.z + sphere.w);
+	}
+	const float assemblyInstanceLongestExtent = std::max({
+		assemblyInstanceAabbMax.x - assemblyInstanceAabbMin.x,
+		assemblyInstanceAabbMax.y - assemblyInstanceAabbMin.y,
+		assemblyInstanceAabbMax.z - assemblyInstanceAabbMin.z });
+	const float assemblyBaselineVoxelWidth =
+		std::isfinite(assemblyInstanceLongestExtent) && assemblyInstanceLongestExtent > 0.0f
+		? assemblyInstanceLongestExtent / static_cast<float>(std::max(2u, settings.voxelGridBaseResolution))
+		: 0.0f;
+
+	auto collectVoxelTailChain = [&](uint32_t globalRootGroupIndex)
+	{
+		std::vector<uint32_t> chain;
+		uint32_t groupIndex = globalRootGroupIndex;
+		std::unordered_set<uint32_t> visited;
+		while (groupIndex < state.groups.size() && visited.insert(groupIndex).second)
+		{
+			const ClusterLODGroup& group = state.groups[groupIndex];
+			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u)
+			{
+				break;
+			}
+			chain.push_back(groupIndex);
+			std::vector<uint32_t> children = CollectUniqueRefinedChildren(state, groupIndex);
+			if (children.size() != 1u)
+			{
+				break;
+			}
+			const uint32_t childGroupIndex = children.front();
+			if (childGroupIndex >= state.groups.size() ||
+				(state.groups[childGroupIndex].flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u)
+			{
+				break;
+			}
+			groupIndex = childGroupIndex;
+		}
+		return chain;
+	};
+
+	auto selectAssemblySourceGroup = [&](const std::vector<uint32_t>& chain, float instanceScale) -> uint32_t
+	{
+		if (chain.empty())
+		{
+			return std::numeric_limits<uint32_t>::max();
+		}
+		const float growthFactor = std::max(1.01f, settings.voxelTailGrowthFactor);
+		const float targetSourceWidth = assemblyBaselineVoxelWidth > 0.0f
+			? assemblyBaselineVoxelWidth / growthFactor
+			: std::numeric_limits<float>::infinity();
+		uint32_t selectedGroup = chain.back();
+		for (uint32_t groupIndex : chain)
+		{
+			const float localWidth = GetFiniteVoxelErrorForGroup(state, groupIndex);
+			const float worldWidth = localWidth * instanceScale;
+			if (std::isfinite(worldWidth) && worldWidth > 0.0f && worldWidth <= targetSourceWidth)
+			{
+				selectedGroup = groupIndex;
+				break;
+			}
+		}
+		return selectedGroup;
+	};
+
 	for (const ClusterLODAssemblyInstanceSpec& spec : instances)
 	{
 		if (spec.partIndex >= parts.size())
@@ -8395,6 +8941,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			.localToWorld = spec.transform,
 			.refinedGroup = static_cast<int32_t>(proxyGroupIndex) });
 
+		uint32_t selectedSourceGroups = 0u;
+		float selectedMaxWorldVoxelWidth = 0.0f;
 		for (uint32_t localGroupIndex = 0; localGroupIndex < static_cast<uint32_t>(part.groups.size()); ++localGroupIndex)
 		{
 			const ClusterLODGroup& localGroup = part.groups[localGroupIndex];
@@ -8403,16 +8951,29 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 				continue;
 			}
 			const uint32_t globalGroupIndex = groupBases[spec.partIndex] + localGroupIndex;
-			const VoxelGroupPayload* payload = getOrBuildVoxelPayloadForGroup(globalGroupIndex);
+			const std::vector<uint32_t> chain = collectVoxelTailChain(globalGroupIndex);
+			const uint32_t selectedGroupIndex = selectAssemblySourceGroup(chain, instanceErrorScale);
+			if (selectedGroupIndex == std::numeric_limits<uint32_t>::max())
+			{
+				continue;
+			}
+			const VoxelGroupPayload* payload = getOrBuildVoxelPayloadForGroup(selectedGroupIndex);
 			if (payload == nullptr)
 			{
 				continue;
 			}
+			selectedSourceGroups++;
+			selectedMaxWorldVoxelWidth = std::max(selectedMaxWorldVoxelWidth, payload->voxelWidth * instanceErrorScale);
 			assemblyGroupSources[proxyGroupIndex].push_back(VoxelSourcePayloadInstance{
 				.payload = payload,
 				.localToTarget = spec.transform,
 				.expansionRadius = GetVoxelCandidateExpansionRadiusForPayload(payload) * MaxScale3x4(spec.transform),
 				.refinedGroupOverride = static_cast<int32_t>(proxyGroupIndex) });
+		}
+		if (selectedSourceGroups != 0u)
+		{
+			TracyPlot("CLOD.Assembly.SelectedSourceGroups", static_cast<int64_t>(selectedSourceGroups));
+			TracyPlot("CLOD.Assembly.SelectedSourceWorldVoxelMicrons", static_cast<int64_t>(selectedMaxWorldVoxelWidth * 1000000.0f));
 		}
 	}
 

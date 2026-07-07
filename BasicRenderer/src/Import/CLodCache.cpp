@@ -740,7 +740,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(32));  // assembly voxel traversal boundaries derive from parent representation errors
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // voxel propagation derives traversal boundaries from active parent payload errors
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
-		boost::hash_combine(seed, static_cast<uint32_t>(8));  // page-less root instance portals force traversal instead of duplicating root pages
+		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");
@@ -750,6 +750,8 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GROWTH");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH");
 		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
 		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
 		return static_cast<uint64_t>(seed);

@@ -266,6 +266,8 @@ struct ClusterLODBuilderSettings
 	float voxelFallbackGrowthFactor = 1.1f;
 	float voxelFallbackAcceptanceBias = 1.0f;
 	float voxelFallbackOpacityThreshold = 0.0f;
+	uint32_t voxelTailMaxLevels = 4u;
+	float voxelTailGrowthFactor = 1.5f;
 	bool doubleSidedVoxelSourceNormals = false;
 };
 
@@ -356,6 +358,8 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readFloat("BASICRENDERER_CLOD_VOXEL_GROWTH", settings.voxelFallbackGrowthFactor);
 	readFloat("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", settings.voxelFallbackAcceptanceBias);
 	readFloat("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD", settings.voxelFallbackOpacityThreshold);
+	readUint("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", settings.voxelTailMaxLevels);
+	readFloat("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", settings.voxelTailGrowthFactor);
 	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
 	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);
 
