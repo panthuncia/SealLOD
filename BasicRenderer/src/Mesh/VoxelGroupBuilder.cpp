@@ -34,6 +34,26 @@ namespace
 	using br::mesh::sggx::SymmetricMatrix3;
 	using br::mesh::sggx::BuildSGGXFromNormals;
 
+	uint32_t ComputeVoxelClusterFlags(
+		const std::vector<CLodVoxelCubeRecord>& cubeRecords,
+		uint32_t firstCube,
+		uint32_t cubeCount)
+	{
+		uint32_t flags = 0u;
+		const uint32_t endCube = std::min<uint32_t>(
+			static_cast<uint32_t>(cubeRecords.size()),
+			firstCube + cubeCount);
+		for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
+		{
+			if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+			{
+				flags |= CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES;
+				break;
+			}
+		}
+		return flags;
+	}
+
 	std::pmr::memory_resource*& CurrentVoxelizationScratchResource()
 	{
 		thread_local std::pmr::memory_resource* resource = nullptr;
@@ -2990,6 +3010,7 @@ void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t m
 			cluster.firstCube = clusterBegin;
 			cluster.cubeCount = clusterEnd - clusterBegin;
 			cluster.refinedGroup = refinedGroup;
+			cluster.flags = ComputeVoxelClusterFlags(packed.cubeRecords, cluster.firstCube, cluster.cubeCount);
 			cluster.bounds = DirectX::XMFLOAT4(center.x, center.y, center.z, radius);
 			cluster.aabbMinAndVoxelWidth = packed.metadata.aabbMinAndVoxelWidth;
 			cluster.resolution = packed.metadata.resolution;

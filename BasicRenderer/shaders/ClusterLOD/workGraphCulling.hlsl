@@ -1223,11 +1223,7 @@ void CLodAppendVoxelRasterClusterWork(
             continue;
         }
 
-        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(
-            voxelPageEntry.slabDescriptorIndex,
-            voxelPageEntry.slabByteOffset,
-            voxelPageHeader.cubeRecordsOffset,
-            voxelCluster);
+        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(voxelCluster);
 
         uint baseSlot = 0u;
         if (clusterHasSkinnedCubes)

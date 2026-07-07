@@ -169,6 +169,7 @@ static_assert(sizeof(ClusterLODAssemblyInstance) == 16, "ClusterLODAssemblyInsta
 
 static constexpr uint32_t CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
+static constexpr uint32_t CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES = 1u << 0;
 
 struct CLodVoxelClusterRecord
 {

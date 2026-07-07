@@ -241,6 +241,7 @@ static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
+static const uint CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES = 1u << 0;
 
 struct CLodVoxelClusterRecord
 {
@@ -409,25 +410,9 @@ CLodVoxelCubeRecord CLodLoadVoxelCubeFromPage(uint slabDescriptorIndex, uint pag
     return cube;
 }
 
-bool CLodVoxelClusterHasSkinnedCubes(
-    uint slabDescriptorIndex,
-    uint pageByteOffset,
-    uint cubeRecordsOffset,
-    CLodVoxelClusterRecord cluster)
+bool CLodVoxelClusterHasSkinnedCubes(CLodVoxelClusterRecord cluster)
 {
-    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    [loop]
-    for (uint cubeIndex = 0u; cubeIndex < cluster.cubeCount; ++cubeIndex)
-    {
-        const uint addr = pageByteOffset + cubeRecordsOffset + (cluster.firstCube + cubeIndex) * CLOD_VOXEL_CUBE_RECORD_STRIDE;
-        const uint dominantBoneIndex = slab.Load(addr + 4u);
-        if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
-        {
-            return true;
-        }
-    }
-
-    return false;
+    return (cluster.flags & CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES) != 0u;
 }
 
 bool CLodTryLoadVoxelPageForSegment(

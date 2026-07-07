@@ -146,6 +146,26 @@ namespace
 		return attributeCount;
 	}
 
+	uint32_t ComputeVoxelClusterFlags(
+		std::span<const CLodVoxelCubeRecord> cubeRecords,
+		uint32_t firstCube,
+		uint32_t cubeCount)
+	{
+		uint32_t flags = 0u;
+		const uint32_t endCube = std::min<uint32_t>(
+			static_cast<uint32_t>(cubeRecords.size()),
+			firstCube + cubeCount);
+		for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
+		{
+			if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+			{
+				flags |= CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES;
+				break;
+			}
+		}
+		return flags;
+	}
+
 	bool BuildVoxelGroupPayloadFromPackedMapping(
 		const VoxelGroupMapping& mapping,
 		uint32_t groupIndex,
@@ -466,6 +486,10 @@ namespace
 				CLodVoxelClusterRecord pageCluster = sourceCluster;
 				pageCluster.firstCube = sourceCluster.firstCube + cubeOffset;
 				pageCluster.cubeCount = chunkCubes;
+				pageCluster.flags = ComputeVoxelClusterFlags(
+					std::span<const CLodVoxelCubeRecord>(packed.cubeRecords.data(), packed.cubeRecords.size()),
+					pageCluster.firstCube,
+					pageCluster.cubeCount);
 				pageClusterRecords.push_back(pageCluster);
 				pageClusterCount++;
 				pageCubeCount += chunkCubes;
