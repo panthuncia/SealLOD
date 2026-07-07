@@ -1325,14 +1325,7 @@ namespace
 			return sample;
 		}
 
-		const std::vector<std::byte>* vertices = sourceTriangles.Vertices();
-		const std::vector<uint32_t>* meshTriangleIndices = sourceTriangles.TriangleIndices();
-		const std::vector<int32_t>* triangleRefinedGroupIds = sourceTriangles.TriangleRefinedGroupIds();
 		const bool doubleSidedTriangles = sourceTriangles.DoubleSidedTriangles();
-		if (vertices == nullptr || meshTriangleIndices == nullptr)
-		{
-			return sample;
-		}
 
 		const Float3 cellExtent = cellWorldMax - cellWorldMin;
 		constexpr float kCellHitEpsilon = 1.0e-5f;
@@ -1373,8 +1366,8 @@ namespace
 				++sourceCoverageTriangleTestCount;
 
 				const float nextTraceTMin = std::max(hitT + kCellHitEpsilon, std::nextafter(traceTMin, std::numeric_limits<float>::infinity()));
-				const size_t triangleBase = static_cast<size_t>(triLocalIdx) * 3u;
-				if (triangleBase + 2u >= meshTriangleIndices->size())
+				VoxelSourceTriangleSample triangleSample{};
+				if (!sourceTriangles.GetTriangleSample(triLocalIdx, triangleSample))
 				{
 					traceTMin = nextTraceTMin;
 					continue;
@@ -1388,15 +1381,12 @@ namespace
 					continue;
 				}
 
-				const uint32_t i0 = (*meshTriangleIndices)[triangleBase + 0u];
-				const uint32_t i1 = (*meshTriangleIndices)[triangleBase + 1u];
-				const uint32_t i2 = (*meshTriangleIndices)[triangleBase + 2u];
-				const Float3 v0 = ReadPosition(*vertices, sourceTriangles.VertexStrideBytes(), i0);
-				const Float3 v1 = ReadPosition(*vertices, sourceTriangles.VertexStrideBytes(), i1);
-				const Float3 v2 = ReadPosition(*vertices, sourceTriangles.VertexStrideBytes(), i2);
-				const Float3 n0 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i0);
-				const Float3 n1 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i1);
-				const Float3 n2 = ReadNormal(*vertices, sourceTriangles.VertexStrideBytes(), i2);
+				const Float3 v0 = ToFloat3(triangleSample.positions[0]);
+				const Float3 v1 = ToFloat3(triangleSample.positions[1]);
+				const Float3 v2 = ToFloat3(triangleSample.positions[2]);
+				const Float3 n0 = ToFloat3(triangleSample.normals[0]);
+				const Float3 n1 = ToFloat3(triangleSample.normals[1]);
+				const Float3 n2 = ToFloat3(triangleSample.normals[2]);
 				const Float3 faceNormal = TriangleNormal(v0, v1, v2);
 				const float hitW = 1.0f - hitU - hitV;
 				const Float3 interpolatedNormal = n0 * hitW + n1 * hitU + n2 * hitV;
@@ -1404,9 +1394,9 @@ namespace
 					? interpolatedNormal.normalized()
 					: faceNormal;
 				candidateNormal = OrientHitNormalForSidedness(candidateNormal, faceNormal, dir, doubleSidedTriangles);
-				const DirectX::XMFLOAT2 uv0 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i0);
-				const DirectX::XMFLOAT2 uv1 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i1);
-				const DirectX::XMFLOAT2 uv2 = ReadTexcoord(*vertices, sourceTriangles.VertexStrideBytes(), i2);
+				const DirectX::XMFLOAT2 uv0 = triangleSample.uvs[0];
+				const DirectX::XMFLOAT2 uv1 = triangleSample.uvs[1];
+				const DirectX::XMFLOAT2 uv2 = triangleSample.uvs[2];
 				DirectX::XMFLOAT2 candidateUv = InterpolateUv(
 					uv0,
 					uv1,
@@ -1648,10 +1638,32 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 		std::vector<uint32_t> sourceTriangleIndices;
 	};
 
+	struct PartScene
+	{
+		RTCScene scene = nullptr;
+		const std::vector<std::byte>* vertices = nullptr;
+		size_t vertexStrideBytes = 0;
+		const std::vector<uint32_t>* triangleIndices = nullptr;
+		uint32_t triangleCount = 0;
+	};
+
+	struct InstanceRef
+	{
+		uint32_t partIndex = 0;
+		ClusterLODAssemblyTransform localToWorld{};
+		int32_t refinedGroup = -1;
+		uint32_t firstTriangle = 0;
+		uint32_t triangleCount = 0;
+	};
+
 	static constexpr int32_t kUnfilteredRefinedGroupScene = std::numeric_limits<int32_t>::min();
 
 	std::vector<DirectX::XMFLOAT3> vertices;
 	std::vector<RefinedGroupScene> refinedGroupScenes;
+	std::vector<PartScene> partScenes;
+	std::vector<InstanceRef> instances;
+	std::vector<uint32_t> instanceIndexByGeometryId;
+	bool instanced = false;
 
 	~EmbreeScene()
 	{
@@ -1663,6 +1675,14 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 				refinedGroupScene.scene = nullptr;
 			}
 		}
+		for (PartScene& partScene : partScenes)
+		{
+			if (partScene.scene != nullptr)
+			{
+				rtcReleaseScene(partScene.scene);
+				partScene.scene = nullptr;
+			}
+		}
 	}
 };
 
@@ -1672,6 +1692,43 @@ namespace
 	{
 		static RTCDevice device = rtcNewDevice(nullptr);
 		return device;
+	}
+
+	DirectX::XMFLOAT3 TransformCoveragePoint(
+		const ClusterLODAssemblyTransform& transform,
+		const DirectX::XMFLOAT3& point)
+	{
+		return DirectX::XMFLOAT3(
+			transform.row0.x * point.x + transform.row0.y * point.y + transform.row0.z * point.z + transform.row0.w,
+			transform.row1.x * point.x + transform.row1.y * point.y + transform.row1.z * point.z + transform.row1.w,
+			transform.row2.x * point.x + transform.row2.y * point.y + transform.row2.z * point.z + transform.row2.w);
+	}
+
+	DirectX::XMFLOAT3 TransformCoverageVector(
+		const ClusterLODAssemblyTransform& transform,
+		const DirectX::XMFLOAT3& vector)
+	{
+		const Float3 transformed(
+			transform.row0.x * vector.x + transform.row0.y * vector.y + transform.row0.z * vector.z,
+			transform.row1.x * vector.x + transform.row1.y * vector.y + transform.row1.z * vector.z,
+			transform.row2.x * vector.x + transform.row2.y * vector.y + transform.row2.z * vector.z);
+		return ToXM(transformed.lengthSq() > 1.0e-20f ? transformed.normalized() : Float3(0.0f, 1.0f, 0.0f));
+	}
+
+	void StoreEmbreeTransform3x4(const ClusterLODAssemblyTransform& transform, float (&outTransform)[12])
+	{
+		outTransform[0] = transform.row0.x;
+		outTransform[1] = transform.row0.y;
+		outTransform[2] = transform.row0.z;
+		outTransform[3] = transform.row0.w;
+		outTransform[4] = transform.row1.x;
+		outTransform[5] = transform.row1.y;
+		outTransform[6] = transform.row1.z;
+		outTransform[7] = transform.row1.w;
+		outTransform[8] = transform.row2.x;
+		outTransform[9] = transform.row2.y;
+		outTransform[10] = transform.row2.z;
+		outTransform[11] = transform.row2.w;
 	}
 }
 
@@ -1812,13 +1869,189 @@ void VoxelSourceTriangleBVH::Build(
 
 	if (!embreeScene->refinedGroupScenes.empty())
 	{
+		spdlog::debug(
+			"Voxel coverage Embree BVH built: vertices={} triangles={} refined_group_scenes_requested={} scenes={}",
+			embreeScene->vertices.size(),
+			triangleCount,
+			buildRefinedGroupScenes,
+			embreeScene->refinedGroupScenes.size());
 		m_embreeScene = std::move(embreeScene);
 	}
 }
 
+void VoxelSourceTriangleBVH::BuildInstanced(
+	std::span<const VoxelSourceTrianglePart> parts,
+	std::span<const VoxelSourceTriangleInstance> instances,
+	bool doubleSidedTriangles)
+{
+	ZoneScopedN("VoxelSourceTriangleBVH::BuildInstanced");
+	m_vertices = nullptr;
+	m_vertexStrideBytes = 0;
+	m_skinningVertices = nullptr;
+	m_skinningVertexStrideBytes = 0;
+	m_triangleIndices = nullptr;
+	m_triangleRefinedGroupIds = nullptr;
+	m_doubleSidedTriangles = doubleSidedTriangles;
+	m_embreeScene.reset();
+
+	if (parts.empty() || instances.empty())
+	{
+		return;
+	}
+
+	RTCDevice device = GetVoxelCoverageEmbreeDevice();
+	if (device == nullptr)
+	{
+		return;
+	}
+
+	std::unique_ptr<EmbreeScene> embreeScene = std::make_unique<EmbreeScene>();
+	embreeScene->instanced = true;
+	embreeScene->partScenes.resize(parts.size());
+
+	auto buildPartScene = [&](size_t partIndex) -> bool
+	{
+		const VoxelSourceTrianglePart& part = parts[partIndex];
+		if (part.vertices == nullptr || part.triangleIndices == nullptr ||
+			part.vertexStrideBytes < sizeof(float) * 3u ||
+			part.triangleIndices->size() < 3u ||
+			(part.triangleIndices->size() % 3u) != 0u)
+		{
+			return false;
+		}
+
+		const size_t sourceVertexCount = part.vertices->size() / part.vertexStrideBytes;
+		const size_t sourceTriangleCount = part.triangleIndices->size() / 3u;
+		if (sourceVertexCount == 0u || sourceTriangleCount == 0u ||
+			sourceVertexCount > std::numeric_limits<uint32_t>::max() ||
+			sourceTriangleCount > std::numeric_limits<uint32_t>::max())
+		{
+			return false;
+		}
+
+		EmbreeScene::PartScene& partScene = embreeScene->partScenes[partIndex];
+		partScene.vertices = part.vertices;
+		partScene.vertexStrideBytes = part.vertexStrideBytes;
+		partScene.triangleIndices = part.triangleIndices;
+		partScene.triangleCount = static_cast<uint32_t>(sourceTriangleCount);
+		partScene.scene = rtcNewScene(device);
+
+		RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+		DirectX::XMFLOAT3* embreeVertices = static_cast<DirectX::XMFLOAT3*>(rtcSetNewGeometryBuffer(
+			geometry,
+			RTC_BUFFER_TYPE_VERTEX,
+			0,
+			RTC_FORMAT_FLOAT3,
+			sizeof(DirectX::XMFLOAT3),
+			sourceVertexCount));
+		if (embreeVertices != nullptr)
+		{
+			for (size_t vertexIndex = 0; vertexIndex < sourceVertexCount; ++vertexIndex)
+			{
+				embreeVertices[vertexIndex] = ToXM(ReadPosition(*part.vertices, part.vertexStrideBytes, static_cast<uint32_t>(vertexIndex)));
+			}
+		}
+
+		EmbreeScene::Triangle* embreeTriangles = static_cast<EmbreeScene::Triangle*>(rtcSetNewGeometryBuffer(
+			geometry,
+			RTC_BUFFER_TYPE_INDEX,
+			0,
+			RTC_FORMAT_UINT3,
+			sizeof(EmbreeScene::Triangle),
+			sourceTriangleCount));
+		if (embreeTriangles != nullptr)
+		{
+			for (size_t triangleIndex = 0; triangleIndex < sourceTriangleCount; ++triangleIndex)
+			{
+				const size_t triangleBase = triangleIndex * 3u;
+				embreeTriangles[triangleIndex] = EmbreeScene::Triangle{
+					(*part.triangleIndices)[triangleBase + 0u],
+					(*part.triangleIndices)[triangleBase + 1u],
+					(*part.triangleIndices)[triangleBase + 2u],
+				};
+			}
+		}
+
+		rtcCommitGeometry(geometry);
+		rtcAttachGeometry(partScene.scene, geometry);
+		rtcReleaseGeometry(geometry);
+		rtcCommitScene(partScene.scene);
+		return true;
+	};
+
+	std::vector<uint8_t> validParts(parts.size(), 0u);
+	for (size_t partIndex = 0; partIndex < parts.size(); ++partIndex)
+	{
+		validParts[partIndex] = buildPartScene(partIndex) ? 1u : 0u;
+	}
+
+	EmbreeScene::RefinedGroupScene topScene{};
+	topScene.refinedGroup = EmbreeScene::kUnfilteredRefinedGroupScene;
+	topScene.scene = rtcNewScene(device);
+
+	uint64_t totalTriangleCount = 0u;
+	for (const VoxelSourceTriangleInstance& sourceInstance : instances)
+	{
+		if (sourceInstance.partIndex >= parts.size() || validParts[sourceInstance.partIndex] == 0u)
+		{
+			continue;
+		}
+		const EmbreeScene::PartScene& partScene = embreeScene->partScenes[sourceInstance.partIndex];
+		if (partScene.scene == nullptr || partScene.triangleCount == 0u ||
+			totalTriangleCount > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - partScene.triangleCount)
+		{
+			continue;
+		}
+
+		RTCGeometry instanceGeometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
+		rtcSetGeometryInstancedScene(instanceGeometry, partScene.scene);
+		float instanceTransform[12]{};
+		StoreEmbreeTransform3x4(sourceInstance.localToWorld, instanceTransform);
+		rtcSetGeometryTransform(instanceGeometry, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, instanceTransform);
+		rtcCommitGeometry(instanceGeometry);
+		const uint32_t geometryId = rtcAttachGeometry(topScene.scene, instanceGeometry);
+		rtcReleaseGeometry(instanceGeometry);
+
+		const uint32_t instanceIndex = static_cast<uint32_t>(embreeScene->instances.size());
+		if (geometryId >= embreeScene->instanceIndexByGeometryId.size())
+		{
+			embreeScene->instanceIndexByGeometryId.resize(static_cast<size_t>(geometryId) + 1ull, std::numeric_limits<uint32_t>::max());
+		}
+		embreeScene->instanceIndexByGeometryId[geometryId] = instanceIndex;
+		embreeScene->instances.push_back(EmbreeScene::InstanceRef{
+			.partIndex = sourceInstance.partIndex,
+			.localToWorld = sourceInstance.localToWorld,
+			.refinedGroup = sourceInstance.refinedGroup,
+			.firstTriangle = static_cast<uint32_t>(totalTriangleCount),
+			.triangleCount = partScene.triangleCount });
+		totalTriangleCount += partScene.triangleCount;
+	}
+
+	if (embreeScene->instances.empty())
+	{
+		rtcReleaseScene(topScene.scene);
+		return;
+	}
+
+	rtcCommitScene(topScene.scene);
+	embreeScene->refinedGroupScenes.push_back(std::move(topScene));
+	TracyPlot("CLOD.Voxel.BVH.InstancedTriangles", static_cast<int64_t>(totalTriangleCount));
+	TracyPlot("CLOD.Voxel.BVH.Instances", static_cast<int64_t>(embreeScene->instances.size()));
+	spdlog::info(
+		"Voxel coverage Embree instanced BVH built: parts={} instances={} logical_triangles={} scenes=1",
+		parts.size(),
+		embreeScene->instances.size(),
+		totalTriangleCount);
+	m_embreeScene = std::move(embreeScene);
+}
+
 bool VoxelSourceTriangleBVH::IsValid() const
 {
-	return m_vertices != nullptr && m_triangleIndices != nullptr && m_embreeScene != nullptr && !m_embreeScene->refinedGroupScenes.empty();
+	if (m_embreeScene == nullptr || m_embreeScene->refinedGroupScenes.empty())
+	{
+		return false;
+	}
+	return m_embreeScene->instanced || (m_vertices != nullptr && m_triangleIndices != nullptr);
 }
 
 void VoxelSourceTriangleBVH::SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap)
@@ -1905,6 +2138,15 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 		const std::vector<int32_t>& domain = m_refinedGroupDomainMap[static_cast<size_t>(refinedGroupFilter)];
 		return std::binary_search(domain.begin(), domain.end(), triangleGroup);
 	};
+	auto instanceAcceptedByDomain = [&](const EmbreeScene::InstanceRef& instance)
+	{
+		if (!useDomainFilteredScene)
+		{
+			return true;
+		}
+		const std::vector<int32_t>& domain = m_refinedGroupDomainMap[static_cast<size_t>(refinedGroupFilter)];
+		return std::binary_search(domain.begin(), domain.end(), instance.refinedGroup);
+	};
 
 	float traceTMin = std::max(0.0f, tMin);
 	while (traceTMin < tMax)
@@ -1931,19 +2173,50 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 			return false;
 		}
 
-		if (rayHit.hit.primID >= scene->sourceTriangleIndices.size())
+		if (m_embreeScene->instanced)
 		{
-			return false;
+			const uint32_t instanceGeometryId = rayHit.hit.instID[0];
+			if (instanceGeometryId == RTC_INVALID_GEOMETRY_ID ||
+				instanceGeometryId >= m_embreeScene->instanceIndexByGeometryId.size())
+			{
+				return false;
+			}
+			const uint32_t instanceIndex = m_embreeScene->instanceIndexByGeometryId[instanceGeometryId];
+			if (instanceIndex == std::numeric_limits<uint32_t>::max() ||
+				instanceIndex >= m_embreeScene->instances.size())
+			{
+				return false;
+			}
+			const EmbreeScene::InstanceRef& instance = m_embreeScene->instances[instanceIndex];
+			if (rayHit.hit.primID >= instance.triangleCount)
+			{
+				return false;
+			}
+			if (instanceAcceptedByDomain(instance))
+			{
+				outTriangleIndex = instance.firstTriangle + rayHit.hit.primID;
+				outT = rayHit.ray.tfar;
+				outU = rayHit.hit.u;
+				outV = rayHit.hit.v;
+				return true;
+			}
 		}
-
-		const uint32_t sourceTriangleIndex = scene->sourceTriangleIndices[rayHit.hit.primID];
-		if (triangleAcceptedByDomain(sourceTriangleIndex))
+		else
 		{
-			outTriangleIndex = sourceTriangleIndex;
-			outT = rayHit.ray.tfar;
-			outU = rayHit.hit.u;
-			outV = rayHit.hit.v;
-			return true;
+			if (rayHit.hit.primID >= scene->sourceTriangleIndices.size())
+			{
+				return false;
+			}
+
+			const uint32_t sourceTriangleIndex = scene->sourceTriangleIndices[rayHit.hit.primID];
+			if (triangleAcceptedByDomain(sourceTriangleIndex))
+			{
+				outTriangleIndex = sourceTriangleIndex;
+				outT = rayHit.ray.tfar;
+				outU = rayHit.hit.u;
+				outV = rayHit.hit.v;
+				return true;
+			}
 		}
 
 		const float nextTraceTMin = std::max(
@@ -1957,6 +2230,90 @@ bool VoxelSourceTriangleBVH::IntersectNearest(
 	}
 
 	return false;
+}
+
+bool VoxelSourceTriangleBVH::GetTriangleSample(
+	uint32_t triangleIndex,
+	VoxelSourceTriangleSample& outSample) const
+{
+	if (m_embreeScene == nullptr)
+	{
+		return false;
+	}
+
+	auto fillFromFlatTriangle = [&](
+		const std::vector<std::byte>& vertices,
+		size_t vertexStrideBytes,
+		const std::vector<uint32_t>& triangleIndices,
+		uint32_t localTriangleIndex,
+		const ClusterLODAssemblyTransform* transform) -> bool
+	{
+		const size_t triangleBase = static_cast<size_t>(localTriangleIndex) * 3u;
+		if (vertexStrideBytes < sizeof(float) * 3u || triangleBase + 2u >= triangleIndices.size())
+		{
+			return false;
+		}
+
+		for (uint32_t corner = 0; corner < 3u; ++corner)
+		{
+			const uint32_t vertexIndex = triangleIndices[triangleBase + corner];
+			DirectX::XMFLOAT3 position = ToXM(ReadPosition(vertices, vertexStrideBytes, vertexIndex));
+			DirectX::XMFLOAT3 normal = ToXM(ReadNormal(vertices, vertexStrideBytes, vertexIndex));
+			if (transform != nullptr)
+			{
+				position = TransformCoveragePoint(*transform, position);
+				normal = TransformCoverageVector(*transform, normal);
+			}
+			outSample.positions[corner] = position;
+			outSample.normals[corner] = normal;
+			outSample.uvs[corner] = ReadTexcoord(vertices, vertexStrideBytes, vertexIndex);
+		}
+		outSample.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+		return true;
+	};
+
+	if (m_embreeScene->instanced)
+	{
+		const auto instanceIt = std::upper_bound(
+			m_embreeScene->instances.begin(),
+			m_embreeScene->instances.end(),
+			triangleIndex,
+			[](uint32_t value, const EmbreeScene::InstanceRef& instance) {
+				return value < instance.firstTriangle;
+			});
+		if (instanceIt == m_embreeScene->instances.begin())
+		{
+			return false;
+		}
+		const EmbreeScene::InstanceRef& instance = *(instanceIt - 1);
+		if (triangleIndex < instance.firstTriangle || triangleIndex >= instance.firstTriangle + instance.triangleCount ||
+			instance.partIndex >= m_embreeScene->partScenes.size())
+		{
+			return false;
+		}
+		const EmbreeScene::PartScene& part = m_embreeScene->partScenes[instance.partIndex];
+		if (part.vertices == nullptr || part.triangleIndices == nullptr)
+		{
+			return false;
+		}
+		return fillFromFlatTriangle(
+			*part.vertices,
+			part.vertexStrideBytes,
+			*part.triangleIndices,
+			triangleIndex - instance.firstTriangle,
+			&instance.localToWorld);
+	}
+
+	if (m_vertices == nullptr || m_triangleIndices == nullptr)
+	{
+		return false;
+	}
+	if (!fillFromFlatTriangle(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, triangleIndex, nullptr))
+	{
+		return false;
+	}
+	outSample.dominantBoneIndex = ComputeDominantBoneIndexForSourceTriangle(*this, triangleIndex);
+	return true;
 }
 
 // Public API: VoxelizeTriangles
@@ -2258,7 +2615,11 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 					workResult.sourceCoverageOutOfCellRejectionCount);
 				if (coverage.representativeTriangleIndex != std::numeric_limits<uint32_t>::max())
 				{
-					dominantBoneIndex = ComputeDominantBoneIndexForSourceTriangle(*input.coverageSourceTriangles, coverage.representativeTriangleIndex);
+					VoxelSourceTriangleSample representativeSample{};
+					if (input.coverageSourceTriangles->GetTriangleSample(coverage.representativeTriangleIndex, representativeSample))
+					{
+						dominantBoneIndex = representativeSample.dominantBoneIndex;
+					}
 				}
 			}
 

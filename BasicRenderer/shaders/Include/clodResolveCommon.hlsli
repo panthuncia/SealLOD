@@ -1304,6 +1304,51 @@ float CLodVoxelHashToUnitFloat(uint v)
     return (float)(CLodVoxelHash(v) & 0x00FFFFFFu) / 16777216.0f;
 }
 
+uint CLodVoxelHilbertIndex(uint posX, uint posY)
+{
+    const uint width = 64u;
+    uint index = 0u;
+    posX &= width - 1u;
+    posY &= width - 1u;
+    for (uint curLevel = width / 2u; curLevel > 0u; curLevel /= 2u)
+    {
+        const uint regionX = (posX & curLevel) != 0u;
+        const uint regionY = (posY & curLevel) != 0u;
+        index += curLevel * curLevel * ((3u * regionX) ^ regionY);
+        if (regionY == 0u)
+        {
+            if (regionX != 0u)
+            {
+                posX = (width - 1u) - posX;
+                posY = (width - 1u) - posY;
+            }
+
+            const uint temp = posX;
+            posX = posY;
+            posY = temp;
+        }
+    }
+    return index;
+}
+
+float2 CLodVoxelR2Sequence(uint n)
+{
+    return frac(float2(
+        0.5f + (float)n * 0.7548776662466927f,
+        0.5f + (float)n * 0.5698402909980532f));
+}
+
+float2 CLodVoxelSGGXSpatiotemporalSample(uint2 pixel, uint frameIndex, uint stableSeed)
+{
+    const uint hilbertIndex = CLodVoxelHilbertIndex(pixel.x, pixel.y);
+    const uint temporalIndex = frameIndex & 63u;
+    const float2 screenTemporal = CLodVoxelR2Sequence(hilbertIndex + 288u * temporalIndex);
+    const float2 stableOffset = float2(
+        CLodVoxelHashToUnitFloat(stableSeed),
+        CLodVoxelHashToUnitFloat(stableSeed ^ 0xD1B54A35u));
+    return frac(screenTemporal + stableOffset);
+}
+
 void CLodVoxelBuildOrthonormalBasis(float3 direction, out float3 tangent, out float3 bitangent)
 {
     SGGXBuildOrthonormalBasis(direction, tangent, bitangent);
@@ -1344,6 +1389,11 @@ float3 CLodVoxelSampleSGGXVNDF(float4 sggxAxisAndSigmas, float3 wi, float u1, fl
     return SGGXSampleVNDF(sggxAxisAndSigmas, wi, u1, u2);
 }
 
+float3x3 CLodAssemblyAwareNormalMatrix(PerObjectBuffer obj)
+{
+    return transpose((float3x3)obj.modelInverse);
+}
+
 bool ResolveClodVoxelCommonSampleFromPackedCluster(
     uint4 packedCluster,
     uint visibleClusterIndex,
@@ -1363,8 +1413,16 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const uint localPageIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageLocalClusterIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
+    if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+    StructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visibleClusterIndex];
+
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
-    const PerObjectBuffer obj = LoadInstanceTransformForDraw(instanceIndex);
+    const PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(instanceIndex, assemblyTransformIndex);
     const PerMeshBuffer mesh = perMeshBuffer[instanceData.perMeshBufferIndex];
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
@@ -1452,20 +1510,23 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
         attributeSample.sggxAxisAndSigmas.xy,
         max(attributeSample.sggxAxisAndSigmas.zw, float2(1.0e-4f, 1.0e-4f)));
     const uint sampleSeed = CLodVoxelHash(
-        pixel.x * 0x1F123BB5u ^
-        pixel.y * 0x05491333u ^
-        visibleClusterIndex * 0x9E3779B9u ^
+        localGroupId * 0x9E3779B9u ^
+        localPageIndex * 0x85EBCA6Bu ^
+        pageLocalClusterIndex * 0xC2B2AE35u ^
+        cube.cubeCoord * 0x27D4EB2Fu ^
         primID * 0x68BC21EBu ^
         cellIndex * 0xB5297A4Du);
+    const float2 sggxXi = CLodVoxelSGGXSpatiotemporalSample(pixel, perFrame.frameIndex, sampleSeed);
+    const float3 viewDirObject = -rayDirObject;
     float3 normalOS = CLodVoxelSampleSGGXVNDF(
         sggxAxisAndSigmas,
-        rayDirObject,
-        CLodVoxelHashToUnitFloat(sampleSeed),
-        CLodVoxelHashToUnitFloat(sampleSeed ^ 0xD1B54A35u));
-    normalOS = dot(normalOS, -rayDirObject) >= 0.0f ? normalOS : -normalOS;
+        viewDirObject,
+        sggxXi.x,
+        sggxXi.y);
+    normalOS = dot(normalOS, viewDirObject) >= 0.0f ? normalOS : -normalOS;
     normalOS = normalize(mul(normalOS, (float3x3)skinMatrix));
-    StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
-    const float3 normalWS = normalize(mul(normalOS, (float3x3)normalMatrixBuffer[obj.normalMatrixBufferIndex].value));
+    const float3x3 normalMatrix = CLodAssemblyAwareNormalMatrix(obj);
+    const float3 normalWS = normalize(mul(normalOS, normalMatrix));
 
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     MaterialInfo materialInfo = materialDataBuffer[mesh.materialDataIndex];
@@ -1692,6 +1753,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 #endif
 
+    uint assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint> visibleClusterTransformIndices =
+            ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+        assemblyTransformIndex = visibleClusterTransformIndices[clusterIndex];
+    }
+
     MeshletResolveData md = LoadMeshletResolveData_Wave(clusterIndex);
     if (meshletTriangleIndex >= md.triangleCount)
     {
@@ -1747,7 +1816,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     ApplyClodSkinningToFrame(triIdx.z, md, p2, n2, t2);
 #endif
 
-    PerObjectBuffer obj = LoadInstanceTransformForDraw(md.objAndMesh.x);
+    PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, assemblyTransformIndex);
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     StructuredBuffer<MaterialEvalInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
     MaterialEvalInfo materialInfo = materialDataBuffer[md.materialDataIndex];
@@ -1931,8 +2000,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
             InterpolateWithDeriv(bary, c0.y, c1.y, c2.y).x,
             InterpolateWithDeriv(bary, c0.z, c1.z, c2.z).x);
     }
-    StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
-    float3x3 normalMatrix = (float3x3)normalMatrixBuffer[obj.normalMatrixBufferIndex].value;
+    float3x3 normalMatrix = CLodAssemblyAwareNormalMatrix(obj);
     const float3 interpolatedNormalOS = normalOS;
     const float3 interpolatedWorldNormal = normalize(mul(interpolatedNormalOS, normalMatrix));
     if (useReyesGeometricNormal)

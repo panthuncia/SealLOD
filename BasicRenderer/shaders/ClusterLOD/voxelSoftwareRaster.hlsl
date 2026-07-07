@@ -86,10 +86,6 @@ static const uint WG_COUNTER_VOXEL_RASTER_QUEUE_OVERFLOW = 146u;
 static const uint WG_COUNTER_VOXEL_RASTER_NON_POSITIVE_DEPTH = 147u;
 static const uint WG_COUNTER_VOXEL_RASTER_VISIBILITY_WINS = 148u;
 static const uint WG_COUNTER_VOXEL_RASTER_VISIBILITY_LOSSES = 149u;
-static const uint WG_COUNTER_DEBUG_VOXEL_PROJECT_NO_VALID_CLIP = 159u;
-static const uint WG_COUNTER_DEBUG_VOXEL_PROJECT_NON_POSITIVE_DEPTH = 160u;
-static const uint WG_COUNTER_DEBUG_ASSEMBLY_VOXEL_SENTINEL_TRANSFORM = 161u;
-static const uint WG_COUNTER_DEBUG_ASSEMBLY_VOXEL_NON_SENTINEL_TRANSFORM = 162u;
 static const uint VOXEL_RASTER_TRACE_HIT = 0u;
 static const uint VOXEL_RASTER_TRACE_DDA_MISS = 1u;
 static const uint VOXEL_RASTER_TRACE_NON_POSITIVE_DEPTH = 2u;
@@ -480,12 +476,6 @@ uint VoxelRasterClampProjectedPixels(
     uint2 targetDims,
     out VoxelRasterProjectedCube projected)
 {
-    const float2 projectedFootprintPixels = max(screenMax - screenMin, float2(0.0f, 0.0f));
-    if (max(projectedFootprintPixels.x, projectedFootprintPixels.y) > CLOD_VOXEL_RASTER_MAX_PROJECTED_FOOTPRINT_PIXELS)
-    {
-        return VOXEL_RASTER_PROJECT_FOOTPRINT_REJECTED;
-    }
-
     int2 minPx = int2(floor(screenMin));
     int2 maxPx = int2(floor(screenMax));
     minPx = max(minPx, int2(rasterInfo.scissorMinX, rasterInfo.scissorMinY));
@@ -978,6 +968,7 @@ bool VoxelRasterTryLoadWorkInputs(
     {
         if (GI == 0u)
         {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER, 1u);
             VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
         }
         return false;
@@ -986,14 +977,6 @@ bool VoxelRasterTryLoadWorkInputs(
     StructuredBuffer<uint> visibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint visibleClusterAssemblyTransformIndex = visibleClusterTransformIndices[work.visibleClusterIndex];
-    if (GI == 0u && (group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
-    {
-        VoxelRasterTelemetryAdd(
-            visibleClusterAssemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
-                ? WG_COUNTER_DEBUG_ASSEMBLY_VOXEL_SENTINEL_TRANSFORM
-                : WG_COUNTER_DEBUG_ASSEMBLY_VOXEL_NON_SENTINEL_TRANSFORM,
-            1u);
-    }
     objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
         instanceIndex,
         visibleClusterAssemblyTransformIndex);
@@ -1005,6 +988,7 @@ bool VoxelRasterTryLoadWorkInputs(
     {
         if (GI == 0u)
         {
+            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER, 1u);
             VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
         }
         return false;
@@ -1143,14 +1127,6 @@ void VoxelRasterRasterizeClusterDirect(
                 else
                 {
                     VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, 1u);
-                    if (projectResult == VOXEL_RASTER_PROJECT_NO_VALID_CLIP)
-                    {
-                        VoxelRasterTelemetryAdd(WG_COUNTER_DEBUG_VOXEL_PROJECT_NO_VALID_CLIP, 1u);
-                    }
-                    else if (projectResult == VOXEL_RASTER_PROJECT_NON_POSITIVE_DEPTH)
-                    {
-                        VoxelRasterTelemetryAdd(WG_COUNTER_DEBUG_VOXEL_PROJECT_NON_POSITIVE_DEPTH, 1u);
-                    }
                 }
             }
             continue;
@@ -1288,9 +1264,6 @@ uint VoxelRasterAccumulateQueuedCubeBatchStats(
 {
     const bool hasOccupancy = (occupancyMask.x | occupancyMask.y) != 0u;
     const bool scissorRejected = hasOccupancy && projectResult == VOXEL_RASTER_PROJECT_SCISSOR_REJECTED;
-    const bool noValidClipRejected = hasOccupancy && projectResult == VOXEL_RASTER_PROJECT_NO_VALID_CLIP;
-    const bool nonPositiveDepthRejected =
-        hasOccupancy && projectResult == VOXEL_RASTER_PROJECT_NON_POSITIVE_DEPTH;
     const bool projectionRejected = hasOccupancy &&
         projectResult != VOXEL_RASTER_PROJECT_OK &&
         projectResult != VOXEL_RASTER_PROJECT_SCISSOR_REJECTED;
@@ -1298,8 +1271,6 @@ uint VoxelRasterAccumulateQueuedCubeBatchStats(
     const uint waveMaxPixelCount = WaveActiveMax(pixelCount);
     const uint waveProjectedPixels = WaveActiveSum(pixelCount);
     const uint waveScissorRejected = WaveActiveCountBits(scissorRejected);
-    const uint waveNoValidClipRejected = WaveActiveCountBits(noValidClipRejected);
-    const uint waveNonPositiveDepthRejected = WaveActiveCountBits(nonPositiveDepthRejected);
     const uint waveProjectionRejected = WaveActiveCountBits(projectionRejected);
     if (WaveIsFirstLane() && waveProjectedPixels != 0u)
     {
@@ -1312,16 +1283,6 @@ uint VoxelRasterAccumulateQueuedCubeBatchStats(
     if (WaveIsFirstLane() && waveProjectionRejected != 0u)
     {
         VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, waveProjectionRejected);
-    }
-    if (WaveIsFirstLane() && waveNoValidClipRejected != 0u)
-    {
-        VoxelRasterTelemetryAdd(WG_COUNTER_DEBUG_VOXEL_PROJECT_NO_VALID_CLIP, waveNoValidClipRejected);
-    }
-    if (WaveIsFirstLane() && waveNonPositiveDepthRejected != 0u)
-    {
-        VoxelRasterTelemetryAdd(
-            WG_COUNTER_DEBUG_VOXEL_PROJECT_NON_POSITIVE_DEPTH,
-            waveNonPositiveDepthRejected);
     }
 
     return waveMaxPixelCount;

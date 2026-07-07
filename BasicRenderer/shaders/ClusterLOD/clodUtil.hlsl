@@ -3008,6 +3008,7 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
             CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX, WG_COUNTER_RASTER_SORT_COMPACTION_VOXEL_SKIPPED, 1u);
             shouldCompactCluster = false;
         }
+
         if (shouldCompactCluster)
         {
             uint bucketIndex = GetRasterBucketIndexFromInstance(CLodVisibleClusterInstanceID(packedCluster));

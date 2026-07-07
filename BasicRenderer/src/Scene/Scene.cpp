@@ -14,6 +14,7 @@
 #include "Managers/ViewManager.h"
 #include "Managers/Singletons/RendererECSManager.h"
 #include <BasicScene/Components.h>
+#include <tracy/Tracy.hpp>
 #include "Materials/Material.h"
 #include "Managers/ObjectManager.h"
 #include "Managers/MeshManager.h"
@@ -429,6 +430,7 @@ flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType typ
 }
 
 void Scene::ActivateRenderable(flecs::entity& entity) {
+	ZoneScopedN("Scene::ActivateRenderable");
 	auto& world = GetSceneWorld();
 
 	auto meshInstances = entity.try_get<Components::MeshInstances>();
@@ -596,6 +598,9 @@ void Scene::ProcessEntitySkins(bool overrideExistingSkins) {
 		bool addSkin = false;
 		for (const auto& meshInstance : oldMeshInstances->meshInstances) {
 			auto rebuiltInstance = MeshInstance::CreateUnique(meshInstance->GetMesh());
+			if (meshInstance->HasMaterialOverride()) {
+				rebuiltInstance->SetMaterialOverride(meshInstance->GetMaterialOverride());
+			}
 			if (rebuiltInstance->HasSkin()) {
 				addSkin = true;
 			}
@@ -1027,23 +1032,30 @@ uint64_t Scene::GetSceneID() const {
 }
 
 void Scene::Update(float elapsedSeconds) {
+	ZoneScopedN("Scene::Update");
 
-	for (auto& node : animatedEntitiesByID) {
-		auto& entity = node.second;
-		AnimationController* animationController = entity.try_get_mut<AnimationController>();
+	{
+		ZoneScopedN("Scene::Update::AnimatedEntities");
+		for (auto& node : animatedEntitiesByID) {
+			auto& entity = node.second;
+			AnimationController* animationController = entity.try_get_mut<AnimationController>();
 #if defined(_DEBUG)
-		if (animationController == nullptr) {
-			spdlog::error("AnimationController is null for entity with ID: {}", node.first);
-			return;
-		}
+			if (animationController == nullptr) {
+				spdlog::error("AnimationController is null for entity with ID: {}", node.first);
+				return;
+			}
 #endif
-	    auto& transform = animationController->GetUpdatedTransform(elapsedSeconds);
-		entity.set<Components::Rotation>(transform.rot);
-		entity.set<Components::Position>(transform.pos);
-		entity.set<Components::Scale>(transform.scale);
+			auto& transform = animationController->GetUpdatedTransform(elapsedSeconds);
+			entity.set<Components::Rotation>(transform.rot);
+			entity.set<Components::Position>(transform.pos);
+			entity.set<Components::Scale>(transform.scale);
+		}
 	}
-	for (auto& child : m_childScenes) {
-		child->Update(elapsedSeconds);
+	{
+		ZoneScopedN("Scene::Update::ChildScenes");
+		for (auto& child : m_childScenes) {
+			child->Update(elapsedSeconds);
+		}
 	}
 }
 
@@ -1123,10 +1135,12 @@ Components::Rotation& Scene::GetPrimaryCameraRotation() {
 }
 
 void Scene::PropagateTransforms() {
+	ZoneScopedN("Scene::PropagateTransforms");
 	auto& world = GetSceneWorld();
 
 	// Lazy-init helper queries (stored as members so they're destroyed with the Scene)
 	if (!m_propagateQueriesBuilt) {
+		ZoneScopedN("Scene::PropagateTransforms::BuildQueries");
 		m_updatedCleanupQuery = world.query_builder<>()
 			.with<Components::TransformUpdatedThisFrame>()
 			.build();
@@ -1138,19 +1152,26 @@ void Scene::PropagateTransforms() {
 	}
 
 	// Clear previous frame's TransformUpdatedThisFrame tags
-	world.defer_begin();
-	m_updatedCleanupQuery.each([](flecs::entity e) {
-		e.remove<Components::TransformUpdatedThisFrame>();
-	});
-	world.defer_end();
+	{
+		ZoneScopedN("Scene::PropagateTransforms::ClearUpdatedTags");
+		world.defer_begin();
+		m_updatedCleanupQuery.each([&](flecs::entity e) {
+			e.remove<Components::TransformUpdatedThisFrame>();
+		});
+		world.defer_end();
+	}
 
 	// Propagate TransformDirty from dirty entities to their active descendants
 	std::vector<flecs::entity> dirtyRoots;
-	m_dirtyQuery.each([&](flecs::entity e) {
-		dirtyRoots.push_back(e);
-	});
+	{
+		ZoneScopedN("Scene::PropagateTransforms::CollectDirtyRoots");
+		m_dirtyQuery.each([&](flecs::entity e) {
+			dirtyRoots.push_back(e);
+		});
+	}
 
 	if (!dirtyRoots.empty()) {
+		ZoneScopedN("Scene::PropagateTransforms::PropagateDirtyToChildren");
 		std::unordered_set<uint64_t> visited;
 		for (auto& e : dirtyRoots) {
 			visited.insert(e.id());
@@ -1163,16 +1184,21 @@ void Scene::PropagateTransforms() {
 	}
 
 	// Run all systems (transform system now filters by TransformDirty)
-	world.progress();
+	{
+		ZoneScopedN("Scene::PropagateTransforms::WorldProgress");
+		world.progress();
+	}
 }
 
 void Scene::PostUpdate() {
+	ZoneScopedN("Scene::PostUpdate");
 	for (auto& child : m_childScenes) {
 		child->PostUpdate();
 	}
 }
 
 std::shared_ptr<Scene> Scene::AppendScene(std::shared_ptr<Scene> scene) {
+	ZoneScopedN("Scene::AppendScene");
 	if (!scene) {
 		return nullptr;
 	}
@@ -1188,6 +1214,7 @@ std::shared_ptr<Scene> Scene::AppendScene(std::shared_ptr<Scene> scene) {
 }
 
 void Scene::MakeResident() {
+	ZoneScopedN("Scene::MakeResident");
 	auto& world = GetSceneWorld();
 	std::vector<flecs::entity> renderables;
 	std::vector<flecs::entity> cameras;
@@ -1204,7 +1231,6 @@ void Scene::MakeResident() {
 			lights.push_back(entity);
 		}
 	});
-
 	for (auto& entity : renderables) {
 		ActivateRenderable(entity);
 	}
@@ -1353,6 +1379,7 @@ void CloneHierarchy(flecs::entity src, flecs::entity dst_parent) {
 }
 
 std::shared_ptr<Scene> Scene::Clone() const {
+	ZoneScopedN("Scene::Clone");
 	auto newScene = std::make_shared<Scene>();
 	newScene->ECSSceneRoot = ECSSceneRoot.clone();
 	ReassignStableSceneIDsRecursive(newScene->ECSSceneRoot);

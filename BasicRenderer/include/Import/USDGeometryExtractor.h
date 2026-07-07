@@ -42,6 +42,8 @@ struct ExtractOptions {
 	std::string objectSurfaceSamplingConfigHash;
 	bool retainClusterLODArtifacts = false;
 	bool buildPointInstancerAssemblyCaches = false;
+	bool buildWholeAssetAssemblyCaches = false;
+	bool importSkinningAsRigidBindPose = false;
 };
 
 void ResetBenchmarkStats();
@@ -99,5 +101,11 @@ StageExtractionResult ExtractAllFromStage(
 	const std::string& sourceIdentifier = {},
 	std::uint32_t tessellationFactor = 1,
 	const ExtractOptions& options = {});
+
+std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentity(
+	const pxr::UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	pxr::UsdTimeCode geomTimeCode,
+	const pxr::UsdGeomMesh& identityMesh);
 
 } // namespace USDGeometryExtractor

@@ -462,6 +462,7 @@ public:
             Builtin::CLod::Groups,
             Builtin::CLod::GroupPageMap,
             Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
             Builtin::SkeletonResources::InverseSkinMatrices,
             Builtin::PerMaterialOpenPBRDataBuffer)
             .WithUnorderedAccess(
@@ -594,6 +595,7 @@ public:
 
         unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
         miscRootConstants[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClusterBufferSRVIndex;
+        miscRootConstants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
         miscRootConstants[VISBUF_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] = m_reyesDiceQueueBufferSRVIndex;
         miscRootConstants[VISBUF_REYES_PATCH_INDEX_BASE] = m_patchVisibilityIndexBase;
         miscRootConstants[VISBUF_REYES_TESS_TABLE_CONFIGS_DESCRIPTOR_INDEX] = m_reyesTessTableConfigsBufferSRVIndex;

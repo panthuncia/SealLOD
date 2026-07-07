@@ -18,9 +18,12 @@
 #include <cmath>
 #include <chrono>
 #include <queue>
+#include <set>
 
 #include <nlohmann/json.hpp>
 #include <tracy/Tracy.hpp>
+
+#include <boost/functional/hash.hpp>
 
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/ar/resolver.h>
@@ -2080,6 +2083,40 @@ namespace USDLoader {
         return 0;
     }
 
+	std::vector<MeshUvSetData> BuildMaterialUvSetDescriptors(const UsdShadeMaterial& material)
+	{
+		std::vector<MeshUvSetData> uvSets;
+		auto appendUnique = [&](const std::string& uvSetName) {
+			if (uvSetName.empty()) {
+				return;
+			}
+			const auto existing = std::find_if(
+				uvSets.begin(),
+				uvSets.end(),
+				[&](const MeshUvSetData& uvSet) { return uvSet.name == uvSetName; });
+			if (existing == uvSets.end()) {
+				uvSets.push_back(MeshUvSetData{ .name = uvSetName });
+			}
+		};
+
+		if (!material) {
+			appendUnique("st");
+			return uvSets;
+		}
+
+		const auto templateIt = loadingCache.materialTemplateCache.find(material.GetPrim().GetPath().GetString());
+		if (templateIt == loadingCache.materialTemplateCache.end()) {
+			appendUnique("st");
+			return uvSets;
+		}
+
+		for (const std::string& uvSetName : templateIt->second.referencedUvSetNames) {
+			appendUnique(uvSetName);
+		}
+		appendUnique("st");
+		return uvSets;
+	}
+
     std::string BuildResolvedMaterialCacheKey(const std::string& materialPath, const MaterialDescription& resolvedDesc) {
         return materialPath + "|" +
             std::to_string(resolvedDesc.baseColor.uvSetIndex) + "|" +
@@ -3454,7 +3491,8 @@ namespace USDLoader {
 		bool isUSDZ,
 		const ImportSettings& importSettings,
 		const InMemoryStageOptions& stageOptions,
-		const std::string& sourceIdentifierOverride = {})
+		const std::string& sourceIdentifierOverride = {},
+		bool retainArtifactsForAssetAssembly = false)
 	{
 		ZoneScopedN("USDLoader::PreprocessAllMeshes");
 		ZoneText(sourceIdentifierOverride.data(), sourceIdentifierOverride.size());
@@ -3487,7 +3525,7 @@ namespace USDLoader {
 					return;
 				}
 
-				if (IsUnsupportedBrNiflySkinnedMesh(mesh)) {
+				if (!retainArtifactsForAssetAssembly && IsUnsupportedBrNiflySkinnedMesh(mesh)) {
 					spdlog::info(
 						"Skipping BRNifly skinned mesh '{}' until NIF skeleton pose updates are supported.",
 						meshPath);
@@ -3539,6 +3577,8 @@ namespace USDLoader {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
 					ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
+					extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
+					extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
 							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -3573,6 +3613,8 @@ namespace USDLoader {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
+						extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
+						extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
 								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -4160,6 +4202,700 @@ namespace USDLoader {
 		return skeleton;
 	}
 
+	void AddPayloadSkeletonAnimation(
+		const UsdSkelSkeleton& skel,
+		UsdSkelCache& skelCache,
+		const UsdStageRefPtr& stage,
+		double metersPerUnit,
+		const VtTokenArray& rawJointOrder,
+		const std::shared_ptr<Skeleton>& skeleton)
+	{
+		if (!skel || !stage || !skeleton || skeleton->GetAnimationCount() > 0u) {
+			return;
+		}
+
+		UsdSkelBindingAPI skelAPI(skel.GetPrim());
+		UsdPrim animPrim;
+		if (!skelAPI.GetAnimationSource(&animPrim)) {
+			return;
+		}
+
+		UsdSkelAnimation anim(animPrim);
+		auto animQuery = skelCache.GetAnimQuery(anim);
+		if (!animQuery) {
+			return;
+		}
+
+		if (auto animation = ProcessAnimQuery(animQuery, stage, metersPerUnit, rawJointOrder)) {
+			skeleton->AddAnimation(animation);
+		}
+	}
+
+	struct AssetAssemblyBucketKey
+	{
+		bool skinned = false;
+		std::uint64_t skinDomain = 0u;
+		std::string materialPath;
+
+		bool operator==(const AssetAssemblyBucketKey& other) const noexcept
+		{
+			return skinned == other.skinned &&
+				skinDomain == other.skinDomain &&
+				materialPath == other.materialPath;
+		}
+	};
+
+	struct AssetAssemblyBucketKeyHash
+	{
+		std::size_t operator()(const AssetAssemblyBucketKey& key) const noexcept
+		{
+			std::size_t result = static_cast<std::size_t>(key.skinDomain ^ (key.skinned ? 0x9E3779B97F4A7C15ull : 0ull));
+			boost::hash_combine(result, key.materialPath);
+			return result;
+		}
+	};
+
+	struct AssetAssemblyBucketInfo
+	{
+		AssetAssemblyBucketKey key;
+		std::shared_ptr<Skeleton> skeleton;
+		UsdShadeMaterial material;
+		std::string staticTextureOverrideSourceName;
+		std::vector<std::string> meshPaths;
+		UsdGeomMesh firstMesh;
+		bool forceDoubleSided = false;
+	};
+
+	static std::uint64_t StableHashString64(const std::string& value)
+	{
+		std::uint64_t hash = 1469598103934665603ull;
+		for (const unsigned char c : value) {
+			hash ^= static_cast<std::uint64_t>(c);
+			hash *= 1099511628211ull;
+		}
+		return hash;
+	}
+
+	static std::string Hex64(std::uint64_t value)
+	{
+		std::array<char, 17> chars{};
+		constexpr char kHex[] = "0123456789abcdef";
+		for (int i = 15; i >= 0; --i) {
+			chars[static_cast<std::size_t>(i)] = kHex[value & 0xfull];
+			value >>= 4u;
+		}
+		return std::string(chars.data(), 16);
+	}
+
+	static std::string AssetAssemblyMaterialDomainPath(const UsdShadeMaterial& material)
+	{
+		return material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>");
+	}
+
+	static std::wstring AssetAssemblyBucketName(const AssetAssemblyBucketKey& key, std::size_t skinnedIndex, std::size_t rigidIndex)
+	{
+		if (!key.skinned) {
+			return rigidIndex == 0u
+				? L"__CLodAssetAssembly"
+				: s2ws("__CLodAssetAssembly_Material" + std::to_string(rigidIndex));
+		}
+		return s2ws("__CLodAssetAssembly_Skinned" + std::to_string(skinnedIndex));
+	}
+
+	static ClusterLODAssemblyTransform AssetAssemblyTransformFromUsdMatrix(const GfMatrix4d& matrix)
+	{
+		auto transformPoint = [&matrix](double x, double y, double z) {
+			return matrix.Transform(GfVec3d(x, y, z));
+		};
+
+		const GfVec3d origin = transformPoint(0.0, 0.0, 0.0);
+		const GfVec3d basisX = transformPoint(1.0, 0.0, 0.0) - origin;
+		const GfVec3d basisY = transformPoint(0.0, 1.0, 0.0) - origin;
+		const GfVec3d basisZ = transformPoint(0.0, 0.0, 1.0) - origin;
+
+		ClusterLODAssemblyTransform transform{};
+		transform.row0 = DirectX::XMFLOAT4(
+			static_cast<float>(basisX[0]),
+			static_cast<float>(basisY[0]),
+			static_cast<float>(basisZ[0]),
+			static_cast<float>(origin[0]));
+		transform.row1 = DirectX::XMFLOAT4(
+			static_cast<float>(basisX[1]),
+			static_cast<float>(basisY[1]),
+			static_cast<float>(basisZ[1]),
+			static_cast<float>(origin[1]));
+		transform.row2 = DirectX::XMFLOAT4(
+			static_cast<float>(basisX[2]),
+			static_cast<float>(basisY[2]),
+			static_cast<float>(basisZ[2]),
+			static_cast<float>(origin[2]));
+		return transform;
+	}
+
+	static bool AssetPathHasAnyPrefix(const SdfPath& path, const std::vector<SdfPath>& prefixes)
+	{
+		for (const SdfPath& prefix : prefixes) {
+			if (path.HasPrefix(prefix)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static std::optional<CLodCacheLoader::MeshCacheIdentity> BuildAssetAssemblyIdentity(
+		const UsdStageRefPtr& stage,
+		const std::string& sourceIdentifier,
+		UsdTimeCode geomTimeCode,
+		const AssetAssemblyBucketInfo& bucket)
+	{
+		if (!stage) {
+			return std::nullopt;
+		}
+		if (!bucket.key.skinned) {
+			auto identity = USDGeometryExtractor::BuildWholeAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, bucket.firstMesh);
+			if (identity && !bucket.key.materialPath.empty()) {
+				identity->sourceIdentifier += "#material_domain=" + Hex64(StableHashString64(bucket.key.materialPath));
+			}
+			return identity;
+		}
+		return std::nullopt;
+	}
+
+	static std::optional<AssetAssemblyBucketKey> ClassifyAssetAssemblyMesh(
+		const UsdGeomMesh& mesh,
+		const UsdShadeMaterial& material,
+		UsdSkelCache&,
+		const UsdStageRefPtr&,
+		double,
+		std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash>&,
+		std::string* fallbackReason)
+	{
+		if (!mesh || IsBrNiflyCollisionMesh(mesh) || IsBrNiflyLODRenderMesh(mesh)) {
+			return std::nullopt;
+		}
+		if (fallbackReason) {
+			fallbackReason->clear();
+		}
+		AssetAssemblyBucketKey key{};
+		key.materialPath = AssetAssemblyMaterialDomainPath(material);
+		return key;
+	}
+
+	static std::vector<AssetAssemblyBucketInfo> DiscoverAssetAssemblyBuckets(
+		const UsdStageRefPtr& stage,
+		UsdSkelCache& skelCache,
+		double metersPerUnit,
+		UsdTimeCode geomTimeCode,
+		const ImportSettings& importSettings,
+		std::string* fallbackReason = nullptr)
+	{
+		ZoneScopedN("USDLoader::AssetAssembly::BucketizeParts");
+		std::vector<UsdGeomPointInstancer> pointInstancers;
+		std::vector<SdfPath> prototypeRoots;
+		std::set<std::string> prototypeRootStrings;
+
+		auto primRange = UsdPrimRange(stage->GetPseudoRoot());
+		for (auto primIt = primRange.begin(); primIt != primRange.end(); ++primIt) {
+			UsdGeomPointInstancer pointInstancer(*primIt);
+			if (!pointInstancer) {
+				continue;
+			}
+			pointInstancers.push_back(pointInstancer);
+			SdfPathVector targets;
+			if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+				for (const SdfPath& target : targets) {
+					if (prototypeRootStrings.insert(target.GetString()).second) {
+						prototypeRoots.push_back(target);
+					}
+				}
+			}
+		}
+		std::unordered_map<AssetAssemblyBucketKey, AssetAssemblyBucketInfo, AssetAssemblyBucketKeyHash> buckets;
+		std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash> skeletonsByKey;
+
+		auto addMeshToBucket = [&](const UsdGeomMesh& mesh, const UsdShadeMaterial& material, const std::optional<UsdGeomSubset>& subset) -> bool {
+			if (!mesh) {
+				return true;
+			}
+			std::string localReason;
+			auto key = ClassifyAssetAssemblyMesh(mesh, material, skelCache, stage, metersPerUnit, skeletonsByKey, &localReason);
+			if (!key) {
+				if (!localReason.empty() && fallbackReason) {
+					*fallbackReason = localReason;
+				}
+				return localReason.empty();
+			}
+
+			auto& bucket = buckets[*key];
+			bucket.key = *key;
+			if (!bucket.firstMesh) {
+				bucket.firstMesh = mesh;
+			}
+			if (!bucket.material && material) {
+				bucket.material = material;
+			}
+			if (bucket.staticTextureOverrideSourceName.empty()) {
+				bucket.staticTextureOverrideSourceName = mesh.GetPrim().GetName().GetString();
+			}
+			if (key->skinned) {
+				bucket.skeleton = skeletonsByKey[*key];
+			}
+			bool authoredDoubleSided = false;
+			if (UsdGeomGprim gprim(mesh.GetPrim()); gprim) {
+				gprim.GetDoubleSidedAttr().Get(&authoredDoubleSided, geomTimeCode);
+			}
+			bucket.forceDoubleSided =
+				bucket.forceDoubleSided ||
+				authoredDoubleSided ||
+				ShouldForceDoubleSidedByName(material, subset, importSettings);
+			bucket.meshPaths.push_back(mesh.GetPrim().GetPath().GetString());
+			return true;
+		};
+
+		std::function<bool(const UsdPrim&, bool)> recurseMeshes = [&](const UsdPrim& prim, bool skipPrototypeRoots) -> bool {
+			if (skipPrototypeRoots && AssetPathHasAnyPrefix(prim.GetPath(), prototypeRoots)) {
+				return true;
+			}
+			if (prim.IsA<UsdGeomImageable>()) {
+				UsdGeomImageable imageable(prim);
+				if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+					return true;
+				}
+			}
+			if (UsdGeomMesh mesh(prim); mesh) {
+				UsdShadeMaterialBindingAPI bindAPI(mesh);
+				auto subsets = bindAPI.GetMaterialBindSubsets();
+				if (subsets.empty()) {
+					if (!addMeshToBucket(mesh, bindAPI.ComputeBoundMaterial(), std::nullopt)) {
+						return false;
+					}
+				}
+				else {
+					for (const UsdGeomSubset& subset : subsets) {
+						if (!addMeshToBucket(mesh, UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial(), subset)) {
+							return false;
+						}
+					}
+				}
+			}
+			for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+				if (!recurseMeshes(child, skipPrototypeRoots)) {
+					return false;
+				}
+			}
+			return true;
+		};
+
+		if (!recurseMeshes(stage->GetPseudoRoot(), true)) {
+			return {};
+		}
+		for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
+			SdfPathVector prototypeTargets;
+			if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
+				continue;
+			}
+			VtIntArray protoIndices;
+			if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
+				continue;
+			}
+			std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
+			if (!mask.empty()) {
+				UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices);
+			}
+			std::vector<bool> prototypeUsed(prototypeTargets.size(), false);
+			for (int protoIndex : protoIndices) {
+				if (protoIndex >= 0 && static_cast<std::size_t>(protoIndex) < prototypeTargets.size()) {
+					prototypeUsed[static_cast<std::size_t>(protoIndex)] = true;
+				}
+			}
+			for (std::size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
+				if (!prototypeUsed[prototypeIndex]) {
+					continue;
+				}
+				const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
+				if (prototypeRoot && !recurseMeshes(prototypeRoot, false)) {
+					return {};
+				}
+			}
+		}
+		std::vector<AssetAssemblyBucketInfo> orderedBuckets;
+		orderedBuckets.reserve(buckets.size());
+		for (auto& [_, bucket] : buckets) {
+			std::sort(bucket.meshPaths.begin(), bucket.meshPaths.end());
+			bucket.meshPaths.erase(std::unique(bucket.meshPaths.begin(), bucket.meshPaths.end()), bucket.meshPaths.end());
+			orderedBuckets.push_back(std::move(bucket));
+		}
+		std::sort(orderedBuckets.begin(), orderedBuckets.end(), [](const auto& lhs, const auto& rhs) {
+			if (lhs.key.skinned != rhs.key.skinned) {
+				return !lhs.key.skinned;
+			}
+			if (lhs.key.skinDomain != rhs.key.skinDomain) {
+				return lhs.key.skinDomain < rhs.key.skinDomain;
+			}
+			return lhs.key.materialPath < rhs.key.materialPath;
+		});
+
+		return orderedBuckets;
+	}
+
+	static std::shared_ptr<Mesh> BuildMeshFromAssetAssemblyPrebuilt(
+		std::optional<ClusterLODPrebuiltData>&& prebuilt,
+		const std::shared_ptr<Material>& material,
+		const std::shared_ptr<Skeleton>& skeleton)
+	{
+		if (!prebuilt) {
+			return nullptr;
+		}
+		MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
+		auto mesh = ingest.Build(material ? material : Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
+		if (mesh && skeleton) {
+			mesh->SetBaseSkin(skeleton);
+		}
+		return mesh;
+	}
+
+	static bool TryLoadAssetAssemblyMeshes(
+		const UsdStageRefPtr& stage,
+		const StageImportContext& stageContext,
+		const ImportSettings& importSettings,
+		const InMemoryStageOptions& options,
+		const std::string& sourceIdentifier,
+		UsdTimeCode geomTimeCode,
+		const std::vector<AssetAssemblyBucketInfo>& buckets,
+		std::vector<std::shared_ptr<Mesh>>& meshes)
+	{
+		ZoneScopedN("USDLoader::LoadModelFromStage::TryLoadAssetAssemblyCache");
+		meshes.clear();
+		meshes.reserve(buckets.size());
+		for (const AssetAssemblyBucketInfo& bucket : buckets) {
+			auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, bucket);
+			if (!identity) {
+				return false;
+			}
+			auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
+			if (!prebuilt || prebuilt->groups.empty()) {
+				meshes.clear();
+				return false;
+			}
+			if (bucket.material) {
+				ProcessMaterial(
+					bucket.material,
+					stage,
+					options,
+					stageContext.isUSDZ,
+					stageContext.directory,
+					importSettings.loadMaterialTextures);
+			}
+			const std::vector<MeshUvSetData> materialUvSets = BuildMaterialUvSetDescriptors(bucket.material);
+			auto material = ResolveMaterialForMesh(
+				bucket.material,
+				materialUvSets,
+				bucket.forceDoubleSided,
+				bucket.firstMesh.GetPrim(),
+				nullptr,
+				bucket.staticTextureOverrideSourceName);
+			auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material, bucket.skeleton);
+			if (!mesh) {
+				meshes.clear();
+				return false;
+			}
+			meshes.push_back(std::move(mesh));
+		}
+		return !meshes.empty();
+	}
+
+	static bool BuildAssetAssemblyMeshesFromPreprocessedData(
+		const UsdStageRefPtr& stage,
+		const StageImportContext& stageContext,
+		const ImportSettings& importSettings,
+		const InMemoryStageOptions& options,
+		const std::string& sourceIdentifier,
+		UsdTimeCode geomTimeCode,
+		const std::vector<AssetAssemblyBucketInfo>& buckets,
+		std::vector<std::shared_ptr<Mesh>>& meshes)
+	{
+		ZoneScopedN("USDLoader::LoadModelFromStage::BuildAssetAssemblyCache");
+		meshes.clear();
+		meshes.reserve(buckets.size());
+
+		struct BuildBucket {
+			const AssetAssemblyBucketInfo* info = nullptr;
+			std::vector<ClusterLODAssemblyPart> parts;
+			std::vector<ClusterLODAssemblyInstanceSpec> instances;
+			std::unordered_map<const MeshPreprocessResult*, uint32_t> partByResult;
+			std::vector<MeshUvSetData> representativeUvSets;
+			std::string staticTextureOverrideSourceName;
+			bool forceDoubleSided = false;
+		};
+
+		std::unordered_map<AssetAssemblyBucketKey, std::size_t, AssetAssemblyBucketKeyHash> bucketIndexByKey;
+		std::vector<BuildBucket> buildBuckets;
+		buildBuckets.reserve(buckets.size());
+		for (const AssetAssemblyBucketInfo& bucket : buckets) {
+			bucketIndexByKey.emplace(bucket.key, buildBuckets.size());
+			buildBuckets.push_back(BuildBucket{ .info = &bucket });
+		}
+
+		auto addResultInstance = [&](BuildBucket& bucket, const MeshPreprocessResult& result, const GfMatrix4d& transform) -> bool {
+			if (!result.transientArtifacts) {
+				spdlog::warn("USD whole-asset CLod assembly missing retained CLod artifacts for '{}'.", result.sourcePrimPath);
+				return false;
+			}
+			uint32_t partIndex = 0u;
+			const auto existing = bucket.partByResult.find(&result);
+			if (existing != bucket.partByResult.end()) {
+				partIndex = existing->second;
+			}
+			else {
+				partIndex = static_cast<uint32_t>(bucket.parts.size());
+				bucket.parts.push_back(ClusterLODAssemblyPart{
+					.artifacts = result.transientArtifacts.get(),
+					.coverageVertices = &result.ingest.GetVertices(),
+					.coverageIndices = &result.ingest.GetIndices(),
+					.coverageVertexSize = result.ingest.GetVertexSize() });
+				bucket.partByResult.emplace(&result, partIndex);
+			}
+			bucket.instances.push_back(ClusterLODAssemblyInstanceSpec{
+				.partIndex = partIndex,
+				.rootNode = 0u,
+				.transform = AssetAssemblyTransformFromUsdMatrix(transform),
+				.flags = 0u,
+			});
+			return true;
+		};
+
+		auto addMeshInstances = [&](const UsdGeomMesh& mesh, const GfMatrix4d& transform) -> bool {
+			std::string ignoredReason;
+			UsdSkelCache localSkelCache;
+			std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash> ignoredSkeletons;
+			const auto recordIt = loadingCache.preprocessedMeshCache.find(mesh.GetPrim().GetPath().GetString());
+			if (recordIt == loadingCache.preprocessedMeshCache.end()) {
+				spdlog::warn("USD whole-asset CLod assembly missing preprocessed mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+				return false;
+			}
+			for (const PreprocessedMeshSubset& subset : recordIt->second.subsets) {
+				auto key = ClassifyAssetAssemblyMesh(mesh, subset.material, localSkelCache, stage, UsdGeomGetStageMetersPerUnit(stage), ignoredSkeletons, &ignoredReason);
+				if (!key) {
+					return ignoredReason.empty();
+				}
+				const auto bucketIt = bucketIndexByKey.find(*key);
+				if (bucketIt == bucketIndexByKey.end()) {
+					continue;
+				}
+				BuildBucket& bucket = buildBuckets[bucketIt->second];
+				bucket.forceDoubleSided =
+					bucket.forceDoubleSided ||
+					recordIt->second.authoredDoubleSided ||
+					subset.inferredDoubleSided ||
+					subset.result.forceDoubleSidedPreview;
+				if (bucket.representativeUvSets.empty()) {
+					bucket.representativeUvSets = subset.result.ingest.GetUvSets();
+				}
+				if (bucket.staticTextureOverrideSourceName.empty()) {
+					bucket.staticTextureOverrideSourceName = subset.staticTextureOverrideSourceName.empty()
+						? mesh.GetPrim().GetName().GetString()
+						: subset.staticTextureOverrideSourceName;
+				}
+				if (!addResultInstance(bucket, subset.result, transform)) {
+					return false;
+				}
+			}
+			return true;
+		};
+
+		std::vector<UsdGeomPointInstancer> pointInstancers;
+		std::vector<SdfPath> prototypeRoots;
+		std::set<std::string> prototypeRootStrings;
+		auto instancerRange = UsdPrimRange(stage->GetPseudoRoot());
+		for (auto primIt = instancerRange.begin(); primIt != instancerRange.end(); ++primIt) {
+			UsdGeomPointInstancer pointInstancer(*primIt);
+			if (!pointInstancer) {
+				continue;
+			}
+			pointInstancers.push_back(pointInstancer);
+			SdfPathVector targets;
+			if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+				for (const SdfPath& target : targets) {
+					if (prototypeRootStrings.insert(target.GetString()).second) {
+						prototypeRoots.push_back(target);
+					}
+				}
+			}
+		}
+
+		UsdGeomXformCache xformCache(geomTimeCode);
+		auto rootPrimRange = UsdPrimRange(stage->GetPseudoRoot());
+		for (auto primIt = rootPrimRange.begin(); primIt != rootPrimRange.end(); ++primIt) {
+			UsdGeomMesh mesh(*primIt);
+			if (!mesh || AssetPathHasAnyPrefix(mesh.GetPrim().GetPath(), prototypeRoots)) {
+				continue;
+			}
+			if (UsdGeomImageable imageable(mesh.GetPrim());
+				imageable && imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+				continue;
+			}
+			if (!addMeshInstances(mesh, xformCache.GetLocalToWorldTransform(mesh.GetPrim()))) {
+				return false;
+			}
+		}
+
+		for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
+			SdfPathVector prototypeTargets;
+			if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
+				continue;
+			}
+			VtIntArray protoIndices;
+			if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
+				continue;
+			}
+			std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
+			if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
+				continue;
+			}
+			VtArray<GfMatrix4d> instanceTransforms;
+			if (!pointInstancer.ComputeInstanceTransformsAtTime(
+				&instanceTransforms,
+				geomTimeCode,
+				geomTimeCode,
+				UsdGeomPointInstancer::IncludeProtoXform,
+				UsdGeomPointInstancer::ApplyMask)) {
+				continue;
+			}
+
+			const std::size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
+			for (std::size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
+				const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
+				if (!prototypeRoot) {
+					continue;
+				}
+				const GfMatrix4d prototypeRootWorldInverse = xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
+				std::vector<std::pair<UsdGeomMesh, GfMatrix4d>> prototypeMeshes;
+				std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
+					if (prim.IsA<UsdGeomImageable>()) {
+						UsdGeomImageable imageable(prim);
+						if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+							return;
+						}
+					}
+					if (UsdGeomMesh mesh(prim); mesh) {
+						prototypeMeshes.emplace_back(mesh, xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
+					}
+					for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+						gatherPrototypeMeshes(child);
+					}
+				};
+				gatherPrototypeMeshes(prototypeRoot);
+
+				for (std::size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+					if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
+						continue;
+					}
+					for (const auto& [mesh, prototypeLocal] : prototypeMeshes) {
+						if (!addMeshInstances(mesh, prototypeLocal * instanceTransforms[instanceIndex])) {
+							return false;
+						}
+					}
+				}
+			}
+		}
+
+		for (BuildBucket& bucket : buildBuckets) {
+			if (bucket.parts.empty() || bucket.instances.empty()) {
+				spdlog::warn(
+					"USD whole-asset CLod assembly bucket produced no instances: skinned={}, domain={}.",
+					bucket.info && bucket.info->key.skinned,
+					bucket.info ? std::to_string(bucket.info->key.skinDomain) : std::string("<none>"));
+				return false;
+			}
+			try {
+				ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
+					bucket.parts,
+					bucket.instances,
+					GetDefaultBuilderSettings(),
+					8u);
+
+				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);
+				if (!identity) {
+					return false;
+				}
+				ClusterLODPrebuiltData savedPrebuiltData;
+				std::optional<ClusterLODPrebuiltData> prebuiltData;
+				if (CLodCacheLoader::SavePrebuiltLocked(
+					*identity,
+					assemblyArtifacts.prebuiltData,
+					assemblyArtifacts.cacheBuildData.AsPayload(),
+					&savedPrebuiltData)) {
+					auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
+					prebuiltData = diskBackedPrebuilt ? std::move(*diskBackedPrebuilt) : std::make_optional(std::move(savedPrebuiltData));
+				}
+				else {
+					spdlog::warn("USD whole-asset CLod assembly cache save failed; using in-memory assembly for this import.");
+					prebuiltData = std::move(assemblyArtifacts.prebuiltData);
+				}
+
+				std::shared_ptr<Material> material = Material::GetDefaultMaterial();
+				if (bucket.info && bucket.info->material) {
+					ProcessMaterial(
+						bucket.info->material,
+						stage,
+						options,
+						stageContext.isUSDZ,
+						stageContext.directory,
+						importSettings.loadMaterialTextures);
+					const std::vector<MeshUvSetData> materialUvSets = bucket.representativeUvSets.empty()
+						? BuildMaterialUvSetDescriptors(bucket.info->material)
+						: bucket.representativeUvSets;
+					material = ResolveMaterialForMesh(
+						bucket.info->material,
+						materialUvSets,
+						bucket.forceDoubleSided || bucket.info->forceDoubleSided,
+						bucket.info->firstMesh.GetPrim(),
+						nullptr,
+						bucket.staticTextureOverrideSourceName.empty()
+							? bucket.info->staticTextureOverrideSourceName
+							: bucket.staticTextureOverrideSourceName);
+				}
+				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuiltData), material, bucket.info->skeleton);
+				if (mesh) {
+					meshes.push_back(std::move(mesh));
+				}
+			}
+			catch (const std::exception& e) {
+				spdlog::warn("USD whole-asset CLod assembly build failed: {}", e.what());
+				return false;
+			}
+		}
+
+		return !meshes.empty();
+	}
+
+	static std::shared_ptr<Scene> CreateCollapsedAssetAssemblyScene(
+		const std::vector<std::shared_ptr<Mesh>>& meshes,
+		const std::vector<AssetAssemblyBucketInfo>& buckets)
+	{
+		ZoneScopedN("USDLoader::LoadModelFromStage::CreateCollapsedAssemblyScene");
+		auto scene = std::make_shared<Scene>();
+		std::size_t skinnedIndex = 0u;
+		std::size_t rigidIndex = 0u;
+		for (std::size_t bucketIndex = 0; bucketIndex < meshes.size() && bucketIndex < buckets.size(); ++bucketIndex) {
+			const auto& mesh = meshes[bucketIndex];
+			if (!mesh) {
+				continue;
+			}
+			const AssetAssemblyBucketKey& key = buckets[bucketIndex].key;
+			scene->CreateRenderableEntityECS(
+				std::vector<std::shared_ptr<Mesh>>{ mesh },
+				AssetAssemblyBucketName(key, skinnedIndex, rigidIndex));
+			if (key.skinned) {
+				++skinnedIndex;
+			}
+			else {
+				++rigidIndex;
+			}
+		}
+		return scene;
+	}
+
 	struct PayloadMeshResult
 	{
 		std::vector<std::shared_ptr<Mesh>> meshes;
@@ -4220,6 +4956,7 @@ namespace USDLoader {
 				}
 
 				skeleton = BuildPayloadSkeleton(skel, skelJointOrderRaw, skelQuery, metersPerUnit);
+				AddPayloadSkeletonAnimation(skel, skelCache, stage, metersPerUnit, skelJointOrderRaw, skeleton);
 			}
 		}
 
@@ -4761,17 +5498,93 @@ namespace USDLoader {
 			loadingCache.textureSearchRoots.push_back(stageContext.directory);
 		}
 
-		auto scene = std::make_shared<Scene>();
-
+		const UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
 		UsdSkelCache skelCache;
+		std::string assetAssemblyFallbackReason;
+		auto assetAssemblyBuckets = DiscoverAssetAssemblyBuckets(
+			stage,
+			skelCache,
+			stageContext.metersPerUnit,
+			geomTimeCode,
+			importSettings,
+			&assetAssemblyFallbackReason);
 
-		PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
+		std::vector<std::shared_ptr<Mesh>> assetAssemblyMeshes;
+		if (!assetAssemblyBuckets.empty() &&
+			TryLoadAssetAssemblyMeshes(
+				stage,
+				stageContext,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				geomTimeCode,
+				assetAssemblyBuckets,
+				assetAssemblyMeshes)) {
+			spdlog::info(
+				"USD whole-asset CLod assembly cache hit: buckets={}, renderables={}.",
+				assetAssemblyBuckets.size(),
+				assetAssemblyMeshes.size());
+			auto scene = CreateCollapsedAssetAssemblyScene(assetAssemblyMeshes, assetAssemblyBuckets);
+			loadingCache.Clear();
+			return scene;
+		}
 
-		ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
+		bool preprocessedForAssembly = false;
+		if (!assetAssemblyBuckets.empty()) {
+			PreprocessAllMeshes(
+				stage,
+				stageContext.metersPerUnit,
+				stageContext.directory,
+				stageContext.isUSDZ,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				true);
+			preprocessedForAssembly = true;
 
-		loadingCache.Clear();
+			if (BuildAssetAssemblyMeshesFromPreprocessedData(
+				stage,
+				stageContext,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				geomTimeCode,
+				assetAssemblyBuckets,
+				assetAssemblyMeshes)) {
+				spdlog::info(
+					"USD whole-asset CLod assembly built: buckets={}, renderables={}.",
+					assetAssemblyBuckets.size(),
+					assetAssemblyMeshes.size());
+				auto scene = CreateCollapsedAssetAssemblyScene(assetAssemblyMeshes, assetAssemblyBuckets);
+				loadingCache.Clear();
+				return scene;
+			}
+		}
 
-		return scene;
+		{
+			ZoneScopedN("USDLoader::LoadModelFromStage::ParseExpandedHierarchyFallback");
+			if (!assetAssemblyFallbackReason.empty()) {
+				spdlog::warn("USD whole-asset CLod assembly fallback: {}", assetAssemblyFallbackReason);
+			}
+			else {
+				spdlog::warn("USD whole-asset CLod assembly fallback: cache/build path did not produce renderables.");
+			}
+			if (!preprocessedForAssembly) {
+				PreprocessAllMeshes(
+					stage,
+					stageContext.metersPerUnit,
+					stageContext.directory,
+					stageContext.isUSDZ,
+					importSettings,
+					options,
+					options.sourceIdentifier);
+			}
+
+			auto scene = std::make_shared<Scene>();
+			ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
+			loadingCache.Clear();
+			return scene;
+		}
 	}
 
 	std::optional<ImportedAssetPayload> LoadImportedAssetFromStage(

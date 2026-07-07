@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <span>
 #include <vector>
 #include <directxmath.h>
 
@@ -23,6 +24,28 @@ struct VoxelSourcePayloadInstance
 	int32_t refinedGroupOverride = std::numeric_limits<int32_t>::min();
 };
 
+struct VoxelSourceTrianglePart
+{
+	const std::vector<std::byte>* vertices = nullptr;
+	size_t vertexStrideBytes = 0;
+	const std::vector<uint32_t>* triangleIndices = nullptr;
+};
+
+struct VoxelSourceTriangleInstance
+{
+	uint32_t partIndex = 0;
+	ClusterLODAssemblyTransform localToWorld{};
+	int32_t refinedGroup = -1;
+};
+
+struct VoxelSourceTriangleSample
+{
+	DirectX::XMFLOAT3 positions[3]{};
+	DirectX::XMFLOAT3 normals[3]{};
+	DirectX::XMFLOAT2 uvs[3]{};
+	uint32_t dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+};
+
 class VoxelSourceTriangleBVH
 {
 public:
@@ -38,6 +61,10 @@ public:
 		const std::vector<int32_t>* triangleRefinedGroupIds = nullptr,
 		bool doubleSidedTriangles = false,
 		bool buildRefinedGroupScenes = true);
+	void BuildInstanced(
+		std::span<const VoxelSourceTrianglePart> parts,
+		std::span<const VoxelSourceTriangleInstance> instances,
+		bool doubleSidedTriangles = false);
 	void SetRefinedGroupDomainMap(std::vector<std::vector<int32_t>> refinedGroupDomainMap);
 
 	bool IsValid() const;
@@ -51,6 +78,9 @@ public:
 		float& outT,
 		float& outU,
 		float& outV) const;
+	bool GetTriangleSample(
+		uint32_t triangleIndex,
+		VoxelSourceTriangleSample& outSample) const;
 
 	const std::vector<std::byte>* Vertices() const { return m_vertices; }
 	size_t VertexStrideBytes() const { return m_vertexStrideBytes; }
@@ -119,6 +149,7 @@ struct VoxelizeTrianglesInput
 	// Output selection. Both default to true for compatibility with existing callers.
 	bool emitRenderPayload = true;
 	bool emitSourcePayload = true;
+
 };
 
 struct VoxelizeTrianglesResult

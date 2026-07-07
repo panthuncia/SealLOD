@@ -39,6 +39,10 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 struct ClusterLODAssemblyPart
 {
 	const ClusterLODPrebuildArtifacts* artifacts = nullptr;
+	const std::vector<std::byte>* coverageVertices = nullptr;
+	const std::vector<uint32_t>* coverageIndices = nullptr;
+	unsigned int coverageVertexSize = 0;
+	bool doubleSidedCoverageTriangles = false;
 };
 
 struct ClusterLODAssemblyInstanceSpec
@@ -53,4 +57,5 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::span<const ClusterLODAssemblyPart> parts,
 	std::span<const ClusterLODAssemblyInstanceSpec> instances,
 	const ClusterLODBuilderSettings& settings,
-	uint32_t preferredNodeWidth = 8u);
+	uint32_t preferredNodeWidth = 8u,
+	bool synthesizeVoxelParents = true);

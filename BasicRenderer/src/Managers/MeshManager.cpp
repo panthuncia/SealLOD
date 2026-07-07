@@ -57,6 +57,7 @@ void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& meta
 	const auto& groups = mesh.GetCLodGroups();
 	const auto& nodes = mesh.GetCLodNodes();
 	const auto& transforms = mesh.GetCLodAssemblyTransforms();
+	const auto& assemblyInstances = mesh.GetCLodAssemblyInstances();
 	uint32_t proxyGroups = 0u;
 	uint32_t assemblyVoxelGroups = 0u;
 	uint32_t voxelGroups = 0u;
@@ -84,9 +85,23 @@ void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& meta
 
 	const uint32_t rootNode = mesh.GetCLodRootNodeIndex();
 	const ClusterLODNode* root = rootNode < nodes.size() ? &nodes[rootNode] : nullptr;
+	uint32_t internalNodes = 0u;
+	uint32_t voxelLeafNodes = 0u;
+	uint32_t segmentLeafNodes = 0u;
+	uint32_t instanceRootNodes = 0u;
+	uint32_t unknownNodeKinds = 0u;
+	for (const ClusterLODNode& node : nodes) {
+		switch (node.range.isGroup) {
+		case CLOD_NODE_INTERNAL: ++internalNodes; break;
+		case CLOD_NODE_VOXEL_LEAF: ++voxelLeafNodes; break;
+		case CLOD_NODE_SEGMENT_LEAF: ++segmentLeafNodes; break;
+		case CLOD_NODE_INSTANCE_ROOT: ++instanceRootNodes; break;
+		default: ++unknownNodeKinds; break;
+		}
+	}
 	const BoundingSphere objectSphere = mesh.GetPerMeshCBData().boundingSphere;
 	spdlog::info(
-		"CLOD assembly upload detail: mesh={} objectSphere=({},{},{},{}) proxyGroups={} pageLessProxyGroups={} voxelGroups={} assemblyVoxelGroups={} pageLessAssemblyVoxelGroups={} maxAssemblyVoxelDepth={} maxTraversalDepth={} rootNode={} rootKind={} rootLodSphere=({},{},{},{})",
+		"CLOD assembly upload detail: mesh={} objectSphere=({},{},{},{}) proxyGroups={} pageLessProxyGroups={} voxelGroups={} assemblyVoxelGroups={} pageLessAssemblyVoxelGroups={} maxAssemblyVoxelDepth={} maxTraversalDepth={} rootNode={} rootKind={} nodes(internal={} voxel_leaf={} segment_leaf={} instance_root={} unknown={}) rootLodSphere=({},{},{},{})",
 		mesh.GetGlobalID(),
 		objectSphere.sphere.x,
 		objectSphere.sphere.y,
@@ -101,6 +116,11 @@ void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& meta
 		mesh.GetCLodMaxTraversalDepth(),
 		rootNode,
 		root != nullptr ? root->range.isGroup : 0xFFFFFFFFu,
+		internalNodes,
+		voxelLeafNodes,
+		segmentLeafNodes,
+		instanceRootNodes,
+		unknownNodeKinds,
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.x : 0.0f,
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.y : 0.0f,
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.z : 0.0f,
@@ -180,6 +200,7 @@ void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& meta
 			transform.row2.z,
 			transform.row2.w);
 	}
+
 }
 
 size_t ReserveBytesWithImportHeadroom(size_t requestedBytes, size_t minimumHeadroomBytes) {

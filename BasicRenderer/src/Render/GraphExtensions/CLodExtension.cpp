@@ -2173,6 +2173,24 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
             phaseIndex == 2u || traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow);
 
         std::string lastRasterPassName = fixedRasterPassName;
+
+        if (useComputeSWRaster) {
+            lastRasterPassName = appendComputeSoftwareRasterPasses(phaseIndex, reyesOwnershipBitsetBuffer);
+        }
+
+        if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow && useShadowPageJob) {
+            lastRasterPassName = phaseIndex == 1u
+                ? CLodShadowVariant::AppendPhase1PageJobRasterPasses(*this, traits, slabGroup, outPasses)
+                : CLodShadowVariant::AppendPhase2PageJobRasterPasses(*this, traits, slabGroup, outPasses);
+            shadowClearDirtyBitsAfterPassName = lastRasterPassName;
+        }
+        else if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow && useShadowReyesRouting) {
+            lastRasterPassName = phaseIndex == 1u
+                ? CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses)
+                : CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses);
+            shadowClearDirtyBitsAfterPassName = lastRasterPassName;
+        }
+
         const std::string voxelRasterPassName = MakeVariantPassName(traits, "VoxelSoftwareRasterizePass" + std::to_string(phaseIndex));
         auto voxelRasterPassDesc = RenderGraph::ExternalPassDesc::Compute(
             voxelRasterPassName,
@@ -2194,32 +2212,17 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     slabGroup,
                     m_voxelRasterWorkCapacity));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            auto voxelInsertPoint = RenderGraph::ExternalInsertPoint::Between(fixedRasterPassName, "MaterialHistogramPass");
+            auto voxelInsertPoint = RenderGraph::ExternalInsertPoint::After(lastRasterPassName);
+            voxelInsertPoint.AlsoBefore("MaterialHistogramPass");
+            voxelInsertPoint.AlsoBefore("BuildPixelListPass");
             voxelRasterPassDesc.At(std::move(voxelInsertPoint));
         }
         else {
-            voxelRasterPassDesc.At(RenderGraph::ExternalInsertPoint::After(fixedRasterPassName));
+            voxelRasterPassDesc.At(RenderGraph::ExternalInsertPoint::After(lastRasterPassName));
         }
         voxelRasterPassDesc.PreferQueue(QueueKind::Graphics);
         outPasses.push_back(std::move(voxelRasterPassDesc));
         lastRasterPassName = voxelRasterPassName;
-
-        if (useComputeSWRaster) {
-            lastRasterPassName = appendComputeSoftwareRasterPasses(phaseIndex, reyesOwnershipBitsetBuffer);
-        }
-
-        if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow && useShadowPageJob) {
-            lastRasterPassName = phaseIndex == 1u
-                ? CLodShadowVariant::AppendPhase1PageJobRasterPasses(*this, traits, slabGroup, outPasses)
-                : CLodShadowVariant::AppendPhase2PageJobRasterPasses(*this, traits, slabGroup, outPasses);
-            shadowClearDirtyBitsAfterPassName = lastRasterPassName;
-        }
-        else if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow && useShadowReyesRouting) {
-            lastRasterPassName = phaseIndex == 1u
-                ? CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses)
-                : CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses);
-            shadowClearDirtyBitsAfterPassName = lastRasterPassName;
-        }
 
         appendPerViewDepthCopyPass(phaseIndex);
         return lastRasterPassName;

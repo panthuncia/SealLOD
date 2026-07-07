@@ -1183,10 +1183,12 @@ static bool ProcessFile(const fs::path& path) {
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
+            extractOptions.buildWholeAssetAssemblyCaches = true;
+            extractOptions.importSkinningAsRigidBindPose = true;
             USDGeometryExtractor::StageExtractionResult result;
             {
                 ZoneScopedN("CLodCacheTool::USD::ExtractAllFromStage");
-                result = USDGeometryExtractor::ExtractAllFromStage(stage, {}, g_usdTessellationFactor, extractOptions);
+                result = USDGeometryExtractor::ExtractAllFromStage(stage, pathStr, g_usdTessellationFactor, extractOptions);
             }
             spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
@@ -1261,6 +1263,8 @@ static bool ProcessFile(const fs::path& path) {
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
+            extractOptions.buildWholeAssetAssemblyCaches = true;
+            extractOptions.importSkinningAsRigidBindPose = true;
             USDGeometryExtractor::StageExtractionResult result;
             {
                 ZoneScopedN("CLodCacheTool::NIF::ExtractAllFromStage");

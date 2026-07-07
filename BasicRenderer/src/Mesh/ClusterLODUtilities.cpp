@@ -4320,7 +4320,7 @@ namespace
 			if (childGroupIndex < state.groups.size())
 			{
 				const float childError = state.groups[childGroupIndex].bounds.error;
-				if (std::isfinite(childError) && childError > 0.0f && childError < std::numeric_limits<float>::max() * 0.5f)
+				if (std::isfinite(childError) && childError > 0.0f && childError < 5.0e19f)
 				{
 					range.minError = std::min(range.minError, childError);
 					range.maxError = std::max(range.maxError, childError);
@@ -4352,6 +4352,21 @@ namespace
 	}
 
 	constexpr float kClusterLODStructuralTraversalError = 1.0e20f;
+
+	bool IsStructuralTraversalError(float error)
+	{
+		return std::isfinite(error) &&
+			error >= kClusterLODStructuralTraversalError * 0.5f &&
+			!IsTerminalErrorSentinel(error);
+	}
+
+	bool IsFiniteContentTraversalError(float error)
+	{
+		return std::isfinite(error) &&
+			error > 0.0f &&
+			!IsTerminalErrorSentinel(error) &&
+			!IsStructuralTraversalError(error);
+	}
 
 	float TraversalNodeErrorFromGroupError(float error)
 	{
@@ -5988,7 +6003,7 @@ namespace
 					}
 
 					const float childError = state.groups[childGroupIndex].bounds.error;
-					if (std::isfinite(childError) && childError > 0.0f && !IsTerminalErrorSentinel(childError))
+					if (IsFiniteContentTraversalError(childError))
 					{
 						maxChildError = std::max(maxChildError, childError);
 						hasFiniteChild = true;
@@ -6383,6 +6398,15 @@ namespace
 				// error of the group that owns this segment. Internal traversal
 				// nodes propagate the max of their children below.
 				node.traversalMetric.maxQuadricError = TraversalNodeErrorFromGroupError(grp.bounds.error);
+				if (info.nodeKind == CLOD_NODE_INSTANCE_ROOT)
+				{
+					// Instance-root leaves are portals into the referenced part
+					// hierarchy, not renderable simplifications. Keep the proxy
+					// group's finite error for condition-2 boundaries, but make
+					// the traversal node itself always eligible once this LOD
+					// layer is active so it can open the child hierarchy.
+					node.traversalMetric.maxQuadricError = kClusterLODStructuralTraversalError;
+				}
 			}
 
 			if (leafCount == 1)
@@ -6682,8 +6706,8 @@ namespace
 
 					const float parentError = group.bounds.error;
 					const float childError = state.groups[childGroupIndex].bounds.error;
-					const bool finiteParent = std::isfinite(parentError) && parentError < std::numeric_limits<float>::max() * 0.5f;
-					const bool finiteChild = std::isfinite(childError) && childError < std::numeric_limits<float>::max() * 0.5f;
+					const bool finiteParent = IsFiniteContentTraversalError(parentError);
+					const bool finiteChild = IsFiniteContentTraversalError(childError);
 					if (finiteParent && finiteChild && !(parentError > childError))
 					{
 						monotonicErrorViolations++;
@@ -7741,7 +7765,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::span<const ClusterLODAssemblyPart> parts,
 	std::span<const ClusterLODAssemblyInstanceSpec> instances,
 	const ClusterLODBuilderSettings& settings,
-	uint32_t preferredNodeWidth)
+	uint32_t preferredNodeWidth,
+	bool synthesizeVoxelParents)
 {
 	if (parts.empty())
 	{
@@ -7760,11 +7785,16 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
 	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
 	std::vector<std::vector<VoxelSourcePayloadInstance>> assemblyGroupSources;
+	std::vector<std::vector<int32_t>> assemblyCoverageDomainMap;
+	std::vector<VoxelSourceTrianglePart> assemblyCoverageParts;
+	std::vector<VoxelSourceTriangleInstance> assemblyCoverageInstances;
+	VoxelSourceTriangleBVH assemblyCoverageSourceTriangles;
 	std::vector<uint32_t> groupBases(parts.size(), 0u);
 	std::vector<uint32_t> segmentBases(parts.size(), 0u);
 	std::vector<uint32_t> nodeBases(parts.size(), 0u);
 	std::vector<uint32_t> transformBases(parts.size(), 0u);
 	std::vector<uint32_t> instanceBases(parts.size(), 0u);
+	assemblyCoverageParts.resize(parts.size());
 
 	size_t assemblyStorageReserve = instances.size() * 2ull + 64ull;
 	size_t transientPayloadReserve = instances.size() * 4ull + 64ull;
@@ -7798,6 +7828,10 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			throw std::runtime_error("ClusterLOD assembly: part has no CLod hierarchy");
 		}
+		assemblyCoverageParts[partIndex] = VoxelSourceTrianglePart{
+			.vertices = parts[partIndex].coverageVertices,
+			.vertexStrideBytes = parts[partIndex].coverageVertexSize,
+			.triangleIndices = parts[partIndex].coverageIndices };
 
 		groupBases[partIndex] = static_cast<uint32_t>(state.groups.size());
 		segmentBases[partIndex] = static_cast<uint32_t>(state.segments.size());
@@ -8039,7 +8073,21 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		state.voxelCarryPayloads.emplace_back();
 		state.voxelGroupMapping.groupToPayloadIndex.push_back(-1);
 		state.voxelGroupMapping.groupToPackedMetadataIndex.push_back(-1);
+		assemblyCoverageDomainMap.emplace_back();
 		return groupIndex;
+	};
+
+	auto appendCoverageDomain = [&](uint32_t groupIndex, int32_t refinedGroup)
+	{
+		if (groupIndex >= assemblyCoverageDomainMap.size())
+		{
+			assemblyCoverageDomainMap.resize(static_cast<size_t>(groupIndex) + 1ull);
+		}
+		std::vector<int32_t>& domain = assemblyCoverageDomainMap[groupIndex];
+		if (std::find(domain.begin(), domain.end(), refinedGroup) == domain.end())
+		{
+			domain.push_back(refinedGroup);
+		}
 	};
 
 	auto buildAssemblyVoxelGroup = [&](std::span<const uint32_t> childGroups, int32_t depth) -> uint32_t
@@ -8051,7 +8099,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		for (uint32_t childGroup : childGroups)
 		{
 			const float childError = state.groups[childGroup].bounds.error;
-			if (std::isfinite(childError) && !IsTerminalErrorSentinel(childError))
+			if (IsFiniteContentTraversalError(childError))
 			{
 				maxChildTraversalError = std::max(maxChildTraversalError, childError);
 			}
@@ -8112,12 +8160,17 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		VoxelizeTrianglesInput voxelInput{};
 		voxelInput.sourceVoxelPayloadInstances = &sourceInstances;
 		voxelInput.candidateVoxelPayloadInstances = &sourceInstances;
+		voxelInput.coverageSourceTriangles = assemblyCoverageSourceTriangles.IsValid() ? &assemblyCoverageSourceTriangles : nullptr;
 		voxelInput.aabbMin = aabbMin;
 		voxelInput.aabbMax = aabbMax;
 		voxelInput.voxelWidth = voxelWidth;
 		voxelInput.resolution = resolution;
 		voxelInput.raysPerCell = std::max(1u, settings.voxelRaysPerCell);
 		voxelInput.emitSourcePayload = false;
+		if (assemblyCoverageSourceTriangles.IsValid())
+		{
+			assemblyCoverageSourceTriangles.SetRefinedGroupDomainMap(assemblyCoverageDomainMap);
+		}
 		VoxelizeTrianglesResult voxelResult = VoxelizeTrianglesDetailed(voxelInput);
 		if (voxelResult.renderPayload.activeCells.empty())
 		{
@@ -8178,6 +8231,16 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		group.representationError = voxelRepresentationError;
 
 		const uint32_t groupIndex = appendGroupStorage(group, true);
+		for (uint32_t childGroup : childGroups)
+		{
+			if (childGroup < assemblyCoverageDomainMap.size())
+			{
+				for (int32_t refinedGroup : assemblyCoverageDomainMap[childGroup])
+				{
+					appendCoverageDomain(groupIndex, refinedGroup);
+				}
+			}
+		}
 		state.segments.insert(state.segments.end(), voxelSegments.begin(), voxelSegments.end());
 		state.segmentBounds.insert(state.segmentBounds.end(), voxelSegmentBounds.begin(), voxelSegmentBounds.end());
 		state.groupPageBlobs[groupIndex] = std::move(voxelPageBlobs);
@@ -8237,18 +8300,42 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		const uint32_t assemblyInstanceIndex = static_cast<uint32_t>(assemblyInstances.size());
 		assemblyInstances.push_back(assemblyInstance);
 
+		const float instanceErrorScale = MaxScale3x4(spec.transform);
+		float proxyTraversalError = 0.0f;
+		if (IsFiniteContentTraversalError(targetNode.traversalMetric.maxQuadricError))
+		{
+			proxyTraversalError = std::max(proxyTraversalError, targetNode.traversalMetric.maxQuadricError);
+		}
+		for (const ClusterLODGroup& partGroup : part.groups)
+		{
+			if (IsFiniteContentTraversalError(partGroup.bounds.error))
+			{
+				proxyTraversalError = std::max(proxyTraversalError, partGroup.bounds.error);
+			}
+			if (std::isfinite(partGroup.representationError) && partGroup.representationError > 0.0f)
+			{
+				proxyTraversalError = std::max(proxyTraversalError, partGroup.representationError);
+			}
+		}
+		proxyTraversalError *= instanceErrorScale;
+
 		const DirectX::XMFLOAT4 lodSphere = TransformSphere3x4(spec.transform, targetNode.traversalMetric.lodBoundingSphere);
 		ClusterLODGroup proxyGroup{};
 		proxyGroup.bounds.center[0] = lodSphere.x;
 		proxyGroup.bounds.center[1] = lodSphere.y;
 		proxyGroup.bounds.center[2] = lodSphere.z;
 		proxyGroup.bounds.radius = lodSphere.w;
-		proxyGroup.bounds.error = std::max(0.0f, targetNode.traversalMetric.maxQuadricError);
+		proxyGroup.bounds.error = proxyTraversalError;
 		proxyGroup.depth = 0;
 		proxyGroup.flags = CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY;
 		proxyGroup.firstMeshlet = assemblyInstanceIndex;
 		const uint32_t proxyGroupIndex = appendGroupStorage(proxyGroup, true);
 		currentLayer.push_back(proxyGroupIndex);
+		appendCoverageDomain(proxyGroupIndex, static_cast<int32_t>(proxyGroupIndex));
+		assemblyCoverageInstances.push_back(VoxelSourceTriangleInstance{
+			.partIndex = spec.partIndex,
+			.localToWorld = spec.transform,
+			.refinedGroup = static_cast<int32_t>(proxyGroupIndex) });
 
 		for (uint32_t localGroupIndex = 0; localGroupIndex < static_cast<uint32_t>(part.groups.size()); ++localGroupIndex)
 		{
@@ -8275,9 +8362,41 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	{
 		throw std::runtime_error("ClusterLOD assembly: no proxy groups were produced");
 	}
+	if (synthesizeVoxelParents)
+	{
+		ZoneScopedN("ClusterLODUtilities::Assembly::BuildCoverageBVH");
+		if (assemblyCoverageInstances.empty())
+		{
+			throw std::runtime_error("ClusterLOD assembly: parent voxel synthesis requires source triangle coverage geometry");
+		}
+		assemblyCoverageSourceTriangles.BuildInstanced(
+			assemblyCoverageParts,
+			assemblyCoverageInstances,
+			false);
+		if (!assemblyCoverageSourceTriangles.IsValid())
+		{
+			throw std::runtime_error("ClusterLOD assembly: failed to build parent voxel coverage BVH");
+		}
+		assemblyCoverageSourceTriangles.SetRefinedGroupDomainMap(assemblyCoverageDomainMap);
+		uint64_t logicalCoverageTriangleCount = 0u;
+		for (const VoxelSourceTriangleInstance& instance : assemblyCoverageInstances)
+		{
+			if (instance.partIndex >= assemblyCoverageParts.size() ||
+				assemblyCoverageParts[instance.partIndex].triangleIndices == nullptr)
+			{
+				continue;
+			}
+			logicalCoverageTriangleCount += assemblyCoverageParts[instance.partIndex].triangleIndices->size() / 3ull;
+		}
+		TracyPlot("CLOD.Assembly.CoverageTriangles", static_cast<int64_t>(std::min<uint64_t>(logicalCoverageTriangleCount, static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))));
+		spdlog::info(
+			"ClusterLOD assembly parent voxel coverage BVH: logical_triangles={} proxy_groups={} mode=embree_instances_domain_filtered",
+			logicalCoverageTriangleCount,
+			currentLayer.size());
+	}
 
 	uint32_t assemblyDepth = 1u;
-	while (currentLayer.size() > 1u)
+	while (synthesizeVoxelParents && currentLayer.size() > 1u)
 	{
 		std::vector<uint32_t> ordered = currentLayer;
 		if (ordered.size() > preferredNodeWidth)
@@ -8322,12 +8441,57 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		++assemblyDepth;
 	}
 
+	uint32_t proxyBoundaryRaises = 0u;
+	for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(state.groups.size()); ++groupIndex)
+	{
+		ClusterLODGroup& group = state.groups[groupIndex];
+		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) == 0u ||
+			group.parentGroupId < 0)
+		{
+			continue;
+		}
+
+		const uint32_t parentGroupIndex = static_cast<uint32_t>(group.parentGroupId);
+		if (parentGroupIndex >= state.groups.size())
+		{
+			continue;
+		}
+
+		const ClusterLODGroup& parentGroup = state.groups[parentGroupIndex];
+		if ((parentGroup.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u ||
+			!IsFiniteContentTraversalError(parentGroup.bounds.error))
+		{
+			continue;
+		}
+
+		const float proxyBoundaryError = std::nextafter(parentGroup.bounds.error, 0.0f);
+		if (std::isfinite(proxyBoundaryError) && proxyBoundaryError > group.bounds.error)
+		{
+			group.bounds.error = proxyBoundaryError;
+			proxyBoundaryRaises++;
+		}
+	}
+	if (proxyBoundaryRaises != 0u)
+	{
+		spdlog::info(
+			"ClusterLOD assembly raised {} proxy traversal errors to assembly voxel boundaries",
+			proxyBoundaryRaises);
+	}
+
 	if (currentLayer.size() == 1u)
 	{
 		// The root assembly node has no coarser parent boundary. Give it the
 		// same always-eligible traversal sentinel used by root voxel-only
 		// assets; representationError remains finite for reporting/quality.
 		state.groups[currentLayer.front()].bounds.error = std::numeric_limits<float>::max();
+	}
+	else if (!synthesizeVoxelParents)
+	{
+		spdlog::info(
+			"ClusterLOD assembly using direct instance-root traversal: parts={} instances={} proxy_groups={}",
+			parts.size(),
+			instances.size(),
+			currentLayer.size());
 	}
 
 	uint32_t assemblyParentErrorRaises = 0u;
@@ -8361,7 +8525,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 				}
 
 				const float childError = state.groups[childGroupIndex].bounds.error;
-				if (std::isfinite(childError) && childError > 0.0f && !IsTerminalErrorSentinel(childError))
+				if (IsFiniteContentTraversalError(childError))
 				{
 					maxChildError = std::max(maxChildError, childError);
 					hasFiniteChild = true;
@@ -8401,7 +8565,15 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	{
 		instance.targetRootNode += libraryNodeBase;
 	}
-	state.maxTraversalDepth = ComputeCLodTraversalDepth(state.nodes, state.topRootNode);
+	const uint32_t topAssemblyTraversalDepth = ComputeCLodTraversalDepth(state.nodes, state.topRootNode);
+	uint32_t maxAssemblyTargetTraversalDepth = 0u;
+	for (const ClusterLODAssemblyInstance& instance : assemblyInstances)
+	{
+		maxAssemblyTargetTraversalDepth = std::max(
+			maxAssemblyTargetTraversalDepth,
+			ComputeCLodTraversalDepth(state.nodes, instance.targetRootNode));
+	}
+	state.maxTraversalDepth = topAssemblyTraversalDepth + maxAssemblyTargetTraversalDepth;
 
 	std::vector<std::vector<std::byte>> meshPageBlobs;
 	std::vector<uint32_t> groupPageReferences;

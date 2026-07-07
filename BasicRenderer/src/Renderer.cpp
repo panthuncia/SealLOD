@@ -970,6 +970,7 @@ void Renderer::CommitCompletedSceneSnapshot() {
 }
 
 void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
+    ZoneScopedN("Renderer::ScheduleSceneUpdateTask");
     if (!m_sceneRenderOverlapEnabled || !currentScene || m_sceneTaskInFlight.exchange(true)) {
         return;
     }
@@ -986,6 +987,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
     horizontalAngle = 0.0f;
 
     TaskSchedulerManager::GetInstance().RunBackgroundTask("SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
+        ZoneScopedN("Renderer::SceneUpdateOverlap");
         const auto taskStart = std::chrono::steady_clock::now();
 
         if (!scene) {
@@ -993,20 +995,33 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
             return;
         }
 
-        if (scene->HasUsablePrimaryCamera()) {
-            Components::Position& cameraPosition = scene->GetPrimaryCameraPosition();
-            Components::Rotation& cameraRotation = scene->GetPrimaryCameraRotation();
-            ApplyMovement(cameraPosition, cameraRotation, movementSnapshot, elapsedSeconds);
-            RotatePitchYaw(cameraRotation, verticalAngleSnapshot, horizontalAngleSnapshot);
-            scene->GetPrimaryCamera().modified<Components::Position>();
-            scene->GetPrimaryCamera().modified<Components::Rotation>();
+        {
+            ZoneScopedN("Renderer::SceneUpdateOverlap::ApplyCameraInput");
+            if (scene->HasUsablePrimaryCamera()) {
+                Components::Position& cameraPosition = scene->GetPrimaryCameraPosition();
+                Components::Rotation& cameraRotation = scene->GetPrimaryCameraRotation();
+                ApplyMovement(cameraPosition, cameraRotation, movementSnapshot, elapsedSeconds);
+                RotatePitchYaw(cameraRotation, verticalAngleSnapshot, horizontalAngleSnapshot);
+                scene->GetPrimaryCamera().modified<Components::Position>();
+                scene->GetPrimaryCamera().modified<Components::Rotation>();
+            }
         }
 
-        scene->Update(elapsedSeconds);
-        scene->PropagateTransforms();
+        {
+            ZoneScopedN("Renderer::SceneUpdateOverlap::SceneUpdate");
+            scene->Update(elapsedSeconds);
+        }
+        {
+            ZoneScopedN("Renderer::SceneUpdateOverlap::PropagateTransforms");
+            scene->PropagateTransforms();
+        }
 
-        auto snapshot = std::make_shared<br::render::SceneFrameSnapshot>(
-            m_sceneRenderBridge.ExportSnapshot(*scene, snapshotSequence, sourceFrameNumber));
+        std::shared_ptr<br::render::SceneFrameSnapshot> snapshot;
+        {
+            ZoneScopedN("Renderer::SceneUpdateOverlap::ExportSnapshot");
+            snapshot = std::make_shared<br::render::SceneFrameSnapshot>(
+                m_sceneRenderBridge.ExportSnapshot(*scene, snapshotSequence, sourceFrameNumber));
+        }
 
         if (overlapEpoch != m_sceneOverlapEpoch.load(std::memory_order_relaxed)) {
             m_sceneTaskInFlight.store(false);
@@ -1017,6 +1032,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
         const auto durationMs = std::chrono::duration<double, std::milli>(taskEnd - taskStart).count();
 
         {
+            ZoneScopedN("Renderer::SceneUpdateOverlap::PublishSnapshot");
             std::scoped_lock lock(m_sceneSnapshotMutex);
             m_completedSceneSnapshot = std::move(snapshot);
             m_lastCompletedSceneSnapshotSequence = snapshotSequence;
@@ -2722,7 +2738,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             };
 
 			spdlog::info(
-				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={}) debug(internal_error={} segment_leaf_error={} voxel_cluster_frustum={} voxel_project_no_clip={} voxel_project_nonpos_depth={} assembly_voxel_sentinel_xform={} assembly_voxel_non_sentinel_xform={})",
+				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
 				requestedFrame,
 				counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
 				counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
@@ -2742,9 +2758,12 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
                 counter(CLodWorkGraphCounterIndex::ClusterCullThreads),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedFrustum),
+                counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCondition2),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOcclusion),
                 counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOutOfRange),
                 counter(CLodWorkGraphCounterIndex::ClusterCullZeroSurvivorWaves),
+                counter(CLodWorkGraphCounterIndex::SegmentEvaluateNonResidentRefinedChildThreads),
+                counter(CLodWorkGraphCounterIndex::SegmentEvaluateEmitBucketThreads),
                 counter(CLodWorkGraphCounterIndex::VoxelObjectCandidates),
                 counter(CLodWorkGraphCounterIndex::VoxelObjectFrustumRejected),
                 counter(CLodWorkGraphCounterIndex::VoxelObjectVisible),
@@ -2782,14 +2801,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionVoxelSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionReyesSkipped),
-                counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
-                counter(CLodWorkGraphCounterIndex::DebugInternalErrorRejected),
-                counter(CLodWorkGraphCounterIndex::DebugSegmentLeafErrorRejected),
-                counter(CLodWorkGraphCounterIndex::DebugVoxelClusterFrustumRejected),
-                counter(CLodWorkGraphCounterIndex::DebugVoxelProjectNoValidClip),
-                counter(CLodWorkGraphCounterIndex::DebugVoxelProjectNonPositiveDepth),
-                counter(CLodWorkGraphCounterIndex::DebugAssemblyVoxelSentinelTransform),
-                counter(CLodWorkGraphCounterIndex::DebugAssemblyVoxelNonSentinelTransform));
+                counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
         });
 
     readbackService->RequestReadbackCapture(
@@ -2814,6 +2826,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 requestedFrame,
                 visibleClusters);
         });
+
 }
 
 void Renderer::MaybeRequestTerrainRvtTelemetry() {

@@ -255,6 +255,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
     const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+    const bool assemblyPortalTraversal = rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
     const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
     if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
     {
@@ -367,6 +368,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             leaf.errorOverDistance,
             0.0f.xxx,
             -1.0f,
+            true,
             false))
         {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CONDITION2, 1);
@@ -458,11 +460,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         lodCamera.isOrtho);
     const bool nodeWantsTraversal =
         forceLodDecision ||
+        assemblyPortalTraversal ||
         (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
 
     if (!nodeWantsTraversal) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
-        WGTelemetryAdd(WG_COUNTER_DEBUG_INTERNAL_ERROR_REJECTED, 1);
         return;
     }
 
@@ -533,7 +535,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             continue;
         }
 
-        if (!forceLodDecision && child.range.isLeaf == CLOD_NODE_INTERNAL) {
+        if (!forceLodDecision && !assemblyPortalTraversal && child.range.isLeaf == CLOD_NODE_INTERNAL) {
             const float3 childWorldCenter = mul(float4(child.metric.lodCenterAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
             const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
             const float childEOD = ProjectedGeometricError(

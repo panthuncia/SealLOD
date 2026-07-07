@@ -37,6 +37,7 @@ public:
     }
 
     std::shared_ptr<Material> GetEffectiveMaterial() const;
+    std::shared_ptr<Material> GetMaterialOverride() const { return m_materialOverride; }
     void SetMaterialOverride(std::shared_ptr<Material> material);
     bool HasMaterialOverride() const { return m_materialOverride != nullptr; }
 

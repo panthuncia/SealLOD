@@ -148,9 +148,6 @@ static const uint WG_COUNTER_VOXEL_OBJECT_VISIBLE = 152u;
 static const uint WG_COUNTER_VOXEL_OBJECT_TRAVERSE_RECORDS = 153u;
 static const uint WG_COUNTER_VOXEL_ROOT_INTERNAL_RECORDS = 154u;
 static const uint WG_COUNTER_VOXEL_ROOT_LEAF_RECORDS = 155u;
-static const uint WG_COUNTER_DEBUG_INTERNAL_ERROR_REJECTED = 156u;
-static const uint WG_COUNTER_DEBUG_SEGMENT_LEAF_ERROR_REJECTED = 157u;
-static const uint WG_COUNTER_DEBUG_VOXEL_CLUSTER_FRUSTUM_REJECTED = 158u;
 
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
@@ -1205,7 +1202,6 @@ void CLodAppendVoxelRasterClusterWork(
             SphereOutsideFrustumViewSpace(clusterViewCenter, clusterWorldRadius, cullCamera))
         {
             WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, 1);
-            WGTelemetryAdd(WG_COUNTER_DEBUG_VOXEL_CLUSTER_FRUSTUM_REJECTED, 1);
             continue;
         }
 
@@ -1843,6 +1839,7 @@ bool CLodRefinedChildSuppressesParent(
     float requestPriorityErrorOverDistance,
     float3 predictiveCenterWorld,
     float predictiveRadiusWorld,
+    bool allowVoxelChildSuppression,
     bool emitNonResidentTelemetry)
 {
     if (!hasRefinedChild)
@@ -1855,6 +1852,11 @@ bool CLodRefinedChildSuppressesParent(
 
     const uint childGroupGlobalIndex = groupsBase + childGroupLocalIndex;
     const ClusterLODGroup childGroup = groups[childGroupGlobalIndex];
+    if (!allowVoxelChildSuppression && ((childGroup.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u))
+    {
+        return false;
+    }
+
     const float3 childWorldCenter = mul(float4(childGroup.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
     const float childWorldRadius = childGroup.bounds.centerAndRadius.w * lodUniformScale;
     const float childBoundaryEOD = ProjectedGeometricError(
@@ -1956,10 +1958,6 @@ bool CLodPrepareRenderableLeaf(
         {
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_REJECTED_BY_ERROR_RECORDS, 1);
         }
-        else
-        {
-            WGTelemetryAdd(WG_COUNTER_DEBUG_SEGMENT_LEAF_ERROR_REJECTED, 1);
-        }
         return false;
     }
 
@@ -1980,6 +1978,10 @@ bool CLodPrepareRenderableLeaf(
         if (leaf.isVoxel)
         {
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_MISSES, 1);
+        }
+        else
+        {
+            WGTelemetryAdd(WG_COUNTER_SEGMENT_EVALUATE_NON_RESIDENT_REFINED_CHILD_THREADS, 1);
         }
     }
 
@@ -2132,6 +2134,7 @@ void CLodHandleRenderableLeaf(
         leaf.errorOverDistance,
         0.0f.xxx,
         -1.0f,
+        true,
         false))
     {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CONDITION2, 1);
@@ -2420,6 +2423,7 @@ void WG_TraverseNodes(
 
         const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
         const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+        const bool assemblyPortalTraversal = rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
         const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
         if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
         {
@@ -2549,11 +2553,11 @@ void WG_TraverseNodes(
                     lodCamera.isOrtho);
                 const bool nodeWantsTraversal =
                     forceLodDecision ||
+                    assemblyPortalTraversal ||
                     (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
 
                 if (!nodeWantsTraversal) {
                     WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
-                    WGTelemetryAdd(WG_COUNTER_DEBUG_INTERNAL_ERROR_REJECTED, 1);
                 }
                 else {
                     bool nodeTouchesDirtyPages = true;
@@ -2640,7 +2644,7 @@ void WG_TraverseNodes(
                                 // LOD pre-filter for internal children only.
                                 // Leaf children use the group sphere for LOD (different from node sphere),
                                 // so we skip the LOD check here and let the leaf thread handle it.
-                                if (!forceLodDecision && child.range.isLeaf == CLOD_NODE_INTERNAL) {
+                                if (!forceLodDecision && !assemblyPortalTraversal && child.range.isLeaf == CLOD_NODE_INTERNAL) {
                                     const float3 childWorldCenter = mul(float4(child.metric.lodCenterAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
                                     const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
                                     const float childEOD = ProjectedGeometricError(
@@ -3331,6 +3335,7 @@ void ClusterCullBody(
                         ownGroupErrorOverDistance,
                         meshletCenterWorld,
                         meshletRadiusWorld,
+                        true,
                         true)) {
                         survives = false;
                         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CONDITION2, 1);
