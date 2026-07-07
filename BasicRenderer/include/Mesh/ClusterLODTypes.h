@@ -158,6 +158,22 @@ struct VoxelGroupMapping
 
 // Prebuilt / Cache payload types
 
+struct ClusterLODPartRecord
+{
+	uint32_t groupBase = 0;
+	uint32_t groupCount = 0;
+	uint32_t nodeBase = 0;
+	uint32_t nodeCount = 0;
+	uint32_t transformBase = 0;
+	uint32_t transformCount = 0;
+	uint32_t instanceBase = 0;
+	uint32_t instanceCount = 0;
+	uint32_t rootNode = 0;
+	uint32_t flags = 0;
+};
+
+static constexpr uint32_t CLOD_PART_RECORD_FLAG_ROOT = 1u << 0;
+
 struct ClusterLODPrebuiltData
 {
 	std::vector<ClusterLODGroup> groups;
@@ -178,6 +194,8 @@ struct ClusterLODPrebuiltData
 	std::vector<uint32_t> lodLevelRoots;
 	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
 	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
+	std::vector<ClusterLODPartRecord> partRecords;
+	uint32_t rootPartIndex = 0;
 	uint32_t maxDepth = 0;
 	uint32_t maxTraversalDepth = 0;
 };

@@ -1789,14 +1789,16 @@ bool CLodInstanceRootWantsTraversal(
     {
         return true;
     }
-    if (!parentAllowsRefine)
-    {
-        return false;
-    }
 
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     const ClusterLODGroup proxyGroup = groups[clodMeshMetadata.groupsBase + node.range.ownerGroupId];
+    const bool structuralRootProxy = proxyGroup.parentGroupId < 0 && proxyGroup.pageCount == 0u;
+    if (!parentAllowsRefine)
+    {
+        return structuralRootProxy;
+    }
+
     const float3 proxyWorldCenter = mul(float4(proxyGroup.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
     const float proxyWorldRadius = proxyGroup.bounds.centerAndRadius.w * lodUniformScale;
     const float proxyErrorOverDistance = ProjectedGeometricError(
@@ -1812,13 +1814,16 @@ bool CLodInstanceRootWantsTraversal(
         return true;
     }
 
+    if (structuralRootProxy)
+    {
+        return true;
+    }
+
     if (proxyGroup.parentGroupId >= 0)
     {
         const uint parentGroupLocalIndex = uint(proxyGroup.parentGroupId);
         const uint parentGroupGlobalIndex = clodMeshMetadata.groupsBase + parentGroupLocalIndex;
-        const ClusterLODGroup parentGroup = groups[parentGroupGlobalIndex];
-        if ((parentGroup.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u &&
-            !CLodTouchAndRequestGroupResident(
+        if (!CLodTouchAndRequestGroupResident(
                 parentGroupGlobalIndex,
                 instanceIndex,
                 meshBufferIndex,

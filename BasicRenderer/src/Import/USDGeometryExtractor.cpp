@@ -1942,7 +1942,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 
 	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
 	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
-	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=9#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=12#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1";
 	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};

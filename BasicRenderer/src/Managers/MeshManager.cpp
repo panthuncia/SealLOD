@@ -935,17 +935,29 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		m_clodSharedStreamingRangesDirty = true;
 		if (SarpClodImportDebugLoggingEnabled()) {
 			std::uint32_t coarsestGroups = 0u;
+			std::uint32_t coarsestPages = 0u;
 			for (const auto& range : sharedState->coarsestRanges) {
 				coarsestGroups += range.groupCount;
+				const auto& clodGroups = mesh->GetCLodGroups();
+				const uint32_t rangeEnd = std::min<uint32_t>(
+					range.firstGroup + range.groupCount,
+					static_cast<uint32_t>(clodGroups.size()));
+				for (uint32_t groupIndex = range.firstGroup; groupIndex < rangeEnd; ++groupIndex) {
+					coarsestPages += clodGroups[groupIndex].pageCount;
+				}
 			}
+			const ClusterLODPrebuiltData prebuilt = mesh->GetClusterLODPrebuiltData();
 			spdlog::info(
-				"SARPDBG AddMesh CLOD mesh={} groupsBase={} groups={} coarsestRanges={} coarsestGroups={} pages={} container='{}' maxTraversalDepth={} rootNode={}",
+				"SARPDBG AddMesh CLOD mesh={} groupsBase={} groups={} coarsestRanges={} coarsestGroups={} coarsestPages={} pages={} parts={} rootPart={} container='{}' maxTraversalDepth={} rootNode={}",
 				mesh->GetGlobalID(),
 				sharedState->groupsBase,
 				sharedState->groupCount,
 				sharedState->coarsestRanges.size(),
 				coarsestGroups,
+				coarsestPages,
 				sharedState->pageDiskLocators.size(),
+				prebuilt.partRecords.size(),
+				prebuilt.rootPartIndex,
 				NarrowDebugPath(sharedState->cacheSource.containerFileName),
 				sharedState->maxTraversalDepth,
 				mesh->GetCLodRootNodeIndex());

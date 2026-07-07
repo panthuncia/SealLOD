@@ -301,6 +301,8 @@ private:
 	std::vector<uint32_t>            m_clodLodLevelRoots;        // node index per depth (== 1+depth)
 	std::vector<ClusterLODAssemblyTransform> m_clodAssemblyTransforms;
 	std::vector<ClusterLODAssemblyInstance> m_clodAssemblyInstances;
+	std::vector<ClusterLODPartRecord> m_clodPartRecords;
+	uint32_t                         m_clodRootPartIndex = 0;
 	uint32_t                         m_clodTopRootNode = 0;      // always 0
 	uint32_t                         m_clodMaxDepth = 0;
 	uint32_t                         m_clodMaxTraversalDepth = 0;

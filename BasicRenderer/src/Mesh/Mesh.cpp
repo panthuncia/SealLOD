@@ -15,6 +15,7 @@
 #include <mutex>
 #include <cassert>
 #include <set>
+#include <span>
 
 #include <spdlog/spdlog.h>
 
@@ -267,7 +268,9 @@ namespace
 	ClusterLODRuntimeSummary BuildRuntimeSummary(
 		const std::vector<ClusterLODGroup>& groups,
 		const std::vector<ClusterLODGroupSegment>& segments,
-		const std::vector<ClusterLODGroupChunk>& groupChunks)
+		const std::vector<ClusterLODGroupChunk>& groupChunks,
+		std::span<const ClusterLODPartRecord> partRecords,
+		uint32_t rootPartIndex)
 	{
 		ClusterLODRuntimeSummary summary{};
 		summary.groupChunkHints.resize(groups.size());
@@ -321,11 +324,22 @@ namespace
 			}
 		}
 
+		uint32_t rootGroupBegin = 0u;
+		uint32_t rootGroupEnd = localGroupCount;
+		if (!partRecords.empty() && rootPartIndex < partRecords.size()) {
+			const ClusterLODPartRecord& rootPart = partRecords[rootPartIndex];
+			rootGroupBegin = std::min(rootPart.groupBase, localGroupCount);
+			const uint32_t availableGroups = localGroupCount - rootGroupBegin;
+			rootGroupEnd = rootGroupBegin + std::min(rootPart.groupCount, availableGroups);
+			if (rootGroupBegin == rootGroupEnd) {
+				rootGroupBegin = 0u;
+				rootGroupEnd = localGroupCount;
+			}
+		}
+
 		uint32_t runStart = std::numeric_limits<uint32_t>::max();
-		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
-			const bool shouldPinForStreaming =
-				summary.parentGroupByLocal[groupLocalIndex] < 0 ||
-				(groups[groupLocalIndex].flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u;
+		for (uint32_t groupLocalIndex = rootGroupBegin; groupLocalIndex < rootGroupEnd; ++groupLocalIndex) {
+			const bool shouldPinForStreaming = summary.parentGroupByLocal[groupLocalIndex] < 0;
 			if (shouldPinForStreaming) {
 				if (runStart == std::numeric_limits<uint32_t>::max()) {
 					runStart = groupLocalIndex;
@@ -342,10 +356,42 @@ namespace
 		if (runStart != std::numeric_limits<uint32_t>::max()) {
 			summary.coarsestRanges.push_back({
 				runStart,
-				localGroupCount - runStart });
+				rootGroupEnd - runStart });
 		}
 
 		return summary;
+	}
+
+	void EnsureRootPartRecord(
+		std::vector<ClusterLODPartRecord>& partRecords,
+		uint32_t& rootPartIndex,
+		uint32_t groupCount,
+		uint32_t nodeCount,
+		uint32_t transformCount,
+		uint32_t instanceCount,
+		uint32_t rootNode)
+	{
+		if (partRecords.empty()) {
+			ClusterLODPartRecord rootPart{};
+			rootPart.groupBase = 0u;
+			rootPart.groupCount = groupCount;
+			rootPart.nodeBase = 0u;
+			rootPart.nodeCount = nodeCount;
+			rootPart.transformBase = 0u;
+			rootPart.transformCount = transformCount;
+			rootPart.instanceBase = 0u;
+			rootPart.instanceCount = instanceCount;
+			rootPart.rootNode = rootNode;
+			rootPart.flags = CLOD_PART_RECORD_FLAG_ROOT;
+			partRecords.push_back(rootPart);
+			rootPartIndex = 0u;
+			return;
+		}
+
+		if (rootPartIndex >= partRecords.size()) {
+			rootPartIndex = 0u;
+		}
+		partRecords[rootPartIndex].flags |= CLOD_PART_RECORD_FLAG_ROOT;
 	}
 
 	bool HasRenderableImportedMeshPayload(
@@ -529,7 +575,6 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 			m_clodGroupChunks[groupIndex].meshletCount = m_clodGroups[groupIndex].meshletCount;
 		}
 	}
-	m_clodRuntimeSummary = BuildRuntimeSummary(m_clodGroups, m_clodSegments, m_clodGroupChunks);
 	ClearCLodCacheBuildChunkData(false);
 	m_clodGroupDiskLocators = data.groupDiskLocators;
 	m_clodPageDiskLocators = data.pageDiskLocators;
@@ -544,7 +589,27 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodLodLevelRoots = data.lodLevelRoots;
 	m_clodAssemblyTransforms = data.assemblyTransforms;
 	m_clodAssemblyInstances = data.assemblyInstances;
+	m_clodPartRecords = data.partRecords;
+	m_clodRootPartIndex = data.rootPartIndex;
 	m_clodTopRootNode = 0;
+	EnsureRootPartRecord(
+		m_clodPartRecords,
+		m_clodRootPartIndex,
+		static_cast<uint32_t>(m_clodGroups.size()),
+		static_cast<uint32_t>(m_clodNodes.size()),
+		static_cast<uint32_t>(m_clodAssemblyTransforms.size()),
+		static_cast<uint32_t>(m_clodAssemblyInstances.size()),
+		m_clodTopRootNode);
+	m_clodRuntimeSummary = BuildRuntimeSummary(
+		m_clodGroups,
+		m_clodSegments,
+		m_clodGroupChunks,
+		m_clodPartRecords,
+		m_clodRootPartIndex);
+	if (m_prebuiltClusterLOD.has_value()) {
+		m_prebuiltClusterLOD->partRecords = m_clodPartRecords;
+		m_prebuiltClusterLOD->rootPartIndex = m_clodRootPartIndex;
+	}
 	m_perMeshBufferData.boundingSphere = data.objectBoundingSphere;
 	{
 		uint32_t voxelGroupCount = 0;
@@ -604,6 +669,16 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 	m_clodVoxelPageBase = data.voxelPageBase;
 	m_clodVoxelPageCount = data.voxelPageCount;
 	m_clodCacheSource = data.cacheSource;
+	m_clodPartRecords = data.partRecords;
+	m_clodRootPartIndex = data.rootPartIndex;
+	EnsureRootPartRecord(
+		m_clodPartRecords,
+		m_clodRootPartIndex,
+		static_cast<uint32_t>(m_clodGroups.size()),
+		static_cast<uint32_t>(m_clodNodes.size()),
+		static_cast<uint32_t>(m_clodAssemblyTransforms.size()),
+		static_cast<uint32_t>(m_clodAssemblyInstances.size()),
+		m_clodTopRootNode);
 	if (m_prebuiltClusterLOD.has_value()) {
 		m_prebuiltClusterLOD->groupDiskLocators = data.groupDiskLocators;
 		m_prebuiltClusterLOD->pageDiskLocators = data.pageDiskLocators;
@@ -613,6 +688,8 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 		m_prebuiltClusterLOD->voxelPageBase = data.voxelPageBase;
 		m_prebuiltClusterLOD->voxelPageCount = data.voxelPageCount;
 		m_prebuiltClusterLOD->cacheSource = data.cacheSource;
+		m_prebuiltClusterLOD->partRecords = m_clodPartRecords;
+		m_prebuiltClusterLOD->rootPartIndex = m_clodRootPartIndex;
 	}
 
 	if (m_clodGroupChunks.size() != m_clodGroups.size()) {
@@ -623,7 +700,12 @@ void Mesh::AdoptCLodDiskStreamingMetadata(const ClusterLODPrebuiltData& data)
 		}
 	}
 
-	m_clodRuntimeSummary = BuildRuntimeSummary(m_clodGroups, m_clodSegments, m_clodGroupChunks);
+	m_clodRuntimeSummary = BuildRuntimeSummary(
+		m_clodGroups,
+		m_clodSegments,
+		m_clodGroupChunks,
+		m_clodPartRecords,
+		m_clodRootPartIndex);
 
 	ClearCLodCacheBuildChunkData(false);
 }
@@ -664,6 +746,10 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodAssemblyInstances.empty()) {
 		out.assemblyInstances = m_clodAssemblyInstances;
 	}
+	if (!m_clodPartRecords.empty()) {
+		out.partRecords = m_clodPartRecords;
+	}
+	out.rootPartIndex = m_clodRootPartIndex;
 	out.maxDepth = m_clodMaxDepth;
 	out.maxTraversalDepth = m_clodMaxTraversalDepth;
 	return out;

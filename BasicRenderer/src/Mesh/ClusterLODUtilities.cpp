@@ -2159,6 +2159,24 @@ namespace
 		return sphere;
 	}
 
+	void AssignSingleRootPartRecord(ClusterLODPrebuiltData& data, uint32_t rootNode)
+	{
+		ClusterLODPartRecord rootPart{};
+		rootPart.groupBase = 0u;
+		rootPart.groupCount = static_cast<uint32_t>(data.groups.size());
+		rootPart.nodeBase = 0u;
+		rootPart.nodeCount = static_cast<uint32_t>(data.nodes.size());
+		rootPart.transformBase = 0u;
+		rootPart.transformCount = static_cast<uint32_t>(data.assemblyTransforms.size());
+		rootPart.instanceBase = 0u;
+		rootPart.instanceCount = static_cast<uint32_t>(data.assemblyInstances.size());
+		rootPart.rootNode = rootNode;
+		rootPart.flags = CLOD_PART_RECORD_FLAG_ROOT;
+		data.partRecords.clear();
+		data.partRecords.push_back(rootPart);
+		data.rootPartIndex = 0u;
+	}
+
 	uint32_t ComputeCLodTraversalDepth(const std::vector<ClusterLODNode>& nodes, uint32_t rootNodeIndex)
 	{
 		if (rootNodeIndex >= nodes.size()) {
@@ -7463,6 +7481,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	artifacts.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	artifacts.prebuiltData.maxDepth = state.maxDepth;
 	artifacts.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
+	AssignSingleRootPartRecord(artifacts.prebuiltData, state.topRootNode);
 
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
@@ -7609,6 +7628,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	artifacts.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	artifacts.prebuiltData.maxDepth = state.maxDepth;
 	artifacts.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
+	AssignSingleRootPartRecord(artifacts.prebuiltData, state.topRootNode);
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
@@ -7809,6 +7829,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::vector<uint32_t> nodeBases(parts.size(), 0u);
 	std::vector<uint32_t> transformBases(parts.size(), 0u);
 	std::vector<uint32_t> instanceBases(parts.size(), 0u);
+	std::vector<ClusterLODPartRecord> copiedPartRecords;
 	assemblyCoverageParts.resize(parts.size());
 
 	size_t assemblyStorageReserve = instances.size() * 2ull + 64ull;
@@ -8034,8 +8055,38 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			}
 			assemblyInstances.push_back(instance);
 		}
+
+		if (!part.partRecords.empty())
+		{
+			for (ClusterLODPartRecord record : part.partRecords)
+			{
+				record.groupBase += groupBases[partIndex];
+				record.nodeBase += nodeBases[partIndex];
+				record.transformBase += transformBases[partIndex];
+				record.instanceBase += instanceBases[partIndex];
+				record.rootNode += nodeBases[partIndex];
+				record.flags &= ~CLOD_PART_RECORD_FLAG_ROOT;
+				copiedPartRecords.push_back(record);
+			}
+		}
+		else
+		{
+			ClusterLODPartRecord record{};
+			record.groupBase = groupBases[partIndex];
+			record.groupCount = static_cast<uint32_t>(part.groups.size());
+			record.nodeBase = nodeBases[partIndex];
+			record.nodeCount = static_cast<uint32_t>(part.nodes.size());
+			record.transformBase = transformBases[partIndex];
+			record.transformCount = static_cast<uint32_t>(part.assemblyTransforms.size());
+			record.instanceBase = instanceBases[partIndex];
+			record.instanceCount = static_cast<uint32_t>(part.assemblyInstances.size());
+			record.rootNode = nodeBases[partIndex];
+			record.flags = 0u;
+			copiedPartRecords.push_back(record);
+		}
 	}
 
+	const uint32_t rootAssemblyGroupBase = static_cast<uint32_t>(state.groups.size());
 	auto getVoxelPayloadForGroup = [&](uint32_t groupIndex) -> const VoxelGroupPayload*
 	{
 		if (groupIndex >= state.voxelGroupMapping.groupToPayloadIndex.size())
@@ -8568,9 +8619,33 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			assemblyParentErrorRaises);
 	}
 
+	const uint32_t rootAssemblyGroupEnd = static_cast<uint32_t>(state.groups.size());
 	BuildClusterLODTraversalHierarchy(state, preferredNodeWidth);
 
 	const uint32_t libraryNodeBase = static_cast<uint32_t>(state.nodes.size());
+	std::vector<ClusterLODPartRecord> partRecords;
+	{
+		ClusterLODPartRecord rootPart{};
+		rootPart.groupBase = rootAssemblyGroupBase;
+		rootPart.groupCount = rootAssemblyGroupEnd - rootAssemblyGroupBase;
+		rootPart.nodeBase = 0u;
+		rootPart.nodeCount = libraryNodeBase;
+		rootPart.transformBase = 0u;
+		rootPart.transformCount = static_cast<uint32_t>(assemblyTransforms.size());
+		rootPart.instanceBase = 0u;
+		rootPart.instanceCount = static_cast<uint32_t>(assemblyInstances.size());
+		rootPart.rootNode = state.topRootNode;
+		rootPart.flags = CLOD_PART_RECORD_FLAG_ROOT;
+		partRecords.push_back(rootPart);
+
+		for (ClusterLODPartRecord record : copiedPartRecords)
+		{
+			record.nodeBase += libraryNodeBase;
+			record.rootNode += libraryNodeBase;
+			record.flags &= ~CLOD_PART_RECORD_FLAG_ROOT;
+			partRecords.push_back(record);
+		}
+	}
 	for (ClusterLODNode node : libraryNodes)
 	{
 		if (node.range.isGroup == CLOD_NODE_INTERNAL)
@@ -8630,6 +8705,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	out.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	out.prebuiltData.assemblyTransforms = std::move(assemblyTransforms);
 	out.prebuiltData.assemblyInstances = std::move(assemblyInstances);
+	out.prebuiltData.partRecords = std::move(partRecords);
+	out.prebuiltData.rootPartIndex = 0u;
 	out.prebuiltData.maxDepth = state.maxDepth;
 	out.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
 	out.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
@@ -8901,6 +8978,7 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	artifacts.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	artifacts.prebuiltData.maxDepth = state.maxDepth;
 	artifacts.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
+	AssignSingleRootPartRecord(artifacts.prebuiltData, state.topRootNode);
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);

@@ -206,6 +206,8 @@ namespace CLodCache {
 			WriteVectorPod(out, prebuiltData.lodLevelRoots);
 			WriteVectorPod(out, prebuiltData.assemblyTransforms);
 			WriteVectorPod(out, prebuiltData.assemblyInstances);
+			WriteVectorPod(out, prebuiltData.partRecords);
+			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
 			WritePod(out, prebuiltData.maxTraversalDepth);
 
@@ -251,6 +253,8 @@ namespace CLodCache {
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodLevelRoots)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransforms)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyInstances)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.partRecords)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
 
@@ -736,7 +740,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(32));  // assembly voxel traversal boundaries derive from parent representation errors
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // voxel propagation derives traversal boundaries from active parent payload errors
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
-		boost::hash_combine(seed, static_cast<uint32_t>(5));  // micro-instancing assembly portal cut participates in normal LOD traversal
+		boost::hash_combine(seed, static_cast<uint32_t>(8));  // page-less root instance portals force traversal instead of duplicating root pages
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");
