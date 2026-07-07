@@ -323,8 +323,10 @@ namespace
 
 		uint32_t runStart = std::numeric_limits<uint32_t>::max();
 		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
-			const bool isCoarsestRoot = summary.parentGroupByLocal[groupLocalIndex] < 0;
-			if (isCoarsestRoot) {
+			const bool shouldPinForStreaming =
+				summary.parentGroupByLocal[groupLocalIndex] < 0 ||
+				(groups[groupLocalIndex].flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u;
+			if (shouldPinForStreaming) {
 				if (runStart == std::numeric_limits<uint32_t>::max()) {
 					runStart = groupLocalIndex;
 				}

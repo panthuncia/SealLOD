@@ -793,7 +793,7 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         commandList.DispatchWorkGraph(replayDispatchDesc);
     }
 
-    std::array<rhi::BufferBarrier, 3> counterBarriers{};
+    std::array<rhi::BufferBarrier, 7> counterBarriers{};
     counterBarriers[0].buffer = m_visibleClustersCounterBuffer->GetAPIResource().GetHandle();
     counterBarriers[0].beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
     counterBarriers[0].afterAccess = rhi::ResourceAccessType::ShaderResource;
@@ -813,6 +813,18 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         counterBarriers[2].afterSync = rhi::ResourceSyncState::ComputeShading;
         counterBarrierCount = 3;
     }
+    auto appendVoxelRasterReadBarrier = [&](const std::shared_ptr<Buffer>& buffer) {
+        auto& barrier = counterBarriers[counterBarrierCount++];
+        barrier.buffer = buffer->GetAPIResource().GetHandle();
+        barrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+        barrier.afterAccess = rhi::ResourceAccessType::ShaderResource;
+        barrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
+        barrier.afterSync = rhi::ResourceSyncState::ComputeShading;
+    };
+    appendVoxelRasterReadBarrier(m_voxelRasterWorkCounterBuffer);
+    appendVoxelRasterReadBarrier(m_skinnedVoxelRasterWorkCounterBuffer);
+    appendVoxelRasterReadBarrier(m_voxelRasterWorkBuffer);
+    appendVoxelRasterReadBarrier(m_skinnedVoxelRasterWorkBuffer);
     rhi::BarrierBatch counterBarrierBatch{};
     counterBarrierBatch.buffers = rhi::Span<rhi::BufferBarrier>(counterBarriers.data(), counterBarrierCount);
     commandList.Barriers(counterBarrierBatch);

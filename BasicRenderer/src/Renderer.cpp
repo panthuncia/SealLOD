@@ -2802,6 +2802,32 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionVoxelSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionReyesSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
+            spdlog::info(
+                "SARP CLOD assembly traversal telemetry: frame={} instance_roots={} part_instance_roots={} assembly_part(traverse={} voxel_leaves={} voxel_raster={} triangle_buckets={}) assembly_voxel(leaves={} depth1={} depth2={} depth3={} depth4plus={} rejected_error={} suppressed_by_child={} nonresident={} nonresident_depth1={} nonresident_depth2={} nonresident_depth3={} nonresident_depth4plus={} raster_work={} raster_depth1={} raster_depth2={} raster_depth3={} raster_depth4plus={})",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::AssemblyInstanceRootRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyPartInstanceRootRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyPartTraversalRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyPartVoxelLeafRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyPartVoxelRasterWorkRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyPartTriangleBucketRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelLeafRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelLeafDepth1),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelLeafDepth2),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelLeafDepth3),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelLeafDepth4Plus),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRejectedByErrorRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelSuppressedByChildRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentDepth1),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentDepth2),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentDepth3),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentDepth4Plus),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkRecords),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkDepth1),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkDepth2),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkDepth3),
+                counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkDepth4Plus));
         });
 
     readbackService->RequestReadbackCapture(

@@ -18,6 +18,7 @@
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -55,6 +56,7 @@ std::string NarrowDebugPath(const std::wstring& path)
 void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& metadata)
 {
 	const auto& groups = mesh.GetCLodGroups();
+	const auto& segments = mesh.GetCLodSegments();
 	const auto& nodes = mesh.GetCLodNodes();
 	const auto& transforms = mesh.GetCLodAssemblyTransforms();
 	const auto& assemblyInstances = mesh.GetCLodAssemblyInstances();
@@ -125,6 +127,94 @@ void LogCLodAssemblyUploadDetails(const Mesh& mesh, const CLodMeshMetadata& meta
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.y : 0.0f,
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.z : 0.0f,
 		root != nullptr ? root->traversalMetric.lodBoundingSphere.w : 0.0f);
+
+	struct AssemblyVoxelDepthSummary {
+		uint32_t groupCount = 0u;
+		uint32_t rootCount = 0u;
+		uint32_t segmentCount = 0u;
+		uint32_t pageCount = 0u;
+		uint32_t proxyChildCount = 0u;
+		uint32_t assemblyVoxelChildCount = 0u;
+		uint32_t otherChildCount = 0u;
+		float minError = std::numeric_limits<float>::infinity();
+		float maxError = 0.0f;
+		float minRepresentationError = std::numeric_limits<float>::infinity();
+		float maxRepresentationError = 0.0f;
+	};
+
+	if (assemblyVoxelGroups != 0u && maxAssemblyVoxelDepth >= 0) {
+		std::vector<AssemblyVoxelDepthSummary> depthSummaries(static_cast<size_t>(maxAssemblyVoxelDepth) + 1u);
+		for (uint32_t groupIndex = 0u; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
+			const ClusterLODGroup& group = groups[groupIndex];
+			if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u || group.depth < 0) {
+				continue;
+			}
+
+			AssemblyVoxelDepthSummary& summary = depthSummaries[static_cast<size_t>(group.depth)];
+			summary.groupCount++;
+			summary.rootCount += group.parentGroupId < 0 ? 1u : 0u;
+			summary.segmentCount += group.segmentCount;
+			summary.pageCount += group.pageCount;
+			if (std::isfinite(group.bounds.error)) {
+				summary.minError = std::min(summary.minError, group.bounds.error);
+				summary.maxError = std::max(summary.maxError, group.bounds.error);
+			}
+			else {
+				summary.maxError = std::numeric_limits<float>::max();
+			}
+			if (std::isfinite(group.representationError) && group.representationError > 0.0f) {
+				summary.minRepresentationError = std::min(summary.minRepresentationError, group.representationError);
+				summary.maxRepresentationError = std::max(summary.maxRepresentationError, group.representationError);
+			}
+
+			for (uint32_t segmentOffset = 0u; segmentOffset < group.segmentCount; ++segmentOffset) {
+				const uint32_t segmentIndex = group.firstSegment + segmentOffset;
+				if (segmentIndex >= segments.size()) {
+					continue;
+				}
+				const ClusterLODGroupSegment& segment = segments[segmentIndex];
+				if (segment.refinedGroup < 0) {
+					continue;
+				}
+				const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+				if (childGroupIndex >= groups.size()) {
+					continue;
+				}
+				const uint32_t childFlags = groups[childGroupIndex].flags;
+				if ((childFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u) {
+					summary.proxyChildCount++;
+				}
+				else if ((childFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u) {
+					summary.assemblyVoxelChildCount++;
+				}
+				else {
+					summary.otherChildCount++;
+				}
+			}
+		}
+
+		for (uint32_t depth = 0u; depth < static_cast<uint32_t>(depthSummaries.size()); ++depth) {
+			const AssemblyVoxelDepthSummary& summary = depthSummaries[depth];
+			if (summary.groupCount == 0u) {
+				continue;
+			}
+			spdlog::info(
+				"CLOD assembly voxel depth summary: mesh={} depth={} groups={} roots={} segments={} pages={} child_proxy={} child_assembly_voxel={} child_other={} error_min={} error_max={} representation_error_min={} representation_error_max={}",
+				mesh.GetGlobalID(),
+				depth,
+				summary.groupCount,
+				summary.rootCount,
+				summary.segmentCount,
+				summary.pageCount,
+				summary.proxyChildCount,
+				summary.assemblyVoxelChildCount,
+				summary.otherChildCount,
+				std::isfinite(summary.minError) ? summary.minError : 0.0f,
+				summary.maxError,
+				std::isfinite(summary.minRepresentationError) ? summary.minRepresentationError : 0.0f,
+				summary.maxRepresentationError);
+		}
+	}
 
 	uint32_t loggedAssemblyVoxels = 0u;
 	for (uint32_t groupIndex = 0u; groupIndex < static_cast<uint32_t>(groups.size()) && loggedAssemblyVoxels < 8u; ++groupIndex) {
@@ -628,12 +718,16 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		{
 			ClusterLODGroupChunk chunk{};
 			const auto& hint = groupChunkHints[groupIndex];
+			const ClusterLODGroup* group = groupIndex < mesh->GetCLodGroups().size()
+				? &mesh->GetCLodGroups()[groupIndex]
+				: nullptr;
+			const uint32_t streamablePageCount = group != nullptr ? group->pageCount : hint.pageCount;
 			chunk.groupVertexCount = hint.groupVertexCount;
 			chunk.meshletCount = hint.meshletCount;
 			chunk.meshletTrianglesByteCount = hint.meshletTrianglesByteCount;
 
 			// Fresh chunks with streamable pages start non-resident, so expose zero counts to the GPU.
-			bool hasRuntimeChunkData = (hint.pageCount == 0u);
+			bool hasRuntimeChunkData = (streamablePageCount == 0u);
 			baselineGroupChunks[groupIndex] = chunk;
 
 			if (!hasRuntimeChunkData) {
@@ -2434,6 +2528,12 @@ void MeshManager::ZeroCLodGroupChunkCounts(ClusterLODGroupChunk& chunk) {
 
 bool MeshManager::IsCLodGroupResident(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const {
 	if (groupLocalIndex >= state.groupResidentFlags.size()) {
+		return false;
+	}
+	if (groupLocalIndex < state.groups.size() &&
+		state.groups[groupLocalIndex].pageCount != 0u &&
+		(groupLocalIndex >= state.residentGroupAllocations.size() ||
+			state.residentGroupAllocations[groupLocalIndex].pageAllocations.empty())) {
 		return false;
 	}
 	return state.groupResidentFlags[groupLocalIndex] != 0u;

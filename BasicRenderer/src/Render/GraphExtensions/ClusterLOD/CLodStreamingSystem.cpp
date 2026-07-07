@@ -3877,10 +3877,15 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
                     spdlog::info("SARPDBG CLodStreaming queued pinned root group={}", groupIndex);
                 }
             } else {
-                SetGroupResidentBit(groupIndex, false);
-                m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
-                if (SarpClodImportDebugLoggingEnabled()) {
-                    spdlog::warn("SARPDBG CLodStreaming failed to queue pinned root group={}", groupIndex);
+                const MeshManager::CLodGroupStreamingInfo info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
+                if (info.valid && info.pageCount == 0u) {
+                    SetGroupResidentBit(groupIndex, true);
+                } else {
+                    SetGroupResidentBit(groupIndex, false);
+                    m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                    if (SarpClodImportDebugLoggingEnabled()) {
+                        spdlog::warn("SARPDBG CLodStreaming failed to queue pinned root group={}", groupIndex);
+                    }
                 }
             }
         }

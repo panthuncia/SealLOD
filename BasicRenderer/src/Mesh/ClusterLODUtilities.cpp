@@ -6422,15 +6422,6 @@ namespace
 				// error of the group that owns this segment. Internal traversal
 				// nodes propagate the max of their children below.
 				node.traversalMetric.maxQuadricError = TraversalNodeErrorFromGroupError(grp.bounds.error);
-				if (info.nodeKind == CLOD_NODE_INSTANCE_ROOT)
-				{
-					// Instance-root leaves are portals into the referenced part
-					// hierarchy, not renderable simplifications. Keep the proxy
-					// group's finite error for condition-2 boundaries, but make
-					// the traversal node itself always eligible once this LOD
-					// layer is active so it can open the child hierarchy.
-					node.traversalMetric.maxQuadricError = kClusterLODStructuralTraversalError;
-				}
 			}
 
 			if (leafCount == 1)

@@ -256,6 +256,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
     const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
     const bool assemblyPortalTraversal = rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    if (assemblyPortalTraversal)
+    {
+        WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRAVERSAL_RECORDS, 1);
+    }
     const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
     if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
     {
@@ -298,28 +302,51 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     }
 
     if (node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT) {
-        StructuredBuffer<ClusterLODAssemblyInstance> assemblyInstances =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyInstances)];
-        if (node.range.indexOrOffset < clodMeshMetadata.assemblyInstanceCount) {
-            const ClusterLODAssemblyInstance assemblyInstance =
-                assemblyInstances[clodMeshMetadata.assemblyInstanceBase + node.range.indexOrOffset];
-            if (assemblyInstance.stackDepth <= CLOD_ASSEMBLY_MAX_STACK_DEPTH) {
-                uint outputIndex = 0u;
-                InterlockedAdd(nextCounter[0], 1u, outputIndex);
-                if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
-                    TraverseNodeRecord childRecord = (TraverseNodeRecord)0;
-                    childRecord.instanceIndex = rec.instanceIndex;
-                    childRecord.viewId = rec.viewId;
-                    childRecord.nodeIdPacked = PackTraverseNodeId(
-                        assemblyInstance.targetRootNode,
-                        UnpackSourceTag(rec.nodeIdPacked),
-                        1u);
-                    childRecord.assemblyTransformIndex =
-                        assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
-                            ? rec.assemblyTransformIndex
-                            : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
-                    nextFrontier[outputIndex] = childRecord;
-                    WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
+        WGTelemetryAdd(WG_COUNTER_ASSEMBLY_INSTANCE_ROOT_RECORDS, 1);
+        if (rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+        {
+            WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_INSTANCE_ROOT_RECORDS, 1);
+        }
+        if (!CLodInstanceRootWantsTraversal(
+            clodMeshMetadata,
+            node,
+            parentAllowsRefine,
+            objectModelMatrix,
+            lodUniformScale,
+            lodCam,
+            lodCamera.isOrtho,
+            forceLodDecision,
+            rec.instanceIndex,
+            instanceData.perMeshBufferIndex,
+            rec.viewId))
+        {
+            WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
+        }
+        else
+        {
+            StructuredBuffer<ClusterLODAssemblyInstance> assemblyInstances =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyInstances)];
+            if (node.range.indexOrOffset < clodMeshMetadata.assemblyInstanceCount) {
+                const ClusterLODAssemblyInstance assemblyInstance =
+                    assemblyInstances[clodMeshMetadata.assemblyInstanceBase + node.range.indexOrOffset];
+                if (assemblyInstance.stackDepth <= CLOD_ASSEMBLY_MAX_STACK_DEPTH) {
+                    uint outputIndex = 0u;
+                    InterlockedAdd(nextCounter[0], 1u, outputIndex);
+                    if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+                        TraverseNodeRecord childRecord = (TraverseNodeRecord)0;
+                        childRecord.instanceIndex = rec.instanceIndex;
+                        childRecord.viewId = rec.viewId;
+                        childRecord.nodeIdPacked = PackTraverseNodeId(
+                            assemblyInstance.targetRootNode,
+                            UnpackSourceTag(rec.nodeIdPacked),
+                            1u);
+                        childRecord.assemblyTransformIndex =
+                            assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
+                                ? rec.assemblyTransformIndex
+                                : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
+                        nextFrontier[outputIndex] = childRecord;
+                        WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
+                    }
                 }
             }
         }
@@ -353,6 +380,14 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         {
             return;
         }
+        const bool assemblyPartVoxelLeaf =
+            assemblyPortalTraversal &&
+            leaf.isVoxel &&
+            ((leaf.group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) == 0u);
+        if (assemblyPartVoxelLeaf)
+        {
+            WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_VOXEL_LEAF_RECORDS, 1);
+        }
 
         if (!forceLodDecision && CLodRefinedChildSuppressesParent(
             clodMeshMetadata.groupsBase,
@@ -372,16 +407,31 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             false))
         {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CONDITION2, 1);
+            if ((leaf.group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+            {
+                WGTelemetryAdd(WG_COUNTER_ASSEMBLY_VOXEL_SUPPRESSED_BY_CHILD_RECORDS, 1);
+            }
             return;
         }
 
         if (!leaf.canRender)
         {
+            if ((leaf.group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+            {
+                WGTelemetryAdd(WG_COUNTER_ASSEMBLY_VOXEL_NONRESIDENT_RECORDS, 1);
+                WGTelemetryAdd(
+                    CLodAssemblyVoxelDepthCounter(uint(max(leaf.group.depth, 0)), WG_COUNTER_ASSEMBLY_VOXEL_NONRESIDENT_DEPTH_1),
+                    1);
+            }
             return;
         }
 
         if (leaf.isVoxel)
         {
+            if (assemblyPartVoxelLeaf)
+            {
+                WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_VOXEL_RASTER_WORK_RECORDS, 1);
+            }
             CLodAppendVoxelRasterWorkForLeaf(
                 clodMeshMetadata,
                 rec.instanceIndex,
@@ -414,6 +464,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         }
 
         WGTelemetryAdd(WG_COUNTER_SEGMENT_EVALUATE_EMIT_BUCKET_THREADS, 1);
+        if (assemblyPortalTraversal)
+        {
+            WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRIANGLE_BUCKET_RECORDS, 1);
+        }
         const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(clodMeshMetadata.pageMapBase, seg.pageIndex);
         if (pageEntry.slabDescriptorIndex == 0u)
         {
@@ -460,7 +514,6 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         lodCamera.isOrtho);
     const bool nodeWantsTraversal =
         forceLodDecision ||
-        assemblyPortalTraversal ||
         (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
 
     if (!nodeWantsTraversal) {
@@ -535,7 +588,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             continue;
         }
 
-        if (!forceLodDecision && !assemblyPortalTraversal && child.range.isLeaf == CLOD_NODE_INTERNAL) {
+        if (!forceLodDecision && child.range.isLeaf == CLOD_NODE_INTERNAL) {
             const float3 childWorldCenter = mul(float4(child.metric.lodCenterAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
             const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
             const float childEOD = ProjectedGeometricError(
