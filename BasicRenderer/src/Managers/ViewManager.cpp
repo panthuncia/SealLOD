@@ -22,7 +22,7 @@ namespace
     float ComputeErrorOverDistanceThreshold(const CameraInfo& cameraInfo, float errorPixels)
     {
         const float projY = DirectX::XMVectorGetY(cameraInfo.jitteredProjection.r[1]);
-        const float screenHeight = static_cast<float>(cameraInfo.depthResY);
+        const float screenHeight = static_cast<float>(cameraInfo.lodResY != 0u ? cameraInfo.lodResY : cameraInfo.depthResY);
         const float denom = (projY * 0.5f) * screenHeight;
         if (denom <= 0.0f) {
             return std::numeric_limits<float>::max();

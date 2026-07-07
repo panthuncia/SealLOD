@@ -375,6 +375,7 @@ struct VoxelRasterRayProjectionSetup
 {
     float4 ndcX;
     float4 ndcY;
+    float4 ndcZ;
     float4 origin;
 };
 
@@ -704,6 +705,11 @@ VoxelRasterRayProjectionSetup VoxelRasterBuildRayProjectionSetup(row_major matri
         projectionInverse._m11,
         projectionInverse._m12,
         projectionInverse._m13);
+    projectionSetup.ndcZ = float4(
+        projectionInverse._m20,
+        projectionInverse._m21,
+        projectionInverse._m22,
+        projectionInverse._m23);
     projectionSetup.origin = float4(
         projectionInverse._m30,
         projectionInverse._m31,
@@ -861,9 +867,9 @@ uint VoxelRasterTracePixel(
 {
     const float ndcX = (float(pixel.x) + 0.5f) * targetDimsInv.x * 2.0f - 1.0f;
     const float ndcY = 1.0f - (float(pixel.y) + 0.5f) * targetDimsInv.y * 2.0f;
-    const float viewNearW = ndcX * projectionSetup.ndcX.w + ndcY * projectionSetup.ndcY.w + projectionSetup.origin.w;
+    const float viewNearW = ndcX * projectionSetup.ndcX.w + ndcY * projectionSetup.ndcY.w + projectionSetup.ndcZ.w + projectionSetup.origin.w;
     const float viewNearInvW = rcp(max(viewNearW, 1.0e-6f));
-    const float3 viewNear = (ndcX * projectionSetup.ndcX.xyz + ndcY * projectionSetup.ndcY.xyz + projectionSetup.origin.xyz) * viewNearInvW;
+    const float3 viewNear = (ndcX * projectionSetup.ndcX.xyz + ndcY * projectionSetup.ndcY.xyz + projectionSetup.ndcZ.xyz + projectionSetup.origin.xyz) * viewNearInvW;
     const float3 rayDirObject = float3(
         dot(viewNear, viewToLocalX.xyz),
         dot(viewNear, viewToLocalY.xyz),

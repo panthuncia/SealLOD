@@ -63,6 +63,24 @@ namespace {
         return requestedMode;
     }
 
+    UpscalingMode ReadUpscalingModeSetting(UpscalingMode fallback) {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<UpscalingMode>("upscalingMode")();
+        }
+        catch (const std::exception&) {
+            return fallback;
+        }
+    }
+
+    UpscaleQualityMode ReadUpscalingQualityModeSetting(UpscaleQualityMode fallback) {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<UpscaleQualityMode>("upscalingQualityMode")();
+        }
+        catch (const std::exception&) {
+            return fallback;
+        }
+    }
+
     bool MakeStreamlineVulkanTextureResource(
         rhi::Device device,
         PixelBuffer* texture,
@@ -98,6 +116,12 @@ namespace {
         return resource.nativeFormat != VK_FORMAT_UNDEFINED;
     }
 
+}
+
+void UpscalingManager::SyncSettingsFromSettingsManager()
+{
+    m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
+    m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
 }
 
 bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {
@@ -156,6 +180,7 @@ inline void StoreFloat4x4(const DirectX::XMMATRIX& m, sl::float4x4& target, bool
 
 void UpscalingManager::InitializeAdapter()
 {
+    SyncSettingsFromSettingsManager();
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
@@ -171,6 +196,7 @@ void UpscalingManager::InitializeAdapter()
 }
 
 void UpscalingManager::ProxyDevice() { // TODO: RHI now handles this internally
+    SyncSettingsFromSettingsManager();
     switch (m_upscalingMode)
     {
     case UpscalingMode::DLSS: {
@@ -218,6 +244,7 @@ bool UpscalingManager::EnsureFSRContext() {
 }
 
 DirectX::XMFLOAT2 UpscalingManager::GetJitter(uint64_t frameNumber) {
+    SyncSettingsFromSettingsManager();
 
     switch (m_upscalingMode)
     {
@@ -275,6 +302,7 @@ DirectX::XMFLOAT2 UpscalingManager::GetJitter(uint64_t frameNumber) {
 }
 
 bool UpscalingManager::InitSL() {
+    SyncSettingsFromSettingsManager();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
         if (m_upscalingMode == UpscalingMode::DLSS) {
@@ -287,6 +315,7 @@ bool UpscalingManager::InitSL() {
 }
 
 void UpscalingManager::Setup() {
+    SyncSettingsFromSettingsManager();
     auto outputRes = m_getOutputRes();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
     switch (effectiveMode)
@@ -673,6 +702,7 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
 }
 
 void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors) {
+    SyncSettingsFromSettingsManager();
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
     switch (effectiveMode)
     {

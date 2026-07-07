@@ -40,6 +40,7 @@
 #include "Render/GraphExtensions/RenderGraphExtensionRegistration.h"
 #include "Utilities/Timer.h"
 #include "Render/RenderContext.h"
+#include "Render/RendererSettings.h"
 #include "Render/OpenPBRLookupResources.h"
 #include "Render/SceneRenderBridge.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
@@ -105,6 +106,7 @@ public:
 
 private:
 	bool m_isInitialized = false;
+    HWND m_hwnd = nullptr;
     rhi::Device m_device;
 
     rhi::SwapchainPtr m_swapChain;
@@ -221,6 +223,7 @@ private:
     void PublishFrameTaskGraphCapture();
     void MaybeRequestCLodVisibilityTelemetry();
     void MaybeRequestTerrainRvtTelemetry();
+    void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
 
     void StallPipeline();
 

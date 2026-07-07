@@ -428,6 +428,7 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 
 void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
     BufferBase::ScopedBackingMutation initializationBackingMutation;
+    m_hwnd = hwnd;
 
     auto& settingsManager = SettingsManager::GetInstance();
     const bool enableStreamline = !IsStreamlineDisabledByEnvironment();
@@ -437,6 +438,11 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
     settingsManager.registerSetting<rhi::Backend>("rhiBackend", rhi::Backend::D3D12);
     settingsManager.registerSetting<DirectX::XMUINT2>("renderResolution", { x_res, y_res });
     settingsManager.registerSetting<DirectX::XMUINT2>("outputResolution", { x_res, y_res });
+    settingsManager.registerSetting<WindowResolutionPreset>(
+        WindowResolutionPresetSettingName,
+        FindClosestWindowResolutionPreset(x_res, y_res));
+    settingsManager.registerSetting<UpscalingMode>("upscalingMode", UpscalingMode::DLSS);
+    settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::DLAA);
     settingsManager.registerSetting<bool>("enableVisibilityRendering", m_visibilityRendering);
     settingsManager.registerSetting<bool>("enableStreamline", enableStreamline);
     settingsManager.registerSetting<bool>("enableDirectStorage", enableDirectStorage);
@@ -1640,6 +1646,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
+    settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::OutputHeight);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
     settingsManager.registerSetting<bool>(
         CLodDisableNonVoxelVisibilitySettingName,
@@ -1674,8 +1681,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<std::function<MeshManager*()>>("getMeshManager", [this]() -> MeshManager* {
         return m_pMeshManager.get();
         });
-	settingsManager.registerSetting<UpscalingMode>("upscalingMode", UpscalingManager::GetInstance().GetCurrentUpscalingMode());
-    settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscalingManager::GetInstance().GetCurrentUpscalingQualityMode());
 	settingsManager.registerSetting<bool>("enableScreenSpaceReflections", m_screenSpaceReflections);
     settingsManager.registerSetting<bool>("enableRayTracedReflections", m_rayTracedReflections);
     settingsManager.registerSetting<float>("rayTracedReflectionMaxDistance", 100.0f);
@@ -1985,6 +1990,13 @@ void Renderer::SetSettings() {
             rebuildRenderGraph = true;
             });
         }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<WindowResolutionPreset>(
+        WindowResolutionPresetSettingName,
+        [this](const WindowResolutionPreset& newValue) {
+            m_preFrameDeferredFunctions.defer([newValue, this]() {
+                ApplyWindowResolutionPreset(newValue);
+            });
+        }));
 	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableScreenSpaceReflections", [this](const bool& newValue) {
 		m_screenSpaceReflections = newValue;
 		rebuildRenderGraph = true;
@@ -2262,6 +2274,46 @@ void Renderer::OnResize(UINT newWidth, UINT newHeight) {
 
 	//Rebuild the render graph
 	rebuildRenderGraph = true;
+}
+
+void Renderer::ApplyWindowResolutionPreset(WindowResolutionPreset preset)
+{
+    const auto resolution = ResolveWindowResolutionPreset(preset);
+    const auto currentResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    if (currentResolution.x == resolution.x && currentResolution.y == resolution.y) {
+        return;
+    }
+
+    if (!m_hwnd) {
+        OnResize(resolution.x, resolution.y);
+        return;
+    }
+
+    RECT windowRect{
+        0,
+        0,
+        static_cast<LONG>(resolution.x),
+        static_cast<LONG>(resolution.y),
+    };
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtr(m_hwnd, GWL_STYLE));
+    const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtr(m_hwnd, GWL_EXSTYLE));
+    if (!AdjustWindowRectEx(&windowRect, style, FALSE, exStyle)) {
+        spdlog::warn("Renderer: AdjustWindowRectEx failed while applying {}x{} window preset", resolution.x, resolution.y);
+        return;
+    }
+
+    const int windowWidth = static_cast<int>(windowRect.right - windowRect.left);
+    const int windowHeight = static_cast<int>(windowRect.bottom - windowRect.top);
+    if (!SetWindowPos(
+            m_hwnd,
+            nullptr,
+            0,
+            0,
+            windowWidth,
+            windowHeight,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+        spdlog::warn("Renderer: SetWindowPos failed while applying {}x{} window preset", resolution.x, resolution.y);
+    }
 }
 
 
@@ -3844,6 +3896,34 @@ void Renderer::CreateRenderGraph() {
     newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
 
 	m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
+
+    if (IsCLodVisibilityTelemetryDebugEnabled()) {
+        const auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+        const auto upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
+        const auto upscalingQuality = UpscalingManager::GetInstance().GetCurrentUpscalingQualityMode();
+        const View* primaryView = m_pViewManager ? m_pViewManager->Get(primaryViewID) : nullptr;
+        const uint32_t depthWidth = depth.depthMap ? depth.depthMap->GetWidth() : 0u;
+        const uint32_t depthHeight = depth.depthMap ? depth.depthMap->GetHeight() : 0u;
+        const uint32_t linearDepthWidth = depth.linearDepthMap ? depth.linearDepthMap->GetWidth() : 0u;
+        const uint32_t linearDepthHeight = depth.linearDepthMap ? depth.linearDepthMap->GetHeight() : 0u;
+        spdlog::info(
+            "SARP CLOD graph resources: render={}x{} output={}x{} visibility={}x{} depth={}x{} linear_depth={}x{} camera_depth_res={}x{} camera_lod_height={} upscaling={} quality={}",
+            resolution.x,
+            resolution.y,
+            outputResolution.x,
+            outputResolution.y,
+            visibilityBuffer->GetWidth(),
+            visibilityBuffer->GetHeight(),
+            depthWidth,
+            depthHeight,
+            linearDepthWidth,
+            linearDepthHeight,
+            primaryView ? primaryView->cameraInfo.depthResX : 0u,
+            primaryView ? primaryView->cameraInfo.depthResY : 0u,
+            primaryView ? primaryView->cameraInfo.lodResY : 0u,
+            UpscalingModeNames[static_cast<size_t>(upscalingMode)],
+            UpscaleQualityModeNames[static_cast<size_t>(upscalingQuality)]);
+    }
 
     CreateGBufferResources(newGraph.get());
 

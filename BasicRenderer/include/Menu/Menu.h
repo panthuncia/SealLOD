@@ -40,6 +40,7 @@
 #include "Import/ModelLoader.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/SettingsManager.h"
+#include "Render/RendererSettings.h"
 #include "Render/TonemapTypes.h"
 #include "Managers/Singletons/UpscalingManager.h"
 #include "DebugUI/RenderGraphInspector.h"
@@ -467,6 +468,8 @@ private:
 
     void DrawEnvironmentsDropdown();
 	void DrawOutputTypeDropdown();
+    void DrawWindowResolutionCombo();
+    void DrawCLodLodHeightModeCombo();
     void DrawUpscalingCombo();
     void DrawUpscalingQualityCombo();
     void DrawTonemapTypeDropdown();
@@ -820,6 +823,14 @@ private:
 	UpscaleQualityMode m_currentUpscalingQualityMode = UpscaleQualityMode::Balanced;
 	std::function<UpscaleQualityMode()> getUpscalingQualityMode;
     std::function<void(UpscaleQualityMode)> setUpscalingQualityMode;
+
+    WindowResolutionPreset m_currentWindowResolutionPreset = WindowResolutionPreset::P1080;
+    std::function<WindowResolutionPreset()> getWindowResolutionPreset;
+    std::function<void(WindowResolutionPreset)> setWindowResolutionPreset;
+
+    CLodLodHeightMode m_currentCLodLodHeightMode = CLodLodHeightMode::OutputHeight;
+    std::function<CLodLodHeightMode()> getCLodLodHeightMode;
+    std::function<void(CLodLodHeightMode)> setCLodLodHeightMode;
 
 	bool m_useAsyncCompute = true;
 	std::function<bool()> getUseAsyncCompute;
@@ -1498,6 +1509,16 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setUpscalingQualityMode = settingsManager.getSettingSetter<UpscaleQualityMode>("upscalingQualityMode");
     m_currentUpscalingQualityMode = getUpscalingQualityMode();
 	observerSetting(m_currentUpscalingQualityMode, "upscalingQualityMode");
+
+    getWindowResolutionPreset = settingsManager.getSettingGetter<WindowResolutionPreset>(WindowResolutionPresetSettingName);
+    setWindowResolutionPreset = settingsManager.getSettingSetter<WindowResolutionPreset>(WindowResolutionPresetSettingName);
+    m_currentWindowResolutionPreset = getWindowResolutionPreset();
+    observerSetting(m_currentWindowResolutionPreset, WindowResolutionPresetSettingName);
+
+    getCLodLodHeightMode = settingsManager.getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName);
+    setCLodLodHeightMode = settingsManager.getSettingSetter<CLodLodHeightMode>(CLodLodHeightModeSettingName);
+    m_currentCLodLodHeightMode = getCLodLodHeightMode();
+    observerSetting(m_currentCLodLodHeightMode, CLodLodHeightModeSettingName);
 
 	getUseAsyncCompute = settingsManager.getSettingGetter<bool>("useAsyncCompute");
     setUseAsyncCompute = settingsManager.getSettingSetter<bool>("useAsyncCompute");
@@ -2258,8 +2279,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		if (ImGui::Checkbox("Collect Pipeline Statistics", &m_collectPipelineStatistics)) {
 			setCollectPipelineStatistics(m_collectPipelineStatistics);
 		}
+        DrawWindowResolutionCombo();
         DrawUpscalingCombo();
         DrawUpscalingQualityCombo();
+        DrawCLodLodHeightModeCombo();
         DrawTonemapTypeDropdown();
 
         DrawEnvironmentsDropdown();
@@ -2584,6 +2607,28 @@ inline void Menu::DrawUpscalingQualityCombo()
     {
         m_currentUpscalingQualityMode = static_cast<UpscaleQualityMode>(modeIdx);
         setUpscalingQualityMode(m_currentUpscalingQualityMode);
+    }
+}
+
+inline void Menu::DrawWindowResolutionCombo()
+{
+    int modeIdx = static_cast<int>(m_currentWindowResolutionPreset);
+
+    if (ImGui::Combo("Window Resolution", &modeIdx, WindowResolutionPresetNames, WindowResolutionPresetCount))
+    {
+        m_currentWindowResolutionPreset = static_cast<WindowResolutionPreset>(modeIdx);
+        setWindowResolutionPreset(m_currentWindowResolutionPreset);
+    }
+}
+
+inline void Menu::DrawCLodLodHeightModeCombo()
+{
+    int modeIdx = static_cast<int>(m_currentCLodLodHeightMode);
+
+    if (ImGui::Combo("CLod LOD Height", &modeIdx, CLodLodHeightModeNames, CLodLodHeightModeCount))
+    {
+        m_currentCLodLodHeightMode = static_cast<CLodLodHeightMode>(modeIdx);
+        setCLodLodHeightMode(m_currentCLodLodHeightMode);
     }
 }
 

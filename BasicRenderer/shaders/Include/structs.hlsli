@@ -187,7 +187,7 @@ struct Camera {
     
     bool isOrtho;
     float2 UVScaleToNextPowerOf2;
-    uint pad[1];
+    uint lodResY;
 };
 
 struct CullingCameraInfo

@@ -14,6 +14,7 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Materials/Material.h"
 #include "Render/DrawWorkload.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Mesh/MeshInstance.h"
 #include "Resources/Sampler.h"
 #include "Scene/Components.h"
@@ -234,11 +235,17 @@ bool SyncRenderableDerivedStateForBulk(
     return signatureChanged;
 }
 
-Components::Camera BuildRendererCamera(const Components::Camera& sceneCamera, const Components::DepthMap& depthMap, uint32_t width, uint32_t height) {
+Components::Camera BuildRendererCamera(
+    const Components::Camera& sceneCamera,
+    const Components::DepthMap& depthMap,
+    uint32_t width,
+    uint32_t height,
+    uint32_t lodHeight) {
     auto rendererCamera = sceneCamera;
     rendererCamera.info.numDepthMips = NumMips(width, height);
     rendererCamera.info.depthResX = width;
     rendererCamera.info.depthResY = height;
+    rendererCamera.info.lodResY = lodHeight != 0u ? lodHeight : height;
     const auto paddedLinearDepthX = depthMap.linearDepthMap->GetInternalWidth();
     const auto paddedLinearDepthY = depthMap.linearDepthMap->GetInternalHeight();
     rendererCamera.info.uvScaleToNextPowerOfTwo = {
@@ -254,7 +261,8 @@ void SyncCameraDerivedState(
     bool isPrimary,
     ViewManager& viewManager,
     uint32_t renderWidth,
-    uint32_t renderHeight) {
+    uint32_t renderHeight,
+    uint32_t lodHeight) {
     const CameraResourceSignature newSignature{ renderWidth, renderHeight, isPrimary };
     const auto* oldSignature = dst.try_get<CameraResourceSignature>();
     const bool signatureChanged = oldSignature == nullptr || !(*oldSignature == newSignature);
@@ -263,7 +271,7 @@ void SyncCameraDerivedState(
         DestroyRendererCamera(dst, viewManager);
 
         auto depthMap = CreateDepthMapComponent(renderWidth, renderHeight, 1, false);
-        auto rendererCamera = BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight);
+        auto rendererCamera = BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight, lodHeight);
         const auto viewFlags = isPrimary ? ViewFlags::PrimaryCamera() : ViewFlags::Generic();
         const auto viewID = viewManager.CreateView(rendererCamera.info, viewFlags);
         viewManager.AttachDepth(viewID, depthMap.depthMap, depthMap.linearDepthMap);
@@ -275,7 +283,7 @@ void SyncCameraDerivedState(
     } else {
         const auto existing = dst.get<Components::Camera>();
         const auto depthMap = dst.get<Components::DepthMap>();
-        auto rendererCamera = BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight);
+        auto rendererCamera = BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight, lodHeight);
         // Preserve view/projection history maintained by RunRenderResourceSyncStage.
         // The scene camera does not maintain these — its view stays at identity.
         rendererCamera.info.view = existing.info.view;
@@ -933,17 +941,21 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
     }
 
     DirectX::XMUINT2 renderResolution{};
+    DirectX::XMUINT2 outputResolution{};
     uint16_t shadowResolution = 0;
     uint8_t directionalCascadeCount = 0;
     float maxShadowDistance = 0.0f;
     float directionalShadowVerticalExtent = 0.0f;
+    CLodLodHeightMode clodLodHeightMode = CLodLodHeightMode::OutputHeight;
     {
         ZoneScopedN("SceneRenderBridge::IngestSnapshot::ReadSettings");
         renderResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+        outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
         shadowResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("shadowResolution")();
         directionalCascadeCount = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades")();
         maxShadowDistance = SettingsManager::GetInstance().getSettingGetter<float>("maxShadowDistance")();
         directionalShadowVerticalExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")();
+        clodLodHeightMode = SettingsManager::GetInstance().getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName)();
     }
     const bool lightResourceSettingsChanged =
         !m_hasLightResourceSettings ||
@@ -1052,7 +1064,12 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
             auto dst = GetOrCreateBridgedEntity(renderWorld, m_bridgedEntities, camera.stableID, m_currentIngestionFrame, sceneRoot);
             CopyCommonComponents(dst, camera.stableID, camera.name, camera.matrix);
             dst.add<Components::RenderTransformUpdated>();
-            SyncCameraDerivedState(dst, camera.camera, camera.primary, *viewManager, renderResolution.x, renderResolution.y);
+            const bool useOutputHeight =
+                camera.primary &&
+                clodLodHeightMode == CLodLodHeightMode::OutputHeight &&
+                outputResolution.y != 0u;
+            const uint32_t lodHeight = useOutputHeight ? outputResolution.y : renderResolution.y;
+            SyncCameraDerivedState(dst, camera.camera, camera.primary, *viewManager, renderResolution.x, renderResolution.y, lodHeight);
             if (camera.useExternalMatrices) {
                 dst.set<Components::ExternalCameraMatrices>(camera.externalMatrices);
             } else {
@@ -1189,7 +1206,15 @@ void SceneRenderBridge::ResyncPrimaryCameraDepth(ViewManager& viewManager, uint3
     auto entity = flecs::entity{ renderWorld, m_primaryCameraEntityId };
     if (!entity.is_alive() || !entity.has<Components::Camera>()) return;
     const auto camera = entity.get<Components::Camera>();
-    SyncCameraDerivedState(entity, camera, entity.has<Components::PrimaryCamera>(), viewManager, renderWidth, renderHeight);
+    uint32_t lodHeight = renderHeight;
+    if (entity.has<Components::PrimaryCamera>()) {
+        const auto lodHeightMode = SettingsManager::GetInstance().getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName)();
+        const auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+        if (lodHeightMode == CLodLodHeightMode::OutputHeight && outputResolution.y != 0u) {
+            lodHeight = outputResolution.y;
+        }
+    }
+    SyncCameraDerivedState(entity, camera, entity.has<Components::PrimaryCamera>(), viewManager, renderWidth, renderHeight, lodHeight);
 }
 
 } // namespace br::render

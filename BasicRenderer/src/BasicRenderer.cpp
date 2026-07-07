@@ -17,6 +17,7 @@
 #include <pix3.h>
 #include <stacktrace>
 #include <sstream>      // ostringstream for formatting
+#include <unordered_map>
 #include <vector>
 #include <filesystem>
 //#include <tracy/Tracy.hpp>
@@ -110,8 +111,8 @@ namespace crashlog {
 }
 
 Renderer renderer;
-UINT default_x_res = 1920;
-UINT default_y_res = 1080;
+UINT default_x_res = 3840;
+UINT default_y_res = 2160;
 
 namespace {
 
@@ -499,11 +500,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 500;
-    constexpr float NeedleDistributionRadius = 100.0f;
-    constexpr float NeedleMinSpacing = 10.0f;
+    constexpr int NeedleCloneCount = 600000;
+    constexpr float NeedleDistributionRadius = 1500.0f;
+    constexpr float NeedleMinSpacing = 5.0f;
     constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
-    constexpr int MaxNeedlePlacementAttempts = 10000;
+    constexpr int MaxNeedleFailedPlacementAttempts = 200000;
     constexpr uint32_t NeedleSkeletonVariantCount = 1;
 
     std::mt19937 needleRng{ 1337 };
@@ -511,10 +512,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     std::uniform_real_distribution<float> needleAngleDist(0.0f, DirectX::XM_2PI);
     std::vector<point> needlePositions;
     needlePositions.reserve(NeedleCloneCount);
+    std::unordered_map<std::int64_t, std::vector<std::size_t>> needlePlacementGrid;
+    needlePlacementGrid.reserve(static_cast<std::size_t>(NeedleCloneCount));
 
-    for (int attempt = 0;
-        needlePositions.size() < NeedleCloneCount && attempt < MaxNeedlePlacementAttempts;
-        ++attempt) {
+    const auto gridCoord = [](float value) -> int {
+        return static_cast<int>(std::floor(value / NeedleMinSpacing));
+    };
+    const auto gridKey = [](int x, int z) -> std::int64_t {
+        return (static_cast<std::int64_t>(x) << 32) ^ static_cast<std::uint32_t>(z);
+    };
+
+    int failedPlacementAttempts = 0;
+    std::uint64_t totalPlacementAttempts = 0;
+    while (needlePositions.size() < NeedleCloneCount &&
+        failedPlacementAttempts < MaxNeedleFailedPlacementAttempts) {
+        ++totalPlacementAttempts;
         const float radius = NeedleDistributionRadius * std::sqrt(needleUnitDist(needleRng));
         const float angle = needleAngleDist(needleRng);
         const point candidate{
@@ -524,27 +536,58 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         };
 
         bool hasEnoughSpacing = true;
-        for (const point& existing : needlePositions) {
-            const float dx = candidate.x - existing.x;
-            const float dz = candidate.z - existing.z;
-            if (dx * dx + dz * dz < NeedleMinSpacingSq) {
-                hasEnoughSpacing = false;
-                break;
+        const int candidateCellX = gridCoord(candidate.x);
+        const int candidateCellZ = gridCoord(candidate.z);
+        for (int dzCell = -1; dzCell <= 1 && hasEnoughSpacing; ++dzCell) {
+            for (int dxCell = -1; dxCell <= 1 && hasEnoughSpacing; ++dxCell) {
+                const auto it = needlePlacementGrid.find(gridKey(candidateCellX + dxCell, candidateCellZ + dzCell));
+                if (it == needlePlacementGrid.end()) {
+                    continue;
+                }
+
+                for (const std::size_t existingIndex : it->second) {
+                    const point& existing = needlePositions[existingIndex];
+                    const float dx = candidate.x - existing.x;
+                    const float dz = candidate.z - existing.z;
+                    if (dx * dx + dz * dz < NeedleMinSpacingSq) {
+                        hasEnoughSpacing = false;
+                        break;
+                    }
+                }
             }
         }
 
         if (hasEnoughSpacing) {
+            const std::size_t insertedIndex = needlePositions.size();
             needlePositions.push_back(candidate);
+            needlePlacementGrid[gridKey(candidateCellX, candidateCellZ)].push_back(insertedIndex);
+            failedPlacementAttempts = 0;
+        }
+        else {
+            ++failedPlacementAttempts;
         }
     }
 
+    spdlog::info(
+        "Needle placement generated {} / {} requested positions (radius={} minSpacing={} attempts={} failedTailLimit={} failedTail={})",
+        needlePositions.size(),
+        NeedleCloneCount,
+        NeedleDistributionRadius,
+        NeedleMinSpacing,
+        totalPlacementAttempts,
+        MaxNeedleFailedPlacementAttempts,
+        failedPlacementAttempts);
+
     SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
+    std::size_t appendedNeedleScenes = 0;
     for (const point& position : needlePositions) {
         needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
         auto needleClone = needles->Clone();
         needleClone->AssignSkeletonVariants(needleSkeletonVariants);
         renderer.GetCurrentScene()->AppendScene(needleClone);
+        ++appendedNeedleScenes;
     }
+    spdlog::info("Needle append completed: appended {} cloned scenes", appendedNeedleScenes);
 	//renderer.GetCurrentScene()->AppendScene(pine->Clone());
 
     //renderer.GetCurrentScene()->AppendScene(cherry->Clone());
@@ -585,7 +628,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 15.f, 120.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 150.f, 1620.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

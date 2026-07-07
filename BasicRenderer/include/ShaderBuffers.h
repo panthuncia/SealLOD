@@ -39,7 +39,7 @@ struct CameraInfo {
 
     unsigned int isOrtho = 0; // bool
 	DirectX::XMFLOAT2 uvScaleToNextPowerOfTwo = { 1.0f, 1.0f }; // Scale to next power of two, for linear depth buffer
-    unsigned int pad[1];
+    unsigned int lodResY = 0; // Final-presentation height used for screen-space LOD error.
 };
 
 struct CullingCameraInfo {

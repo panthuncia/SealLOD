@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <execution>
 #include <functional>
 #include <limits>
@@ -36,6 +37,24 @@
 
 namespace {
 	std::atomic<uint64_t> globalStableSceneId = 0;
+
+	DirectX::XMMATRIX MakeInfiniteReverseZPerspectiveFovRH(float fovY, float aspect, float zNear)
+	{
+		const float nearPlane = std::max(zNear, 1.0e-5f);
+		const float yScale = 1.0f / std::tan(fovY * 0.5f);
+		const float xScale = yScale / aspect;
+
+		return DirectX::XMMATRIX(
+			xScale, 0.0f, 0.0f, 0.0f,
+			0.0f, yScale, 0.0f, 0.0f,
+			0.0f, 0.0f, 0.0f, -1.0f,
+			0.0f, 0.0f, nearPlane, 0.0f);
+	}
+
+	void DisableFarClipPlane(std::array<ClippingPlane, 6>& planes)
+	{
+		planes[1] = { DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f) };
+	}
 
 	void MergeMeshReyesUvDensityIntoMaterial(Mesh& mesh, Material& material, MaterialManager& materialManager)
 	{
@@ -1066,11 +1085,12 @@ void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, flo
         m_managerInterface.GetIndirectCommandBufferManager()->UnregisterBuffers(m_primaryCamera.id());
     }
 
-    CameraInfo info;
+	CameraInfo info;
 	auto planes = GetFrustumPlanesPerspective(aspect, fov, zNear, zFar);
+	DisableFarClipPlane(planes);
 	//info.view = XMMatrixTranslation(pos.x, pos.y, pos.z);
 	//info.viewInverse = XMMatrixIdentity();
-	info.unjitteredProjection = XMMatrixPerspectiveFovRH(fov, aspect, zFar, zNear);  // Note the reversed near/far for reversed Z
+	info.unjitteredProjection = MakeInfiniteReverseZPerspectiveFovRH(fov, aspect, zNear);
 	info.jitteredProjection = info.unjitteredProjection;
 	info.viewProjection = DirectX::XMMatrixMultiply(info.view, info.unjitteredProjection);
 	info.projectionInverse = XMMatrixInverse(nullptr, info.unjitteredProjection);

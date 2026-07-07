@@ -39,6 +39,7 @@ inline constexpr const char* CLodForceTraversalDepthRootSettingName = "clodForce
 inline constexpr const char* CLodVisibleClusterCapacitySettingName = "clodVisibleClusterCapacity";
 inline constexpr const char* CLodPureComputePhase2ExpansionFactorSettingName = "clodPureComputePhase2ExpansionFactor";
 inline constexpr const char* CLodFrustumCullingSettingName = "clodFrustumCulling";
+inline constexpr const char* CLodLodHeightModeSettingName = "clodLodHeightMode";
 inline constexpr uint32_t CLodDefaultVisibleClusterCapacity = 8u * 1000u * 1000u;
 inline constexpr uint32_t CLodMinVisibleClusterCapacity = 1u * 1000u * 1000u;
 inline constexpr uint32_t CLodMaxVisibleClusterCapacity = 30u * 1000u * 1000u;
@@ -129,6 +130,18 @@ enum class CLodVSMRasterMode : uint8_t {
     PageJob,
     Reyes,
 };
+
+enum class CLodLodHeightMode : uint8_t {
+    RenderHeight,
+    OutputHeight,
+};
+
+inline constexpr const char* CLodLodHeightModeNames[] = {
+    "Render Height",
+    "Output Height",
+};
+inline constexpr int CLodLodHeightModeCount =
+    static_cast<int>(sizeof(CLodLodHeightModeNames) / sizeof(CLodLodHeightModeNames[0]));
 
 enum class CLodRasterOutputKind : uint8_t {
     VisibilityBuffer,

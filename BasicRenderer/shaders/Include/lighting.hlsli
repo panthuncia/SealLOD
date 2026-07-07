@@ -199,32 +199,39 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
 }
 
 uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
-                         ConstantBuffer<PerFrameBuffer> perFrame, Camera mainCamera) {
+                          ConstantBuffer<PerFrameBuffer> perFrame, Camera mainCamera) {
 
-    float2 tileSize = float2(perFrame.screenResX, perFrame.screenResY) / float2(perFrame.lightClusterGridSizeX, perFrame.lightClusterGridSizeY);
-    uint2 tile = uint2(pixelCoords / tileSize);
+    uint gridX = max(perFrame.lightClusterGridSizeX, 1u);
+    uint gridY = max(perFrame.lightClusterGridSizeY, 1u);
+    uint totalZ = max(perFrame.lightClusterGridSizeZ, 1u);
+
+    float2 tileSize = float2(perFrame.screenResX, perFrame.screenResY) / float2(gridX, gridY);
+    uint2 tile = min(uint2(pixelCoords / max(tileSize, float2(1.0f, 1.0f))), uint2(gridX - 1u, gridY - 1u));
     
     // Z slice piecewise
-    float z = abs(viewDepth);
-    uint totalZ = perFrame.lightClusterGridSizeZ;
-    uint nearSlices = perFrame.nearClusterCount;
-    float zSplit = perFrame.clusterZSplitDepth;
-    float zNear = mainCamera.zNear;
-    float zFar = mainCamera.zFar;
+    float zNear = max(mainCamera.zNear, 1.0e-5f);
+    float z = max(abs(viewDepth), zNear);
+    uint nearSlices = min(perFrame.nearClusterCount, totalZ);
+    float zSplit = max(perFrame.clusterZSplitDepth, zNear + 1.0e-4f);
+    float zFar = max(mainCamera.zFar, zSplit + 1.0e-4f);
     uint sliceZ;
 
-    if (z < zSplit) {
+    if (nearSlices > 0u && z < zSplit) {
         // uniform up close
-        float t = (z - zNear) / (zSplit - zNear);
-        sliceZ = uint(t * nearSlices);
+        float t = saturate((z - zNear) / max(zSplit - zNear, 1.0e-5f));
+        sliceZ = min(uint(t * nearSlices), nearSlices - 1u);
     }
-    else {
+    else if (totalZ > nearSlices) {
         // logarithmic beyond zSplit
         float logStart = log(zSplit / zNear);
         float logEnd = log(zFar / zNear);
         float logZ = log(z / zNear);
-        float u = (logZ - logStart) / (logEnd - logStart);
-        sliceZ = nearSlices + uint(u * (totalZ - nearSlices));
+        float u = saturate((logZ - logStart) / max(logEnd - logStart, 1.0e-5f));
+        uint logSlices = totalZ - nearSlices;
+        sliceZ = nearSlices + min(uint(u * logSlices), logSlices - 1u);
+    }
+    else {
+        sliceZ = totalZ - 1u;
     }
     
     return uint3(tile.x, tile.y, sliceZ);
