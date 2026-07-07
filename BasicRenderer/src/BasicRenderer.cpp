@@ -499,8 +499,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 4000;
-    constexpr float NeedleDistributionRadius = 400.0f;
+    constexpr int NeedleCloneCount = 500;
+    constexpr float NeedleDistributionRadius = 100.0f;
     constexpr float NeedleMinSpacing = 10.0f;
     constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
     constexpr int MaxNeedlePlacementAttempts = 10000;
@@ -585,7 +585,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 120.f, 420.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 15.f, 120.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

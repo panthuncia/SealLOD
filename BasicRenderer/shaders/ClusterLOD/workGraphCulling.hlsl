@@ -1139,7 +1139,7 @@ float ProjectedGeometricError(
     float worldRadius,
     float errorMeshSpace,
     float errorScale,
-    float3 cameraPos,
+    float4 worldToViewZ,
     float zNear,
     bool isOrtho);
 
@@ -1741,7 +1741,7 @@ void WGTelemetryAddObjectCullPlaneReject(uint planeIndex)
     }
 }
 
-// Perspective views attenuate projected geometric error by distance.
+// Perspective views attenuate projected geometric error by view-space depth.
 // Orthographic views keep a constant world-to-screen scale, so the projected
 // error reduces to the world-space error directly.
 float ProjectedGeometricError(
@@ -1749,7 +1749,7 @@ float ProjectedGeometricError(
     float worldRadius,
     float errorMeshSpace,
     float errorScale,
-    float3 cameraPos,
+    float4 worldToViewZ,
     float zNear,
     bool isOrtho)
 {
@@ -1758,9 +1758,11 @@ float ProjectedGeometricError(
         return worldSpaceError;
     }
 
-    // Conservative "distance to sphere surface"
-    float dist = length(worldCenter - cameraPos);
-    float denom = max(dist - worldRadius, zNear);
+    // Use view-space depth, not radial camera distance. Radial distance
+    // underestimates projected error near frustum edges and allows coarse LODs
+    // to switch in too early toward screen corners.
+    const float centerViewZ = dot(float4(worldCenter, 1.0f), worldToViewZ);
+    const float denom = max(-centerViewZ - worldRadius, zNear);
 
     return worldSpaceError / denom;
 }
@@ -1806,7 +1808,7 @@ bool CLodInstanceRootWantsTraversal(
         proxyWorldRadius,
         proxyGroup.bounds.error,
         lodUniformScale,
-        lodCam.positionWorldSpace.xyz,
+        lodCam.viewZ,
         lodCam.zNear,
         lodCameraIsOrtho);
     if (proxyErrorOverDistance >= lodCam.errorOverDistanceThreshold)
@@ -1972,7 +1974,7 @@ bool CLodRefinedChildSuppressesParent(
         childWorldRadius,
         childGroup.bounds.error,
         lodUniformScale,
-        lodCam.positionWorldSpace.xyz,
+        lodCam.viewZ,
         lodCam.zNear,
         lodCameraIsOrtho);
 
@@ -2062,7 +2064,7 @@ bool CLodPrepareRenderableLeaf(
         groupWorldRadius,
         node.metric.maxQuadricError,
         lodUniformScale,
-        lodCam.positionWorldSpace.xyz,
+        lodCam.viewZ,
         lodCam.zNear,
         lodCameraIsOrtho);
     const bool wantsRender = forceLodDecision || (parentAllowsRefine && (leaf.errorOverDistance >= lodCam.errorOverDistanceThreshold));
@@ -2730,7 +2732,7 @@ void WG_TraverseNodes(
                     lodCheckWorldRadius,
                     node.metric.maxQuadricError,
                     lodUniformScale,
-                    lodCam.positionWorldSpace.xyz,
+                    lodCam.viewZ,
                     lodCam.zNear,
                     lodCamera.isOrtho);
                 const bool nodeWantsTraversal =
@@ -2831,7 +2833,7 @@ void WG_TraverseNodes(
                                     const float childEOD = ProjectedGeometricError(
                                         childWorldCenter, childLodRadiusWorld,
                                         child.metric.maxQuadricError, lodUniformScale,
-                                        lodCam.positionWorldSpace.xyz, lodCam.zNear,
+                                        lodCam.viewZ, lodCam.zNear,
                                         lodCamera.isOrtho);
                                     if (childEOD < lodCam.errorOverDistanceThreshold) {
                                         WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED, 1);
@@ -3367,7 +3369,7 @@ void ClusterCullBody(
             const float ownWorldRadius = ownGrp.bounds.centerAndRadius.w * lodUniformScale;
             ownGroupErrorOverDistance = ProjectedGeometricError(
                 ownWorldCenter, ownWorldRadius, ownGrp.bounds.error, lodUniformScale,
-                lodCam.positionWorldSpace.xyz, lodCam.zNear,
+                lodCam.viewZ, lodCam.zNear,
                 lodCameraIsOrtho);
         }
 

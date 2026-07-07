@@ -509,7 +509,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         lodCheckWorldRadius,
         node.metric.maxQuadricError,
         lodUniformScale,
-        lodCam.positionWorldSpace.xyz,
+        lodCam.viewZ,
         lodCam.zNear,
         lodCamera.isOrtho);
     const bool nodeWantsTraversal =
@@ -594,7 +594,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             const float childEOD = ProjectedGeometricError(
                 childWorldCenter, childLodRadiusWorld,
                 child.metric.maxQuadricError, lodUniformScale,
-                lodCam.positionWorldSpace.xyz, lodCam.zNear,
+                lodCam.viewZ, lodCam.zNear,
                 lodCamera.isOrtho);
             if (childEOD < lodCam.errorOverDistanceThreshold) {
                 WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED, 1);
