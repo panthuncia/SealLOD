@@ -1,14 +1,18 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
 
 #include <DirectXMath.h>
+#include <spdlog/spdlog.h>
 
 #include "Animation/Skeleton.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -150,6 +154,14 @@ private:
         return true;
     }
 
+    static float Distance(DirectX::XMFLOAT4 a, DirectX::XMFLOAT4 b)
+    {
+        const float x = a.x - b.x;
+        const float y = a.y - b.y;
+        const float z = a.z - b.z;
+        return std::sqrt(x * x + y * y + z * z);
+    }
+
     static DirectX::XMFLOAT4 ColorForSkeleton(uint32_t skeletonIndex)
     {
         constexpr DirectX::XMFLOAT4 kColors[] = {
@@ -162,10 +174,88 @@ private:
         return kColors[skeletonIndex % std::size(kColors)];
     }
 
+    static std::string_view LeafName(std::string_view name)
+    {
+        const size_t slash = name.find_last_of('/');
+        return slash == std::string_view::npos ? name : name.substr(slash + 1u);
+    }
+
+    static std::string_view SkeletonInstancePrefix(std::string_view name)
+    {
+        const size_t bracket = name.find(']');
+        return bracket == std::string_view::npos ? std::string_view{} : name.substr(0u, bracket + 1u);
+    }
+
+    enum class LineClass : uint32_t {
+        SameInstance,
+        CrossInstance,
+        LongSameInstance,
+        LongCrossInstance,
+        LongRootRegion,
+        RootParent,
+    };
+
+    static DirectX::XMFLOAT4 ColorForLineClass(LineClass lineClass, DirectX::XMFLOAT4 skeletonColor)
+    {
+        switch (lineClass) {
+        case LineClass::RootParent:
+            return { 1.00f, 0.05f, 0.10f, 1.00f };
+        case LineClass::LongRootRegion:
+            return { 1.00f, 0.42f, 0.00f, 1.00f };
+        case LineClass::LongCrossInstance:
+            return { 1.00f, 0.00f, 0.85f, 1.00f };
+        case LineClass::CrossInstance:
+            return { 0.10f, 1.00f, 0.25f, 1.00f };
+        case LineClass::LongSameInstance:
+            return { 1.00f, 0.95f, 0.05f, 1.00f };
+        case LineClass::SameInstance:
+        default:
+            return skeletonColor;
+        }
+    }
+
+    static const char* LineClassName(LineClass lineClass)
+    {
+        switch (lineClass) {
+        case LineClass::RootParent:
+            return "root-parent";
+        case LineClass::LongRootRegion:
+            return "long-root-region";
+        case LineClass::LongCrossInstance:
+            return "long-cross-instance";
+        case LineClass::CrossInstance:
+            return "cross-instance";
+        case LineClass::LongSameInstance:
+            return "long-same-instance";
+        case LineClass::SameInstance:
+        default:
+            return "same-instance";
+        }
+    }
+
     void BuildLines()
     {
         m_lines.clear();
         m_drawRanges.clear();
+
+        struct EmittedLineDiagnostic {
+            uint32_t skeletonIndex = 0;
+            uint32_t child = 0;
+            int32_t parent = -1;
+            float length = 0.0f;
+            float startDistanceFromRoot = 0.0f;
+            bool rootParentLine = false;
+            bool crossInstanceLine = false;
+            LineClass lineClass = LineClass::SameInstance;
+            std::string childName;
+            std::string parentName;
+        };
+        std::vector<EmittedLineDiagnostic> emittedLineDiagnostics;
+        uint32_t diagnosticRootParentLineCount = 0;
+        uint32_t diagnosticRootRegionLineCount = 0;
+        uint32_t diagnosticCrossInstanceLineCount = 0;
+        uint32_t diagnosticLongCrossInstanceLineCount = 0;
+        uint32_t diagnosticLongSameInstanceLineCount = 0;
 
         uint32_t skeletonIndex = 0;
         std::unordered_set<const Skeleton*> drawnSkeletons;
@@ -194,16 +284,21 @@ private:
                 }
 
                 const uint32_t rangeStart = static_cast<uint32_t>(m_lines.size());
+                const uint32_t currentSkeletonIndex = skeletonIndex;
                 const DirectX::XMFLOAT4 color = ColorForSkeleton(skeletonIndex++);
+                const auto boneNames = skin->GetBoneNames();
+                const DirectX::XMFLOAT4 skeletonRootWorld = TransformJointOrigin(boneMatrices[0], matrix.matrix);
                 for (uint32_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
                     const int32_t parentIndex = parentIndices[boneIndex];
 
                     SkeletonDebugLine line{};
+                    bool rootParentLine = false;
                     if (parentIndex < 0) {
                         if (boneIndex >= rootParentGlobals.size() || MatrixIsNearlyIdentity(rootParentGlobals[boneIndex])) {
                             continue;
                         }
                         line.startWorld = TransformJointOrigin(rootParentGlobals[boneIndex], matrix.matrix);
+                        rootParentLine = true;
                     }
                     else if (static_cast<uint32_t>(parentIndex) < boneCount) {
                         line.startWorld = TransformJointOrigin(boneMatrices[static_cast<uint32_t>(parentIndex)], matrix.matrix);
@@ -212,8 +307,82 @@ private:
                         continue;
                     }
                     line.endWorld = TransformJointOrigin(boneMatrices[boneIndex], matrix.matrix);
-                    line.color = color;
+
+                    const float lineLength = Distance(line.startWorld, line.endWorld);
+                    const float startDistanceFromRoot = Distance(line.startWorld, skeletonRootWorld);
+                    const bool startsNearRoot = startDistanceFromRoot <= 2.0f;
+                    const bool longLine = lineLength >= 4.0f;
+                    bool crossInstanceLine = false;
+                    if (parentIndex >= 0 &&
+                        static_cast<uint32_t>(parentIndex) < boneNames.size() &&
+                        boneIndex < boneNames.size()) {
+                        const std::string_view childPrefix = SkeletonInstancePrefix(boneNames[boneIndex]);
+                        const std::string_view parentPrefix = SkeletonInstancePrefix(boneNames[static_cast<uint32_t>(parentIndex)]);
+                        crossInstanceLine = !childPrefix.empty() && !parentPrefix.empty() && childPrefix != parentPrefix;
+                    }
+
+                    LineClass lineClass = LineClass::SameInstance;
+                    if (rootParentLine) {
+                        lineClass = LineClass::RootParent;
+                    }
+                    else if (startsNearRoot && longLine) {
+                        lineClass = LineClass::LongRootRegion;
+                    }
+                    else if (crossInstanceLine && longLine) {
+                        lineClass = LineClass::LongCrossInstance;
+                    }
+                    else if (crossInstanceLine) {
+                        lineClass = LineClass::CrossInstance;
+                    }
+                    else if (longLine) {
+                        lineClass = LineClass::LongSameInstance;
+                    }
+
+                    line.color = ColorForLineClass(lineClass, color);
                     m_lines.push_back(line);
+
+                    if (!m_loggedLineDiagnostics) {
+                        if (rootParentLine) {
+                            ++diagnosticRootParentLineCount;
+                        }
+                        if (lineClass == LineClass::LongRootRegion) {
+                            ++diagnosticRootRegionLineCount;
+                        }
+                        if (crossInstanceLine) {
+                            ++diagnosticCrossInstanceLineCount;
+                        }
+                        if (lineClass == LineClass::LongCrossInstance) {
+                            ++diagnosticLongCrossInstanceLineCount;
+                        }
+                        if (lineClass == LineClass::LongSameInstance) {
+                            ++diagnosticLongSameInstanceLineCount;
+                        }
+                        if (longLine || rootParentLine || startsNearRoot || crossInstanceLine) {
+                            std::string childName = boneIndex < boneNames.size()
+                                ? boneNames[boneIndex]
+                                : ("bone_" + std::to_string(boneIndex));
+                            childName = std::string(LeafName(childName));
+
+                            std::string parentName = "<root-parent>";
+                            if (parentIndex >= 0 && static_cast<uint32_t>(parentIndex) < boneNames.size()) {
+                                parentName = boneNames[static_cast<uint32_t>(parentIndex)];
+                                parentName = std::string(LeafName(parentName));
+                            }
+
+                            emittedLineDiagnostics.push_back(EmittedLineDiagnostic{
+                                .skeletonIndex = currentSkeletonIndex,
+                                .child = boneIndex,
+                                .parent = parentIndex,
+                                .length = lineLength,
+                                .startDistanceFromRoot = startDistanceFromRoot,
+                                .rootParentLine = rootParentLine,
+                                .crossInstanceLine = crossInstanceLine,
+                                .lineClass = lineClass,
+                                .childName = std::move(childName),
+                                .parentName = std::move(parentName),
+                            });
+                        }
+                    }
                 }
 
                 const uint32_t rangeCount = static_cast<uint32_t>(m_lines.size()) - rangeStart;
@@ -225,6 +394,39 @@ private:
                 }
             }
         });
+
+        if (!m_loggedLineDiagnostics && !m_lines.empty()) {
+            m_loggedLineDiagnostics = true;
+            std::sort(emittedLineDiagnostics.begin(), emittedLineDiagnostics.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.length > rhs.length;
+            });
+            spdlog::info(
+                "DebugSkeleton overlay diagnostics: skeletons={} lines={} rootParentLines={} longLinesStartingNearRoot={} crossInstanceLines={} longCrossInstanceLines={} longSameInstanceLines={}",
+                skeletonIndex,
+                m_lines.size(),
+                diagnosticRootParentLineCount,
+                diagnosticRootRegionLineCount,
+                diagnosticCrossInstanceLineCount,
+                diagnosticLongCrossInstanceLineCount,
+                diagnosticLongSameInstanceLineCount);
+
+            const size_t detailCount = (std::min<size_t>)(emittedLineDiagnostics.size(), 32u);
+            for (size_t i = 0; i < detailCount; ++i) {
+                const auto& diagnostic = emittedLineDiagnostics[i];
+                spdlog::info(
+                    "  DebugSkeleton emitted line: skel={} class={} child={} '{}' parent={} '{}' length={:.4f} startDistRoot={:.4f} rootParent={} crossInstance={}",
+                    diagnostic.skeletonIndex,
+                    LineClassName(diagnostic.lineClass),
+                    diagnostic.child,
+                    diagnostic.childName,
+                    diagnostic.parent,
+                    diagnostic.parentName,
+                    diagnostic.length,
+                    diagnostic.startDistanceFromRoot,
+                    diagnostic.rootParentLine,
+                    diagnostic.crossInstanceLine);
+            }
+        }
     }
 
     void CreatePSO()
@@ -301,4 +503,5 @@ private:
     flecs::query<Components::Matrix, Components::ObjectDrawInfo, Components::MeshInstances> m_meshInstancesQuery;
     rhi::PipelinePtr m_pso;
     PipelineResources m_resourceDescriptorBindings;
+    bool m_loggedLineDiagnostics = false;
 };

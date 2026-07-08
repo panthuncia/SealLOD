@@ -235,6 +235,13 @@ namespace USDLoader {
 		double metersPerUnit = 1.0;
 	};
 
+	struct AssemblySkeletonTopologyHints
+	{
+		bool scanned = false;
+		std::size_t naniteBindJointPairCount = 0u;
+		std::unordered_set<std::string> naniteBindEdgeKeys;
+	};
+
 	struct LoadingCaches {
 		std::unordered_map<std::string, MaterialTemplateRecord> materialTemplateCache;
         std::unordered_map<std::string, std::shared_ptr<Material>> resolvedMaterialCache;
@@ -249,6 +256,7 @@ namespace USDLoader {
 		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
 		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonMap;
 		std::unordered_map<const Skeleton*, PayloadSkeletonBuildMetadata> payloadSkeletonMetadata;
+		std::unordered_map<std::string, AssemblySkeletonTopologyHints> assemblySkeletonTopologyHintsByStage;
 		std::unordered_map<std::string, std::shared_ptr<Animation>> animationMap;
 		// For storing nodes in the USD shader graph
 		std::unordered_map<std::string, flecs::entity> nodeMap;
@@ -266,6 +274,7 @@ namespace USDLoader {
 			primsWithSkeletons.clear();
 			skeletonMap.clear();
 			payloadSkeletonMetadata.clear();
+			assemblySkeletonTopologyHintsByStage.clear();
 			animationMap.clear();
 			nodeMap.clear();
 		}
@@ -4196,15 +4205,6 @@ namespace USDLoader {
 		return animation;
 	}
 
-	struct AssemblySkeletonParentRepair
-	{
-		size_t jointIndex = 0;
-		int32_t oldParent = -1;
-		int32_t newParent = -1;
-		double oldDistance = 0.0;
-		double newDistance = 0.0;
-	};
-
 	static GfVec3d ExtractUsdMatrixTranslation(const GfMatrix4d& matrix)
 	{
 		return matrix.Transform(GfVec3d(0.0));
@@ -4252,15 +4252,208 @@ namespace USDLoader {
 		return children;
 	}
 
-	static void RepairAssemblySkeletonParentIndices(
+	static std::string_view UsdJointLeafName(std::string_view jointName)
+	{
+		const size_t slash = jointName.find_last_of('/');
+		return slash == std::string_view::npos ? jointName : jointName.substr(slash + 1u);
+	}
+
+	static std::string AssemblySkeletonEdgeKey(std::string_view parent, std::string_view child)
+	{
+		std::string key;
+		key.reserve(parent.size() + child.size() + 1u);
+		key.append(parent);
+		key.push_back('\n');
+		key.append(child);
+		return key;
+	}
+
+	static void AddAssemblySkeletonEdgeHint(
+		AssemblySkeletonTopologyHints& hints,
+		std::string_view parent,
+		std::string_view child)
+	{
+		if (parent.empty() || child.empty()) {
+			return;
+		}
+		hints.naniteBindEdgeKeys.insert(AssemblySkeletonEdgeKey(parent, child));
+		hints.naniteBindEdgeKeys.insert(AssemblySkeletonEdgeKey(UsdJointLeafName(parent), UsdJointLeafName(child)));
+	}
+
+	static std::string StageTopologyHintCacheKey(const UsdStageRefPtr& stage)
+	{
+		if (!stage) {
+			return "<null>";
+		}
+		if (const SdfLayerHandle rootLayer = stage->GetRootLayer()) {
+			return rootLayer->GetIdentifier();
+		}
+		return "<anonymous>";
+	}
+
+	static const AssemblySkeletonTopologyHints& GetAssemblySkeletonTopologyHints(const UsdStageRefPtr& stage)
+	{
+		const std::string cacheKey = StageTopologyHintCacheKey(stage);
+		AssemblySkeletonTopologyHints& hints = loadingCache.assemblySkeletonTopologyHintsByStage[cacheKey];
+		if (hints.scanned) {
+			return hints;
+		}
+
+		hints.scanned = true;
+		if (!stage) {
+			return hints;
+		}
+
+		for (const UsdPrim& prim : UsdPrimRange(stage->GetPseudoRoot())) {
+			const UsdAttribute bindJointsAttr = prim.GetAttribute(TfToken("primvars:unreal:naniteAssembly:bindJoints"));
+			if (!bindJointsAttr) {
+				continue;
+			}
+
+			VtTokenArray bindJoints;
+			if (!bindJointsAttr.Get(&bindJoints) || bindJoints.size() < 2u) {
+				continue;
+			}
+
+			hints.naniteBindJointPairCount += bindJoints.size() / 2u;
+			for (size_t tokenIndex = 0; tokenIndex + 1u < bindJoints.size(); tokenIndex += 2u) {
+				AddAssemblySkeletonEdgeHint(
+					hints,
+					bindJoints[tokenIndex].GetString(),
+					bindJoints[tokenIndex + 1u].GetString());
+			}
+		}
+
+		if (hints.naniteBindJointPairCount != 0u) {
+			spdlog::info(
+				"USD assembly skeleton topology hints: stage='{}' naniteBindJointPairs={} edgeKeys={}",
+				cacheKey,
+				hints.naniteBindJointPairCount,
+				hints.naniteBindEdgeKeys.size());
+		}
+
+		return hints;
+	}
+
+	struct UsdSkeletonTopologyValidation
+	{
+		size_t duplicateJointNames = 0u;
+		size_t missingAuthoredParents = 0u;
+		size_t parentMismatches = 0u;
+		size_t invalidParentIndices = 0u;
+		size_t selfParents = 0u;
+		size_t forwardParents = 0u;
+		size_t cycles = 0u;
+	};
+
+	static UsdSkeletonTopologyValidation ValidateUsdSkeletonTopology(
+		const VtTokenArray& jointOrder,
+		const std::vector<int32_t>& parentIndices)
+	{
+		UsdSkeletonTopologyValidation validation{};
+		std::unordered_map<std::string, size_t> jointIndexByName;
+		jointIndexByName.reserve(jointOrder.size());
+		for (size_t jointIndex = 0; jointIndex < jointOrder.size(); ++jointIndex) {
+			const std::string jointName = jointOrder[jointIndex].GetString();
+			if (!jointIndexByName.emplace(jointName, jointIndex).second) {
+				++validation.duplicateJointNames;
+			}
+		}
+
+		for (size_t jointIndex = 0; jointIndex < jointOrder.size(); ++jointIndex) {
+			const int32_t parentIndex = jointIndex < parentIndices.size() ? parentIndices[jointIndex] : -1;
+			if (parentIndex == static_cast<int32_t>(jointIndex)) {
+				++validation.selfParents;
+			}
+			if (parentIndex >= static_cast<int32_t>(jointOrder.size())) {
+				++validation.invalidParentIndices;
+			}
+			if (parentIndex > static_cast<int32_t>(jointIndex)) {
+				++validation.forwardParents;
+			}
+
+			const std::string jointName = jointOrder[jointIndex].GetString();
+			const size_t slash = jointName.find_last_of('/');
+			if (slash == std::string::npos) {
+				if (parentIndex >= 0) {
+					++validation.parentMismatches;
+				}
+				continue;
+			}
+
+			const std::string authoredParentName = jointName.substr(0u, slash);
+			const auto authoredParentIt = jointIndexByName.find(authoredParentName);
+			if (authoredParentIt == jointIndexByName.end()) {
+				++validation.missingAuthoredParents;
+			}
+			else if (parentIndex != static_cast<int32_t>(authoredParentIt->second)) {
+				++validation.parentMismatches;
+			}
+		}
+
+		std::vector<uint8_t> visitState(jointOrder.size(), 0u);
+		std::function<bool(size_t)> visit = [&](size_t jointIndex) -> bool {
+			if (jointIndex >= parentIndices.size()) {
+				return false;
+			}
+			if (visitState[jointIndex] == 1u) {
+				return true;
+			}
+			if (visitState[jointIndex] == 2u) {
+				return false;
+			}
+			visitState[jointIndex] = 1u;
+			const int32_t parentIndex = parentIndices[jointIndex];
+			bool hasCycle = false;
+			if (parentIndex >= 0 && static_cast<size_t>(parentIndex) < jointOrder.size()) {
+				hasCycle = visit(static_cast<size_t>(parentIndex));
+			}
+			visitState[jointIndex] = 2u;
+			return hasCycle;
+		};
+		for (size_t jointIndex = 0; jointIndex < jointOrder.size(); ++jointIndex) {
+			if (visit(jointIndex)) {
+				++validation.cycles;
+			}
+		}
+
+		return validation;
+	}
+
+	static int32_t FindNearestPriorJoint(
+		const std::vector<GfVec3d>& jointPositions,
+		size_t jointIndex,
+		int32_t excludedJoint,
+		double* outDistance = nullptr)
+	{
+		int32_t bestParent = -1;
+		double bestDistance = std::numeric_limits<double>::max();
+		for (size_t candidate = 0; candidate < jointIndex; ++candidate) {
+			if (static_cast<int32_t>(candidate) == excludedJoint) {
+				continue;
+			}
+			const double distance = UsdDistance(jointPositions[jointIndex], jointPositions[candidate]);
+			if (distance < bestDistance) {
+				bestDistance = distance;
+				bestParent = static_cast<int32_t>(candidate);
+			}
+		}
+		if (outDistance) {
+			*outDistance = bestDistance;
+		}
+		return bestParent;
+	}
+
+	static bool SanitizeAssemblySkeletonParentIndices(
 		const std::string& skeletonPath,
 		const VtTokenArray& jointOrder,
 		const VtArray<GfMatrix4d>& bindXforms,
+		const AssemblySkeletonTopologyHints& hints,
 		std::vector<int32_t>& parentIndices)
 	{
 		const size_t jointCount = jointOrder.size();
 		if (jointCount < 3 || bindXforms.empty() || parentIndices.size() != jointCount) {
-			return;
+			return true;
 		}
 
 		int32_t primaryRoot = -1;
@@ -4271,7 +4464,7 @@ namespace USDLoader {
 			}
 		}
 		if (primaryRoot < 0) {
-			return;
+			return true;
 		}
 
 		std::vector<GfVec3d> jointPositions(jointCount, GfVec3d(0.0));
@@ -4282,7 +4475,32 @@ namespace USDLoader {
 
 		const size_t rootsBefore = CountUsdSkeletonRoots(parentIndices);
 		const size_t rootChildrenBefore = CountUsdSkeletonChildrenOf(parentIndices, primaryRoot);
-		std::vector<AssemblySkeletonParentRepair> repairs;
+		const std::vector<int32_t> authoredParentIndices = parentIndices;
+		const UsdSkeletonTopologyValidation authoredValidation = ValidateUsdSkeletonTopology(jointOrder, parentIndices);
+
+		enum class SanitizedParentReason
+		{
+			NaniteAssemblyBindEdge,
+			CoincidentBindPoseAlias,
+			PropagatedThroughSanitizedParent,
+		};
+
+		struct SanitizedParentEdge
+		{
+			size_t jointIndex = 0;
+			int32_t oldParent = -1;
+			int32_t newParent = -1;
+			double oldDistance = 0.0;
+			double newDistance = 0.0;
+			SanitizedParentReason reason = SanitizedParentReason::NaniteAssemblyBindEdge;
+		};
+
+		std::vector<uint8_t> sanitizedJoint(jointCount, 0u);
+		std::vector<SanitizedParentEdge> sanitizedEdges;
+		size_t naniteEdgeCount = 0u;
+		size_t coincidentAliasCount = 0u;
+		size_t propagatedEdgeCount = 0u;
+		constexpr double kCoincidentBindPositionEpsilon = 1.0e-8;
 
 		for (size_t i = 0; i < jointCount; ++i) {
 			if (static_cast<int32_t>(i) == primaryRoot) {
@@ -4290,80 +4508,142 @@ namespace USDLoader {
 			}
 
 			const int32_t oldParent = parentIndices[i];
-			const bool isSecondaryRoot = oldParent < 0;
-			const bool isPrimaryRootChild = oldParent == primaryRoot;
-			if (!isSecondaryRoot && !isPrimaryRootChild) {
+			if (oldParent < 0 || static_cast<size_t>(oldParent) >= jointPositions.size()) {
 				continue;
 			}
 
-			int32_t bestParent = oldParent;
-			double bestDistance = std::numeric_limits<double>::max();
-			for (size_t candidate = 0; candidate < i; ++candidate) {
-				if (candidate == i) {
-					continue;
+			const double oldDistance = UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(oldParent)]);
+			const std::string childName = jointOrder[i].GetString();
+			const std::string parentName = jointOrder[static_cast<size_t>(oldParent)].GetString();
+			const bool isNaniteBindEdge =
+				hints.naniteBindEdgeKeys.contains(AssemblySkeletonEdgeKey(parentName, childName)) ||
+				hints.naniteBindEdgeKeys.contains(AssemblySkeletonEdgeKey(UsdJointLeafName(parentName), UsdJointLeafName(childName)));
+
+			double nearestDistance = std::numeric_limits<double>::max();
+			const int32_t nearestParent = FindNearestPriorJoint(jointPositions, i, isNaniteBindEdge ? oldParent : -1, &nearestDistance);
+			int32_t newParent = oldParent;
+			SanitizedParentReason reason = SanitizedParentReason::NaniteAssemblyBindEdge;
+
+			if (isNaniteBindEdge && nearestParent >= 0) {
+				newParent = nearestParent;
+				reason = SanitizedParentReason::NaniteAssemblyBindEdge;
+			}
+			else if (nearestParent >= 0 &&
+				nearestParent != oldParent &&
+				nearestDistance <= kCoincidentBindPositionEpsilon &&
+				oldDistance > kCoincidentBindPositionEpsilon) {
+				newParent = nearestParent;
+				reason = SanitizedParentReason::CoincidentBindPoseAlias;
+			}
+			else if (sanitizedJoint[static_cast<size_t>(oldParent)] != 0u) {
+				const int32_t authoredGrandparent = authoredParentIndices[static_cast<size_t>(oldParent)];
+				if (authoredGrandparent >= 0 &&
+					static_cast<size_t>(authoredGrandparent) < i &&
+					authoredGrandparent != oldParent) {
+					const double grandparentDistance =
+						UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(authoredGrandparent)]);
+					if (grandparentDistance + kCoincidentBindPositionEpsilon < oldDistance) {
+						newParent = authoredGrandparent;
+						nearestDistance = grandparentDistance;
+						reason = SanitizedParentReason::PropagatedThroughSanitizedParent;
+					}
 				}
-				const double distance = UsdDistance(jointPositions[i], jointPositions[candidate]);
-				if (distance < bestDistance) {
-					bestDistance = distance;
-					bestParent = static_cast<int32_t>(candidate);
-				}
 			}
 
-			if (bestParent < 0 || bestParent == oldParent) {
+			if (newParent < 0 || newParent == oldParent || static_cast<size_t>(newParent) >= i) {
 				continue;
 			}
 
-			double oldDistance = std::numeric_limits<double>::max();
-			if (oldParent >= 0 && static_cast<size_t>(oldParent) < jointPositions.size()) {
-				oldDistance = UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(oldParent)]);
+			parentIndices[i] = newParent;
+			sanitizedJoint[i] = 1u;
+			switch (reason) {
+			case SanitizedParentReason::NaniteAssemblyBindEdge:
+				++naniteEdgeCount;
+				break;
+			case SanitizedParentReason::CoincidentBindPoseAlias:
+				++coincidentAliasCount;
+				break;
+			case SanitizedParentReason::PropagatedThroughSanitizedParent:
+				++propagatedEdgeCount;
+				break;
 			}
-			else if (primaryRoot >= 0 && static_cast<size_t>(primaryRoot) < jointPositions.size()) {
-				oldDistance = UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(primaryRoot)]);
-			}
-
-			if (!std::isfinite(oldDistance) || !(bestDistance < oldDistance * 0.5)) {
-				continue;
-			}
-
-			parentIndices[i] = bestParent;
-			repairs.push_back({ i, oldParent, bestParent, oldDistance, bestDistance });
+			sanitizedEdges.push_back({ i, oldParent, newParent, oldDistance, nearestDistance, reason });
 		}
 
 		const size_t rootsAfter = CountUsdSkeletonRoots(parentIndices);
 		const size_t rootChildrenAfter = CountUsdSkeletonChildrenOf(parentIndices, primaryRoot);
+		const UsdSkeletonTopologyValidation sanitizedValidation = ValidateUsdSkeletonTopology(jointOrder, parentIndices);
+		const bool sanitizedTopologyValid =
+			authoredValidation.duplicateJointNames == 0u &&
+			sanitizedValidation.invalidParentIndices == 0u &&
+			sanitizedValidation.selfParents == 0u &&
+			sanitizedValidation.forwardParents == 0u &&
+			sanitizedValidation.cycles == 0u;
 		spdlog::info(
-			"USD assembly skeleton hierarchy '{}': joints={}, roots {}->{}, rootChildren {}->{}, repaired={}",
+			"USD assembly skeleton topology sanitize '{}': joints={}, roots {}->{}, rootChildren {}->{}, naniteBindPairs={}, sanitized={} (nanite={}, coincident={}, propagated={}), authoredIssues={{duplicates={}, missingParents={}, parentMismatches={}, invalidParents={}, cycles={}}}, sanitizedIssues={{invalidParents={}, selfParents={}, forwardParents={}, cycles={}}}",
 			skeletonPath,
 			jointCount,
 			rootsBefore,
 			rootsAfter,
 			rootChildrenBefore,
 			rootChildrenAfter,
-			repairs.size());
+			hints.naniteBindJointPairCount,
+			sanitizedEdges.size(),
+			naniteEdgeCount,
+			coincidentAliasCount,
+			propagatedEdgeCount,
+			authoredValidation.duplicateJointNames,
+			authoredValidation.missingAuthoredParents,
+			authoredValidation.parentMismatches,
+			authoredValidation.invalidParentIndices,
+			authoredValidation.cycles,
+			sanitizedValidation.invalidParentIndices,
+			sanitizedValidation.selfParents,
+			sanitizedValidation.forwardParents,
+			sanitizedValidation.cycles);
+		if (!sanitizedTopologyValid) {
+			spdlog::error(
+				"USD assembly skeleton topology sanitize '{}': refusing invalid hierarchy after sanitation.",
+				skeletonPath);
+			return false;
+		}
 
-		const size_t detailCount = (std::min<size_t>)(repairs.size(), 24u);
+		auto reasonName = [](SanitizedParentReason reason) -> const char* {
+			switch (reason) {
+			case SanitizedParentReason::NaniteAssemblyBindEdge:
+				return "naniteBindEdge";
+			case SanitizedParentReason::CoincidentBindPoseAlias:
+				return "coincidentBindAlias";
+			case SanitizedParentReason::PropagatedThroughSanitizedParent:
+				return "propagatedThroughSanitizedParent";
+			}
+			return "unknown";
+		};
+		const size_t detailCount = (std::min<size_t>)(sanitizedEdges.size(), 24u);
 		for (size_t i = 0; i < detailCount; ++i) {
-			const auto& repair = repairs[i];
-			const char* oldParentName = repair.oldParent >= 0 && static_cast<size_t>(repair.oldParent) < jointOrder.size()
-				? jointOrder[static_cast<size_t>(repair.oldParent)].GetText()
-				: "<root>";
-			const char* newParentName = repair.newParent >= 0 && static_cast<size_t>(repair.newParent) < jointOrder.size()
-				? jointOrder[static_cast<size_t>(repair.newParent)].GetText()
-				: "<root>";
+			const auto& edge = sanitizedEdges[i];
+			const std::string_view oldParentName = edge.oldParent >= 0 && static_cast<size_t>(edge.oldParent) < jointOrder.size()
+				? UsdJointLeafName(jointOrder[static_cast<size_t>(edge.oldParent)].GetString())
+				: std::string_view("<root>");
+			const std::string_view newParentName = edge.newParent >= 0 && static_cast<size_t>(edge.newParent) < jointOrder.size()
+				? UsdJointLeafName(jointOrder[static_cast<size_t>(edge.newParent)].GetString())
+				: std::string_view("<root>");
 			spdlog::info(
-				"  USD assembly skeleton reparent '{}': '{}' -> '{}' (distance {:.4f} -> {:.4f})",
-				jointOrder[repair.jointIndex].GetText(),
+				"  USD assembly skeleton sanitized '{}': '{}' -> '{}' reason={} (distance {:.4f} -> {:.4f})",
+				UsdJointLeafName(jointOrder[edge.jointIndex].GetString()),
 				oldParentName,
 				newParentName,
-				repair.oldDistance,
-				repair.newDistance);
+				reasonName(edge.reason),
+				edge.oldDistance,
+				edge.newDistance);
 		}
-		if (repairs.size() > detailCount) {
+		if (sanitizedEdges.size() > detailCount) {
 			spdlog::info(
-				"  USD assembly skeleton '{}': {} additional repaired parent links omitted",
+				"  USD assembly skeleton '{}': {} additional sanitized parent links omitted",
 				skeletonPath,
-				repairs.size() - detailCount);
+				sanitizedEdges.size() - detailCount);
 		}
+		return true;
 	}
 
 	std::shared_ptr<Skeleton> BuildPayloadSkeleton(
@@ -4371,13 +4651,18 @@ namespace USDLoader {
 		const VtTokenArray& rawJointOrder,
 		const UsdSkelSkeletonQuery& skelQuery,
 		double metersPerUnit,
-		bool repairAssemblyHierarchy = false)
+		bool sanitizeAssemblyHierarchy = false,
+		const UsdStageRefPtr& stage = nullptr)
 	{
 		ZoneScopedN("USDLoader::BuildPayloadSkeleton");
 		const auto skeletonPath = skel.GetPrim().GetPath().GetString();
 		ZoneText(skeletonPath.data(), skeletonPath.size());
-		const std::string skeletonCacheKey = repairAssemblyHierarchy
-			? skeletonPath + "#assembly_hierarchy_repair=1"
+		const AssemblySkeletonTopologyHints* topologyHints = sanitizeAssemblyHierarchy
+			? &GetAssemblySkeletonTopologyHints(stage)
+			: nullptr;
+		const std::string skeletonCacheKey = sanitizeAssemblyHierarchy
+			? skeletonPath + "#assembly_topology_sanitize=2#nanite_pairs=" +
+				std::to_string(topologyHints ? topologyHints->naniteBindJointPairCount : 0u)
 			: skeletonPath;
 		if (loadingCache.skeletonMap.contains(skeletonCacheKey)) {
 			return loadingCache.skeletonMap[skeletonCacheKey];
@@ -4404,8 +4689,10 @@ namespace USDLoader {
 		restLocalTransforms.reserve(rawJointOrder.size());
 
 		parentIndices = BuildUsdSkeletonParentIndices(topology, rawJointOrder.size());
-		if (repairAssemblyHierarchy) {
-			RepairAssemblySkeletonParentIndices(skeletonPath, rawJointOrder, bindXforms, parentIndices);
+		if (sanitizeAssemblyHierarchy && topologyHints != nullptr) {
+			if (!SanitizeAssemblySkeletonParentIndices(skeletonPath, rawJointOrder, bindXforms, *topologyHints, parentIndices)) {
+				return nullptr;
+			}
 		}
 
 		PayloadSkeletonBuildMetadata metadata;
@@ -4526,11 +4813,232 @@ namespace USDLoader {
 			Components::Scale(scale));
 	}
 
+	static DirectX::XMFLOAT3 ExtractDirectXMatrixTranslation(DirectX::XMMATRIX matrix)
+	{
+		DirectX::XMFLOAT3 translation{};
+		DirectX::XMStoreFloat3(
+			&translation,
+			DirectX::XMVector3TransformCoord(DirectX::XMVectorZero(), matrix));
+		return translation;
+	}
+
+	static float Distance(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b)
+	{
+		const float x = a.x - b.x;
+		const float y = a.y - b.y;
+		const float z = a.z - b.z;
+		return std::sqrt(x * x + y * y + z * z);
+	}
+
+	static void LogAssemblySkeletonTopologyDiagnostics(
+		const ClusterLODAssemblySkeletonData& data,
+		std::string_view context)
+	{
+		if (data.Empty()) {
+			return;
+		}
+
+		const size_t jointCount = data.jointNames.size();
+		std::vector<DirectX::XMFLOAT3> bindPositions;
+		bindPositions.reserve(jointCount);
+		for (size_t jointIndex = 0; jointIndex < jointCount; ++jointIndex) {
+			if (jointIndex < data.bindGlobalMatrices.size()) {
+				bindPositions.push_back(ExtractDirectXMatrixTranslation(DirectX::XMLoadFloat4x4(&data.bindGlobalMatrices[jointIndex])));
+			}
+			else if (jointIndex < data.restLocalMatrices.size()) {
+				bindPositions.push_back(ExtractDirectXMatrixTranslation(DirectX::XMLoadFloat4x4(&data.restLocalMatrices[jointIndex])));
+			}
+			else {
+				bindPositions.push_back(DirectX::XMFLOAT3{ 0.0f, 0.0f, 0.0f });
+			}
+		}
+
+		struct ParentEdgeDiagnostic
+		{
+			size_t child = 0;
+			size_t parent = 0;
+			float distance = 0.0f;
+		};
+
+		auto leafName = [](const std::string& name) {
+			const std::string_view view(name);
+			const size_t slash = view.find_last_of('/');
+			return slash == std::string_view::npos ? view : view.substr(slash + 1u);
+		};
+		auto skeletonInstancePrefix = [](const std::string& name) {
+			const std::string_view view(name);
+			const size_t bracket = view.find(']');
+			return bracket == std::string_view::npos ? view : view.substr(0u, bracket + 1u);
+		};
+
+		size_t rootCount = 0;
+		size_t parentLineCount = 0;
+		size_t invalidParentCount = 0;
+		size_t edgesToJointZero = 0;
+		size_t longEdgesFromRootRegionCount = 0;
+		size_t crossSkeletonInstanceEdgeCount = 0;
+		size_t longCrossSkeletonInstanceEdgeCount = 0;
+		std::vector<ParentEdgeDiagnostic> longEdges;
+		std::vector<ParentEdgeDiagnostic> jointZeroEdges;
+		std::vector<ParentEdgeDiagnostic> longEdgesFromRootRegion;
+		std::vector<ParentEdgeDiagnostic> longCrossSkeletonInstanceEdges;
+		const DirectX::XMFLOAT3 assemblyRootPosition = bindPositions.empty()
+			? DirectX::XMFLOAT3{ 0.0f, 0.0f, 0.0f }
+			: bindPositions[0];
+		constexpr float kRootRegionRadius = 2.0f;
+		constexpr float kLongRootEdgeDistance = 4.0f;
+		for (size_t jointIndex = 0; jointIndex < jointCount; ++jointIndex) {
+			const int32_t parent = jointIndex < data.parentIndices.size()
+				? data.parentIndices[jointIndex]
+				: -1;
+			if (parent < 0) {
+				++rootCount;
+				continue;
+			}
+			if (static_cast<size_t>(parent) >= jointCount) {
+				++invalidParentCount;
+				continue;
+			}
+
+			++parentLineCount;
+			const float distance = Distance(bindPositions[jointIndex], bindPositions[static_cast<size_t>(parent)]);
+			longEdges.push_back(ParentEdgeDiagnostic{
+				.child = jointIndex,
+				.parent = static_cast<size_t>(parent),
+				.distance = distance,
+			});
+			if (parent == 0 && jointIndex != 0u) {
+				++edgesToJointZero;
+				jointZeroEdges.push_back(ParentEdgeDiagnostic{
+					.child = jointIndex,
+					.parent = 0u,
+					.distance = distance,
+				});
+			}
+			const float parentDistanceToRoot = Distance(bindPositions[static_cast<size_t>(parent)], assemblyRootPosition);
+			if (parentDistanceToRoot <= kRootRegionRadius && distance >= kLongRootEdgeDistance) {
+				++longEdgesFromRootRegionCount;
+				longEdgesFromRootRegion.push_back(ParentEdgeDiagnostic{
+					.child = jointIndex,
+					.parent = static_cast<size_t>(parent),
+					.distance = distance,
+				});
+			}
+			if (skeletonInstancePrefix(data.jointNames[jointIndex]) !=
+				skeletonInstancePrefix(data.jointNames[static_cast<size_t>(parent)])) {
+				++crossSkeletonInstanceEdgeCount;
+				if (distance >= kLongRootEdgeDistance) {
+					++longCrossSkeletonInstanceEdgeCount;
+					longCrossSkeletonInstanceEdges.push_back(ParentEdgeDiagnostic{
+						.child = jointIndex,
+						.parent = static_cast<size_t>(parent),
+						.distance = distance,
+					});
+				}
+			}
+		}
+
+		std::sort(longEdges.begin(), longEdges.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.distance > rhs.distance;
+		});
+		std::sort(jointZeroEdges.begin(), jointZeroEdges.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.distance > rhs.distance;
+		});
+		std::sort(longEdgesFromRootRegion.begin(), longEdgesFromRootRegion.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.distance > rhs.distance;
+		});
+		std::sort(longCrossSkeletonInstanceEdges.begin(), longCrossSkeletonInstanceEdges.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.distance > rhs.distance;
+		});
+
+		spdlog::info(
+			"USD CLod assembly skeleton topology [{}]: joints={} roots={} parentLines={} edgesToJoint0={} longRootRegionEdges={} crossInstanceEdges={} longCrossInstanceEdges={} invalidParents={} rootParentGlobalLinesExpected=0",
+			context,
+			jointCount,
+			rootCount,
+			parentLineCount,
+			edgesToJointZero,
+			longEdgesFromRootRegionCount,
+			crossSkeletonInstanceEdgeCount,
+			longCrossSkeletonInstanceEdgeCount,
+			invalidParentCount);
+
+		const size_t jointZeroDetailCount = (std::min<size_t>)(jointZeroEdges.size(), 16u);
+		for (size_t i = 0; i < jointZeroDetailCount; ++i) {
+			const ParentEdgeDiagnostic& edge = jointZeroEdges[i];
+			spdlog::info(
+				"  assembly skeleton edge-to-joint0 [{}]: child={} '{}' parent=0 '{}' distance={:.4f}",
+				context,
+				edge.child,
+				leafName(data.jointNames[edge.child]),
+				leafName(data.jointNames[0]),
+				edge.distance);
+		}
+		if (jointZeroEdges.size() > jointZeroDetailCount) {
+			spdlog::info(
+				"  assembly skeleton edge-to-joint0 [{}]: {} additional edges omitted",
+				context,
+				jointZeroEdges.size() - jointZeroDetailCount);
+		}
+
+		const size_t longEdgeDetailCount = (std::min<size_t>)(longEdges.size(), 12u);
+		for (size_t i = 0; i < longEdgeDetailCount; ++i) {
+			const ParentEdgeDiagnostic& edge = longEdges[i];
+			spdlog::info(
+				"  assembly skeleton longest edge [{}]: child={} '{}' parent={} '{}' distance={:.4f}",
+				context,
+				edge.child,
+				leafName(data.jointNames[edge.child]),
+				edge.parent,
+				leafName(data.jointNames[edge.parent]),
+				edge.distance);
+		}
+
+		const size_t rootRegionDetailCount = (std::min<size_t>)(longEdgesFromRootRegion.size(), 24u);
+		for (size_t i = 0; i < rootRegionDetailCount; ++i) {
+			const ParentEdgeDiagnostic& edge = longEdgesFromRootRegion[i];
+			spdlog::info(
+				"  assembly skeleton long edge from root-region [{}]: child={} '{}' parent={} '{}' distance={:.4f}",
+				context,
+				edge.child,
+				leafName(data.jointNames[edge.child]),
+				edge.parent,
+				leafName(data.jointNames[edge.parent]),
+				edge.distance);
+		}
+		if (longEdgesFromRootRegion.size() > rootRegionDetailCount) {
+			spdlog::info(
+				"  assembly skeleton long edge from root-region [{}]: {} additional edges omitted",
+				context,
+				longEdgesFromRootRegion.size() - rootRegionDetailCount);
+		}
+
+		const size_t crossInstanceDetailCount = (std::min<size_t>)(longCrossSkeletonInstanceEdges.size(), 24u);
+		for (size_t i = 0; i < crossInstanceDetailCount; ++i) {
+			const ParentEdgeDiagnostic& edge = longCrossSkeletonInstanceEdges[i];
+			spdlog::info(
+				"  assembly skeleton long cross-instance edge [{}]: child={} '{}' parent={} '{}' distance={:.4f}",
+				context,
+				edge.child,
+				leafName(data.jointNames[edge.child]),
+				edge.parent,
+				leafName(data.jointNames[edge.parent]),
+				edge.distance);
+		}
+		if (longCrossSkeletonInstanceEdges.size() > crossInstanceDetailCount) {
+			spdlog::info(
+				"  assembly skeleton long cross-instance edge [{}]: {} additional edges omitted",
+				context,
+				longCrossSkeletonInstanceEdges.size() - crossInstanceDetailCount);
+		}
+	}
+
 	static std::shared_ptr<Skeleton> BuildSkeletonFromAssemblySkeletonData(const ClusterLODAssemblySkeletonData& data)
 	{
 		if (data.Empty()) {
 			return nullptr;
 		}
+		LogAssemblySkeletonTopologyDiagnostics(data, "runtime");
 		std::vector<DirectX::XMMATRIX> inverseBinds;
 		std::vector<Components::Transform> restLocals;
 		inverseBinds.reserve(data.inverseBindMatrices.size());
@@ -4637,12 +5145,6 @@ namespace USDLoader {
 	static std::string AssetAssemblyMaterialDomainPath(const UsdShadeMaterial& material)
 	{
 		return material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>");
-	}
-
-	static std::string_view UsdJointLeafName(std::string_view jointName)
-	{
-		const size_t slash = jointName.find_last_of('/');
-		return slash == std::string_view::npos ? jointName : jointName.substr(slash + 1u);
 	}
 
 	static bool MeshHasUsdSkinningPrimvars(const UsdGeomMesh& mesh)
@@ -4808,7 +5310,7 @@ namespace USDLoader {
 		key.skinDomain = ComputeUsdSkeletonDomainHash(skel, jointOrder, skelQuery);
 
 		if (!skeletonsByKey.contains(key)) {
-			auto skeleton = BuildPayloadSkeleton(skel, jointOrder, skelQuery, metersPerUnit, false);
+			auto skeleton = BuildPayloadSkeleton(skel, jointOrder, skelQuery, metersPerUnit, true, stage);
 			if (!skeleton) {
 				if (fallbackReason) {
 					*fallbackReason = "failed to build base skeleton for '" +
@@ -5529,23 +6031,62 @@ namespace USDLoader {
 			return remap;
 		};
 
+		struct SkeletonAppendWorkItem
+		{
+			BuildBucket* bucket = nullptr;
+			std::size_t instanceIndex = 0;
+			std::size_t jointCount = 0;
+			std::string skeletonPath;
+		};
+
+		std::vector<SkeletonAppendWorkItem> skeletonAppendWork;
 		for (BuildBucket& bucket : buildBuckets) {
 			if (bucket.info == nullptr || !bucket.info->key.skinned || !bucket.info->skeleton) {
 				continue;
 			}
+			const auto metadataIt = loadingCache.payloadSkeletonMetadata.find(bucket.info->skeleton.get());
+			if (metadataIt == loadingCache.payloadSkeletonMetadata.end()) {
+				continue;
+			}
+			const PayloadSkeletonBuildMetadata& metadata = metadataIt->second;
 			const std::size_t instanceCount = std::min(bucket.instances.size(), bucket.instanceTransforms.size());
 			for (std::size_t instanceIndex = 0; instanceIndex < instanceCount; ++instanceIndex) {
-				bucket.instances[instanceIndex].boneRemapIndices =
-					appendOrReuseSkeletonInstance(bucket.info->skeleton, bucket.instanceTransforms[instanceIndex]);
+				skeletonAppendWork.push_back(SkeletonAppendWorkItem{
+					.bucket = &bucket,
+					.instanceIndex = instanceIndex,
+					.jointCount = metadata.boneNames.size(),
+					.skeletonPath = metadata.skeletonPath,
+				});
 			}
+		}
+		std::sort(skeletonAppendWork.begin(), skeletonAppendWork.end(), [](const SkeletonAppendWorkItem& lhs, const SkeletonAppendWorkItem& rhs) {
+			if (lhs.jointCount != rhs.jointCount) {
+				return lhs.jointCount > rhs.jointCount;
+			}
+			if (lhs.skeletonPath != rhs.skeletonPath) {
+				return lhs.skeletonPath < rhs.skeletonPath;
+			}
+			return lhs.instanceIndex < rhs.instanceIndex;
+		});
+		for (SkeletonAppendWorkItem& workItem : skeletonAppendWork) {
+			if (workItem.bucket == nullptr || workItem.instanceIndex >= workItem.bucket->instances.size() ||
+				workItem.instanceIndex >= workItem.bucket->instanceTransforms.size()) {
+				continue;
+			}
+			workItem.bucket->instances[workItem.instanceIndex].boneRemapIndices =
+				appendOrReuseSkeletonInstance(
+					workItem.bucket->info->skeleton,
+					workItem.bucket->instanceTransforms[workItem.instanceIndex]);
 		}
 
 		if (!expandedAssemblySkeleton.Empty()) {
 			spdlog::info(
-				"USD CLod assembly expanded skeleton: joints={} uniqueInstances={} buckets={}",
+				"USD CLod assembly expanded skeleton: joints={} uniqueInstances={} buckets={} appendJobs={}",
 				expandedAssemblySkeleton.jointNames.size(),
 				remapByInstanceKey.size(),
-				buildBuckets.size());
+				buildBuckets.size(),
+				skeletonAppendWork.size());
+			LogAssemblySkeletonTopologyDiagnostics(expandedAssemblySkeleton, "build");
 		}
 
 		for (BuildBucket& bucket : buildBuckets) {
