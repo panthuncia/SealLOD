@@ -500,7 +500,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 600000;
+    constexpr int NeedleCloneCount = 200000;
     constexpr float NeedleDistributionRadius = 1500.0f;
     constexpr float NeedleMinSpacing = 5.0f;
     constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;

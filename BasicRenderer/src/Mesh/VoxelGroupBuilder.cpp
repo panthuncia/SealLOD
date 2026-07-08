@@ -1728,10 +1728,26 @@ namespace
 		const ClusterLODAssemblyTransform& transform,
 		const DirectX::XMFLOAT3& vector)
 	{
+		const Float3 r0(transform.row0.x, transform.row0.y, transform.row0.z);
+		const Float3 r1(transform.row1.x, transform.row1.y, transform.row1.z);
+		const Float3 r2(transform.row2.x, transform.row2.y, transform.row2.z);
+		const Float3 c0 = r1.cross(r2);
+		const Float3 c1 = r2.cross(r0);
+		const Float3 c2 = r0.cross(r1);
+		const float det = r0.dot(c0);
+		if (std::abs(det) <= 1.0e-8f)
+		{
+			return vector;
+		}
+
+		const float invDet = 1.0f / det;
+		const Float3 invRow0(c0.x * invDet, c1.x * invDet, c2.x * invDet);
+		const Float3 invRow1(c0.y * invDet, c1.y * invDet, c2.y * invDet);
+		const Float3 invRow2(c0.z * invDet, c1.z * invDet, c2.z * invDet);
 		const Float3 transformed(
-			transform.row0.x * vector.x + transform.row0.y * vector.y + transform.row0.z * vector.z,
-			transform.row1.x * vector.x + transform.row1.y * vector.y + transform.row1.z * vector.z,
-			transform.row2.x * vector.x + transform.row2.y * vector.y + transform.row2.z * vector.z);
+			invRow0.x * vector.x + invRow1.x * vector.y + invRow2.x * vector.z,
+			invRow0.y * vector.x + invRow1.y * vector.y + invRow2.y * vector.z,
+			invRow0.z * vector.x + invRow1.z * vector.y + invRow2.z * vector.z);
 		return ToXM(transformed.lengthSq() > 1.0e-20f ? transformed.normalized() : Float3(0.0f, 1.0f, 0.0f));
 	}
 

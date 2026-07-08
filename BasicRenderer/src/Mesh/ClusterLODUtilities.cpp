@@ -8280,6 +8280,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::vector<VoxelSourceTrianglePart> assemblyCoverageParts;
 	std::vector<VoxelSourceTriangleInstance> assemblyCoverageInstances;
 	VoxelSourceTriangleBVH assemblyCoverageSourceTriangles;
+	bool assemblyCoverageDoubleSidedTriangles = settings.doubleSidedVoxelSourceNormals;
 	std::vector<uint32_t> groupBases(parts.size(), 0u);
 	std::vector<uint32_t> segmentBases(parts.size(), 0u);
 	std::vector<uint32_t> nodeBases(parts.size(), 0u);
@@ -8324,6 +8325,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			.vertices = parts[partIndex].coverageVertices,
 			.vertexStrideBytes = parts[partIndex].coverageVertexSize,
 			.triangleIndices = parts[partIndex].coverageIndices };
+		assemblyCoverageDoubleSidedTriangles =
+			assemblyCoverageDoubleSidedTriangles || parts[partIndex].doubleSidedCoverageTriangles;
 
 		groupBases[partIndex] = static_cast<uint32_t>(state.groups.size());
 		segmentBases[partIndex] = static_cast<uint32_t>(state.segments.size());
@@ -8991,7 +8994,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		assemblyCoverageSourceTriangles.BuildInstanced(
 			assemblyCoverageParts,
 			assemblyCoverageInstances,
-			false);
+			assemblyCoverageDoubleSidedTriangles);
 		if (!assemblyCoverageSourceTriangles.IsValid())
 		{
 			throw std::runtime_error("ClusterLOD assembly: failed to build parent voxel coverage BVH");

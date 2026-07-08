@@ -3886,7 +3886,7 @@ namespace USDLoader {
 
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
-		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=3";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=4#assembly_double_sided_coverage=1";
 		return assemblyIdentity;
 	}
 
@@ -4652,7 +4652,8 @@ namespace USDLoader {
 					.artifacts = result.transientArtifacts.get(),
 					.coverageVertices = &result.ingest.GetVertices(),
 					.coverageIndices = &result.ingest.GetIndices(),
-					.coverageVertexSize = result.ingest.GetVertexSize() });
+					.coverageVertexSize = result.ingest.GetVertexSize(),
+					.doubleSidedCoverageTriangles = result.forceDoubleSidedPreview });
 				bucket.partByResult.emplace(&result, partIndex);
 			}
 			bucket.instances.push_back(ClusterLODAssemblyInstanceSpec{
@@ -4808,10 +4809,14 @@ namespace USDLoader {
 				return false;
 			}
 			try {
+				ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings();
+				assemblySettings.doubleSidedVoxelSourceNormals =
+					bucket.forceDoubleSided ||
+					(bucket.info != nullptr && bucket.info->forceDoubleSided);
 				ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
 					bucket.parts,
 					bucket.instances,
-					GetDefaultBuilderSettings(),
+					assemblySettings,
 					8u);
 
 				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);

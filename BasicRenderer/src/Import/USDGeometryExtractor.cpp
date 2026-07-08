@@ -1942,7 +1942,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 
 	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
 	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
-	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=13#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=14#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1";
 	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};
@@ -2034,7 +2034,8 @@ void AppendPointInstancerAssemblyCaches(
 			.artifacts = submesh.transientArtifacts.get(),
 			.coverageVertices = &submesh.ingest.GetVertices(),
 			.coverageIndices = &submesh.ingest.GetIndices(),
-			.coverageVertexSize = submesh.ingest.GetVertexSize() });
+			.coverageVertexSize = submesh.ingest.GetVertexSize(),
+			.doubleSidedCoverageTriangles = submesh.forceDoubleSidedPreview });
 		partByResultIndex.emplace(resultIndex, partIndex);
 		return partIndex;
 	};
@@ -2163,7 +2164,12 @@ void AppendPointInstancerAssemblyCaches(
 	}
 
 	try {
-		ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(parts, instances, GetDefaultBuilderSettings(), 8u);
+		ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings();
+		assemblySettings.doubleSidedVoxelSourceNormals = std::any_of(
+			parts.begin(),
+			parts.end(),
+			[](const ClusterLODAssemblyPart& part) { return part.doubleSidedCoverageTriangles; });
+		ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(parts, instances, assemblySettings, 8u);
 		CLodCacheLoader::MeshCacheIdentity assemblyIdentity{};
 		if (firstRootMesh) {
 			assemblyIdentity = CLodCacheLoader::BuildIdentity(firstRootMesh, stage, "CLodAssembly", geomTimeCode, sourceIdentifier);
@@ -2177,7 +2183,7 @@ void AppendPointInstancerAssemblyCaches(
 		}
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
-		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=3";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=4#assembly_double_sided_coverage=1";
 
 		ClusterLODPrebuiltData savedPrebuiltData;
 		if (CLodCacheLoader::SavePrebuiltLocked(
@@ -2266,7 +2272,8 @@ void AppendWholeAssetAssemblyCaches(
 			.artifacts = submesh.transientArtifacts.get(),
 			.coverageVertices = &submesh.ingest.GetVertices(),
 			.coverageIndices = &submesh.ingest.GetIndices(),
-			.coverageVertexSize = submesh.ingest.GetVertexSize() });
+			.coverageVertexSize = submesh.ingest.GetVertexSize(),
+			.doubleSidedCoverageTriangles = submesh.forceDoubleSidedPreview });
 		partByResultIndex.emplace(resultIndex, partIndex);
 		return partIndex;
 	};
@@ -2393,7 +2400,12 @@ void AppendWholeAssetAssemblyCaches(
 	}
 
 	try {
-		ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(parts, instances, GetDefaultBuilderSettings(), 8u);
+		ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings();
+		assemblySettings.doubleSidedVoxelSourceNormals = std::any_of(
+			parts.begin(),
+			parts.end(),
+			[](const ClusterLODAssemblyPart& part) { return part.doubleSidedCoverageTriangles; });
+		ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(parts, instances, assemblySettings, 8u);
 		auto assemblyIdentity = BuildWholeAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, firstRootMesh);
 		if (!assemblyIdentity) {
 			return;
