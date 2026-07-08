@@ -1471,8 +1471,12 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     float4x4 inverseSkinMatrix = IdentitySkinMatrix();
     if (cube.dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
     {
-        skinMatrix = LoadBoneSkinMatrix(instanceData.skinningInstanceSlot, cube.dominantBoneIndex);
-        inverseSkinMatrix = LoadBoneInverseSkinMatrix(instanceData.skinningInstanceSlot, cube.dominantBoneIndex);
+        const uint expandedBoneIndex = ResolveAssemblyBoneIndex(
+            cube.dominantBoneIndex,
+            metadata,
+            assemblyTransformIndex);
+        skinMatrix = LoadBoneSkinMatrix(instanceData.skinningInstanceSlot, expandedBoneIndex);
+        inverseSkinMatrix = LoadBoneInverseSkinMatrix(instanceData.skinningInstanceSlot, expandedBoneIndex);
     }
     const row_major matrix localToWorld = mul(skinMatrix, obj.model);
     const row_major matrix worldToLocal = mul(obj.modelInverse, inverseSkinMatrix);

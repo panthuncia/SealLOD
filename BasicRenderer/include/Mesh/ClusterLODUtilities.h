@@ -51,6 +51,9 @@ struct ClusterLODAssemblyInstanceSpec
 	uint32_t rootNode = 0;
 	ClusterLODAssemblyTransform transform{};
 	uint32_t flags = 0;
+	uint32_t boneRemapBase = CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
+	uint32_t boneRemapCount = 0;
+	std::vector<uint32_t> boneRemapIndices;
 };
 
 ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(

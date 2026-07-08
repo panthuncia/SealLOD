@@ -55,6 +55,8 @@
       "Nodes": {},
       "AssemblyTransforms": {},
       "AssemblyInstances": {},
+      "AssemblyBoneRemaps": {},
+      "AssemblyBoneRemapIndices": {},
       "VoxelCubeRecords": {},
       "VoxelAttributeSamples": {},
       "PageTable": {},

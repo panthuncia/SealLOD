@@ -553,6 +553,10 @@ void Mesh::ReleaseCLodHierarchyCpuData()
 	m_clodAssemblyTransforms.shrink_to_fit();
 	m_clodAssemblyInstances.clear();
 	m_clodAssemblyInstances.shrink_to_fit();
+	m_clodAssemblyBoneRemaps.clear();
+	m_clodAssemblyBoneRemaps.shrink_to_fit();
+	m_clodAssemblyBoneRemapIndices.clear();
+	m_clodAssemblyBoneRemapIndices.shrink_to_fit();
 }
 
 void Mesh::ReleaseCLodGroupChunkMetadataCpuData()
@@ -589,6 +593,8 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodLodLevelRoots = data.lodLevelRoots;
 	m_clodAssemblyTransforms = data.assemblyTransforms;
 	m_clodAssemblyInstances = data.assemblyInstances;
+	m_clodAssemblyBoneRemaps = data.assemblyBoneRemaps;
+	m_clodAssemblyBoneRemapIndices = data.assemblyBoneRemapIndices;
 	m_clodPartRecords = data.partRecords;
 	m_clodRootPartIndex = data.rootPartIndex;
 	m_clodTopRootNode = 0;
@@ -746,6 +752,17 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodAssemblyInstances.empty()) {
 		out.assemblyInstances = m_clodAssemblyInstances;
 	}
+	if (!m_clodAssemblyBoneRemaps.empty()) {
+		out.assemblyBoneRemaps = m_clodAssemblyBoneRemaps;
+	}
+	if (!m_clodAssemblyBoneRemapIndices.empty()) {
+		out.assemblyBoneRemapIndices = m_clodAssemblyBoneRemapIndices;
+	}
+	if (!m_prebuiltClusterLOD.has_value() || !m_prebuiltClusterLOD->assemblySkeleton.Empty()) {
+		out.assemblySkeleton = m_prebuiltClusterLOD.has_value()
+			? m_prebuiltClusterLOD->assemblySkeleton
+			: ClusterLODAssemblySkeletonData{};
+	}
 	if (!m_clodPartRecords.empty()) {
 		out.partRecords = m_clodPartRecords;
 	}
@@ -804,13 +821,17 @@ void Mesh::SetCLodBufferViews(
 	std::unique_ptr<BufferView> clusterLODSegmentsView,
 	std::unique_ptr<BufferView> clusterLODNodesView,
 	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView,
-	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView
+	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView,
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView,
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView
 ) {
 	m_clusterLODGroupsView = std::move(clusterLODGroupsView);
 	m_clusterLODSegmentsView = std::move(clusterLODSegmentsView);
 	m_clusterLODNodesView = std::move(clusterLODNodesView);
 	m_clusterLODAssemblyTransformsView = std::move(clusterLODAssemblyTransformsView);
 	m_clusterLODAssemblyInstancesView = std::move(clusterLODAssemblyInstancesView);
+	m_clusterLODAssemblyBoneRemapsView = std::move(clusterLODAssemblyBoneRemapsView);
+	m_clusterLODAssemblyBoneRemapIndicesView = std::move(clusterLODAssemblyBoneRemapIndicesView);
 
 	auto firstChunkOffsetDiv = [](const auto& chunkViews, uint32_t divisor) -> uint32_t {
 		uint32_t minGroupIndex = std::numeric_limits<uint32_t>::max();

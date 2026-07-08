@@ -8539,6 +8539,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	std::vector<ClusterLODNode> libraryNodes;
 	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
 	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
+	std::vector<ClusterLODAssemblyBoneRemap> assemblyBoneRemaps;
+	std::vector<uint32_t> assemblyBoneRemapIndices;
 	std::vector<std::vector<VoxelSourcePayloadInstance>> assemblyGroupSources;
 	std::vector<std::vector<int32_t>> assemblyCoverageDomainMap;
 	std::vector<VoxelSourceTrianglePart> assemblyCoverageParts;
@@ -8761,9 +8763,25 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			libraryNodes.push_back(node);
 		}
 
-		for (ClusterLODAssemblyTransform transform : part.assemblyTransforms)
+		const uint32_t remapIndexBase = static_cast<uint32_t>(assemblyBoneRemapIndices.size());
+		assemblyBoneRemapIndices.insert(
+			assemblyBoneRemapIndices.end(),
+			part.assemblyBoneRemapIndices.begin(),
+			part.assemblyBoneRemapIndices.end());
+
+		for (uint32_t localTransformIndex = 0; localTransformIndex < static_cast<uint32_t>(part.assemblyTransforms.size()); ++localTransformIndex)
 		{
-			assemblyTransforms.push_back(transform);
+			assemblyTransforms.push_back(part.assemblyTransforms[localTransformIndex]);
+			ClusterLODAssemblyBoneRemap remap{};
+			if (localTransformIndex < part.assemblyBoneRemaps.size())
+			{
+				remap = part.assemblyBoneRemaps[localTransformIndex];
+				if (remap.remapIndexBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL)
+				{
+					remap.remapIndexBase += remapIndexBase;
+				}
+			}
+			assemblyBoneRemaps.push_back(remap);
 		}
 		for (ClusterLODAssemblyInstance instance : part.assemblyInstances)
 		{
@@ -9168,6 +9186,22 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		const ClusterLODNode& targetNode = libraryNodes[targetRoot];
 		const uint32_t transformIndex = static_cast<uint32_t>(assemblyTransforms.size());
 		assemblyTransforms.push_back(spec.transform);
+		ClusterLODAssemblyBoneRemap boneRemap{};
+		if (!spec.boneRemapIndices.empty())
+		{
+			boneRemap.remapIndexBase = static_cast<uint32_t>(assemblyBoneRemapIndices.size());
+			boneRemap.remapIndexCount = static_cast<uint32_t>(spec.boneRemapIndices.size());
+			assemblyBoneRemapIndices.insert(
+				assemblyBoneRemapIndices.end(),
+				spec.boneRemapIndices.begin(),
+				spec.boneRemapIndices.end());
+		}
+		else if (spec.boneRemapBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL && spec.boneRemapCount != 0u)
+		{
+			boneRemap.remapIndexBase = spec.boneRemapBase;
+			boneRemap.remapIndexCount = spec.boneRemapCount;
+		}
+		assemblyBoneRemaps.push_back(boneRemap);
 
 		ClusterLODAssemblyInstance assemblyInstance{};
 		assemblyInstance.targetRootNode = targetRoot;
@@ -9524,6 +9558,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	out.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	out.prebuiltData.assemblyTransforms = std::move(assemblyTransforms);
 	out.prebuiltData.assemblyInstances = std::move(assemblyInstances);
+	out.prebuiltData.assemblyBoneRemaps = std::move(assemblyBoneRemaps);
+	out.prebuiltData.assemblyBoneRemapIndices = std::move(assemblyBoneRemapIndices);
 	out.prebuiltData.partRecords = std::move(partRecords);
 	out.prebuiltData.rootPartIndex = 0u;
 	out.prebuiltData.maxDepth = state.maxDepth;

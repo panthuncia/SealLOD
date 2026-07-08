@@ -108,6 +108,29 @@ struct ClusterLODCacheSource
 	std::wstring containerFileName;
 };
 
+struct ClusterLODAssemblySkeletonData
+{
+	std::vector<std::string> jointNames;
+	std::vector<int32_t> parentIndices;
+	std::vector<DirectX::XMFLOAT4X4> inverseBindMatrices;
+	std::vector<DirectX::XMFLOAT4X4> restLocalMatrices;
+	std::vector<DirectX::XMFLOAT4X4> bindGlobalMatrices;
+
+	bool Empty() const
+	{
+		return jointNames.empty();
+	}
+
+	void Clear()
+	{
+		jointNames.clear();
+		parentIndices.clear();
+		inverseBindMatrices.clear();
+		restLocalMatrices.clear();
+		bindGlobalMatrices.clear();
+	}
+};
+
 // Voxel group data model
 
 struct VoxelCell
@@ -194,6 +217,9 @@ struct ClusterLODPrebuiltData
 	std::vector<uint32_t> lodLevelRoots;
 	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
 	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
+	std::vector<ClusterLODAssemblyBoneRemap> assemblyBoneRemaps;
+	std::vector<uint32_t> assemblyBoneRemapIndices;
+	ClusterLODAssemblySkeletonData assemblySkeleton;
 	std::vector<ClusterLODPartRecord> partRecords;
 	uint32_t rootPartIndex = 0;
 	uint32_t maxDepth = 0;

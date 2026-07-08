@@ -278,6 +278,8 @@ private:
 	std::shared_ptr<DynamicBuffer> m_clusterLODNodes;
 	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyTransforms;
 	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyInstances;
+	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyBoneRemaps;
+	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyBoneRemapIndices;
 	std::shared_ptr<DynamicBuffer> m_clodGroupPageMap;
 	uint64_t m_activeMeshletCount = 0;
 

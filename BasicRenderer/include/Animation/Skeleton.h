@@ -30,7 +30,8 @@ public:
     Skeleton(std::vector<std::string> boneNames,
         std::vector<int32_t> parentIndices,
         std::vector<Matrix> inverseBindMatrices,
-        std::vector<Components::Transform> restLocalTransforms = {});
+        std::vector<Components::Transform> restLocalTransforms = {},
+        std::vector<Matrix> rootParentGlobals = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -84,6 +85,7 @@ public:
     uint32_t GetBoneCount() const noexcept;
     std::span<const std::string> GetBoneNames() const;
     std::span<const int32_t> GetParentIndices() const;
+    std::span<const Matrix> GetRootParentGlobals() const;
 
     // Optional hook for SkeletonManager (or draw-data) to store an instance slot/index.
     uint32_t GetSkinningInstanceSlot() const noexcept { return m_skinningInstanceSlot; }

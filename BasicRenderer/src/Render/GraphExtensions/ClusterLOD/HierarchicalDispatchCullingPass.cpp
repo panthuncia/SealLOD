@@ -435,6 +435,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CLod::Nodes,
             Builtin::CLod::AssemblyInstances,
             Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::CLod::StreamingNonResidentBits,
             Builtin::CLod::MeshMetadata,
             CLodLevelInfosBufferId,

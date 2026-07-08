@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include <DirectXMath.h>
@@ -133,6 +134,22 @@ private:
         return out;
     }
 
+    static bool MatrixIsNearlyIdentity(DirectX::FXMMATRIX matrix)
+    {
+        const DirectX::XMMATRIX identity = DirectX::XMMatrixIdentity();
+        constexpr float kTolerance = 1.0e-5f;
+        for (uint32_t row = 0; row < 4; ++row) {
+            const DirectX::XMVECTOR diff = DirectX::XMVectorAbs(DirectX::XMVectorSubtract(matrix.r[row], identity.r[row]));
+            if (DirectX::XMVectorGetX(diff) > kTolerance ||
+                DirectX::XMVectorGetY(diff) > kTolerance ||
+                DirectX::XMVectorGetZ(diff) > kTolerance ||
+                DirectX::XMVectorGetW(diff) > kTolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static DirectX::XMFLOAT4 ColorForSkeleton(uint32_t skeletonIndex)
     {
         constexpr DirectX::XMFLOAT4 kColors[] = {
@@ -151,6 +168,7 @@ private:
         m_drawRanges.clear();
 
         uint32_t skeletonIndex = 0;
+        std::unordered_set<const Skeleton*> drawnSkeletons;
         m_meshInstancesQuery.each([&](flecs::entity, Components::Matrix matrix, Components::ObjectDrawInfo, Components::MeshInstances meshInstances) {
             for (const auto& meshInstance : meshInstances.meshInstances) {
                 if (!meshInstance || !meshInstance->HasSkin()) {
@@ -161,9 +179,13 @@ private:
                 if (!skin) {
                     continue;
                 }
+                if (!drawnSkeletons.insert(skin.get()).second) {
+                    continue;
+                }
 
                 const auto boneMatrices = skin->GetBoneMatrices();
                 const auto parentIndices = skin->GetParentIndices();
+                const auto rootParentGlobals = skin->GetRootParentGlobals();
                 const uint32_t boneCount = (std::min)(
                     static_cast<uint32_t>(boneMatrices.size()),
                     static_cast<uint32_t>(parentIndices.size()));
@@ -175,12 +197,20 @@ private:
                 const DirectX::XMFLOAT4 color = ColorForSkeleton(skeletonIndex++);
                 for (uint32_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
                     const int32_t parentIndex = parentIndices[boneIndex];
-                    if (parentIndex < 0 || static_cast<uint32_t>(parentIndex) >= boneCount) {
-                        continue;
-                    }
 
                     SkeletonDebugLine line{};
-                    line.startWorld = TransformJointOrigin(boneMatrices[static_cast<uint32_t>(parentIndex)], matrix.matrix);
+                    if (parentIndex < 0) {
+                        if (boneIndex >= rootParentGlobals.size() || MatrixIsNearlyIdentity(rootParentGlobals[boneIndex])) {
+                            continue;
+                        }
+                        line.startWorld = TransformJointOrigin(rootParentGlobals[boneIndex], matrix.matrix);
+                    }
+                    else if (static_cast<uint32_t>(parentIndex) < boneCount) {
+                        line.startWorld = TransformJointOrigin(boneMatrices[static_cast<uint32_t>(parentIndex)], matrix.matrix);
+                    }
+                    else {
+                        continue;
+                    }
                     line.endWorld = TransformJointOrigin(boneMatrices[boneIndex], matrix.matrix);
                     line.color = color;
                     m_lines.push_back(line);

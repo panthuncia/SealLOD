@@ -8,6 +8,8 @@ struct Builtin {
   inline static constexpr std::string_view BRDFLUT = "Builtin::BRDFLUT";
   inline static constexpr std::string_view Backbuffer = "Builtin::Backbuffer";
   struct CLod {
+    inline static constexpr std::string_view AssemblyBoneRemapIndices = "Builtin::CLod::AssemblyBoneRemapIndices";
+    inline static constexpr std::string_view AssemblyBoneRemaps = "Builtin::CLod::AssemblyBoneRemaps";
     inline static constexpr std::string_view AssemblyInstances = "Builtin::CLod::AssemblyInstances";
     inline static constexpr std::string_view AssemblyTransforms = "Builtin::CLod::AssemblyTransforms";
     inline static constexpr std::string_view GroupChunks = "Builtin::CLod::GroupChunks";

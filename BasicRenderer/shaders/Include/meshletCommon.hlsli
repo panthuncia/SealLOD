@@ -65,6 +65,8 @@ struct MeshletSetup
     uint triangleByteOffset;    // byte offset within page triangle stream
     uint boneListOffset;        // uint offset within page bone-index stream
     uint boneCount;
+    uint assemblyTransformIndex;
+    CLodMeshMetadata clodMetadata;
     uint pageAttributeMask;
     uint uvSetCount;
     uint uvDescriptorBase;
@@ -130,6 +132,8 @@ bool InitializeMeshletInternal(
     setup.triangleByteOffset = 0;
     setup.boneListOffset = 0;
     setup.boneCount = 0;
+    setup.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    setup.clodMetadata = (CLodMeshMetadata)0;
     setup.pageAttributeMask = 0;
     setup.uvSetCount = 0;
     setup.uvDescriptorBase = 0;

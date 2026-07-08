@@ -70,7 +70,8 @@ Skeleton::Skeleton(const std::vector<flecs::entity>& nodes,
 Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::vector<int32_t> parentIndices,
     std::vector<Matrix> inverseBindMatrices,
-    std::vector<Components::Transform> restLocalTransforms)
+    std::vector<Components::Transform> restLocalTransforms,
+    std::vector<Matrix> rootParentGlobals)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -91,7 +92,10 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     if (m_restLocalTransforms.empty()) {
         m_restLocalTransforms.resize(m_boneNames.size());
     }
-    m_rootParentGlobals.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
+    m_rootParentGlobals = std::move(rootParentGlobals);
+    if (m_rootParentGlobals.size() != m_boneNames.size()) {
+        m_rootParentGlobals.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
+    }
     m_inverseBindMatrices = std::move(inverseBindMatrices);
     if (m_inverseBindMatrices.size() != m_boneNames.size()) {
         spdlog::warn("Skeleton: inverse bind count ({}) != bone name count ({}); using identity inverse binds",
@@ -484,6 +488,13 @@ std::span<const int32_t> Skeleton::GetParentIndices() const
 {
     if (m_isBaseSkeleton) return m_parentIndices;
     if (m_baseSkeleton) return m_baseSkeleton->m_parentIndices;
+    return {};
+}
+
+std::span<const Skeleton::Matrix> Skeleton::GetRootParentGlobals() const
+{
+    if (m_isBaseSkeleton) return m_rootParentGlobals;
+    if (m_baseSkeleton) return m_baseSkeleton->m_rootParentGlobals;
     return {};
 }
 

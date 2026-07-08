@@ -4,12 +4,61 @@
 #include "cbuffers.hlsli"
 #include "structs.hlsli"
 #include "vertex.hlsli"
+#include "clodStructs.hlsli"
 
 typedef row_major float4x4 SkinningMatrix;
 
 bool IsValidSkinningInstanceSlot(uint skinningInstanceSlot)
 {
     return skinningInstanceSlot != 0xFFFFFFFFu;
+}
+
+uint ResolveAssemblyBoneIndex(
+    uint localJointId,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
+{
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
+        metadata.assemblyBoneRemapCount == 0u ||
+        assemblyTransformIndex < metadata.assemblyTransformBase)
+    {
+        return localJointId;
+    }
+
+    const uint localTransformIndex = assemblyTransformIndex - metadata.assemblyTransformBase;
+    if (localTransformIndex >= metadata.assemblyBoneRemapCount)
+    {
+        return localJointId;
+    }
+
+    StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
+    const ClusterLODAssemblyBoneRemap remap = remaps[metadata.assemblyBoneRemapBase + localTransformIndex];
+    if (remap.remapIndexBase == CLOD_ASSEMBLY_BONE_REMAP_SENTINEL ||
+        localJointId >= remap.remapIndexCount)
+    {
+        return localJointId;
+    }
+
+    StructuredBuffer<uint> remapIndices =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
+    return remapIndices[remap.remapIndexBase + localJointId];
+}
+
+SkinningInfluences ResolveAssemblySkinningInfluences(
+    SkinningInfluences skinning,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
+{
+    skinning.joints0.x = ResolveAssemblyBoneIndex(skinning.joints0.x, metadata, assemblyTransformIndex);
+    skinning.joints0.y = ResolveAssemblyBoneIndex(skinning.joints0.y, metadata, assemblyTransformIndex);
+    skinning.joints0.z = ResolveAssemblyBoneIndex(skinning.joints0.z, metadata, assemblyTransformIndex);
+    skinning.joints0.w = ResolveAssemblyBoneIndex(skinning.joints0.w, metadata, assemblyTransformIndex);
+    skinning.joints1.x = ResolveAssemblyBoneIndex(skinning.joints1.x, metadata, assemblyTransformIndex);
+    skinning.joints1.y = ResolveAssemblyBoneIndex(skinning.joints1.y, metadata, assemblyTransformIndex);
+    skinning.joints1.z = ResolveAssemblyBoneIndex(skinning.joints1.z, metadata, assemblyTransformIndex);
+    skinning.joints1.w = ResolveAssemblyBoneIndex(skinning.joints1.w, metadata, assemblyTransformIndex);
+    return skinning;
 }
 
 float SkinningMaxAxisScale_RowVector(SkinningMatrix M)

@@ -78,9 +78,13 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     StructuredBuffer<PerMeshBuffer> perMeshes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
 
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    const CLodMeshMetadata metadata = clodMeshMetadataBuffer[offsets.clodMeshMetadataIndex];
     const uint materialIndex = perMesh.materialDataIndex;
     const MaterialInfo materialInfo = materialDataBuffer[materialIndex];
 
@@ -107,7 +111,9 @@ void ReyesClassifyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             pageSlabDescriptorIndex,
             pageSlabByteOffset,
             perMesh.vertexFlags,
-            meshInstance.skinningInstanceSlot);
+            meshInstance.skinningInstanceSlot,
+            metadata,
+            CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
         const PerObjectBuffer objectData = LoadInstanceTransformForDraw(instanceID);
         const float uniformScale = CLodMaxAxisScale_RowVector(objectData.model);
         const float3 centerWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectData.model).xyz;

@@ -3278,6 +3278,7 @@ void ClusterCullBody(
     uint activeGroupScanCount = 0;
     float ownGroupErrorOverDistance = 0.0f;
     PerObjectBuffer instanceTransform = (PerObjectBuffer)0;
+    CLodMeshMetadata clodMeshMetadata = (CLodMeshMetadata)0;
     bool isSkinned = false;
     bool reyesDisplacementCandidate = false;
     bool isAlphaTestedMaterial = false;
@@ -3360,7 +3361,7 @@ void ClusterCullBody(
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
         const MeshInstanceClodOffsets clodOff = LoadCLodOffsetsForDrawRecord(drawRecord);
-        const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[clodOff.clodMeshMetadataIndex];
+        clodMeshMetadata = clodMeshMetadataBuffer[clodOff.clodMeshMetadataIndex];
         groupsBase = clodMeshMetadata.groupsBase;
         forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
 
@@ -3462,7 +3463,9 @@ void ClusterCullBody(
                     pageSlabDesc,
                     pageSlabOff,
                     meshVertexFlags,
-                    skinningInstanceSlot);
+                    skinningInstanceSlot,
+                    clodMeshMetadata,
+                    b.assemblyTransformIndex);
                 meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, viewMatrix);
                 meshletCenterWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
                 meshletRadiusWorld = meshletBounds.sphere.w * cullUniformScale;

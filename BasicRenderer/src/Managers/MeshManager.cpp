@@ -104,6 +104,8 @@ MeshManager::MeshManager() {
 	m_clusterLODNodes = DynamicBuffer::CreateShared(sizeof(ClusterLODNode), 10000, "clusterLODNodes");
 	m_clusterLODAssemblyTransforms = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyTransform), 10000, "clusterLODAssemblyTransforms");
 	m_clusterLODAssemblyInstances = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyInstance), 10000, "clusterLODAssemblyInstances");
+	m_clusterLODAssemblyBoneRemaps = DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
+	m_clusterLODAssemblyBoneRemapIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
 	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
 	m_clodSharedGroupChunks->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
@@ -121,6 +123,8 @@ MeshManager::MeshManager() {
 	rg::memory::SetResourceUsageHint(*m_clusterLODNodes, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyTransforms, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyInstances, "Cluster LOD data");
+	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemaps, "Cluster LOD data");
+	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemapIndices, "Cluster LOD data");
 	rg::memory::SetResourceUsageHint(*m_clodGroupPageMap, "Cluster LOD streaming");
 
 	m_resources[Builtin::PerMeshBuffer] = m_perMeshBuffers;
@@ -136,6 +140,8 @@ MeshManager::MeshManager() {
 	m_resources[Builtin::CLod::Nodes] = m_clusterLODNodes;
 	m_resources[Builtin::CLod::AssemblyTransforms] = m_clusterLODAssemblyTransforms;
 	m_resources[Builtin::CLod::AssemblyInstances] = m_clusterLODAssemblyInstances;
+	m_resources[Builtin::CLod::AssemblyBoneRemaps] = m_clusterLODAssemblyBoneRemaps;
+	m_resources[Builtin::CLod::AssemblyBoneRemapIndices] = m_clusterLODAssemblyBoneRemapIndices;
 	m_resources[Builtin::CLod::GroupPageMap] = m_clodGroupPageMap;
 
 	// Page pool
@@ -456,12 +462,28 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance),
 			sizeof(ClusterLODAssemblyInstance));
 	}
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
+	if (!mesh->GetCLodAssemblyBoneRemaps().empty()) {
+		clusterLODAssemblyBoneRemapsView = m_clusterLODAssemblyBoneRemaps->AddData(
+			mesh->GetCLodAssemblyBoneRemaps().data(),
+			mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap),
+			sizeof(ClusterLODAssemblyBoneRemap));
+	}
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
+	if (!mesh->GetCLodAssemblyBoneRemapIndices().empty()) {
+		clusterLODAssemblyBoneRemapIndicesView = m_clusterLODAssemblyBoneRemapIndices->AddData(
+			mesh->GetCLodAssemblyBoneRemapIndices().data(),
+			mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t),
+			sizeof(uint32_t));
+	}
 	if (!clusterLODGroupsView || !clusterLODSegmentsView || !clusterLODNodesView) {
 		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD hierarchy views for mesh globalID={}", mesh->GetGlobalID());
 		return false;
 	}
 	if ((!mesh->GetCLodAssemblyTransforms().empty() && !clusterLODAssemblyTransformsView) ||
-		(!mesh->GetCLodAssemblyInstances().empty() && !clusterLODAssemblyInstancesView)) {
+		(!mesh->GetCLodAssemblyInstances().empty() && !clusterLODAssemblyInstancesView) ||
+		(!mesh->GetCLodAssemblyBoneRemaps().empty() && !clusterLODAssemblyBoneRemapsView) ||
+		(!mesh->GetCLodAssemblyBoneRemapIndices().empty() && !clusterLODAssemblyBoneRemapIndicesView)) {
 		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD assembly views for mesh globalID={}", mesh->GetGlobalID());
 		return false;
 	}
@@ -613,6 +635,10 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			? static_cast<uint32_t>(clusterLODAssemblyInstancesView->GetOffset() / sizeof(ClusterLODAssemblyInstance))
 			: 0u;
 		clodMeshMetadata.assemblyInstanceCount = static_cast<uint32_t>(mesh->GetCLodAssemblyInstances().size());
+		clodMeshMetadata.assemblyBoneRemapBase = clusterLODAssemblyBoneRemapsView != nullptr
+			? static_cast<uint32_t>(clusterLODAssemblyBoneRemapsView->GetOffset() / sizeof(ClusterLODAssemblyBoneRemap))
+			: 0u;
+		clodMeshMetadata.assemblyBoneRemapCount = static_cast<uint32_t>(mesh->GetCLodAssemblyBoneRemaps().size());
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
 		if (!sharedState->ownedMeshMetadataView) {
 			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
@@ -712,7 +738,9 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		std::move(clusterLODSegmentsView),
 		std::move(clusterLODNodesView),
 		std::move(clusterLODAssemblyTransformsView),
-		std::move(clusterLODAssemblyInstancesView));
+		std::move(clusterLODAssemblyInstancesView),
+		std::move(clusterLODAssemblyBoneRemapsView),
+		std::move(clusterLODAssemblyBoneRemapIndicesView));
 	mesh->ReleaseCLodChunkUploadData();
 	mesh->ReleaseCLodHierarchyCpuData();
 	mesh->ReleaseCLodGroupChunkMetadataCpuData();
@@ -753,6 +781,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	size_t clodNodesBytes = 0;
 	size_t clodAssemblyTransformsBytes = 0;
 	size_t clodAssemblyInstancesBytes = 0;
+	size_t clodAssemblyBoneRemapsBytes = 0;
+	size_t clodAssemblyBoneRemapIndicesBytes = 0;
 	size_t clodSharedGroupChunkBytes = 0;
 	size_t clodHierarchyLevelInfoBytes = 0;
 	size_t clodMeshMetadataBytes = 0;
@@ -770,6 +800,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
 			clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
 			clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
+			clodAssemblyBoneRemapsBytes += mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap);
+			clodAssemblyBoneRemapIndicesBytes += mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t);
 			clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
 			clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
 			clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
@@ -796,6 +828,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODNodes->CanAllocateBytes(clodNodesBytes) &&
 			m_clusterLODAssemblyTransforms->CanAllocateBytes(clodAssemblyTransformsBytes) &&
 			m_clusterLODAssemblyInstances->CanAllocateBytes(clodAssemblyInstancesBytes) &&
+			m_clusterLODAssemblyBoneRemaps->CanAllocateBytes(clodAssemblyBoneRemapsBytes) &&
+			m_clusterLODAssemblyBoneRemapIndices->CanAllocateBytes(clodAssemblyBoneRemapIndicesBytes) &&
 			m_clodSharedGroupChunks->CanAllocateBytes(clodSharedGroupChunkBytes) &&
 			m_clodHierarchyLevelInfos->CanAllocateBytes(clodHierarchyLevelInfoBytes) &&
 			m_clodMeshMetadata->CanAllocateBytes(clodMeshMetadataBytes) &&
@@ -808,6 +842,8 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
 			m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
 			m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
+			m_clusterLODAssemblyBoneRemaps->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapsBytes, 512ull * 1024ull));
+			m_clusterLODAssemblyBoneRemapIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapIndicesBytes, 512ull * 1024ull));
 			m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
 			m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
 			m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));
@@ -840,6 +876,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	size_t clodNodesBytes = 0;
 	size_t clodAssemblyTransformsBytes = 0;
 	size_t clodAssemblyInstancesBytes = 0;
+	size_t clodAssemblyBoneRemapsBytes = 0;
+	size_t clodAssemblyBoneRemapIndicesBytes = 0;
 	size_t clodSharedGroupChunkBytes = 0;
 	size_t clodHierarchyLevelInfoBytes = 0;
 	size_t clodMeshMetadataBytes = 0;
@@ -862,6 +900,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 				clodNodesBytes += mesh->GetCLodNodes().size() * sizeof(ClusterLODNode);
 				clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
 				clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
+				clodAssemblyBoneRemapsBytes += mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap);
+				clodAssemblyBoneRemapIndicesBytes += mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t);
 				clodSharedGroupChunkBytes += mesh->GetCLodGroupChunkHints().size() * sizeof(ClusterLODGroupChunk);
 				clodHierarchyLevelInfoBytes += mesh->GetCLodLodLevelRoots().size() * sizeof(CLodHierarchyLevelInfo);
 				clodMeshMetadataBytes += sizeof(CLodMeshMetadata);
@@ -888,6 +928,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 		m_clusterLODNodes->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodesBytes, 2ull * 1024ull * 1024ull));
 		m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
 		m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
+		m_clusterLODAssemblyBoneRemaps->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapsBytes, 512ull * 1024ull));
+		m_clusterLODAssemblyBoneRemapIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapIndicesBytes, 512ull * 1024ull));
 		m_clodSharedGroupChunks->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSharedGroupChunkBytes, 512ull * 1024ull));
 		m_clodHierarchyLevelInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodHierarchyLevelInfoBytes, 256ull * 1024ull));
 		m_clodMeshMetadata->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodMeshMetadataBytes, 256ull * 1024ull));

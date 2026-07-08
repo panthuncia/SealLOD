@@ -360,6 +360,7 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
 #if defined(PSO_SKINNED)
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
+    skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
     ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
 #else
     if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) == 0u)
@@ -369,6 +370,7 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
 
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
+    skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
     ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
 #endif
 }
@@ -687,6 +689,7 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     {
         SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
         skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
+        skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
         position = ApplySkinningToPosition(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, position);
     }
 
@@ -1122,6 +1125,13 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
 
     setup.meshBuffer = perMeshBuffer[setup.meshInstanceBuffer.perMeshBufferIndex];
     setup.objectBuffer = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, assemblyTransformIndex);
+    setup.assemblyTransformIndex = assemblyTransformIndex;
+    {
+        const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDrawRecord(drawRecord);
+        StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+        setup.clodMetadata = clodMeshMetadataBuffer[offsets.clodMeshMetadataIndex];
+    }
 
     // Use pre-resolved page address from VisibleCluster
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);

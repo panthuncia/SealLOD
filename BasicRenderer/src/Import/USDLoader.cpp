@@ -19,6 +19,7 @@
 #include <chrono>
 #include <queue>
 #include <set>
+#include <limits>
 
 #include <nlohmann/json.hpp>
 #include <tracy/Tracy.hpp>
@@ -74,6 +75,7 @@
 #include "Import/Filetypes.h"
 #include "Scene/Scene.h"
 #include "Mesh/Mesh.h"
+#include "Mesh/MeshInstance.h"
 #include "Mesh/ClusterLODUtilities.h"
 #include "Animation/Skeleton.h"
 #include "Scene/Components.h"
@@ -224,6 +226,15 @@ namespace USDLoader {
 		MeshPreprocessResult result;
 	};
 
+	struct PayloadSkeletonBuildMetadata
+	{
+		std::string skeletonPath;
+		std::vector<std::string> boneNames;
+		std::vector<int32_t> parentIndices;
+		std::vector<GfMatrix4d> bindXforms;
+		double metersPerUnit = 1.0;
+	};
+
 	struct LoadingCaches {
 		std::unordered_map<std::string, MaterialTemplateRecord> materialTemplateCache;
         std::unordered_map<std::string, std::shared_ptr<Material>> resolvedMaterialCache;
@@ -237,6 +248,7 @@ namespace USDLoader {
 		//std::unordered_map<std::string, std::shared_ptr<UsdSkelSkeleton>> unprocessedSkeletons;
 		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
 		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonMap;
+		std::unordered_map<const Skeleton*, PayloadSkeletonBuildMetadata> payloadSkeletonMetadata;
 		std::unordered_map<std::string, std::shared_ptr<Animation>> animationMap;
 		// For storing nodes in the USD shader graph
 		std::unordered_map<std::string, flecs::entity> nodeMap;
@@ -253,6 +265,7 @@ namespace USDLoader {
 			textureSearchRoots.clear();
 			primsWithSkeletons.clear();
 			skeletonMap.clear();
+			payloadSkeletonMetadata.clear();
 			animationMap.clear();
 			nodeMap.clear();
 		}
@@ -4183,17 +4196,191 @@ namespace USDLoader {
 		return animation;
 	}
 
+	struct AssemblySkeletonParentRepair
+	{
+		size_t jointIndex = 0;
+		int32_t oldParent = -1;
+		int32_t newParent = -1;
+		double oldDistance = 0.0;
+		double newDistance = 0.0;
+	};
+
+	static GfVec3d ExtractUsdMatrixTranslation(const GfMatrix4d& matrix)
+	{
+		return matrix.Transform(GfVec3d(0.0));
+	}
+
+	static double UsdDistance(const GfVec3d& a, const GfVec3d& b)
+	{
+		const GfVec3d delta = a - b;
+		return delta.GetLength();
+	}
+
+	static std::vector<int32_t> BuildUsdSkeletonParentIndices(
+		const UsdSkelTopology& topology,
+		size_t jointCount)
+	{
+		std::vector<int32_t> parentIndices;
+		parentIndices.reserve(jointCount);
+		for (size_t i = 0; i < jointCount; ++i) {
+			parentIndices.push_back(topology.GetParent(i));
+		}
+		return parentIndices;
+	}
+
+	static size_t CountUsdSkeletonRoots(const std::vector<int32_t>& parentIndices)
+	{
+		size_t roots = 0;
+		for (const int32_t parent : parentIndices) {
+			if (parent < 0) {
+				++roots;
+			}
+		}
+		return roots;
+	}
+
+	static size_t CountUsdSkeletonChildrenOf(
+		const std::vector<int32_t>& parentIndices,
+		int32_t parentIndex)
+	{
+		size_t children = 0;
+		for (const int32_t parent : parentIndices) {
+			if (parent == parentIndex) {
+				++children;
+			}
+		}
+		return children;
+	}
+
+	static void RepairAssemblySkeletonParentIndices(
+		const std::string& skeletonPath,
+		const VtTokenArray& jointOrder,
+		const VtArray<GfMatrix4d>& bindXforms,
+		std::vector<int32_t>& parentIndices)
+	{
+		const size_t jointCount = jointOrder.size();
+		if (jointCount < 3 || bindXforms.empty() || parentIndices.size() != jointCount) {
+			return;
+		}
+
+		int32_t primaryRoot = -1;
+		for (size_t i = 0; i < parentIndices.size(); ++i) {
+			if (parentIndices[i] < 0) {
+				primaryRoot = static_cast<int32_t>(i);
+				break;
+			}
+		}
+		if (primaryRoot < 0) {
+			return;
+		}
+
+		std::vector<GfVec3d> jointPositions(jointCount, GfVec3d(0.0));
+		for (size_t i = 0; i < jointCount; ++i) {
+			const GfMatrix4d bindMatrix = i < bindXforms.size() ? bindXforms[i] : GfMatrix4d(1.0);
+			jointPositions[i] = ExtractUsdMatrixTranslation(bindMatrix);
+		}
+
+		const size_t rootsBefore = CountUsdSkeletonRoots(parentIndices);
+		const size_t rootChildrenBefore = CountUsdSkeletonChildrenOf(parentIndices, primaryRoot);
+		std::vector<AssemblySkeletonParentRepair> repairs;
+
+		for (size_t i = 0; i < jointCount; ++i) {
+			if (static_cast<int32_t>(i) == primaryRoot) {
+				continue;
+			}
+
+			const int32_t oldParent = parentIndices[i];
+			const bool isSecondaryRoot = oldParent < 0;
+			const bool isPrimaryRootChild = oldParent == primaryRoot;
+			if (!isSecondaryRoot && !isPrimaryRootChild) {
+				continue;
+			}
+
+			int32_t bestParent = oldParent;
+			double bestDistance = std::numeric_limits<double>::max();
+			for (size_t candidate = 0; candidate < i; ++candidate) {
+				if (candidate == i) {
+					continue;
+				}
+				const double distance = UsdDistance(jointPositions[i], jointPositions[candidate]);
+				if (distance < bestDistance) {
+					bestDistance = distance;
+					bestParent = static_cast<int32_t>(candidate);
+				}
+			}
+
+			if (bestParent < 0 || bestParent == oldParent) {
+				continue;
+			}
+
+			double oldDistance = std::numeric_limits<double>::max();
+			if (oldParent >= 0 && static_cast<size_t>(oldParent) < jointPositions.size()) {
+				oldDistance = UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(oldParent)]);
+			}
+			else if (primaryRoot >= 0 && static_cast<size_t>(primaryRoot) < jointPositions.size()) {
+				oldDistance = UsdDistance(jointPositions[i], jointPositions[static_cast<size_t>(primaryRoot)]);
+			}
+
+			if (!std::isfinite(oldDistance) || !(bestDistance < oldDistance * 0.5)) {
+				continue;
+			}
+
+			parentIndices[i] = bestParent;
+			repairs.push_back({ i, oldParent, bestParent, oldDistance, bestDistance });
+		}
+
+		const size_t rootsAfter = CountUsdSkeletonRoots(parentIndices);
+		const size_t rootChildrenAfter = CountUsdSkeletonChildrenOf(parentIndices, primaryRoot);
+		spdlog::info(
+			"USD assembly skeleton hierarchy '{}': joints={}, roots {}->{}, rootChildren {}->{}, repaired={}",
+			skeletonPath,
+			jointCount,
+			rootsBefore,
+			rootsAfter,
+			rootChildrenBefore,
+			rootChildrenAfter,
+			repairs.size());
+
+		const size_t detailCount = (std::min<size_t>)(repairs.size(), 24u);
+		for (size_t i = 0; i < detailCount; ++i) {
+			const auto& repair = repairs[i];
+			const char* oldParentName = repair.oldParent >= 0 && static_cast<size_t>(repair.oldParent) < jointOrder.size()
+				? jointOrder[static_cast<size_t>(repair.oldParent)].GetText()
+				: "<root>";
+			const char* newParentName = repair.newParent >= 0 && static_cast<size_t>(repair.newParent) < jointOrder.size()
+				? jointOrder[static_cast<size_t>(repair.newParent)].GetText()
+				: "<root>";
+			spdlog::info(
+				"  USD assembly skeleton reparent '{}': '{}' -> '{}' (distance {:.4f} -> {:.4f})",
+				jointOrder[repair.jointIndex].GetText(),
+				oldParentName,
+				newParentName,
+				repair.oldDistance,
+				repair.newDistance);
+		}
+		if (repairs.size() > detailCount) {
+			spdlog::info(
+				"  USD assembly skeleton '{}': {} additional repaired parent links omitted",
+				skeletonPath,
+				repairs.size() - detailCount);
+		}
+	}
+
 	std::shared_ptr<Skeleton> BuildPayloadSkeleton(
 		const UsdSkelSkeleton& skel,
 		const VtTokenArray& rawJointOrder,
 		const UsdSkelSkeletonQuery& skelQuery,
-		double metersPerUnit)
+		double metersPerUnit,
+		bool repairAssemblyHierarchy = false)
 	{
 		ZoneScopedN("USDLoader::BuildPayloadSkeleton");
 		const auto skeletonPath = skel.GetPrim().GetPath().GetString();
 		ZoneText(skeletonPath.data(), skeletonPath.size());
-		if (loadingCache.skeletonMap.contains(skel.GetPrim().GetPath().GetString())) {
-			return loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()];
+		const std::string skeletonCacheKey = repairAssemblyHierarchy
+			? skeletonPath + "#assembly_hierarchy_repair=1"
+			: skeletonPath;
+		if (loadingCache.skeletonMap.contains(skeletonCacheKey)) {
+			return loadingCache.skeletonMap[skeletonCacheKey];
 		}
 
 		const auto& topology = skelQuery.GetTopology();
@@ -4216,12 +4403,25 @@ namespace USDLoader {
 		inverseBindMatrices.reserve(rawJointOrder.size());
 		restLocalTransforms.reserve(rawJointOrder.size());
 
+		parentIndices = BuildUsdSkeletonParentIndices(topology, rawJointOrder.size());
+		if (repairAssemblyHierarchy) {
+			RepairAssemblySkeletonParentIndices(skeletonPath, rawJointOrder, bindXforms, parentIndices);
+		}
+
+		PayloadSkeletonBuildMetadata metadata;
+		metadata.skeletonPath = skeletonPath;
+		metadata.parentIndices = parentIndices;
+		metadata.metersPerUnit = metersPerUnit;
+		metadata.boneNames.reserve(rawJointOrder.size());
+		metadata.bindXforms.reserve(rawJointOrder.size());
+
 		for (size_t i = 0; i < rawJointOrder.size(); ++i) {
 			boneNames.push_back(rawJointOrder[i].GetString());
-			const int parentIndex = topology.GetParent(i);
-			parentIndices.push_back(parentIndex);
+			metadata.boneNames.push_back(boneNames.back());
+			const int parentIndex = i < parentIndices.size() ? parentIndices[i] : -1;
 
 			const GfMatrix4d bindMatrix = i < bindXforms.size() ? bindXforms[i] : GfMatrix4d(1.0);
+			metadata.bindXforms.push_back(bindMatrix);
 			GfMatrix4d localBindMatrix = bindMatrix;
 			if (parentIndex >= 0 && static_cast<size_t>(parentIndex) < bindXforms.size()) {
 				localBindMatrix = bindMatrix * bindXforms[static_cast<size_t>(parentIndex)].GetInverse();
@@ -4235,7 +4435,8 @@ namespace USDLoader {
 			std::move(parentIndices),
 			std::move(inverseBindMatrices),
 			std::move(restLocalTransforms));
-		loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()] = skeleton;
+		loadingCache.skeletonMap[skeletonCacheKey] = skeleton;
+		loadingCache.payloadSkeletonMetadata[skeleton.get()] = std::move(metadata);
 		return skeleton;
 	}
 
@@ -4299,9 +4500,107 @@ namespace USDLoader {
 		UsdShadeMaterial material;
 		std::string staticTextureOverrideSourceName;
 		std::vector<std::string> meshPaths;
+		std::vector<GfMatrix4d> skeletonInstanceTransforms;
 		UsdGeomMesh firstMesh;
 		bool forceDoubleSided = false;
 	};
+
+	static void StoreMatrix4x4(DirectX::XMFLOAT4X4& out, DirectX::XMMATRIX matrix)
+	{
+		DirectX::XMStoreFloat4x4(&out, matrix);
+	}
+
+	static Components::Transform ComponentsTransformFromDirectXMatrix(DirectX::XMMATRIX matrix)
+	{
+		DirectX::XMVECTOR scale = DirectX::XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f);
+		DirectX::XMVECTOR rotation = DirectX::XMQuaternionIdentity();
+		DirectX::XMVECTOR translation = DirectX::XMVectorZero();
+		if (!DirectX::XMMatrixDecompose(&scale, &rotation, &translation, matrix)) {
+			scale = DirectX::XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f);
+			rotation = DirectX::XMQuaternionIdentity();
+			translation = DirectX::XMVectorZero();
+		}
+		return Components::Transform(
+			Components::Position(translation),
+			Components::Rotation(rotation),
+			Components::Scale(scale));
+	}
+
+	static std::shared_ptr<Skeleton> BuildSkeletonFromAssemblySkeletonData(const ClusterLODAssemblySkeletonData& data)
+	{
+		if (data.Empty()) {
+			return nullptr;
+		}
+		std::vector<DirectX::XMMATRIX> inverseBinds;
+		std::vector<Components::Transform> restLocals;
+		inverseBinds.reserve(data.inverseBindMatrices.size());
+		restLocals.reserve(data.restLocalMatrices.size());
+		for (const DirectX::XMFLOAT4X4& matrix : data.inverseBindMatrices) {
+			inverseBinds.push_back(DirectX::XMLoadFloat4x4(&matrix));
+		}
+		for (const DirectX::XMFLOAT4X4& matrix : data.restLocalMatrices) {
+			restLocals.push_back(ComponentsTransformFromDirectXMatrix(DirectX::XMLoadFloat4x4(&matrix)));
+		}
+		return std::make_shared<Skeleton>(
+			data.jointNames,
+			data.parentIndices,
+			std::move(inverseBinds),
+			std::move(restLocals));
+	}
+
+	static std::string BuildAssemblySkeletonCacheKey(const ClusterLODAssemblySkeletonData& data)
+	{
+		auto hashString = [](const std::string& value) {
+			std::uint64_t hash = 1469598103934665603ull;
+			for (const unsigned char c : value) {
+				hash ^= static_cast<std::uint64_t>(c);
+				hash *= 1099511628211ull;
+			}
+			return hash;
+		};
+		auto combine = [](std::uint64_t& seed, std::uint64_t value) {
+			seed ^= value + 0x9E3779B97F4A7C15ull + (seed << 6u) + (seed >> 2u);
+		};
+		std::uint64_t hash = hashString("assembly_skeleton");
+		combine(hash, static_cast<std::uint64_t>(data.jointNames.size()));
+		for (const std::string& name : data.jointNames) {
+			combine(hash, hashString(name));
+		}
+		for (int32_t parent : data.parentIndices) {
+			combine(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(parent)));
+		}
+		auto hashMatrix = [&hash, &combine](const DirectX::XMFLOAT4X4& matrix) {
+			const float* values = &matrix._11;
+			for (uint32_t i = 0; i < 16u; ++i) {
+				std::uint32_t bits = 0u;
+				std::memcpy(&bits, values + i, sizeof(bits));
+				combine(hash, bits);
+			}
+		};
+		for (const DirectX::XMFLOAT4X4& matrix : data.inverseBindMatrices) {
+			hashMatrix(matrix);
+		}
+		for (const DirectX::XMFLOAT4X4& matrix : data.restLocalMatrices) {
+			hashMatrix(matrix);
+		}
+		return "assembly_skeleton#" + std::to_string(hash);
+	}
+
+	static std::shared_ptr<Skeleton> GetOrBuildAssemblySkeleton(const ClusterLODAssemblySkeletonData& data)
+	{
+		if (data.Empty()) {
+			return nullptr;
+		}
+		const std::string key = BuildAssemblySkeletonCacheKey(data);
+		if (auto it = loadingCache.skeletonMap.find(key); it != loadingCache.skeletonMap.end()) {
+			return it->second;
+		}
+		auto skeleton = BuildSkeletonFromAssemblySkeletonData(data);
+		if (skeleton) {
+			loadingCache.skeletonMap[key] = skeleton;
+		}
+		return skeleton;
+	}
 
 	static std::uint64_t StableHashString64(const std::string& value)
 	{
@@ -4338,6 +4637,12 @@ namespace USDLoader {
 	static std::string AssetAssemblyMaterialDomainPath(const UsdShadeMaterial& material)
 	{
 		return material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>");
+	}
+
+	static std::string_view UsdJointLeafName(std::string_view jointName)
+	{
+		const size_t slash = jointName.find_last_of('/');
+		return slash == std::string_view::npos ? jointName : jointName.substr(slash + 1u);
 	}
 
 	static bool MeshHasUsdSkinningPrimvars(const UsdGeomMesh& mesh)
@@ -4503,7 +4808,7 @@ namespace USDLoader {
 		key.skinDomain = ComputeUsdSkeletonDomainHash(skel, jointOrder, skelQuery);
 
 		if (!skeletonsByKey.contains(key)) {
-			auto skeleton = BuildPayloadSkeleton(skel, jointOrder, skelQuery, metersPerUnit);
+			auto skeleton = BuildPayloadSkeleton(skel, jointOrder, skelQuery, metersPerUnit, false);
 			if (!skeleton) {
 				if (fallbackReason) {
 					*fallbackReason = "failed to build base skeleton for '" +
@@ -4516,6 +4821,151 @@ namespace USDLoader {
 
 		(void)stage;
 		return key;
+	}
+
+	static void AttachAssemblySkeletonBucketsToPrimary(std::vector<AssetAssemblyBucketInfo>& buckets)
+	{
+		struct Candidate
+		{
+			size_t bucketIndex = 0;
+			PayloadSkeletonBuildMetadata metadata;
+		};
+
+		std::vector<Candidate> candidates;
+		candidates.reserve(buckets.size());
+		for (size_t bucketIndex = 0; bucketIndex < buckets.size(); ++bucketIndex) {
+			const auto& bucket = buckets[bucketIndex];
+			if (!bucket.key.skinned || !bucket.skeleton) {
+				continue;
+			}
+			const auto metadataIt = loadingCache.payloadSkeletonMetadata.find(bucket.skeleton.get());
+			if (metadataIt == loadingCache.payloadSkeletonMetadata.end() ||
+				metadataIt->second.bindXforms.empty() ||
+				metadataIt->second.boneNames.empty()) {
+				continue;
+			}
+			candidates.push_back(Candidate{ bucketIndex, metadataIt->second });
+		}
+
+		if (candidates.size() < 2u) {
+			return;
+		}
+
+		auto primaryIt = std::max_element(candidates.begin(), candidates.end(), [](const Candidate& lhs, const Candidate& rhs) {
+			return lhs.metadata.boneNames.size() < rhs.metadata.boneNames.size();
+		});
+		if (primaryIt == candidates.end() || primaryIt->metadata.boneNames.size() < 2u) {
+			return;
+		}
+
+		const PayloadSkeletonBuildMetadata& primary = primaryIt->metadata;
+		std::vector<GfVec3d> primaryPositions;
+		primaryPositions.reserve(primary.bindXforms.size());
+		for (const GfMatrix4d& bind : primary.bindXforms) {
+			primaryPositions.push_back(ExtractUsdMatrixTranslation(bind));
+		}
+
+		size_t attachedSkeletons = 0;
+		size_t attachedRoots = 0;
+		for (const Candidate& candidate : candidates) {
+			AssetAssemblyBucketInfo& bucket = buckets[candidate.bucketIndex];
+			const PayloadSkeletonBuildMetadata& metadata = candidate.metadata;
+			if (&metadata == &primary || metadata.skeletonPath == primary.skeletonPath) {
+				continue;
+			}
+			if (metadata.parentIndices.size() != metadata.boneNames.size() ||
+				metadata.bindXforms.size() != metadata.boneNames.size()) {
+				continue;
+			}
+
+			std::vector<DirectX::XMMATRIX> inverseBindMatrices;
+			std::vector<Components::Transform> restLocalTransforms;
+			std::vector<DirectX::XMMATRIX> rootParentGlobals(
+				metadata.boneNames.size(),
+				DirectX::XMMatrixIdentity());
+			inverseBindMatrices.reserve(metadata.boneNames.size());
+			restLocalTransforms.reserve(metadata.boneNames.size());
+			const GfMatrix4d attachmentTransform = bucket.skeletonInstanceTransforms.empty()
+				? GfMatrix4d(1.0)
+				: bucket.skeletonInstanceTransforms.front();
+			if (bucket.skeletonInstanceTransforms.size() > 1u) {
+				spdlog::info(
+					"USD assembly skeleton attach '{}': bucket has {} instance transforms; using first for external root parent in current per-bucket skin representation",
+					metadata.skeletonPath,
+					bucket.skeletonInstanceTransforms.size());
+			}
+
+			size_t skeletonRootAttachments = 0;
+			for (size_t jointIndex = 0; jointIndex < metadata.boneNames.size(); ++jointIndex) {
+				const int32_t parentIndex = metadata.parentIndices[jointIndex];
+				const GfMatrix4d bindMatrix = metadata.bindXforms[jointIndex];
+				const GfMatrix4d attachmentBindMatrix = bindMatrix * attachmentTransform;
+				GfMatrix4d localBindMatrix = bindMatrix;
+
+				if (parentIndex >= 0 && static_cast<size_t>(parentIndex) < metadata.bindXforms.size()) {
+					localBindMatrix = bindMatrix * metadata.bindXforms[static_cast<size_t>(parentIndex)].GetInverse();
+				}
+				else if (!primary.bindXforms.empty()) {
+					const GfVec3d rootPosition = ExtractUsdMatrixTranslation(attachmentBindMatrix);
+					size_t bestParent = 0;
+					double bestDistance = std::numeric_limits<double>::max();
+					for (size_t primaryJointIndex = 0; primaryJointIndex < primaryPositions.size(); ++primaryJointIndex) {
+						const double distance = UsdDistance(rootPosition, primaryPositions[primaryJointIndex]);
+						if (distance < bestDistance) {
+							bestDistance = distance;
+							bestParent = primaryJointIndex;
+						}
+					}
+
+					const GfMatrix4d& parentBind = primary.bindXforms[bestParent];
+					localBindMatrix = attachmentBindMatrix * parentBind.GetInverse();
+					rootParentGlobals[jointIndex] = DirectXMatrixFromUsdMatrix(parentBind, metadata.metersPerUnit);
+					++skeletonRootAttachments;
+					++attachedRoots;
+
+					spdlog::info(
+						"USD assembly skeleton attach '{}': root '{}' -> primary '{}' joint '{}' distance={:.4f}",
+						metadata.skeletonPath,
+						UsdJointLeafName(metadata.boneNames[jointIndex]),
+						primary.skeletonPath,
+						UsdJointLeafName(primary.boneNames[bestParent]),
+						bestDistance);
+				}
+
+				restLocalTransforms.push_back(ComponentsTransformFromUsdMatrix(localBindMatrix, metadata.metersPerUnit));
+				inverseBindMatrices.push_back(DirectX::XMMatrixInverse(nullptr, DirectXMatrixFromUsdMatrix(bindMatrix, metadata.metersPerUnit)));
+			}
+
+			if (skeletonRootAttachments == 0u) {
+				continue;
+			}
+
+			auto attachedSkeleton = std::make_shared<Skeleton>(
+				metadata.boneNames,
+				metadata.parentIndices,
+				std::move(inverseBindMatrices),
+				std::move(restLocalTransforms),
+				std::move(rootParentGlobals));
+			if (bucket.skeleton) {
+				for (const auto& animation : bucket.skeleton->animations) {
+					if (animation) {
+						attachedSkeleton->AddAnimation(animation);
+					}
+				}
+			}
+			bucket.skeleton = attachedSkeleton;
+			loadingCache.payloadSkeletonMetadata[attachedSkeleton.get()] = metadata;
+			++attachedSkeletons;
+		}
+
+		if (attachedRoots != 0u) {
+			spdlog::info(
+				"USD assembly skeleton attachments: primary='{}' primaryJoints={} attachedSkeletons={} attachedRoots={}",
+				primary.skeletonPath,
+				primary.boneNames.size(),
+				attachedSkeletons,
+				attachedRoots);
+		}
 	}
 
 	static std::vector<AssetAssemblyBucketInfo> DiscoverAssetAssemblyBuckets(
@@ -4549,8 +4999,9 @@ namespace USDLoader {
 		}
 		std::unordered_map<AssetAssemblyBucketKey, AssetAssemblyBucketInfo, AssetAssemblyBucketKeyHash> buckets;
 		std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash> skeletonsByKey;
+		UsdGeomXformCache xformCache(geomTimeCode);
 
-		auto addMeshToBucket = [&](const UsdGeomMesh& mesh, const UsdShadeMaterial& material, const std::optional<UsdGeomSubset>& subset) -> bool {
+		auto addMeshToBucket = [&](const UsdGeomMesh& mesh, const UsdShadeMaterial& material, const std::optional<UsdGeomSubset>& subset, const GfMatrix4d& transform) -> bool {
 			if (!mesh) {
 				return true;
 			}
@@ -4576,6 +5027,9 @@ namespace USDLoader {
 			}
 			if (key->skinned) {
 				bucket.skeleton = skeletonsByKey[*key];
+				if (bucket.skeletonInstanceTransforms.size() < 64u) {
+					bucket.skeletonInstanceTransforms.push_back(transform);
+				}
 			}
 			bool authoredDoubleSided = false;
 			if (UsdGeomGprim gprim(mesh.GetPrim()); gprim) {
@@ -4603,13 +5057,15 @@ namespace USDLoader {
 				UsdShadeMaterialBindingAPI bindAPI(mesh);
 				auto subsets = bindAPI.GetMaterialBindSubsets();
 				if (subsets.empty()) {
-					if (!addMeshToBucket(mesh, bindAPI.ComputeBoundMaterial(), std::nullopt)) {
+					const GfMatrix4d meshTransform = xformCache.GetLocalToWorldTransform(mesh.GetPrim());
+					if (!addMeshToBucket(mesh, bindAPI.ComputeBoundMaterial(), std::nullopt, meshTransform)) {
 						return false;
 					}
 				}
 				else {
+					const GfMatrix4d meshTransform = xformCache.GetLocalToWorldTransform(mesh.GetPrim());
 					for (const UsdGeomSubset& subset : subsets) {
-						if (!addMeshToBucket(mesh, UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial(), subset)) {
+						if (!addMeshToBucket(mesh, UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial(), subset, meshTransform)) {
 							return false;
 						}
 					}
@@ -4636,11 +5092,22 @@ namespace USDLoader {
 				continue;
 			}
 			std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
-			if (!mask.empty()) {
-				UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices);
+			if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
+				continue;
 			}
+			VtArray<GfMatrix4d> instanceTransforms;
+			if (!pointInstancer.ComputeInstanceTransformsAtTime(
+				&instanceTransforms,
+				geomTimeCode,
+				geomTimeCode,
+				UsdGeomPointInstancer::IncludeProtoXform,
+				UsdGeomPointInstancer::ApplyMask)) {
+				continue;
+			}
+			const std::size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
 			std::vector<bool> prototypeUsed(prototypeTargets.size(), false);
-			for (int protoIndex : protoIndices) {
+			for (std::size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+				const int protoIndex = protoIndices[instanceIndex];
 				if (protoIndex >= 0 && static_cast<std::size_t>(protoIndex) < prototypeTargets.size()) {
 					prototypeUsed[static_cast<std::size_t>(protoIndex)] = true;
 				}
@@ -4650,8 +5117,48 @@ namespace USDLoader {
 					continue;
 				}
 				const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
-				if (prototypeRoot && !recurseMeshes(prototypeRoot, false)) {
-					return {};
+				if (!prototypeRoot) {
+					continue;
+				}
+				const GfMatrix4d prototypeRootWorldInverse = xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
+				std::vector<std::pair<UsdGeomMesh, GfMatrix4d>> prototypeMeshes;
+				std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
+					if (prim.IsA<UsdGeomImageable>()) {
+						UsdGeomImageable imageable(prim);
+						if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+							return;
+						}
+					}
+					if (UsdGeomMesh mesh(prim); mesh) {
+						prototypeMeshes.emplace_back(mesh, xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
+					}
+					for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+						gatherPrototypeMeshes(child);
+					}
+				};
+				gatherPrototypeMeshes(prototypeRoot);
+
+				for (std::size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+					if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
+						continue;
+					}
+					for (const auto& [mesh, prototypeLocal] : prototypeMeshes) {
+						UsdShadeMaterialBindingAPI bindAPI(mesh);
+						auto subsets = bindAPI.GetMaterialBindSubsets();
+						const GfMatrix4d meshTransform = prototypeLocal * instanceTransforms[instanceIndex];
+						if (subsets.empty()) {
+							if (!addMeshToBucket(mesh, bindAPI.ComputeBoundMaterial(), std::nullopt, meshTransform)) {
+								return {};
+							}
+						}
+						else {
+							for (const UsdGeomSubset& subset : subsets) {
+								if (!addMeshToBucket(mesh, UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial(), subset, meshTransform)) {
+									return {};
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -4671,7 +5178,6 @@ namespace USDLoader {
 			}
 			return lhs.key.materialPath < rhs.key.materialPath;
 		});
-
 		return orderedBuckets;
 	}
 
@@ -4684,9 +5190,13 @@ namespace USDLoader {
 			return nullptr;
 		}
 		MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
+		std::shared_ptr<Skeleton> baseSkeleton = GetOrBuildAssemblySkeleton(prebuilt->assemblySkeleton);
+		if (!baseSkeleton) {
+			baseSkeleton = skeleton;
+		}
 		auto mesh = ingest.Build(material ? material : Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
-		if (mesh && skeleton) {
-			mesh->SetBaseSkin(skeleton);
+		if (mesh && baseSkeleton) {
+			mesh->SetBaseSkin(baseSkeleton);
 		}
 		return mesh;
 	}
@@ -4762,6 +5272,7 @@ namespace USDLoader {
 			std::unordered_map<const MeshPreprocessResult*, uint32_t> partByResult;
 			std::vector<MeshUvSetData> representativeUvSets;
 			std::string staticTextureOverrideSourceName;
+			std::vector<GfMatrix4d> instanceTransforms;
 			bool forceDoubleSided = false;
 		};
 
@@ -4799,6 +5310,7 @@ namespace USDLoader {
 				.transform = AssetAssemblyTransformFromUsdMatrix(transform),
 				.flags = 0u,
 			});
+			bucket.instanceTransforms.push_back(transform);
 			return true;
 		};
 
@@ -4937,6 +5449,105 @@ namespace USDLoader {
 			}
 		}
 
+		ClusterLODAssemblySkeletonData expandedAssemblySkeleton;
+		std::vector<GfMatrix4d> expandedBindGlobals;
+		std::unordered_map<std::uint64_t, std::vector<uint32_t>> remapByInstanceKey;
+		auto buildInstanceKey = [](const PayloadSkeletonBuildMetadata& metadata, const GfMatrix4d& transform) {
+			std::uint64_t hash = StableHashString64(metadata.skeletonPath);
+			for (const std::string& name : metadata.boneNames) {
+				StableHashCombine64(hash, StableHashString64(name));
+			}
+			StableHashMatrix64(hash, transform);
+			return hash;
+		};
+		auto appendOrReuseSkeletonInstance = [&](const std::shared_ptr<Skeleton>& sourceSkeleton, const GfMatrix4d& transform) -> std::vector<uint32_t> {
+			if (!sourceSkeleton) {
+				return {};
+			}
+			const auto metadataIt = loadingCache.payloadSkeletonMetadata.find(sourceSkeleton.get());
+			if (metadataIt == loadingCache.payloadSkeletonMetadata.end()) {
+				return {};
+			}
+			const PayloadSkeletonBuildMetadata& metadata = metadataIt->second;
+			const std::uint64_t instanceKey = buildInstanceKey(metadata, transform);
+			if (auto existing = remapByInstanceKey.find(instanceKey); existing != remapByInstanceKey.end()) {
+				return existing->second;
+			}
+
+			std::vector<uint32_t> remap(metadata.boneNames.size(), 0u);
+			const uint32_t baseJoint = static_cast<uint32_t>(expandedAssemblySkeleton.jointNames.size());
+			for (uint32_t jointIndex = 0; jointIndex < static_cast<uint32_t>(metadata.boneNames.size()); ++jointIndex) {
+				const GfMatrix4d sourceBind = jointIndex < metadata.bindXforms.size()
+					? metadata.bindXforms[jointIndex]
+					: GfMatrix4d(1.0);
+				const GfMatrix4d expandedBind = sourceBind * transform;
+				int32_t parentIndex = jointIndex < metadata.parentIndices.size()
+					? metadata.parentIndices[jointIndex]
+					: -1;
+				if (parentIndex >= 0 && static_cast<uint32_t>(parentIndex) < jointIndex) {
+					parentIndex = static_cast<int32_t>(baseJoint + static_cast<uint32_t>(parentIndex));
+				}
+				else {
+					parentIndex = -1;
+					if (!expandedBindGlobals.empty()) {
+						const GfVec3d rootTranslation = expandedBind.ExtractTranslation();
+						double bestDistanceSquared = std::numeric_limits<double>::infinity();
+						int32_t bestParent = -1;
+						for (uint32_t candidateIndex = 0; candidateIndex < static_cast<uint32_t>(expandedBindGlobals.size()); ++candidateIndex) {
+							const GfVec3d delta = rootTranslation - expandedBindGlobals[candidateIndex].ExtractTranslation();
+							const double distanceSquared = GfDot(delta, delta);
+							if (distanceSquared < bestDistanceSquared) {
+								bestDistanceSquared = distanceSquared;
+								bestParent = static_cast<int32_t>(candidateIndex);
+							}
+						}
+						parentIndex = bestParent;
+					}
+				}
+
+				GfMatrix4d restLocal = expandedBind;
+				if (parentIndex >= 0 && static_cast<uint32_t>(parentIndex) < expandedBindGlobals.size()) {
+					restLocal = expandedBind * expandedBindGlobals[static_cast<uint32_t>(parentIndex)].GetInverse();
+				}
+
+				expandedAssemblySkeleton.jointNames.push_back(
+					metadata.skeletonPath + "[" + std::to_string(remapByInstanceKey.size()) + "]/" + metadata.boneNames[jointIndex]);
+				expandedAssemblySkeleton.parentIndices.push_back(parentIndex);
+				DirectX::XMFLOAT4X4 inverseBind{};
+				DirectX::XMFLOAT4X4 restLocalMatrix{};
+				DirectX::XMFLOAT4X4 bindGlobalMatrix{};
+				StoreMatrix4x4(inverseBind, DirectX::XMMatrixInverse(nullptr, DirectXMatrixFromUsdMatrix(expandedBind, metadata.metersPerUnit)));
+				StoreMatrix4x4(restLocalMatrix, DirectXMatrixFromUsdMatrix(restLocal, metadata.metersPerUnit));
+				StoreMatrix4x4(bindGlobalMatrix, DirectXMatrixFromUsdMatrix(expandedBind, metadata.metersPerUnit));
+				expandedAssemblySkeleton.inverseBindMatrices.push_back(inverseBind);
+				expandedAssemblySkeleton.restLocalMatrices.push_back(restLocalMatrix);
+				expandedAssemblySkeleton.bindGlobalMatrices.push_back(bindGlobalMatrix);
+				expandedBindGlobals.push_back(expandedBind);
+				remap[jointIndex] = baseJoint + jointIndex;
+			}
+			remapByInstanceKey.emplace(instanceKey, remap);
+			return remap;
+		};
+
+		for (BuildBucket& bucket : buildBuckets) {
+			if (bucket.info == nullptr || !bucket.info->key.skinned || !bucket.info->skeleton) {
+				continue;
+			}
+			const std::size_t instanceCount = std::min(bucket.instances.size(), bucket.instanceTransforms.size());
+			for (std::size_t instanceIndex = 0; instanceIndex < instanceCount; ++instanceIndex) {
+				bucket.instances[instanceIndex].boneRemapIndices =
+					appendOrReuseSkeletonInstance(bucket.info->skeleton, bucket.instanceTransforms[instanceIndex]);
+			}
+		}
+
+		if (!expandedAssemblySkeleton.Empty()) {
+			spdlog::info(
+				"USD CLod assembly expanded skeleton: joints={} uniqueInstances={} buckets={}",
+				expandedAssemblySkeleton.jointNames.size(),
+				remapByInstanceKey.size(),
+				buildBuckets.size());
+		}
+
 		for (BuildBucket& bucket : buildBuckets) {
 			if (bucket.parts.empty() || bucket.instances.empty()) {
 				spdlog::warn(
@@ -4970,6 +5581,10 @@ namespace USDLoader {
 						assemblySettings,
 						8u,
 						false);
+				}
+
+				if (bucket.info != nullptr && bucket.info->key.skinned && !expandedAssemblySkeleton.Empty()) {
+					assemblyArtifacts.prebuiltData.assemblySkeleton = expandedAssemblySkeleton;
 				}
 
 				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);
@@ -5033,22 +5648,37 @@ namespace USDLoader {
 	{
 		ZoneScopedN("USDLoader::LoadModelFromStage::CreateCollapsedAssemblyScene");
 		auto scene = std::make_shared<Scene>();
-		std::size_t skinnedIndex = 0u;
-		std::size_t rigidIndex = 0u;
-		for (std::size_t bucketIndex = 0; bucketIndex < meshes.size() && bucketIndex < buckets.size(); ++bucketIndex) {
-			const auto& mesh = meshes[bucketIndex];
-			if (!mesh) {
-				continue;
+		std::vector<std::shared_ptr<Mesh>> entityMeshes;
+		entityMeshes.reserve(meshes.size());
+		for (const auto& mesh : meshes) {
+			if (mesh) {
+				entityMeshes.push_back(mesh);
 			}
-			const AssetAssemblyBucketKey& key = buckets[bucketIndex].key;
-			scene->CreateRenderableEntityECS(
-				std::vector<std::shared_ptr<Mesh>>{ mesh },
-				AssetAssemblyBucketName(key, skinnedIndex, rigidIndex));
-			if (key.skinned) {
-				++skinnedIndex;
-			}
-			else {
-				++rigidIndex;
+		}
+		if (!entityMeshes.empty()) {
+			flecs::entity entity = scene->CreateRenderableEntityECS(std::move(entityMeshes), L"__CLodAssetAssembly");
+			if (auto* meshInstances = entity.try_get_mut<Components::MeshInstances>()) {
+				std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> runtimeSkeletonByBase;
+				for (const auto& meshInstance : meshInstances->meshInstances) {
+					if (!meshInstance || !meshInstance->HasSkin()) {
+						continue;
+					}
+					auto runtimeSkeleton = meshInstance->GetSkin();
+					auto baseSkeleton = runtimeSkeleton ? runtimeSkeleton->GetBaseSkeletonShared() : nullptr;
+					if (!baseSkeleton) {
+						continue;
+					}
+					auto& sharedRuntimeSkeleton = runtimeSkeletonByBase[baseSkeleton.get()];
+					if (!sharedRuntimeSkeleton) {
+						sharedRuntimeSkeleton = runtimeSkeleton;
+						continue;
+					}
+					meshInstance->SetSkeleton(sharedRuntimeSkeleton);
+					meshInstance->SyncSkinningStateFromSkeleton();
+				}
+				if (!runtimeSkeletonByBase.empty()) {
+					meshInstances->BumpGeneration();
+				}
 			}
 		}
 		return scene;

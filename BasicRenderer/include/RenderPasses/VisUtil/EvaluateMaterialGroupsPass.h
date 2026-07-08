@@ -130,6 +130,8 @@ public:
             Builtin::CLod::GroupPageMap,
             Builtin::CLod::MeshMetadata,
             Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseSkinMatrices,
             Builtin::PerMaterialOpenPBRDataBuffer)
             .WithUnorderedAccess(Builtin::GBuffer::Normals,

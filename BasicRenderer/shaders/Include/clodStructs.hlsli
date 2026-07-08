@@ -34,6 +34,8 @@ struct CLodMeshMetadata
     uint assemblyTransformCount;
     uint assemblyInstanceBase;
     uint assemblyInstanceCount;
+    uint assemblyBoneRemapBase;
+    uint assemblyBoneRemapCount;
 };
 
 struct CLodHierarchyLevelInfo
@@ -208,6 +210,7 @@ static const uint CLOD_NODE_VOXEL_LEAF = 1u;
 static const uint CLOD_NODE_SEGMENT_LEAF = 2u;
 static const uint CLOD_NODE_INSTANCE_ROOT = 3u;
 static const uint CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
+static const uint CLOD_ASSEMBLY_BONE_REMAP_SENTINEL = 0xFFFFFFFFu;
 static const uint CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
 
 struct ClusterLODAssemblyTransform
@@ -223,6 +226,14 @@ struct ClusterLODAssemblyInstance
     uint transformIndex;
     uint flags;
     uint stackDepth;
+};
+
+struct ClusterLODAssemblyBoneRemap
+{
+    uint remapIndexBase;
+    uint remapIndexCount;
+    uint flags;
+    uint reserved;
 };
 
 struct CLodRuntimeAssemblyTransform

@@ -38,6 +38,7 @@
 #include "Import/AssimpGeometryExtractor.h"
 #include "Import/USDGeometryExtractor.h"
 #include "Import/BRNiflyClient.h"
+#include "Utilities/CachePathUtilities.h"
 
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/usd/primFlags.h>
@@ -1327,7 +1328,7 @@ int main(int argc, char* argv[]) {
     spdlog::info("Working directory: {}", fs::current_path().string());
 
     {
-        auto cacheRoot = fs::current_path() / "cache";
+        auto cacheRoot = GetCacheRootPath();
         spdlog::info("Cache root directory: {}", cacheRoot.string());
         if (fs::exists(cacheRoot))
             spdlog::info("  (cache root already exists)");
@@ -1418,7 +1419,7 @@ int main(int argc, char* argv[]) {
 
     // Report cache directory contents
     {
-        auto cacheRoot = fs::current_path() / "cache";
+        auto cacheRoot = GetCacheRootPath();
         if (fs::exists(cacheRoot)) {
             size_t cacheFileCount = 0;
             uintmax_t cacheBytes = 0;

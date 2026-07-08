@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <system_error>
 #include <unordered_set>
 #include <vector>
@@ -78,46 +79,22 @@ std::string ws2s(const std::wstring_view& wide)
 }
 
 namespace {
-std::optional<std::filesystem::path> FindProjectRootFrom(std::filesystem::path start)
+std::optional<std::filesystem::path> GetExecutableDirectory()
 {
-	std::error_code ec;
-	if (start.empty()) {
-		return std::nullopt;
-	}
-	start = std::filesystem::weakly_canonical(start, ec);
-	if (ec) {
-		return std::nullopt;
-	}
-	if (std::filesystem::is_regular_file(start, ec)) {
-		start = start.parent_path();
-	}
-
-	for (std::filesystem::path path = start; !path.empty(); path = path.parent_path()) {
-		if (std::filesystem::exists(path / "CMakePresets.json", ec) &&
-			std::filesystem::exists(path / "models", ec)) {
-			return path;
-		}
-		if (path == path.root_path()) {
-			break;
-		}
-	}
-	return std::nullopt;
-}
-
-std::optional<std::filesystem::path> FindProjectRoot()
-{
-	if (auto root = FindProjectRootFrom(std::filesystem::current_path())) {
-		return root;
-	}
-
 	std::vector<wchar_t> modulePath(MAX_PATH);
 	while (true) {
 		const DWORD written = ::GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
 		if (written == 0) {
 			break;
 		}
-		if (written < modulePath.size() - 1u) {
-			return FindProjectRootFrom(std::filesystem::path(modulePath.data()).parent_path());
+		if (written < modulePath.size()) {
+			std::filesystem::path path(modulePath.data());
+			std::error_code ec;
+			path = std::filesystem::weakly_canonical(path, ec);
+			if (ec) {
+				path = std::filesystem::path(modulePath.data());
+			}
+			return path.parent_path();
 		}
 		modulePath.resize(modulePath.size() * 2u);
 	}
@@ -159,23 +136,25 @@ std::filesystem::path RemapBuildOutputAssetPath(const std::filesystem::path& can
 }
 }
 
-std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
-	std::filesystem::path cacheRoot;
+std::filesystem::path GetCacheRootPath()
+{
 	const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
 	if (envLength > 1) {
 		std::vector<char> envRoot(envLength);
 		if (::GetEnvironmentVariableA("SARP_CACHE_ROOT", envRoot.data(), envLength) != 0 && envRoot.front() != '\0') {
-			cacheRoot = std::filesystem::path(envRoot.data());
+			return std::filesystem::path(envRoot.data());
 		}
 	}
-	if (cacheRoot.empty()) {
-		if (auto projectRoot = FindProjectRoot()) {
-			cacheRoot = *projectRoot / L"cache";
-		}
-		else {
-			cacheRoot = std::filesystem::current_path() / L"cache";
-		}
+
+	if (auto executableDirectory = GetExecutableDirectory()) {
+		return *executableDirectory / L"cache";
 	}
+
+	return std::filesystem::current_path() / L"cache";
+}
+
+std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
+	const std::filesystem::path cacheRoot = GetCacheRootPath();
 	std::filesystem::path cacheDir = cacheRoot / directory;
 
 	// Avoid repeated OS syscalls: only call create_directories once per unique

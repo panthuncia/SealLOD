@@ -148,6 +148,7 @@ static constexpr uint32_t CLOD_NODE_VOXEL_LEAF = 1u;
 static constexpr uint32_t CLOD_NODE_SEGMENT_LEAF = 2u;
 static constexpr uint32_t CLOD_NODE_INSTANCE_ROOT = 3u;
 static constexpr uint32_t CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
+static constexpr uint32_t CLOD_ASSEMBLY_BONE_REMAP_SENTINEL = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
 
 struct ClusterLODAssemblyTransform
@@ -166,6 +167,15 @@ struct ClusterLODAssemblyInstance
 	uint32_t stackDepth = 0;
 };
 static_assert(sizeof(ClusterLODAssemblyInstance) == 16, "ClusterLODAssemblyInstance must be 16 bytes");
+
+struct ClusterLODAssemblyBoneRemap
+{
+	uint32_t remapIndexBase = CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
+	uint32_t remapIndexCount = 0;
+	uint32_t flags = 0;
+	uint32_t reserved = 0;
+};
+static_assert(sizeof(ClusterLODAssemblyBoneRemap) == 16, "ClusterLODAssemblyBoneRemap must be 16 bytes");
 
 static constexpr uint32_t CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;

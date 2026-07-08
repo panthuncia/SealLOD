@@ -727,6 +727,8 @@ uint VoxelRasterPrepareCube(
 #if PSO_SKINNED
     in const PerMeshInstanceBuffer meshInstance,
     in const PerObjectBuffer objectData,
+    in const CLodMeshMetadata metadata,
+    uint assemblyTransformIndex,
 #endif
     in const CullingCameraInfo camera,
     in const ClodViewRasterInfo rasterInfo,
@@ -769,8 +771,9 @@ uint VoxelRasterPrepareCube(
     row_major matrix worldToLocal = objectData.modelInverse;
     if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
     {
-        const float4x4 skinMatrix = LoadBoneSkinMatrix(meshInstance.skinningInstanceSlot, dominantBoneIndex);
-        const float4x4 inverseSkinMatrix = LoadBoneInverseSkinMatrix(meshInstance.skinningInstanceSlot, dominantBoneIndex);
+        const uint expandedBoneIndex = ResolveAssemblyBoneIndex(dominantBoneIndex, metadata, assemblyTransformIndex);
+        const float4x4 skinMatrix = LoadBoneSkinMatrix(meshInstance.skinningInstanceSlot, expandedBoneIndex);
+        const float4x4 inverseSkinMatrix = LoadBoneInverseSkinMatrix(meshInstance.skinningInstanceSlot, expandedBoneIndex);
         localToWorld = mul(skinMatrix, objectData.model);
         worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
     }
@@ -935,12 +938,27 @@ bool VoxelRasterTryLoadWorkInputs(
     out PerMeshInstanceBuffer meshInstance,
 #endif
     out PerObjectBuffer objectData,
+    out CLodMeshMetadata metadata,
+    out uint visibleClusterAssemblyTransformIndex,
     out CullingCameraInfo camera,
     out ClodViewRasterInfo rasterInfo,
     out GroupPageMapEntry pageEntry,
     out CLodVoxelPageHeader pageHeader,
     out CLodVoxelClusterRecord voxelCluster)
 {
+    work = (CLodVoxelRasterWorkRecord)0;
+#if PSO_SKINNED
+    meshInstance = (PerMeshInstanceBuffer)0;
+#endif
+    metadata = (CLodMeshMetadata)0;
+    visibleClusterAssemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    objectData = (PerObjectBuffer)0;
+    camera = (CullingCameraInfo)0;
+    rasterInfo = (ClodViewRasterInfo)0;
+    pageEntry = (GroupPageMapEntry)0;
+    pageHeader = (CLodVoxelPageHeader)0;
+    voxelCluster = (CLodVoxelClusterRecord)0;
+
     StructuredBuffer<CLodVoxelRasterWorkRecord> workRecords = ResourceDescriptorHeap[CLOD_RASTER_VOXEL_WORK_RECORDS_DESCRIPTOR_INDEX];
     work = workRecords[workIndex];
     if (GI == 0u)
@@ -962,7 +980,7 @@ bool VoxelRasterTryLoadWorkInputs(
     meshInstance = LoadMeshTemplateForDraw(instanceIndex);
 #endif
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
-    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+    metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
     camera = cameras[viewId];
     rasterInfo = viewRasterInfoBuffer[viewId];
 
@@ -982,7 +1000,7 @@ bool VoxelRasterTryLoadWorkInputs(
 
     StructuredBuffer<uint> visibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint visibleClusterAssemblyTransformIndex = visibleClusterTransformIndices[work.visibleClusterIndex];
+    visibleClusterAssemblyTransformIndex = visibleClusterTransformIndices[work.visibleClusterIndex];
     objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
         instanceIndex,
         visibleClusterAssemblyTransformIndex);
@@ -1073,6 +1091,8 @@ void VoxelRasterRasterizeClusterDirect(
 #if PSO_SKINNED
     PerMeshInstanceBuffer meshInstance,
     PerObjectBuffer objectData,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex,
 #endif
     CullingCameraInfo camera,
     ClodViewRasterInfo rasterInfo,
@@ -1107,6 +1127,8 @@ void VoxelRasterRasterizeClusterDirect(
 #if PSO_SKINNED
             meshInstance,
             objectData,
+            metadata,
+            assemblyTransformIndex,
 #endif
             camera,
             rasterInfo,
@@ -1222,6 +1244,8 @@ uint VoxelRasterPrepareQueuedCubeCandidate(
 #if PSO_SKINNED
     PerMeshInstanceBuffer meshInstance,
     PerObjectBuffer objectData,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex,
 #endif
     CullingCameraInfo camera,
     ClodViewRasterInfo rasterInfo,
@@ -1242,6 +1266,8 @@ uint VoxelRasterPrepareQueuedCubeCandidate(
 #if PSO_SKINNED
         meshInstance,
         objectData,
+        metadata,
+        assemblyTransformIndex,
 #endif
         camera,
         rasterInfo,
@@ -1345,6 +1371,8 @@ void VoxelRasterPrepareQueuedCubeBatch(
 #if PSO_SKINNED
     PerMeshInstanceBuffer meshInstance,
     PerObjectBuffer objectData,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex,
 #endif
     CullingCameraInfo camera,
     ClodViewRasterInfo rasterInfo,
@@ -1370,6 +1398,8 @@ void VoxelRasterPrepareQueuedCubeBatch(
 #if PSO_SKINNED
             meshInstance,
             objectData,
+            metadata,
+            assemblyTransformIndex,
 #endif
             camera,
             rasterInfo,
@@ -1704,6 +1734,8 @@ void VoxelRasterRasterizeClusterQueued(
 #if PSO_SKINNED
     PerMeshInstanceBuffer meshInstance,
     PerObjectBuffer objectData,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex,
 #endif
     CullingCameraInfo camera,
     ClodViewRasterInfo rasterInfo,
@@ -1743,6 +1775,8 @@ void VoxelRasterRasterizeClusterQueued(
 #if PSO_SKINNED
             meshInstance,
             objectData,
+            metadata,
+            assemblyTransformIndex,
 #endif
             camera,
             rasterInfo,
@@ -1823,6 +1857,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     PerMeshInstanceBuffer meshInstance = (PerMeshInstanceBuffer)0;
 #endif
     PerObjectBuffer objectData = (PerObjectBuffer)0;
+    CLodMeshMetadata metadata = (CLodMeshMetadata)0;
+    uint visibleClusterAssemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
     CullingCameraInfo camera = (CullingCameraInfo)0;
     ClodViewRasterInfo rasterInfo = (ClodViewRasterInfo)0;
     GroupPageMapEntry pageEntry = (GroupPageMapEntry)0;
@@ -1836,6 +1872,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         meshInstance,
 #endif
         objectData,
+        metadata,
+        visibleClusterAssemblyTransformIndex,
         camera,
         rasterInfo,
         pageEntry,
@@ -1898,6 +1936,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 #if PSO_SKINNED
         meshInstance,
         objectData,
+        metadata,
+        visibleClusterAssemblyTransformIndex,
 #endif
         camera,
         rasterInfo,
@@ -1928,6 +1968,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 #if PSO_SKINNED
         meshInstance,
         objectData,
+        metadata,
+        visibleClusterAssemblyTransformIndex,
 #endif
         camera,
         rasterInfo,

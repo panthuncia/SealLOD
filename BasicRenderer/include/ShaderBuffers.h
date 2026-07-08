@@ -682,6 +682,8 @@ struct CLodMeshMetadata
     uint assemblyTransformCount;
     uint assemblyInstanceBase;
     uint assemblyInstanceCount;
+    uint assemblyBoneRemapBase;
+    uint assemblyBoneRemapCount;
 };
 
 struct CLodHierarchyLevelInfo

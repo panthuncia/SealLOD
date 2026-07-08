@@ -62,7 +62,9 @@ BoundingSphere CLodComputeSkinnedMeshletBounds(
     CLodPageHeader pageHeader,
     uint pageSlabDescriptorIndex,
     uint pageSlabByteOffset,
-    uint skinningInstanceSlot)
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
 {
     BoundingSphere staticBounds = { desc.bounds };
     if (!IsValidSkinningInstanceSlot(skinningInstanceSlot) || CLodDescBoneCount(desc) == 0u)
@@ -80,7 +82,10 @@ BoundingSphere CLodComputeSkinnedMeshletBounds(
     [loop]
     for (uint boneIndex = 0; boneIndex < CLodDescBoneCount(desc); ++boneIndex)
     {
-        const uint jointIndex = slab.Load(boneListBase + boneIndex * 4u);
+        const uint jointIndex = ResolveAssemblyBoneIndex(
+            slab.Load(boneListBase + boneIndex * 4u),
+            metadata,
+            assemblyTransformIndex);
         const float4x4 boneSkinMatrix = LoadBoneSkinMatrix(skinningInstanceSlot, jointIndex);
         const float3 transformedCenter = mul(float4(staticBounds.sphere.xyz, 1.0f), boneSkinMatrix).xyz;
         const float transformedRadius = staticBounds.sphere.w * SkinningMaxAxisScale_RowVector(boneSkinMatrix);
@@ -127,7 +132,9 @@ BoundingSphere CLodComputeMeshletBounds(
     uint pageSlabDescriptorIndex,
     uint pageSlabByteOffset,
     uint vertexFlags,
-    uint skinningInstanceSlot)
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
 {
     if ((vertexFlags & VERTEX_SKINNED) != 0u)
     {
@@ -136,7 +143,9 @@ BoundingSphere CLodComputeMeshletBounds(
             pageHeader,
             pageSlabDescriptorIndex,
             pageSlabByteOffset,
-            skinningInstanceSlot);
+            skinningInstanceSlot,
+            metadata,
+            assemblyTransformIndex);
     }
 
     BoundingSphere bounds = { desc.bounds };
