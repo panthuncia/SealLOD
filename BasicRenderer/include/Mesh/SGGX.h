@@ -276,6 +276,47 @@ namespace br::mesh::sggx
 		return sggx;
 	}
 
+	[[nodiscard]] inline SymmetricMatrix3 BuildSGGXFromWeightedNormals(const std::vector<Float3>& normals, const std::vector<float>& weights)
+	{
+		if (normals.empty() || weights.size() != normals.size()) {
+			return BuildSGGXFromNormals(normals);
+		}
+
+		float totalWeight = 0.0f;
+		SymmetricMatrix3 moment{};
+		for (size_t sampleIndex = 0; sampleIndex < normals.size(); ++sampleIndex) {
+			const float weight = std::max(weights[sampleIndex], 0.0f);
+			if (weight <= 0.0f) {
+				continue;
+			}
+			moment = moment + Outer(SafeNormalizeNormal(normals[sampleIndex]), weight);
+			totalWeight += weight;
+		}
+		if (totalWeight <= 1.0e-12f) {
+			return BuildSGGXFromNormals(normals);
+		}
+
+		const float invWeight = 1.0f / totalWeight;
+		moment = moment * invWeight;
+
+		const std::array<Float3, 3> axes = EigenvectorsSymmetric(moment);
+		SymmetricMatrix3 sggx{};
+		constexpr float kMinSigma = 1.0e-4f;
+		for (const Float3& axis : axes) {
+			float sigma = 0.0f;
+			for (size_t sampleIndex = 0; sampleIndex < normals.size(); ++sampleIndex) {
+				const float weight = std::max(weights[sampleIndex], 0.0f);
+				if (weight <= 0.0f) {
+					continue;
+				}
+				sigma += weight * std::abs(axis.dot(SafeNormalizeNormal(normals[sampleIndex])));
+			}
+			sigma = std::max(kMinSigma, 0.5f * sigma * invWeight);
+			sggx = sggx + Outer(axis, sigma * sigma);
+		}
+		return sggx;
+	}
+
 	[[nodiscard]] inline DirectX::XMFLOAT4 EncodeSGGXFromNormals(const std::vector<Float3>& normals)
 	{
 		return EncodeAxialSGGX(CompressSGGXToAxial(BuildSGGXFromNormals(normals)));

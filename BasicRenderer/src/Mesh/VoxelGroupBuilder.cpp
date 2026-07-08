@@ -33,6 +33,7 @@ namespace
 	using br::mesh::sggx::SGGXFromNormal;
 	using br::mesh::sggx::SymmetricMatrix3;
 	using br::mesh::sggx::BuildSGGXFromNormals;
+	using br::mesh::sggx::BuildSGGXFromWeightedNormals;
 
 	uint32_t ComputeVoxelClusterFlags(
 		const std::vector<CLodVoxelCubeRecord>& cubeRecords,
@@ -1237,6 +1238,7 @@ namespace
 	struct CellCoverageSample
 	{
 		float coverage = 0.0f;
+		float coverageWeight = 0.0f;
 		uint32_t hitCount = 0;
 		uint32_t representativeTriangleIndex = std::numeric_limits<uint32_t>::max();
 		Float3 accumulatedNormal{};
@@ -1246,6 +1248,7 @@ namespace
 		float uvWeight = 0.0f;
 		std::vector<DirectX::XMFLOAT2> uvSamples;
 		std::vector<Float3> normalSamples;
+		std::vector<float> normalWeights;
 	};
 
 	void AddCoverageUvSample(CellCoverageSample& sample, const DirectX::XMFLOAT2& uv, float weight)
@@ -1450,20 +1453,22 @@ namespace
 			if (nearestTriangleIndex != std::numeric_limits<uint32_t>::max())
 			{
 				++sample.hitCount;
+				sample.coverageWeight += nearestWeight;
 				if (sample.representativeTriangleIndex == std::numeric_limits<uint32_t>::max())
 				{
 					sample.representativeTriangleIndex = nearestTriangleIndex;
 				}
-				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal;
+				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal * nearestWeight;
 				sample.normalSamples.push_back(nearestNormal);
+				sample.normalWeights.push_back(nearestWeight);
 				AddCoverageUvSample(sample, nearestUv, nearestWeight);
 			}
 		}
 
-		sample.coverage = static_cast<float>(sample.hitCount) / static_cast<float>(rays.size());
+		sample.coverage = sample.coverageWeight / static_cast<float>(rays.size());
 		if (!sample.normalSamples.empty())
 		{
-			sample.accumulatedSGGX = BuildSGGXFromNormals(sample.normalSamples);
+			sample.accumulatedSGGX = BuildSGGXFromWeightedNormals(sample.normalSamples, sample.normalWeights);
 			sample.sggxWeight = 1.0f;
 		}
 		return sample;

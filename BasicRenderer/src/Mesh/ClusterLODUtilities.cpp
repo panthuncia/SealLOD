@@ -8677,6 +8677,11 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			std::max(2u, settings.voxelMinResolution),
 			static_cast<uint32_t>(std::ceil(longestExtent / std::max(voxelWidth, 1.0e-8f))));
 		const float voxelRepresentationError = ComputeVoxelRepresentationError(voxelWidth);
+		const float sourceToParentRatio = std::max(1.0f, voxelWidth / std::max(maxSourceVoxelWidth, 1.0e-8f));
+		const uint32_t rayScale = std::clamp(
+			static_cast<uint32_t>(std::ceil(sourceToParentRatio * sourceToParentRatio)),
+			1u,
+			32u);
 
 		VoxelizeTrianglesInput voxelInput{};
 		voxelInput.sourceVoxelPayloadInstances = &sourceInstances;
@@ -8686,7 +8691,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		voxelInput.aabbMax = aabbMax;
 		voxelInput.voxelWidth = voxelWidth;
 		voxelInput.resolution = resolution;
-		voxelInput.raysPerCell = std::max(1u, settings.voxelRaysPerCell);
+		voxelInput.raysPerCell = std::max(1u, settings.voxelRaysPerCell) * rayScale;
 		voxelInput.emitSourcePayload = false;
 		if (assemblyCoverageSourceTriangles.IsValid())
 		{
