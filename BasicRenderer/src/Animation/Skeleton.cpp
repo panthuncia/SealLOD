@@ -69,7 +69,8 @@ Skeleton::Skeleton(const std::vector<flecs::entity>& nodes,
 
 Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::vector<int32_t> parentIndices,
-    std::vector<Matrix> inverseBindMatrices)
+    std::vector<Matrix> inverseBindMatrices,
+    std::vector<Components::Transform> restLocalTransforms)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -80,7 +81,16 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
             m_boneNames.size());
         m_parentIndices.assign(m_boneNames.size(), -1);
     }
-    m_restLocalTransforms.resize(m_boneNames.size());
+    m_restLocalTransforms = std::move(restLocalTransforms);
+    if (!m_restLocalTransforms.empty() && m_restLocalTransforms.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: rest local transform count ({}) != bone name count ({}); using identity rest transforms",
+            m_restLocalTransforms.size(),
+            m_boneNames.size());
+        m_restLocalTransforms.clear();
+    }
+    if (m_restLocalTransforms.empty()) {
+        m_restLocalTransforms.resize(m_boneNames.size());
+    }
     m_rootParentGlobals.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
     m_inverseBindMatrices = std::move(inverseBindMatrices);
     if (m_inverseBindMatrices.size() != m_boneNames.size()) {
@@ -109,6 +119,7 @@ Skeleton::Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton)
     m_isBaseSkeleton = false;
 
     EnsureInstanceBuffersSized_();
+    UpdateTransforms(0.0f, true);
     // Start at rest pose
     m_poseDirty = true;
 }

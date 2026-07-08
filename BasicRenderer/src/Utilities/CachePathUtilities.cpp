@@ -77,6 +77,88 @@ std::string ws2s(const std::wstring_view& wide)
 	return out;
 }
 
+namespace {
+std::optional<std::filesystem::path> FindProjectRootFrom(std::filesystem::path start)
+{
+	std::error_code ec;
+	if (start.empty()) {
+		return std::nullopt;
+	}
+	start = std::filesystem::weakly_canonical(start, ec);
+	if (ec) {
+		return std::nullopt;
+	}
+	if (std::filesystem::is_regular_file(start, ec)) {
+		start = start.parent_path();
+	}
+
+	for (std::filesystem::path path = start; !path.empty(); path = path.parent_path()) {
+		if (std::filesystem::exists(path / "CMakePresets.json", ec) &&
+			std::filesystem::exists(path / "models", ec)) {
+			return path;
+		}
+		if (path == path.root_path()) {
+			break;
+		}
+	}
+	return std::nullopt;
+}
+
+std::optional<std::filesystem::path> FindProjectRoot()
+{
+	if (auto root = FindProjectRootFrom(std::filesystem::current_path())) {
+		return root;
+	}
+
+	std::vector<wchar_t> modulePath(MAX_PATH);
+	while (true) {
+		const DWORD written = ::GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		if (written == 0) {
+			break;
+		}
+		if (written < modulePath.size() - 1u) {
+			return FindProjectRootFrom(std::filesystem::path(modulePath.data()).parent_path());
+		}
+		modulePath.resize(modulePath.size() * 2u);
+	}
+	return std::nullopt;
+}
+
+std::filesystem::path RemapBuildOutputAssetPath(const std::filesystem::path& canonicalPath)
+{
+	std::vector<std::filesystem::path> parts;
+	for (const auto& part : canonicalPath) {
+		parts.push_back(part);
+	}
+
+	for (std::size_t outIndex = 0; outIndex < parts.size(); ++outIndex) {
+		if (parts[outIndex] != "out" || outIndex == 0u) {
+			continue;
+		}
+		for (std::size_t assetRootIndex = outIndex + 1u; assetRootIndex < parts.size(); ++assetRootIndex) {
+			if (parts[assetRootIndex] != "models" && parts[assetRootIndex] != "textures") {
+				continue;
+			}
+
+			std::filesystem::path sourceRoot;
+			for (std::size_t i = 0; i < outIndex; ++i) {
+				sourceRoot /= parts[i];
+			}
+			std::filesystem::path candidate = sourceRoot;
+			for (std::size_t i = assetRootIndex; i < parts.size(); ++i) {
+				candidate /= parts[i];
+			}
+
+			std::error_code ec;
+			if (std::filesystem::exists(candidate, ec)) {
+				return candidate;
+			}
+		}
+	}
+	return canonicalPath;
+}
+}
+
 std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
 	std::filesystem::path cacheRoot;
 	const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
@@ -87,7 +169,12 @@ std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& 
 		}
 	}
 	if (cacheRoot.empty()) {
-		cacheRoot = std::filesystem::current_path() / L"cache";
+		if (auto projectRoot = FindProjectRoot()) {
+			cacheRoot = *projectRoot / L"cache";
+		}
+		else {
+			cacheRoot = std::filesystem::current_path() / L"cache";
+		}
 	}
 	std::filesystem::path cacheDir = cacheRoot / directory;
 
@@ -128,5 +215,5 @@ std::string NormalizeCacheSourcePath(const std::string& path) {
 	std::error_code ec;
 	auto canonical = std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
 	if (ec) return path; // if canonicalisation fails, use original
-	return canonical.generic_string(); // forward-slash, absolute
+	return RemapBuildOutputAssetPath(canonical).generic_string(); // forward-slash, absolute
 }

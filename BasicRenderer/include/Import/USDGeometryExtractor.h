@@ -44,6 +44,7 @@ struct ExtractOptions {
 	bool buildPointInstancerAssemblyCaches = false;
 	bool buildWholeAssetAssemblyCaches = false;
 	bool importSkinningAsRigidBindPose = false;
+	bool enableDoubleSidedNameHeuristic = true;
 };
 
 void ResetBenchmarkStats();
@@ -107,5 +108,16 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 	const std::string& sourceIdentifier,
 	pxr::UsdTimeCode geomTimeCode,
 	const pxr::UsdGeomMesh& identityMesh);
+
+std::string BuildWholeAssetAssemblyBucketIdentitySuffix(
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath);
+
+void AppendWholeAssetAssemblyBucketIdentity(
+	CLodCacheLoader::MeshCacheIdentity& identity,
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath);
 
 } // namespace USDGeometryExtractor

@@ -43,6 +43,7 @@
 #include "RenderPasses/EnvironmentFilterPass.h"
 #include "RenderPasses/ClearUAVsPass.h"
 #include "RenderPasses/DebugSpheresPass.h"
+#include "RenderPasses/DebugSkeletonPass.h"
 #include "RenderPasses/Base/ComputePass.h"
 #include "RenderPasses/FidelityFX/Downsample.h"
 #include "RenderPasses/PostProcessing/Tonemapping.h"
@@ -73,6 +74,7 @@
 #include "Managers/Singletons/FFXManager.h"
 #include "Managers/Singletons/DirectStorageManager.h"
 #include "Render/Runtime/OpenRenderGraphSettings.h"
+#include "Render/OutputTypes.h"
 #include "Render/GraphExtensions/IOExtension.h"
 #include "Render/GraphExtensions/CLodExtension.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
@@ -128,6 +130,11 @@ namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
+
+bool OutputTypeRequiresRenderGraphRebuild(unsigned int outputType)
+{
+    return outputType == static_cast<unsigned int>(OutputType::SKELETONS);
+}
 
 bool ReadTruthyEnvironmentFlag(const char* name)
 {
@@ -1765,8 +1772,15 @@ void Renderer::SetSettings() {
 		SetEnvironmentInternal(s2ws(newValue));
 		rebuildRenderGraph = true;
 		}));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<unsigned int>("outputType", [this](const unsigned int& newValue) {
+    bool outputTypeRequiresRenderGraphRebuild =
+        OutputTypeRequiresRenderGraphRebuild(settingsManager.getSettingGetter<unsigned int>("outputType")());
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<unsigned int>("outputType", [this, outputTypeRequiresRenderGraphRebuild](const unsigned int& newValue) mutable {
         ResourceManager::GetInstance().SetOutputType(newValue);
+        const bool newOutputTypeRequiresRenderGraphRebuild = OutputTypeRequiresRenderGraphRebuild(newValue);
+        if (newOutputTypeRequiresRenderGraphRebuild != outputTypeRequiresRenderGraphRebuild) {
+            rebuildRenderGraph = true;
+        }
+        outputTypeRequiresRenderGraphRebuild = newOutputTypeRequiresRenderGraphRebuild;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableMeshShader", [this](const bool& newValue) {
 		ToggleMeshShaders(newValue);
@@ -4052,8 +4066,18 @@ void Renderer::CreateRenderGraph() {
     newGraph->BuildRenderPass<TonemappingPass>("TonemappingPass");
     newGraph->SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
 
-    newGraph->BuildRenderPass<DebugResolvePass>("DebugResolvePass");
-    newGraph->SetPassTechnique("DebugResolvePass", "Debug::Visualization");
+    const auto outputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")();
+    const bool skeletonDebugOutput =
+        outputType == static_cast<unsigned int>(OutputType::SKELETONS) &&
+        DeviceManager::GetInstance().GetMeshShadersSupported();
+    if (skeletonDebugOutput) {
+        newGraph->BuildRenderPass<DebugSkeletonPass>("DebugSkeletonPass");
+        newGraph->SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
+    }
+    else {
+        newGraph->BuildRenderPass<DebugResolvePass>("DebugResolvePass");
+        newGraph->SetPassTechnique("DebugResolvePass", "Debug::Visualization");
+    }
 
     newGraph->BuildRenderPass<MenuRenderPass>("MenuRenderPass");
     newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");

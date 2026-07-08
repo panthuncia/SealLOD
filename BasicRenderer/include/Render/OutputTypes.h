@@ -69,6 +69,7 @@ enum OutputType {
 	TERRAIN_GRASS_OVERLAY = 65,
 	CLOD_ASSEMBLY_VOXEL_INHERITANCE = 66,
 	CLOD_ASSEMBLY_PARTS = 67,
+	SKELETONS = 68,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -140,4 +141,5 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Terrain Grass Overlay",
 	"CLod assembly voxel inheritance",
 	"CLod assembly parts",
+	"Skeletons",
 };

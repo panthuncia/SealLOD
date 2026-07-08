@@ -29,7 +29,8 @@ public:
 
     Skeleton(std::vector<std::string> boneNames,
         std::vector<int32_t> parentIndices,
-        std::vector<Matrix> inverseBindMatrices);
+        std::vector<Matrix> inverseBindMatrices,
+        std::vector<Components::Transform> restLocalTransforms = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);

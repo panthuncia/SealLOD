@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cmath>
+#include <cctype>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <optional>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -37,6 +39,7 @@
 #include <tracy/Tracy.hpp>
 
 #include "Import/CLodCacheLoader.h"
+#include "Utilities/CachePathUtilities.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/ClusterLODTypes.h"
 #include "Mesh/ClusterLODUtilities.h"
@@ -1930,6 +1933,65 @@ bool PathHasAnyPrefix(const SdfPath& path, const std::vector<SdfPath>& prefixes)
 	return false;
 }
 
+std::string NormalizeHeuristicName(std::string value)
+{
+	std::replace(value.begin(), value.end(), '-', '_');
+	std::replace(value.begin(), value.end(), ' ', '_');
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	return value;
+}
+
+bool NameSuggestsDoubleSided(const std::string& value)
+{
+	const std::string normalized = NormalizeHeuristicName(value);
+	return normalized.find("twosided") != std::string::npos ||
+		normalized.find("two_sided") != std::string::npos ||
+		normalized.find("2sided") != std::string::npos ||
+		normalized.find("2_sided") != std::string::npos ||
+		normalized.find("doublesided") != std::string::npos ||
+		normalized.find("double_sided") != std::string::npos;
+}
+
+bool ShouldForceDoubleSidedByName(
+	const UsdShadeMaterial& material,
+	const std::optional<UsdGeomSubset>& subset,
+	const ExtractOptions& options)
+{
+	if (!options.enableDoubleSidedNameHeuristic) {
+		return false;
+	}
+	if (subset && NameSuggestsDoubleSided(subset->GetPrim().GetName().GetString())) {
+		return true;
+	}
+	if (material && NameSuggestsDoubleSided(material.GetPrim().GetName().GetString())) {
+		return true;
+	}
+	return false;
+}
+
+std::uint64_t StableHashString64(const std::string& value)
+{
+	std::uint64_t hash = 1469598103934665603ull;
+	for (const unsigned char c : value) {
+		hash ^= static_cast<std::uint64_t>(c);
+		hash *= 1099511628211ull;
+	}
+	return hash;
+}
+
+std::string Hex64(std::uint64_t value)
+{
+	std::array<char, 17> chars{};
+	constexpr char kHex[] = "0123456789abcdef";
+	for (int i = 15; i >= 0; --i) {
+		chars[static_cast<std::size_t>(i)] = kHex[value & 0xfull];
+		value >>= 4u;
+	}
+	return std::string(chars.data(), 16);
+}
+
 std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentity(
 	const UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier,
@@ -1946,19 +2008,11 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};
-	if (identityMesh) {
-		identity = CLodCacheLoader::BuildIdentity(
-			identityMesh,
-			stage,
-			kAssetAssemblySubsetName,
-			geomTimeCode,
-			sourceIdentifier);
-	}
-	else {
-		identity.sourceIdentifier = sourceIdentifier;
-		if (identity.sourceIdentifier.empty() && stage->GetRootLayer()) {
-			identity.sourceIdentifier = stage->GetRootLayer()->GetIdentifier();
-		}
+	(void)identityMesh;
+	(void)geomTimeCode;
+	identity.sourceIdentifier = NormalizeCacheSourcePath(sourceIdentifier);
+	if (identity.sourceIdentifier.empty() && stage->GetRootLayer()) {
+		identity.sourceIdentifier = NormalizeCacheSourcePath(stage->GetRootLayer()->GetIdentifier());
 		identity.subsetName = kAssetAssemblySubsetName;
 	}
 
@@ -1970,6 +2024,31 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 	identity.sourceIdentifier += kAssetAssemblyAbiSuffix;
 	identity.sourceIdentifier += kRigidBindPoseSuffix;
 	return identity;
+}
+
+std::string BuildWholeAssetAssemblyBucketIdentitySuffix(
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath)
+{
+	std::string suffix;
+	if (skinned) {
+		suffix += "#skinned=1";
+		suffix += "#skin_domain=" + Hex64(skinDomain);
+	}
+	if (!materialPath.empty()) {
+		suffix += "#material_domain=" + Hex64(StableHashString64(materialPath));
+	}
+	return suffix;
+}
+
+void AppendWholeAssetAssemblyBucketIdentity(
+	CLodCacheLoader::MeshCacheIdentity& identity,
+	bool skinned,
+	std::uint64_t skinDomain,
+	const std::string& materialPath)
+{
+	identity.sourceIdentifier += BuildWholeAssetAssemblyBucketIdentitySuffix(skinned, skinDomain, materialPath);
 }
 
 void AppendPointInstancerAssemblyCaches(
@@ -2528,17 +2607,23 @@ StageExtractionResult ExtractAllFromStage(
 		spdlog::info("  Found mesh #{}: '{}'", meshIndex + 1, workItem.primPath);
 
 		if (workItem.subsets.empty()) {
+			UsdShadeMaterialBindingAPI bindAPI(workItem.mesh);
+			const UsdShadeMaterial material = bindAPI.ComputeBoundMaterial();
 			MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::nullopt, stage, geomTimeCode, metersPerUnit,
 				requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-				workItem.doubleSided, sourceIdentifier, tessellationFactor, options);
+				workItem.doubleSided || ShouldForceDoubleSidedByName(material, std::nullopt, options),
+				sourceIdentifier, tessellationFactor, options);
 			std::lock_guard lock(resultMutex);
 			result.submeshes.push_back(std::move(submesh));
 		}
 		else {
 			TaskSchedulerManager::GetInstance().ParallelFor("USDGeometryExtractor::PreprocessSubsets", workItem.subsets.size(), [&](size_t subsetIndex) {
+				const UsdGeomSubset& subset = workItem.subsets[subsetIndex];
+				const UsdShadeMaterial material = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 				MeshPreprocessResult submesh = ExtractSubMesh(workItem.mesh, std::make_optional(workItem.subsets[subsetIndex]), stage, geomTimeCode, metersPerUnit,
 					requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
-					workItem.doubleSided, sourceIdentifier, tessellationFactor, options);
+					workItem.doubleSided || ShouldForceDoubleSidedByName(material, subset, options),
+					sourceIdentifier, tessellationFactor, options);
 				std::lock_guard lock(resultMutex);
 				result.submeshes.push_back(std::move(submesh));
 				});

@@ -1561,7 +1561,7 @@ void CLodExtension::Shutdown(RenderGraph& rg)
 {
     (void)rg;
     if (m_streamingSystem) {
-        m_streamingSystem->Shutdown();
+        m_streamingSystem->ShutdownGraphResources();
     }
 }
 

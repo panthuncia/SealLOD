@@ -382,6 +382,31 @@ namespace USDLoader {
 				static_cast<float>(translation[2] * metersPerUnit));
 	}
 
+	static Components::Transform ComponentsTransformFromUsdMatrix(
+		const GfMatrix4d& matrix,
+		double metersPerUnit)
+	{
+		const GfTransform transform(matrix);
+		const GfVec3d translation = transform.GetTranslation();
+		const GfQuaternion rotation = transform.GetRotation().GetQuaternion();
+		const GfVec3d scale = transform.GetScale();
+
+		return Components::Transform(
+			Components::Position(DirectX::XMFLOAT3(
+				static_cast<float>(translation[0] * metersPerUnit),
+				static_cast<float>(translation[1] * metersPerUnit),
+				static_cast<float>(translation[2] * metersPerUnit))),
+			Components::Rotation(DirectX::XMFLOAT4(
+				static_cast<float>(rotation.GetImaginary()[0]),
+				static_cast<float>(rotation.GetImaginary()[1]),
+				static_cast<float>(rotation.GetImaginary()[2]),
+				static_cast<float>(rotation.GetReal()))),
+			Components::Scale(DirectX::XMFLOAT3(
+				static_cast<float>(scale[0]),
+				static_cast<float>(scale[1]),
+				static_cast<float>(scale[2]))));
+	}
+
 	static void ApplyPointInstancerPScaleFallback(
 		const UsdGeomPointInstancer& pointInstancer,
 		const UsdTimeCode& timeCode,
@@ -4185,19 +4210,31 @@ namespace USDLoader {
 		std::vector<std::string> boneNames;
 		std::vector<int32_t> parentIndices;
 		std::vector<DirectX::XMMATRIX> inverseBindMatrices;
+		std::vector<Components::Transform> restLocalTransforms;
 		boneNames.reserve(rawJointOrder.size());
 		parentIndices.reserve(rawJointOrder.size());
 		inverseBindMatrices.reserve(rawJointOrder.size());
+		restLocalTransforms.reserve(rawJointOrder.size());
 
 		for (size_t i = 0; i < rawJointOrder.size(); ++i) {
 			boneNames.push_back(rawJointOrder[i].GetString());
-			parentIndices.push_back(topology.GetParent(i));
+			const int parentIndex = topology.GetParent(i);
+			parentIndices.push_back(parentIndex);
 
 			const GfMatrix4d bindMatrix = i < bindXforms.size() ? bindXforms[i] : GfMatrix4d(1.0);
+			GfMatrix4d localBindMatrix = bindMatrix;
+			if (parentIndex >= 0 && static_cast<size_t>(parentIndex) < bindXforms.size()) {
+				localBindMatrix = bindMatrix * bindXforms[static_cast<size_t>(parentIndex)].GetInverse();
+			}
+			restLocalTransforms.push_back(ComponentsTransformFromUsdMatrix(localBindMatrix, metersPerUnit));
 			inverseBindMatrices.push_back(DirectX::XMMatrixInverse(nullptr, DirectXMatrixFromUsdMatrix(bindMatrix, metersPerUnit)));
 		}
 
-		auto skeleton = std::make_shared<Skeleton>(std::move(boneNames), std::move(parentIndices), std::move(inverseBindMatrices));
+		auto skeleton = std::make_shared<Skeleton>(
+			std::move(boneNames),
+			std::move(parentIndices),
+			std::move(inverseBindMatrices),
+			std::move(restLocalTransforms));
 		loadingCache.skeletonMap[skel.GetPrim().GetPath().GetString()] = skeleton;
 		return skeleton;
 	}
@@ -4276,20 +4313,67 @@ namespace USDLoader {
 		return hash;
 	}
 
-	static std::string Hex64(std::uint64_t value)
+	static void StableHashCombine64(std::uint64_t& seed, std::uint64_t value)
 	{
-		std::array<char, 17> chars{};
-		constexpr char kHex[] = "0123456789abcdef";
-		for (int i = 15; i >= 0; --i) {
-			chars[static_cast<std::size_t>(i)] = kHex[value & 0xfull];
-			value >>= 4u;
+		seed ^= value + 0x9E3779B97F4A7C15ull + (seed << 6u) + (seed >> 2u);
+	}
+
+	static std::uint64_t StableHashDouble64(double value)
+	{
+		std::uint64_t bits = 0u;
+		static_assert(sizeof(bits) == sizeof(value));
+		std::memcpy(&bits, &value, sizeof(bits));
+		return bits;
+	}
+
+	static void StableHashMatrix64(std::uint64_t& seed, const GfMatrix4d& matrix)
+	{
+		for (int row = 0; row < 4; ++row) {
+			for (int column = 0; column < 4; ++column) {
+				StableHashCombine64(seed, StableHashDouble64(matrix[row][column]));
+			}
 		}
-		return std::string(chars.data(), 16);
 	}
 
 	static std::string AssetAssemblyMaterialDomainPath(const UsdShadeMaterial& material)
 	{
 		return material ? material.GetPrim().GetPath().GetString() : std::string("<unbound>");
+	}
+
+	static bool MeshHasUsdSkinningPrimvars(const UsdGeomMesh& mesh)
+	{
+		if (!mesh) {
+			return false;
+		}
+
+		UsdSkelBindingAPI bindAPI(mesh.GetPrim());
+		return bindAPI.GetJointIndicesPrimvar() || bindAPI.GetJointWeightsPrimvar();
+	}
+
+	static std::uint64_t ComputeUsdSkeletonDomainHash(
+		const UsdSkelSkeleton& skel,
+		const VtTokenArray& jointOrder,
+		const UsdSkelSkeletonQuery& skelQuery)
+	{
+		std::uint64_t hash = StableHashString64(skel.GetPrim().GetPath().GetString());
+		const auto& topology = skelQuery.GetTopology();
+
+		VtArray<GfMatrix4d> bindTransforms;
+		skel.GetBindTransformsAttr().Get(&bindTransforms);
+
+		StableHashCombine64(hash, static_cast<std::uint64_t>(jointOrder.size()));
+		for (size_t jointIndex = 0; jointIndex < jointOrder.size(); ++jointIndex) {
+			StableHashCombine64(hash, StableHashString64(jointOrder[jointIndex].GetString()));
+			StableHashCombine64(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(topology.GetParent(jointIndex))));
+			if (jointIndex < bindTransforms.size()) {
+				StableHashMatrix64(hash, bindTransforms[jointIndex]);
+			}
+			else {
+				StableHashMatrix64(hash, GfMatrix4d(1.0));
+			}
+		}
+
+		return hash;
 	}
 
 	static std::wstring AssetAssemblyBucketName(const AssetAssemblyBucketKey& key, std::size_t skinnedIndex, std::size_t rigidIndex)
@@ -4351,23 +4435,25 @@ namespace USDLoader {
 		if (!stage) {
 			return std::nullopt;
 		}
-		if (!bucket.key.skinned) {
-			auto identity = USDGeometryExtractor::BuildWholeAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, bucket.firstMesh);
-			if (identity && !bucket.key.materialPath.empty()) {
-				identity->sourceIdentifier += "#material_domain=" + Hex64(StableHashString64(bucket.key.materialPath));
-			}
-			return identity;
+		auto identity = USDGeometryExtractor::BuildWholeAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, bucket.firstMesh);
+		if (!identity) {
+			return std::nullopt;
 		}
-		return std::nullopt;
+		USDGeometryExtractor::AppendWholeAssetAssemblyBucketIdentity(
+			*identity,
+			bucket.key.skinned,
+			bucket.key.skinDomain,
+			bucket.key.materialPath);
+		return identity;
 	}
 
 	static std::optional<AssetAssemblyBucketKey> ClassifyAssetAssemblyMesh(
 		const UsdGeomMesh& mesh,
 		const UsdShadeMaterial& material,
-		UsdSkelCache&,
-		const UsdStageRefPtr&,
-		double,
-		std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash>&,
+		UsdSkelCache& skelCache,
+		const UsdStageRefPtr& stage,
+		double metersPerUnit,
+		std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash>& skeletonsByKey,
 		std::string* fallbackReason)
 	{
 		if (!mesh || IsBrNiflyCollisionMesh(mesh) || IsBrNiflyLODRenderMesh(mesh)) {
@@ -4376,8 +4462,59 @@ namespace USDLoader {
 		if (fallbackReason) {
 			fallbackReason->clear();
 		}
+
 		AssetAssemblyBucketKey key{};
 		key.materialPath = AssetAssemblyMaterialDomainPath(material);
+
+		auto skinningQuery = USDGeometryExtractor::GetSkinningQuery(mesh, skelCache);
+		if (!skinningQuery) {
+			if (MeshHasUsdSkinningPrimvars(mesh)) {
+				if (fallbackReason) {
+					*fallbackReason = "skinned USD mesh '" + mesh.GetPrim().GetPath().GetString() +
+						"' has joint primvars but no inherited UsdSkel skeleton";
+				}
+				return std::nullopt;
+			}
+			return key;
+		}
+
+		UsdSkelBindingAPI bindingAPI(mesh.GetPrim());
+		UsdSkelSkeleton skel = bindingAPI.GetInheritedSkeleton();
+		if (!skel) {
+			if (fallbackReason) {
+				*fallbackReason = "skinned USD mesh '" + mesh.GetPrim().GetPath().GetString() +
+					"' produced a skinning query but no inherited UsdSkel skeleton";
+			}
+			return std::nullopt;
+		}
+
+		skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+		UsdSkelSkeletonQuery skelQuery = skelCache.GetSkelQuery(skel);
+		if (!skelQuery) {
+			if (fallbackReason) {
+				*fallbackReason = "UsdSkel skeleton query could not be built for '" +
+					skel.GetPrim().GetPath().GetString() + "'";
+			}
+			return std::nullopt;
+		}
+
+		const VtTokenArray jointOrder = skelQuery.GetJointOrder();
+		key.skinned = true;
+		key.skinDomain = ComputeUsdSkeletonDomainHash(skel, jointOrder, skelQuery);
+
+		if (!skeletonsByKey.contains(key)) {
+			auto skeleton = BuildPayloadSkeleton(skel, jointOrder, skelQuery, metersPerUnit);
+			if (!skeleton) {
+				if (fallbackReason) {
+					*fallbackReason = "failed to build base skeleton for '" +
+						skel.GetPrim().GetPath().GetString() + "'";
+				}
+				return std::nullopt;
+			}
+			skeletonsByKey.emplace(key, std::move(skeleton));
+		}
+
+		(void)stage;
 		return key;
 	}
 
@@ -4813,11 +4950,27 @@ namespace USDLoader {
 				assemblySettings.doubleSidedVoxelSourceNormals =
 					bucket.forceDoubleSided ||
 					(bucket.info != nullptr && bucket.info->forceDoubleSided);
-				ClusterLODPrebuildArtifacts assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
-					bucket.parts,
-					bucket.instances,
-					assemblySettings,
-					8u);
+				ClusterLODPrebuildArtifacts assemblyArtifacts;
+				try {
+					assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
+						bucket.parts,
+						bucket.instances,
+						assemblySettings,
+						8u);
+				}
+				catch (const std::runtime_error& e) {
+					if (std::string_view(e.what()).find("child assembly groups have no voxel payload sources") == std::string_view::npos) {
+						throw;
+					}
+					spdlog::warn(
+						"USD whole-asset CLod assembly bucket has no voxel payload sources; retrying with direct instance-root traversal.");
+					assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
+						bucket.parts,
+						bucket.instances,
+						assemblySettings,
+						8u,
+						false);
+				}
 
 				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);
 				if (!identity) {

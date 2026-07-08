@@ -31,6 +31,7 @@ public:
 
     void Initialize(RenderGraph& rg);
     void Shutdown();
+    void ShutdownGraphResources();
     void OnRegistryReset(ResourceRegistry* reg);
     void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
     void GatherStructuralTailPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);

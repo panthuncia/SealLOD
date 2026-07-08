@@ -496,12 +496,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
         renderer.SetCurrentScene(baseScene);
-    	//renderer.GetCurrentScene()->AppendScene(needles->Clone());
+    	renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 200000;
-    constexpr float NeedleDistributionRadius = 1500.0f;
+    constexpr int NeedleCloneCount = 0;
+    constexpr float NeedleDistributionRadius = 100.0f;
     constexpr float NeedleMinSpacing = 5.0f;
     constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
     constexpr int MaxNeedleFailedPlacementAttempts = 200000;
@@ -628,7 +628,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 150.f, 1620.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 15.f, 20.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

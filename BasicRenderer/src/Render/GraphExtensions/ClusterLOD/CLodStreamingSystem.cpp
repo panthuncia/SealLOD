@@ -877,6 +877,25 @@ CLodStreamingSystem::~CLodStreamingSystem() {
     DestroyParallelSortResources();
 }
 
+void CLodStreamingSystem::ShutdownGraphResources() {
+    std::lock_guard serviceLock(m_streamingServiceMutex);
+
+    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+        ClearStreamingUploadFunction(meshManager);
+    }
+    if (m_uploadInstance) {
+        m_uploadInstance->Cleanup();
+        m_uploadInstance.reset();
+    }
+
+    std::lock_guard lock(m_streamingWorkerMutex);
+    for (auto& slot : m_readbackStagingSlots) {
+        slot.inFlight = false;
+        slot.fenceValue = 0;
+    }
+    m_readbackStagingCursor = 0;
+}
+
 void CLodStreamingSystem::Shutdown() {
     const bool wasAlreadyQuitting = m_streamingWorkerQuit.exchange(true, std::memory_order_acq_rel);
     if (!wasAlreadyQuitting && m_getMeshManager) {
@@ -908,20 +927,7 @@ void CLodStreamingSystem::Shutdown() {
         m_streamingWorkerThread.join();
     }
 
-    if (!wasAlreadyQuitting) {
-        std::lock_guard lock(m_streamingWorkerMutex);
-        for (auto& slot : m_readbackStagingSlots) {
-            slot.inFlight = false;
-            slot.fenceValue = 0;
-        }
-    }
-
-    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
-        ClearStreamingUploadFunction(meshManager);
-    }
-    if (m_uploadInstance) {
-        m_uploadInstance->Cleanup();
-    }
+    ShutdownGraphResources();
 }
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
@@ -964,6 +970,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     }
     if (m_uploadInstance) {
         m_uploadInstance->Cleanup();
+        m_uploadInstance.reset();
     }
 
     // Evict ALL resident groups so MeshManager clears groupResidentFlags,
@@ -1076,7 +1083,8 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
 
 void CLodStreamingSystem::Initialize(RenderGraph& rg) {
     std::lock_guard serviceLock(m_streamingServiceMutex);
-    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
+    if (meshManager != nullptr) {
         ClearStreamingUploadFunction(meshManager);
     }
     if (m_uploadInstance) {
@@ -1095,6 +1103,12 @@ void CLodStreamingSystem::Initialize(RenderGraph& rg) {
     m_uploadInstance = std::make_unique<UploadInstance>(numFramesInFlight);
 
     EnsureParallelSortResources();
+    if (meshManager != nullptr && m_pageLruInitialized) {
+        InstallStreamingUploadFunction(meshManager);
+    }
+
+    m_streamingServiceRequested.store(true, std::memory_order_release);
+    m_streamingWorkerCV.notify_one();
 }
 
 void CLodStreamingSystem::ClearStreamingUploadFunction(MeshManager* meshManager) {
@@ -1191,6 +1205,9 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
         if (m_getMeshManager) {
             meshManager = m_getMeshManager();
         }
+    }
+    if (m_uploadInstance == nullptr) {
+        return;
     }
 
     {
