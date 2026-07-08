@@ -8328,16 +8328,50 @@ namespace
 			float weight = 0.0f;
 		};
 
-		auto cellCoord = [&](float value, float minValue) -> std::optional<uint32_t>
+		std::unordered_set<VoxelCellRefinedKey, VoxelCellRefinedKeyHash> activeParentCells;
+		activeParentCells.reserve(parentPayload.activeCells.size());
+		for (const VoxelCell& parentCell : parentPayload.activeCells)
 		{
-			const float local = (value - minValue) / parentPayload.voxelWidth;
-			if (!std::isfinite(local) || local < 0.0f || local >= static_cast<float>(parentPayload.resolution))
-			{
-				return std::nullopt;
-			}
+			activeParentCells.insert(VoxelCellRefinedKey{
+				PackVoxelTailCellKey(parentCell.x, parentCell.y, parentCell.z),
+				parentCell.refinedGroup });
+		}
 
-			const int32_t coord = static_cast<int32_t>(std::floor(local));
+		const float invParentVoxelWidth = 1.0f / parentPayload.voxelWidth;
+		auto minCellCoord = [&](float value, float minValue) -> uint32_t
+		{
+			const int32_t coord = static_cast<int32_t>(std::floor((value - minValue) * invParentVoxelWidth));
 			return static_cast<uint32_t>(std::clamp<int32_t>(coord, 0, static_cast<int32_t>(parentPayload.resolution) - 1));
+		};
+		auto maxCellCoord = [&](float value, float minValue) -> uint32_t
+		{
+			const int32_t coord = static_cast<int32_t>(std::ceil((value - minValue) * invParentVoxelWidth)) - 1;
+			return static_cast<uint32_t>(std::clamp<int32_t>(coord, 0, static_cast<int32_t>(parentPayload.resolution) - 1));
+		};
+		auto parentCellMin = [&](uint32_t x, uint32_t y, uint32_t z) -> DirectX::XMFLOAT3
+		{
+			return DirectX::XMFLOAT3(
+				parentPayload.aabbMin.x + static_cast<float>(x) * parentPayload.voxelWidth,
+				parentPayload.aabbMin.y + static_cast<float>(y) * parentPayload.voxelWidth,
+				parentPayload.aabbMin.z + static_cast<float>(z) * parentPayload.voxelWidth);
+		};
+		auto overlapAxis = [](float aMin, float aMax, float bMin, float bMax) -> float
+		{
+			return std::max(0.0f, std::min(aMax, bMax) - std::max(aMin, bMin));
+		};
+		auto overlapsParentAabb = [&](const DirectX::XMFLOAT3& minValue, const DirectX::XMFLOAT3& maxValue) -> bool
+		{
+			if (!std::isfinite(minValue.x) || !std::isfinite(minValue.y) || !std::isfinite(minValue.z) ||
+				!std::isfinite(maxValue.x) || !std::isfinite(maxValue.y) || !std::isfinite(maxValue.z))
+			{
+				return false;
+			}
+			return maxValue.x > parentPayload.aabbMin.x &&
+				maxValue.y > parentPayload.aabbMin.y &&
+				maxValue.z > parentPayload.aabbMin.z &&
+				minValue.x < parentPayload.aabbMax.x &&
+				minValue.y < parentPayload.aabbMax.y &&
+				minValue.z < parentPayload.aabbMax.z;
 		};
 
 		std::unordered_map<VoxelCellRefinedKey, SGGXAccum, VoxelCellRefinedKeyHash> accumulations;
@@ -8352,27 +8386,70 @@ namespace
 			const bool hasRefinedGroupOverride = sourceInstance.refinedGroupOverride != std::numeric_limits<int32_t>::min();
 			for (const VoxelCell& sourceCell : sourcePayload->activeCells)
 			{
-				const DirectX::XMFLOAT3 sourceCenter{
-					sourcePayload->aabbMin.x + (static_cast<float>(sourceCell.x) + 0.5f) * sourcePayload->voxelWidth,
-					sourcePayload->aabbMin.y + (static_cast<float>(sourceCell.y) + 0.5f) * sourcePayload->voxelWidth,
-					sourcePayload->aabbMin.z + (static_cast<float>(sourceCell.z) + 0.5f) * sourcePayload->voxelWidth
-				};
-				const DirectX::XMFLOAT3 parentCenter = TransformPoint3x4(sourceInstance.localToTarget, sourceCenter);
-				const std::optional<uint32_t> x = cellCoord(parentCenter.x, parentPayload.aabbMin.x);
-				const std::optional<uint32_t> y = cellCoord(parentCenter.y, parentPayload.aabbMin.y);
-				const std::optional<uint32_t> z = cellCoord(parentCenter.z, parentPayload.aabbMin.z);
-				if (!x || !y || !z)
+				const DirectX::XMFLOAT3 sourceMin = VoxelCellMin3(*sourcePayload, sourceCell);
+				const DirectX::XMFLOAT3 sourceMax = VoxelCellMax3(*sourcePayload, sourceCell);
+				DirectX::XMFLOAT3 transformedMin(
+					std::numeric_limits<float>::max(),
+					std::numeric_limits<float>::max(),
+					std::numeric_limits<float>::max());
+				DirectX::XMFLOAT3 transformedMax(
+					std::numeric_limits<float>::lowest(),
+					std::numeric_limits<float>::lowest(),
+					std::numeric_limits<float>::lowest());
+				ExpandAabbWithTransformedAabb3x4(sourceInstance.localToTarget, sourceMin, sourceMax, transformedMin, transformedMax);
+				if (!overlapsParentAabb(transformedMin, transformedMax))
 				{
 					continue;
 				}
 
 				const int32_t refinedGroup = hasRefinedGroupOverride ? sourceInstance.refinedGroupOverride : sourceCell.refinedGroup;
-				const VoxelCellRefinedKey key{ PackVoxelTailCellKey(*x, *y, *z), refinedGroup };
-				const float weight = std::max(sourceCell.opacity, 1.0e-6f);
-				const br::mesh::sggx::SymmetricMatrix3 sourceSGGX = br::mesh::sggx::DecodeAxialSGGX(sourceCell.sggxAxisAndSigmas);
-				SGGXAccum& accum = accumulations[key];
-				accum.sum = accum.sum + TransformSGGX3x4(sourceInstance.localToTarget, sourceSGGX) * weight;
-				accum.weight += weight;
+				const uint32_t xMin = minCellCoord(transformedMin.x, parentPayload.aabbMin.x);
+				const uint32_t yMin = minCellCoord(transformedMin.y, parentPayload.aabbMin.y);
+				const uint32_t zMin = minCellCoord(transformedMin.z, parentPayload.aabbMin.z);
+				const uint32_t xMax = maxCellCoord(transformedMax.x, parentPayload.aabbMin.x);
+				const uint32_t yMax = maxCellCoord(transformedMax.y, parentPayload.aabbMin.y);
+				const uint32_t zMax = maxCellCoord(transformedMax.z, parentPayload.aabbMin.z);
+				const float transformedVolume = std::max(
+					(transformedMax.x - transformedMin.x) *
+					(transformedMax.y - transformedMin.y) *
+					(transformedMax.z - transformedMin.z),
+					1.0e-12f);
+				const br::mesh::sggx::SymmetricMatrix3 transformedSGGX =
+					TransformSGGX3x4(sourceInstance.localToTarget, br::mesh::sggx::DecodeAxialSGGX(sourceCell.sggxAxisAndSigmas));
+
+				for (uint32_t z = zMin; z <= zMax; ++z)
+				{
+					for (uint32_t y = yMin; y <= yMax; ++y)
+					{
+						for (uint32_t x = xMin; x <= xMax; ++x)
+						{
+							const VoxelCellRefinedKey key{ PackVoxelTailCellKey(x, y, z), refinedGroup };
+							if (activeParentCells.find(key) == activeParentCells.end())
+							{
+								continue;
+							}
+
+							const DirectX::XMFLOAT3 cellMin = parentCellMin(x, y, z);
+							const DirectX::XMFLOAT3 cellMax(
+								cellMin.x + parentPayload.voxelWidth,
+								cellMin.y + parentPayload.voxelWidth,
+								cellMin.z + parentPayload.voxelWidth);
+							const float overlapVolume =
+								overlapAxis(transformedMin.x, transformedMax.x, cellMin.x, cellMax.x) *
+								overlapAxis(transformedMin.y, transformedMax.y, cellMin.y, cellMax.y) *
+								overlapAxis(transformedMin.z, transformedMax.z, cellMin.z, cellMax.z);
+							if (overlapVolume <= 1.0e-12f)
+							{
+								continue;
+							}
+
+							const float weight = std::max(sourceCell.opacity, 1.0e-6f) * (overlapVolume / transformedVolume);
+							SGGXAccum& accum = accumulations[key];
+							accum.sum = accum.sum + transformedSGGX * weight;
+							accum.weight += weight;
+						}
+					}
+				}
 			}
 		}
 
