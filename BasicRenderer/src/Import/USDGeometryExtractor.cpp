@@ -1942,7 +1942,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 
 	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
 	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
-	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=15#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=16#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=1";
 	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};
@@ -2183,7 +2183,7 @@ void AppendPointInstancerAssemblyCaches(
 		}
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
-		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=5#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=6#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=1";
 
 		ClusterLODPrebuiltData savedPrebuiltData;
 		if (CLodCacheLoader::SavePrebuiltLocked(

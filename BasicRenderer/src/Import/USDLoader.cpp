@@ -3886,7 +3886,7 @@ namespace USDLoader {
 
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
-		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=5#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=6#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=1";
 		return assemblyIdentity;
 	}
 

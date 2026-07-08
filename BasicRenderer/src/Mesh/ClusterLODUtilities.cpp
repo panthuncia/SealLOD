@@ -29,6 +29,7 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Mesh/VertexLayout.h"
 #include "Mesh/VertexFlags.h"
+#include "Mesh/SGGX.h"
 #include "Mesh/VoxelGroupBuilder.h"
 #include "Utilities/mikktspace.h"
 
@@ -4336,7 +4337,14 @@ namespace
 			aabbMin.z + voxelWidth * static_cast<float>(resolution));
 		result.voxelWidth = voxelWidth;
 
-		std::unordered_map<uint64_t, VoxelCell> cells;
+		struct DownsampleCellAccum
+		{
+			VoxelCell cell{};
+			br::mesh::sggx::SymmetricMatrix3 sggxSum{};
+			float sggxWeight = 0.0f;
+		};
+
+		std::unordered_map<uint64_t, DownsampleCellAccum> cells;
 		cells.reserve(sourcePayload.activeCells.size());
 		for (const VoxelCell& sourceCell : sourcePayload.activeCells)
 		{
@@ -4354,7 +4362,12 @@ namespace
 			const uint32_t z = cellCoord(centerZ, aabbMin.z);
 			const uint64_t key = PackVoxelTailCellKey(x, y, z);
 
-			VoxelCell& dst = cells[key];
+			DownsampleCellAccum& accum = cells[key];
+			VoxelCell& dst = accum.cell;
+			const float sourceWeight = std::max(sourceCell.opacity, 1.0e-6f);
+			accum.sggxSum = accum.sggxSum + br::mesh::sggx::DecodeAxialSGGX(sourceCell.sggxAxisAndSigmas) * sourceWeight;
+			accum.sggxWeight += sourceWeight;
+
 			if (dst.opacity <= sourceCell.opacity)
 			{
 				dst = sourceCell;
@@ -4370,9 +4383,14 @@ namespace
 		}
 
 		result.activeCells.reserve(cells.size());
-		for (auto& [key, cell] : cells)
+		for (auto& [key, accum] : cells)
 		{
-			result.activeCells.push_back(cell);
+			if (accum.sggxWeight > 1.0e-12f)
+			{
+				const br::mesh::sggx::SymmetricMatrix3 sggx = accum.sggxSum * (1.0f / accum.sggxWeight);
+				accum.cell.sggxAxisAndSigmas = br::mesh::sggx::EncodeAxialSGGX(br::mesh::sggx::CompressSGGXToAxial(sggx));
+			}
+			result.activeCells.push_back(accum.cell);
 		}
 		return result;
 	}
@@ -8203,6 +8221,175 @@ namespace
 		return valid;
 	}
 
+	struct VoxelCellRefinedKey
+	{
+		uint64_t cellKey = 0;
+		int32_t refinedGroup = -1;
+
+		bool operator==(const VoxelCellRefinedKey& other) const
+		{
+			return cellKey == other.cellKey && refinedGroup == other.refinedGroup;
+		}
+	};
+
+	struct VoxelCellRefinedKeyHash
+	{
+		size_t operator()(const VoxelCellRefinedKey& key) const
+		{
+			size_t seed = std::hash<uint64_t>{}(key.cellKey);
+			seed ^= std::hash<int32_t>{}(key.refinedGroup) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+			return seed;
+		}
+	};
+
+	br::mesh::sggx::SymmetricMatrix3 TransformSGGX3x4(
+		const ClusterLODAssemblyTransform& transform,
+		const br::mesh::sggx::SymmetricMatrix3& source)
+	{
+		using br::mesh::sggx::Float3;
+
+		const Float3 r0(transform.row0.x, transform.row0.y, transform.row0.z);
+		const Float3 r1(transform.row1.x, transform.row1.y, transform.row1.z);
+		const Float3 r2(transform.row2.x, transform.row2.y, transform.row2.z);
+		const Float3 c0 = r1.cross(r2);
+		const Float3 c1 = r2.cross(r0);
+		const Float3 c2 = r0.cross(r1);
+		const float det = r0.dot(c0);
+		if (std::abs(det) <= 1.0e-8f)
+		{
+			return source;
+		}
+
+		const float invDet = 1.0f / det;
+		const float n[3][3] = {
+			{ c0.x * invDet, c0.y * invDet, c0.z * invDet },
+			{ c1.x * invDet, c1.y * invDet, c1.z * invDet },
+			{ c2.x * invDet, c2.y * invDet, c2.z * invDet }
+		};
+		const float m[3][3] = {
+			{ source.xx, source.xy, source.xz },
+			{ source.xy, source.yy, source.yz },
+			{ source.xz, source.yz, source.zz }
+		};
+		float nm[3][3]{};
+		for (uint32_t row = 0u; row < 3u; ++row)
+		{
+			for (uint32_t col = 0u; col < 3u; ++col)
+			{
+				for (uint32_t k = 0u; k < 3u; ++k)
+				{
+					nm[row][col] += n[row][k] * m[k][col];
+				}
+			}
+		}
+
+		float transformed[3][3]{};
+		for (uint32_t row = 0u; row < 3u; ++row)
+		{
+			for (uint32_t col = 0u; col < 3u; ++col)
+			{
+				for (uint32_t k = 0u; k < 3u; ++k)
+				{
+					transformed[row][col] += nm[row][k] * n[col][k];
+				}
+			}
+		}
+
+		br::mesh::sggx::SymmetricMatrix3 result{
+			transformed[0][0],
+			transformed[1][1],
+			transformed[2][2],
+			0.5f * (transformed[0][1] + transformed[1][0]),
+			0.5f * (transformed[0][2] + transformed[2][0]),
+			0.5f * (transformed[1][2] + transformed[2][1])
+		};
+
+		const float sourceTrace = std::max(source.xx + source.yy + source.zz, 1.0e-8f);
+		const float resultTrace = result.xx + result.yy + result.zz;
+		if (resultTrace > 1.0e-8f)
+		{
+			result = result * (sourceTrace / resultTrace);
+		}
+		return result;
+	}
+
+	void ApplyChildPayloadSGGXToParentCells(
+		VoxelGroupPayload& parentPayload,
+		std::span<const VoxelSourcePayloadInstance> sourceInstances)
+	{
+		if (parentPayload.activeCells.empty() || parentPayload.voxelWidth <= 0.0f || parentPayload.resolution == 0u || sourceInstances.empty())
+		{
+			return;
+		}
+
+		struct SGGXAccum
+		{
+			br::mesh::sggx::SymmetricMatrix3 sum{};
+			float weight = 0.0f;
+		};
+
+		auto cellCoord = [&](float value, float minValue) -> std::optional<uint32_t>
+		{
+			const float local = (value - minValue) / parentPayload.voxelWidth;
+			if (!std::isfinite(local) || local < 0.0f || local >= static_cast<float>(parentPayload.resolution))
+			{
+				return std::nullopt;
+			}
+
+			const int32_t coord = static_cast<int32_t>(std::floor(local));
+			return static_cast<uint32_t>(std::clamp<int32_t>(coord, 0, static_cast<int32_t>(parentPayload.resolution) - 1));
+		};
+
+		std::unordered_map<VoxelCellRefinedKey, SGGXAccum, VoxelCellRefinedKeyHash> accumulations;
+		for (const VoxelSourcePayloadInstance& sourceInstance : sourceInstances)
+		{
+			const VoxelGroupPayload* sourcePayload = sourceInstance.payload;
+			if (sourcePayload == nullptr || sourcePayload->activeCells.empty() || sourcePayload->voxelWidth <= 0.0f)
+			{
+				continue;
+			}
+
+			const bool hasRefinedGroupOverride = sourceInstance.refinedGroupOverride != std::numeric_limits<int32_t>::min();
+			for (const VoxelCell& sourceCell : sourcePayload->activeCells)
+			{
+				const DirectX::XMFLOAT3 sourceCenter{
+					sourcePayload->aabbMin.x + (static_cast<float>(sourceCell.x) + 0.5f) * sourcePayload->voxelWidth,
+					sourcePayload->aabbMin.y + (static_cast<float>(sourceCell.y) + 0.5f) * sourcePayload->voxelWidth,
+					sourcePayload->aabbMin.z + (static_cast<float>(sourceCell.z) + 0.5f) * sourcePayload->voxelWidth
+				};
+				const DirectX::XMFLOAT3 parentCenter = TransformPoint3x4(sourceInstance.localToTarget, sourceCenter);
+				const std::optional<uint32_t> x = cellCoord(parentCenter.x, parentPayload.aabbMin.x);
+				const std::optional<uint32_t> y = cellCoord(parentCenter.y, parentPayload.aabbMin.y);
+				const std::optional<uint32_t> z = cellCoord(parentCenter.z, parentPayload.aabbMin.z);
+				if (!x || !y || !z)
+				{
+					continue;
+				}
+
+				const int32_t refinedGroup = hasRefinedGroupOverride ? sourceInstance.refinedGroupOverride : sourceCell.refinedGroup;
+				const VoxelCellRefinedKey key{ PackVoxelTailCellKey(*x, *y, *z), refinedGroup };
+				const float weight = std::max(sourceCell.opacity, 1.0e-6f);
+				const br::mesh::sggx::SymmetricMatrix3 sourceSGGX = br::mesh::sggx::DecodeAxialSGGX(sourceCell.sggxAxisAndSigmas);
+				SGGXAccum& accum = accumulations[key];
+				accum.sum = accum.sum + TransformSGGX3x4(sourceInstance.localToTarget, sourceSGGX) * weight;
+				accum.weight += weight;
+			}
+		}
+
+		for (VoxelCell& parentCell : parentPayload.activeCells)
+		{
+			const VoxelCellRefinedKey key{ PackVoxelTailCellKey(parentCell.x, parentCell.y, parentCell.z), parentCell.refinedGroup };
+			const auto accumIt = accumulations.find(key);
+			if (accumIt == accumulations.end() || accumIt->second.weight <= 1.0e-12f)
+			{
+				continue;
+			}
+
+			const br::mesh::sggx::SymmetricMatrix3 averagedSGGX = accumIt->second.sum * (1.0f / accumIt->second.weight);
+			parentCell.sggxAxisAndSigmas = br::mesh::sggx::EncodeAxialSGGX(br::mesh::sggx::CompressSGGXToAxial(averagedSGGX));
+		}
+	}
+
 	ClusterLODNode BuildAssemblyInternalNode(
 		const std::vector<ClusterLODNode>& nodes,
 		uint32_t childOffset,
@@ -8702,6 +8889,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			throw std::runtime_error("ClusterLOD assembly: assembly voxelization produced no render cells");
 		}
+		ApplyChildPayloadSGGXToParentCells(voxelResult.renderPayload, sourceInstances);
 
 		const uint32_t firstCluster = static_cast<uint32_t>(state.voxelGroupMapping.packedClusterRecords.size());
 		const uint32_t firstCube = static_cast<uint32_t>(state.voxelGroupMapping.packedCubeRecords.size());
