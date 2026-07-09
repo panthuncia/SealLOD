@@ -44,7 +44,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::shared_ptr<Buffer> nonResidentBits,
     std::shared_ptr<Buffer> activeGroupsBits,
     std::shared_ptr<Buffer> runtimeState,
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> tryConsumeNonResidentBitsUpload,
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
     std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
     std::function<void()> scheduleStreamingReadbacks,
     std::function<void()> processStreamingRequests)
@@ -55,7 +55,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     , m_nonResidentBits(std::move(nonResidentBits))
     , m_activeGroupsBits(std::move(activeGroupsBits))
     , m_runtimeState(std::move(runtimeState))
-    , m_tryConsumeNonResidentBitsUpload(std::move(tryConsumeNonResidentBitsUpload))
+    , m_queueNonResidentBitsUpload(std::move(queueNonResidentBitsUpload))
     , m_getActiveGroupsBitsUpload(std::move(getActiveGroupsBitsUpload))
     , m_scheduleStreamingReadbacks(std::move(scheduleStreamingReadbacks))
     , m_processStreamingRequests(std::move(processStreamingRequests))
@@ -189,20 +189,15 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         bool hasNonResidentBitsUpload = false;
         {
             ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::Consume");
-            hasNonResidentBitsUpload = m_tryConsumeNonResidentBitsUpload
-                && m_tryConsumeNonResidentBitsUpload(m_nonResidentBitsUploadScratch, nonResidentFirstWord);
+            hasNonResidentBitsUpload = m_queueNonResidentBitsUpload
+                && m_queueNonResidentBitsUpload(
+                    m_nonResidentBitsUploadScratch,
+                    nonResidentFirstWord,
+                    uploadInstance);
         }
         TracyPlot(
             "CLodBeginFrame.NonResidentBits.UploadWords",
             static_cast<int64_t>(hasNonResidentBitsUpload ? m_nonResidentBitsUploadScratch.size() : 0u));
-        if (hasNonResidentBitsUpload && !m_nonResidentBitsUploadScratch.empty()) {
-            ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::UploadData");
-            uploadInstance->UploadData(
-                m_nonResidentBitsUploadScratch.data(),
-                static_cast<uint32_t>(m_nonResidentBitsUploadScratch.size() * sizeof(uint32_t)),
-                rg::runtime::UploadTarget::FromShared(m_nonResidentBits),
-                nonResidentFirstWord * sizeof(uint32_t));
-        }
     }
 }
 

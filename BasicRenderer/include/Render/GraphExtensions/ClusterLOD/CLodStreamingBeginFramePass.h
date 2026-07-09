@@ -20,7 +20,7 @@ public:
         std::shared_ptr<Buffer> nonResidentBits,
         std::shared_ptr<Buffer> activeGroupsBits,
         std::shared_ptr<Buffer> runtimeState,
-        std::function<bool(std::vector<uint32_t>&, uint32_t&)> tryConsumeNonResidentBitsUpload,
+        std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> queueNonResidentBitsUpload,
         std::function<bool(std::vector<uint32_t>&, uint32_t&)> getActiveGroupsBitsUpload,
         std::function<void()> scheduleStreamingReadbacks,
         std::function<void()> processStreamingRequests);
@@ -39,7 +39,7 @@ private:
     std::shared_ptr<Buffer> m_nonResidentBits;
     std::shared_ptr<Buffer> m_activeGroupsBits;
     std::shared_ptr<Buffer> m_runtimeState;
-    std::function<bool(std::vector<uint32_t>&, uint32_t&)> m_tryConsumeNonResidentBitsUpload;
+    std::function<bool(std::vector<uint32_t>&, uint32_t&, UploadInstance*)> m_queueNonResidentBitsUpload;
     std::function<bool(std::vector<uint32_t>&, uint32_t&)> m_getActiveGroupsBitsUpload;
     std::function<void()> m_scheduleStreamingReadbacks;
     std::function<void()> m_processStreamingRequests;

@@ -169,7 +169,7 @@ private:
     void ReleaseGroupResidency(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
     void RetirePhysicalPage(uint32_t page, MeshManager* meshManager, bool pinned);
     void DrainRetiredPhysicalPages(MeshManager* meshManager);
-    bool IsPhysicalPageRetired(uint32_t page) const;
+    bool IsPhysicalPageRetired(uint32_t page);
     bool IsPhysicalPagePinnedStorage(uint32_t page) const;
     uint64_t StreamingUploadVisibilityDelayTicks() const;
     void RecordNonResidentBitsUploadQueued();
@@ -268,6 +268,8 @@ private:
     std::vector<uint8_t> m_pagePinnedStorage;
     std::vector<uint64_t> m_pageReuseRequiresNonResidentEpoch;
     std::vector<uint64_t> m_pageReuseNonResidentQueuedTick;
+    std::vector<uint64_t> m_pageReuseUploadFenceValue;
+    std::vector<uint32_t> m_retiringPagesAwaitingUploadFence;
     std::vector<uint32_t> m_pendingPageOwnerGroup;
     std::vector<uint32_t> m_pendingPageOwnerSegment;
     std::vector<uint64_t> m_pageOwnerMeshPageKey;
@@ -286,6 +288,8 @@ private:
     std::unordered_map<uint32_t, PreAllocatedPages> m_preAllocatedPagesByGroup;
     std::unordered_map<uint32_t, MeshManager::CLodDiskStreamingCompletion> m_readyStreamingCompletionsByGroup;
     std::unordered_set<uint32_t> m_pendingResidencyCommitGroups;
+    std::unordered_map<uint32_t, uint64_t> m_pendingResidencyUploadFenceByGroup;
+    std::vector<uint32_t> m_residencyGroupsAwaitingUploadFence;
     std::vector<StreamingRequestState> m_streamingRequestStateByGroup;
     std::vector<uint32_t> m_pendingLoadPriorityByGroup;
     std::vector<PendingStreamingRequest> m_waitingForPagesRequests;
@@ -361,6 +365,8 @@ private:
     uint64_t m_streamingResidencyMutationEpoch = 0u;
     uint64_t m_streamingNonResidentBitsQueuedEpoch = 0u;
     uint64_t m_streamingNonResidentBitsQueuedTick = 0u;
+    uint64_t m_streamingNonResidentBitsUploadFenceEpoch = 0u;
+    uint64_t m_streamingNonResidentBitsUploadFenceValue = 0u;
     std::function<MeshManager*()> m_getMeshManager = []() { return nullptr; };
     std::function<uint32_t()> m_getStreamingCpuUploadBudgetRequests;
 
@@ -394,9 +400,15 @@ private:
     rhi::Timeline m_streamingReadbackFenceHandle;
     std::atomic<uint64_t> m_streamingReadbackFenceCounter{0};
     std::atomic<uint64_t> m_streamingReadbackDiscardedFenceCounter{0};
-    rhi::TimelinePtr m_streamingDirectStorageFencePtr;
-    rhi::Timeline m_streamingDirectStorageFenceHandle;
-    static constexpr uint64_t kStreamingDirectStorageFenceReadyValue = 1u;
+    rhi::TimelinePtr m_streamingUploadCompletionFencePtr;
+    rhi::Timeline m_streamingUploadCompletionFenceHandle;
+    std::atomic<uint64_t> m_streamingUploadCompletionFenceCounter{0};
+    rhi::TimelinePtr m_directStorageLaunchFencePtr;
+    rhi::Timeline m_directStorageLaunchFenceHandle;
+    std::atomic<uint64_t> m_directStorageLaunchFenceCounter{0};
+    // Guarded by m_streamingServiceMutex. While nonzero, launch production is
+    // frozen until the after-present graphics signal reaches this value.
+    uint64_t m_directStorageArmedLaunchFenceValue = 0;
 
     struct ReadbackStagingSlot {
         std::shared_ptr<Buffer> counterStaging;
