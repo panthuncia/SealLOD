@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <unordered_set>
 
@@ -719,6 +720,7 @@ CLodStreamingSystem::CLodStreamingSystem() {
     };
 
     m_streamingNonResidentBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), ~0u);
+    m_streamingNonResidentBitsDirtyWordFlags.assign(m_streamingNonResidentBitsCpu.size(), 0u);
     m_streamingActiveGroupsBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
     m_streamingPinnedGroupsBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
     m_streamingResidencyInitializedBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
@@ -1031,6 +1033,10 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_pageLruInitialized = false;
     m_streamingResidentGroupsCount = 0u;
     std::fill(m_streamingNonResidentBitsCpu.begin(), m_streamingNonResidentBitsCpu.end(), ~0u);
+    std::fill(m_streamingNonResidentBitsDirtyWordFlags.begin(), m_streamingNonResidentBitsDirtyWordFlags.end(), 0u);
+    m_streamingNonResidentBitsDirtyWords.clear();
+    m_streamingNonResidentBitsDirtyWordCursor = 0u;
+    m_streamingNonResidentBitsDirtyWordsSorted = true;
     std::fill(m_streamingActiveGroupsBitsCpu.begin(), m_streamingActiveGroupsBitsCpu.end(), 0u);
     std::fill(m_streamingPinnedGroupsBitsCpu.begin(), m_streamingPinnedGroupsBitsCpu.end(), 0u);
     std::fill(m_streamingResidencyInitializedBitsCpu.begin(), m_streamingResidencyInitializedBitsCpu.end(), 0u);
@@ -1371,44 +1377,26 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
 		m_streamingActiveGroupsBits,
 		m_streamingRuntimeState,
 		[this](std::vector<uint32_t>& outBits, uint32_t& outFirstWord) {
-            std::lock_guard serviceLock(m_streamingServiceMutex);
-            outBits.clear();
-            outFirstWord = 0u;
-            if (!m_streamingNonResidentBitsUploadPending) {
-                return false;
-            }
-
-            const uint32_t gpuWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
-            const uint32_t cpuWordCount = static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size());
-            const uint32_t originalDirtyEnd = m_streamingNonResidentBitsDirtyEnd;
-            const uint32_t validWordCount = std::min(gpuWordCount, cpuWordCount);
-            const uint32_t begin = std::min(m_streamingNonResidentBitsDirtyBegin, validWordCount);
-            const uint32_t end = std::min(m_streamingNonResidentBitsDirtyEnd, validWordCount);
-            if (begin >= end) {
-                if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
-                    m_streamingNonResidentBitsUploadPending = false;
-                    m_streamingNonResidentBitsDirtyBegin = 0u;
-                    m_streamingNonResidentBitsDirtyEnd = 0u;
+            ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::ConsumeCallback");
+            std::unique_lock serviceLock(m_streamingServiceMutex, std::defer_lock);
+            {
+                ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::ConsumeCallback::Lock");
+                if (!serviceLock.try_lock()) {
+                    TracyPlot("CLodBeginFrame.NonResidentBits.ConsumeLockBusy", static_cast<int64_t>(1));
+                    outBits.clear();
+                    outFirstWord = 0u;
+                    return false;
                 }
-                return false;
             }
-
-            outBits.assign(
-                m_streamingNonResidentBitsCpu.begin() + begin,
-                m_streamingNonResidentBitsCpu.begin() + end);
-            outFirstWord = begin;
-            if (originalDirtyEnd > gpuWordCount) {
-                m_streamingNonResidentBitsUploadPending = true;
-                m_streamingNonResidentBitsDirtyBegin = gpuWordCount;
-                m_streamingNonResidentBitsDirtyEnd = originalDirtyEnd;
+            TracyPlot("CLodBeginFrame.NonResidentBits.ConsumeLockBusy", static_cast<int64_t>(0));
+            constexpr uint32_t kBeginFrameMaxNonResidentUploadWords = 4096u;
+            {
+                ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::ConsumeCallback::ConsumeRun");
+                return TryConsumeStreamingNonResidentBitsUpload(
+                    outBits,
+                    outFirstWord,
+                    kBeginFrameMaxNonResidentUploadWords);
             }
-            else {
-                m_streamingNonResidentBitsUploadPending = false;
-                m_streamingNonResidentBitsDirtyBegin = 0u;
-                m_streamingNonResidentBitsDirtyEnd = 0u;
-            }
-            RecordNonResidentBitsUploadQueued();
-            return true;
 		},
 		[this](std::vector<uint32_t>& outBits, uint32_t& outActiveScanCount) {
             std::lock_guard publishLock(m_streamingPublishMutex);
@@ -1737,6 +1725,18 @@ void CLodStreamingSystem::MarkStreamingNonResidentBitsDirtyWord(uint32_t wordAdd
         return;
     }
 
+    if (m_streamingNonResidentBitsDirtyWordFlags.size() < m_streamingNonResidentBitsCpu.size()) {
+        m_streamingNonResidentBitsDirtyWordFlags.resize(m_streamingNonResidentBitsCpu.size(), 0u);
+    }
+    if (m_streamingNonResidentBitsDirtyWordFlags[wordAddress] == 0u) {
+        m_streamingNonResidentBitsDirtyWordFlags[wordAddress] = 1u;
+        if (!m_streamingNonResidentBitsDirtyWords.empty() &&
+            wordAddress < m_streamingNonResidentBitsDirtyWords.back()) {
+            m_streamingNonResidentBitsDirtyWordsSorted = false;
+        }
+        m_streamingNonResidentBitsDirtyWords.push_back(wordAddress);
+    }
+
     if (!m_streamingNonResidentBitsUploadPending) {
         m_streamingNonResidentBitsDirtyBegin = wordAddress;
         m_streamingNonResidentBitsDirtyEnd = wordAddress + 1u;
@@ -1754,12 +1754,157 @@ void CLodStreamingSystem::MarkStreamingNonResidentBitsDirtyAll() {
         m_streamingNonResidentBitsUploadPending = false;
         m_streamingNonResidentBitsDirtyBegin = 0u;
         m_streamingNonResidentBitsDirtyEnd = 0u;
+        m_streamingNonResidentBitsDirtyWords.clear();
+        m_streamingNonResidentBitsDirtyWordCursor = 0u;
+        m_streamingNonResidentBitsDirtyWordFlags.clear();
+        m_streamingNonResidentBitsDirtyWordsSorted = true;
         return;
     }
 
+    m_streamingNonResidentBitsDirtyWordFlags.assign(wordCount, 1u);
+    m_streamingNonResidentBitsDirtyWords.resize(wordCount);
+    m_streamingNonResidentBitsDirtyWordCursor = 0u;
+    std::iota(
+        m_streamingNonResidentBitsDirtyWords.begin(),
+        m_streamingNonResidentBitsDirtyWords.end(),
+        0u);
+    m_streamingNonResidentBitsDirtyWordsSorted = true;
     m_streamingNonResidentBitsUploadPending = true;
     m_streamingNonResidentBitsDirtyBegin = 0u;
     m_streamingNonResidentBitsDirtyEnd = wordCount;
+}
+
+bool CLodStreamingSystem::TryConsumeStreamingNonResidentBitsUpload(
+    std::vector<uint32_t>& outBits,
+    uint32_t& outFirstWord,
+    uint32_t maxWords) {
+    ZoneScopedN("CLodStreamingSystem::TryConsumeNonResidentBitsUpload");
+    outBits.clear();
+    outFirstWord = 0u;
+    if (!m_streamingNonResidentBitsUploadPending || maxWords == 0u) {
+        return false;
+    }
+
+    const uint32_t gpuWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
+    const uint32_t cpuWordCount = static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size());
+    const uint32_t validWordCount = std::min(gpuWordCount, cpuWordCount);
+    if (validWordCount == 0u) {
+        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
+            m_streamingNonResidentBitsUploadPending = false;
+            m_streamingNonResidentBitsDirtyBegin = 0u;
+            m_streamingNonResidentBitsDirtyEnd = 0u;
+            m_streamingNonResidentBitsDirtyWords.clear();
+            m_streamingNonResidentBitsDirtyWordCursor = 0u;
+        }
+        return false;
+    }
+
+    if (m_streamingNonResidentBitsDirtyWordFlags.size() < cpuWordCount) {
+        m_streamingNonResidentBitsDirtyWordFlags.resize(cpuWordCount, 0u);
+    }
+
+    if (!m_streamingNonResidentBitsDirtyWordsSorted) {
+        ZoneScopedN("CLodStreamingSystem::TryConsumeNonResidentBitsUpload::CompactSortDirtyWords");
+        size_t writeIndex = 0u;
+        for (size_t readIndex = m_streamingNonResidentBitsDirtyWordCursor;
+            readIndex < m_streamingNonResidentBitsDirtyWords.size();
+            ++readIndex) {
+            const uint32_t word = m_streamingNonResidentBitsDirtyWords[readIndex];
+            if (word < cpuWordCount && m_streamingNonResidentBitsDirtyWordFlags[word] != 0u) {
+                m_streamingNonResidentBitsDirtyWords[writeIndex++] = word;
+            }
+        }
+        m_streamingNonResidentBitsDirtyWords.resize(writeIndex);
+        m_streamingNonResidentBitsDirtyWordCursor = 0u;
+        std::sort(m_streamingNonResidentBitsDirtyWords.begin(), m_streamingNonResidentBitsDirtyWords.end());
+        m_streamingNonResidentBitsDirtyWords.erase(
+            std::unique(m_streamingNonResidentBitsDirtyWords.begin(), m_streamingNonResidentBitsDirtyWords.end()),
+            m_streamingNonResidentBitsDirtyWords.end());
+        m_streamingNonResidentBitsDirtyWordsSorted = true;
+    }
+
+    size_t beginIndex = m_streamingNonResidentBitsDirtyWordCursor;
+    while (beginIndex < m_streamingNonResidentBitsDirtyWords.size() &&
+        (m_streamingNonResidentBitsDirtyWords[beginIndex] >= cpuWordCount ||
+            m_streamingNonResidentBitsDirtyWordFlags[m_streamingNonResidentBitsDirtyWords[beginIndex]] == 0u)) {
+        ++beginIndex;
+    }
+    m_streamingNonResidentBitsDirtyWordCursor = beginIndex;
+
+    if (beginIndex >= m_streamingNonResidentBitsDirtyWords.size() ||
+        m_streamingNonResidentBitsDirtyWords[beginIndex] >= validWordCount) {
+        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
+            m_streamingNonResidentBitsUploadPending = false;
+            m_streamingNonResidentBitsDirtyBegin = 0u;
+            m_streamingNonResidentBitsDirtyEnd = 0u;
+            for (uint32_t word : m_streamingNonResidentBitsDirtyWords) {
+                if (word < m_streamingNonResidentBitsDirtyWordFlags.size()) {
+                    m_streamingNonResidentBitsDirtyWordFlags[word] = 0u;
+                }
+            }
+            m_streamingNonResidentBitsDirtyWords.clear();
+            m_streamingNonResidentBitsDirtyWordCursor = 0u;
+        }
+        return false;
+    }
+
+    const uint32_t firstWord = m_streamingNonResidentBitsDirtyWords[beginIndex];
+    uint32_t lastWordExclusive = firstWord + 1u;
+    size_t endIndex = beginIndex + 1u;
+    while (endIndex < m_streamingNonResidentBitsDirtyWords.size() &&
+        lastWordExclusive < validWordCount &&
+        lastWordExclusive - firstWord < maxWords &&
+        m_streamingNonResidentBitsDirtyWords[endIndex] == lastWordExclusive) {
+        ++lastWordExclusive;
+        ++endIndex;
+    }
+
+    {
+        ZoneScopedN("CLodStreamingSystem::TryConsumeNonResidentBitsUpload::CopyRun");
+        outBits.assign(
+            m_streamingNonResidentBitsCpu.begin() + firstWord,
+            m_streamingNonResidentBitsCpu.begin() + lastWordExclusive);
+    }
+    outFirstWord = firstWord;
+
+    for (size_t i = beginIndex; i < endIndex; ++i) {
+        const uint32_t word = m_streamingNonResidentBitsDirtyWords[i];
+        if (word < m_streamingNonResidentBitsDirtyWordFlags.size()) {
+            m_streamingNonResidentBitsDirtyWordFlags[word] = 0u;
+        }
+    }
+    m_streamingNonResidentBitsDirtyWordCursor = endIndex;
+
+    size_t nextIndex = m_streamingNonResidentBitsDirtyWordCursor;
+    while (nextIndex < m_streamingNonResidentBitsDirtyWords.size() &&
+        (m_streamingNonResidentBitsDirtyWords[nextIndex] >= cpuWordCount ||
+            m_streamingNonResidentBitsDirtyWordFlags[m_streamingNonResidentBitsDirtyWords[nextIndex]] == 0u)) {
+        ++nextIndex;
+    }
+    m_streamingNonResidentBitsDirtyWordCursor = nextIndex;
+
+    if (m_streamingNonResidentBitsDirtyWordCursor >= m_streamingNonResidentBitsDirtyWords.size()) {
+        m_streamingNonResidentBitsDirtyWords.clear();
+        m_streamingNonResidentBitsDirtyWordCursor = 0u;
+        m_streamingNonResidentBitsDirtyBegin = 0u;
+        m_streamingNonResidentBitsDirtyEnd = 0u;
+        m_streamingNonResidentBitsUploadPending = false;
+        RecordNonResidentBitsUploadQueued();
+    }
+    else {
+        const uint32_t nextWord = m_streamingNonResidentBitsDirtyWords[m_streamingNonResidentBitsDirtyWordCursor];
+        m_streamingNonResidentBitsDirtyBegin = nextWord;
+        m_streamingNonResidentBitsDirtyEnd = std::min<uint32_t>(
+            validWordCount,
+            m_streamingNonResidentBitsDirtyWords.back() + 1u);
+        m_streamingNonResidentBitsUploadPending = true;
+    }
+
+    TracyPlot("CLodStreaming.NonResidentBits.UploadWords", static_cast<int64_t>(outBits.size()));
+    TracyPlot(
+        "CLodStreaming.NonResidentBits.PendingWords",
+        static_cast<int64_t>(m_streamingNonResidentBitsDirtyWords.size() - m_streamingNonResidentBitsDirtyWordCursor));
+    return !outBits.empty();
 }
 
 void CLodStreamingSystem::MarkStreamingActiveGroupsBitsDirty() {
@@ -2074,53 +2219,34 @@ void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
         return;
     }
 
-    const uint32_t gpuWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
-    const uint32_t originalDirtyEnd = m_streamingNonResidentBitsDirtyEnd;
-    const uint32_t begin = std::min<uint32_t>(
-        m_streamingNonResidentBitsDirtyBegin,
-        std::min<uint32_t>(gpuWordCount, static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size())));
-    const uint32_t end = std::min<uint32_t>(
-        m_streamingNonResidentBitsDirtyEnd,
-        std::min<uint32_t>(gpuWordCount, static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size())));
-    if (begin >= end) {
-        if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
-            m_streamingNonResidentBitsUploadPending = false;
-            m_streamingNonResidentBitsDirtyBegin = 0u;
-            m_streamingNonResidentBitsDirtyEnd = 0u;
-        }
-        return;
+    constexpr uint32_t kWorkerMaxNonResidentUploadWordsPerRun = 16384u;
+    constexpr uint32_t kWorkerMaxNonResidentUploadRuns = 64u;
+    std::vector<uint32_t> uploadBits;
+    uint32_t firstWord = 0u;
+    uint32_t uploadedRuns = 0u;
+    uint64_t uploadedWords = 0u;
+    while (uploadedRuns < kWorkerMaxNonResidentUploadRuns &&
+        TryConsumeStreamingNonResidentBitsUpload(uploadBits, firstWord, kWorkerMaxNonResidentUploadWordsPerRun)) {
+        m_uploadInstance->UploadData(
+            uploadBits.data(),
+            uploadBits.size() * sizeof(uint32_t),
+            rg::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
+            firstWord * sizeof(uint32_t));
+        uploadedWords += static_cast<uint64_t>(uploadBits.size());
+        ++uploadedRuns;
     }
 
-    std::vector<uint32_t> uploadBits(
-        m_streamingNonResidentBitsCpu.begin() + begin,
-        m_streamingNonResidentBitsCpu.begin() + end);
-    if (originalDirtyEnd > gpuWordCount) {
-        m_streamingNonResidentBitsUploadPending = true;
-        m_streamingNonResidentBitsDirtyBegin = gpuWordCount;
-        m_streamingNonResidentBitsDirtyEnd = originalDirtyEnd;
-    }
-    else {
-        m_streamingNonResidentBitsUploadPending = false;
-        m_streamingNonResidentBitsDirtyBegin = 0u;
-        m_streamingNonResidentBitsDirtyEnd = 0u;
-    }
-
-    m_uploadInstance->UploadData(
-        uploadBits.data(),
-        uploadBits.size() * sizeof(uint32_t),
-        rg::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
-        begin * sizeof(uint32_t));
-    if (SarpClodImportDebugLoggingEnabled()) {
+    TracyPlot("CLodStreaming.NonResidentBits.WorkerUploadRuns", static_cast<int64_t>(uploadedRuns));
+    TracyPlot("CLodStreaming.NonResidentBits.WorkerUploadWords", static_cast<int64_t>(uploadedWords));
+    if (SarpClodImportDebugLoggingEnabled() && uploadedRuns != 0u) {
         spdlog::info(
-            "SARPDBG QueueNonResidentBitsUpload begin={} end={} words={} epoch={} dirtyRemaining={} queuedTick={}",
-            begin,
-            end,
-            uploadBits.size(),
+            "SARPDBG QueueNonResidentBitsUpload runs={} words={} epoch={} dirtyRemaining={} queuedTick={}",
+            uploadedRuns,
+            uploadedWords,
             m_streamingResidencyMutationEpoch,
             m_streamingNonResidentBitsUploadPending ? 1 : 0,
             m_streamingDiagnosticTick);
     }
-    RecordNonResidentBitsUploadQueued();
 }
 
 void CLodStreamingSystem::LogPageOverwriteInvariant(
@@ -4160,6 +4286,7 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     RequestStreamingStorageGpuResize(newCapacity);
 
     m_streamingNonResidentBitsCpu.resize(newWordCount, ~0u);
+    m_streamingNonResidentBitsDirtyWordFlags.resize(newWordCount, 0u);
     m_streamingActiveGroupsBitsCpu.resize(newWordCount, 0u);
     m_streamingPinnedGroupsBitsCpu.resize(newWordCount, 0u);
     m_streamingResidencyInitializedBitsCpu.resize(newWordCount, 0u);

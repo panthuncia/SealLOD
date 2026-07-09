@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <DirectXTex.h>
@@ -633,6 +634,72 @@ bool BuildProcessedTextureCacheLayouts(
 	return true;
 }
 
+struct ConditionedCacheResidentUploadMetadata {
+	std::wstring widePath;
+	br::processed_texture_cache::FileHeader header{};
+	std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts;
+	std::vector<UINT> numRows;
+	UINT64 totalBytes = 0;
+};
+
+struct ConditionedCacheResidentUploadMetadataCache {
+	std::mutex mutex;
+	std::unordered_map<std::string, std::shared_ptr<const ConditionedCacheResidentUploadMetadata>> byPath;
+};
+
+ConditionedCacheResidentUploadMetadataCache& GetConditionedCacheResidentUploadMetadataCache()
+{
+	static ConditionedCacheResidentUploadMetadataCache cache;
+	return cache;
+}
+
+std::shared_ptr<const ConditionedCacheResidentUploadMetadata> GetConditionedCacheResidentUploadMetadata(
+	const std::string& path,
+	std::string& outError)
+{
+	ZoneScopedN("TextureAsset::GetConditionedCacheResidentUploadMetadata");
+	outError.clear();
+	if (path.empty()) {
+		outError = "empty conditioned cache path";
+		return {};
+	}
+
+	{
+		ZoneScopedN("TextureAsset::GetConditionedCacheResidentUploadMetadata::Lookup");
+		auto& cache = GetConditionedCacheResidentUploadMetadataCache();
+		std::lock_guard lock(cache.mutex);
+		if (auto it = cache.byPath.find(path); it != cache.byPath.end() && it->second) {
+			return it->second;
+		}
+	}
+
+	auto metadata = std::make_shared<ConditionedCacheResidentUploadMetadata>();
+	metadata->widePath = std::filesystem::path(path).wstring();
+	{
+		ZoneScopedN("TextureAsset::GetConditionedCacheResidentUploadMetadata::ReadHeader");
+		if (!ReadProcessedTextureCacheHeader(metadata->widePath, metadata->header, &outError)) {
+			return {};
+		}
+	}
+	{
+		ZoneScopedN("TextureAsset::GetConditionedCacheResidentUploadMetadata::BuildLayouts");
+		if (!BuildProcessedTextureCacheLayouts(metadata->header, metadata->layouts, metadata->numRows, metadata->totalBytes, &outError)) {
+			return {};
+		}
+	}
+
+	{
+		ZoneScopedN("TextureAsset::GetConditionedCacheResidentUploadMetadata::Insert");
+		auto& cache = GetConditionedCacheResidentUploadMetadataCache();
+		std::lock_guard lock(cache.mutex);
+		auto [it, inserted] = cache.byPath.emplace(path, metadata);
+		if (!inserted && it->second) {
+			return it->second;
+		}
+	}
+	return metadata;
+}
+
 std::shared_ptr<TextureSourceData> BuildSourceDataFromConditionedCacheFilePath(const std::string& path, const std::string& reason) {
 	ZoneScopedN("TextureAsset::BuildSourceDataFromConditionedCacheFilePath");
 	ZoneText(path.data(), path.size());
@@ -754,27 +821,15 @@ bool TryBuildConditionedCacheResidentUpload(
 {
 	ZoneScopedN("TextureAsset::TryBuildConditionedCacheResidentUpload");
 	outError.clear();
-	const std::wstring widePath = std::filesystem::path(path).wstring();
-	br::processed_texture_cache::FileHeader header{};
-	{
-		ZoneScopedN("TextureAsset::TryBuildConditionedCacheResidentUpload::ReadHeader");
-		if (!ReadProcessedTextureCacheHeader(widePath, header, &outError)) {
-			return false;
-		}
+	const auto metadata = GetConditionedCacheResidentUploadMetadata(path, outError);
+	if (!metadata) {
+		return false;
 	}
+	const br::processed_texture_cache::FileHeader& header = metadata->header;
+	const auto& layouts = metadata->layouts;
 	TracyPlot("SARP.Texture.ConditionedCache.Preflight.Width", static_cast<int64_t>(header.baseWidth));
 	TracyPlot("SARP.Texture.ConditionedCache.Preflight.Height", static_cast<int64_t>(header.baseHeight));
 	TracyPlot("SARP.Texture.ConditionedCache.Preflight.MipLevels", static_cast<int64_t>(header.mipLevels));
-
-	std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts;
-	std::vector<UINT> numRows;
-	UINT64 totalBytes = 0;
-	{
-		ZoneScopedN("TextureAsset::TryBuildConditionedCacheResidentUpload::BuildLayouts");
-		if (!BuildProcessedTextureCacheLayouts(header, layouts, numRows, totalBytes, &outError)) {
-			return false;
-		}
-	}
 
 	const bool fullChainOnly = header.totalArraySlices > 1u;
 	const ConditionedCacheResidencyClass residencyClass = fullChainOnly
@@ -1915,6 +1970,20 @@ void TextureAsset::SetProcessingSettings(TextureProcessingSettings settings) {
 	InvalidateResidentImageForStreamingRequest();
 }
 
+void TextureAsset::PrimeConditionedCacheResidentUploadMetadata() const {
+	if (m_initialDataString.empty() || !IsConditionedCacheFilePath(m_initialDataString)) {
+		return;
+	}
+
+	std::string error;
+	if (!GetConditionedCacheResidentUploadMetadata(m_initialDataString, error) && !error.empty()) {
+		spdlog::debug(
+			"TextureAsset: failed to prime conditioned cache upload metadata for '{}': {}",
+			m_initialDataString,
+			error);
+	}
+}
+
 TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
 	TexturePendingDebugInfo info{};
 	info.label = TextureTelemetryLabel(*this);
@@ -2398,6 +2467,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		m_initialDataString = cachePath;
 		m_initialStorage = m_initialDataString;
 		m_meta.isProcessingCacheArtifact = true;
+		PrimeConditionedCacheResidentUploadMetadata();
 		return true;
 	};
 

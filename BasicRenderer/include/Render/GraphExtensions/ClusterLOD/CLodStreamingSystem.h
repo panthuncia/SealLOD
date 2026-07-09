@@ -192,6 +192,7 @@ private:
     bool EvictPhysicalPage(uint32_t page, MeshManager* meshManager);
     void MarkStreamingNonResidentBitsDirtyWord(uint32_t wordAddress);
     void MarkStreamingNonResidentBitsDirtyAll();
+    bool TryConsumeStreamingNonResidentBitsUpload(std::vector<uint32_t>& outBits, uint32_t& outFirstWord, uint32_t maxWords);
     void MarkStreamingActiveGroupsBitsDirty();
 
     struct PreAllocatedPages {
@@ -345,6 +346,10 @@ private:
     bool m_streamingActiveGroupsBitsUploadPending = true;
     uint32_t m_streamingNonResidentBitsDirtyBegin = 0u;
     uint32_t m_streamingNonResidentBitsDirtyEnd = 0u;
+    std::vector<uint32_t> m_streamingNonResidentBitsDirtyWords;
+    std::vector<uint8_t> m_streamingNonResidentBitsDirtyWordFlags;
+    size_t m_streamingNonResidentBitsDirtyWordCursor = 0u;
+    bool m_streamingNonResidentBitsDirtyWordsSorted = true;
     uint32_t m_streamingReadbackRingSize = 3u;
     uint32_t m_streamingCpuUploadBudgetRequests = 0u;
     uint64_t m_prevTotalStreamedBytes = 0u;

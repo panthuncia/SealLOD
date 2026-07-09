@@ -383,8 +383,9 @@ private:
             m_image = std::get<std::shared_ptr<PixelBuffer>>(m_initialStorage);
 			m_hasUploadedFinalImage = true;
         }
-		if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
+        if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
             m_initialDataString = std::get<std::string>(m_initialStorage);
+            PrimeConditionedCacheResidentUploadMetadata();
 		}
         if (std::holds_alternative<BytesList>(m_initialStorage)) {
             m_originalSourceDesc = m_desc;
@@ -433,4 +434,5 @@ private:
     void NoteTextureSeen(uint64_t frameIndex);
     void BumpStreamingStateRevision();
     void BumpBindingRevision();
+    void PrimeConditionedCacheResidentUploadMetadata() const;
 };

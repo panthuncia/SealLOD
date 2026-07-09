@@ -186,9 +186,17 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
     uint32_t nonResidentFirstWord = 0u;
     {
         ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits");
-        if (m_tryConsumeNonResidentBitsUpload
-            && m_tryConsumeNonResidentBitsUpload(m_nonResidentBitsUploadScratch, nonResidentFirstWord)
-            && !m_nonResidentBitsUploadScratch.empty()) {
+        bool hasNonResidentBitsUpload = false;
+        {
+            ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::Consume");
+            hasNonResidentBitsUpload = m_tryConsumeNonResidentBitsUpload
+                && m_tryConsumeNonResidentBitsUpload(m_nonResidentBitsUploadScratch, nonResidentFirstWord);
+        }
+        TracyPlot(
+            "CLodBeginFrame.NonResidentBits.UploadWords",
+            static_cast<int64_t>(hasNonResidentBitsUpload ? m_nonResidentBitsUploadScratch.size() : 0u));
+        if (hasNonResidentBitsUpload && !m_nonResidentBitsUploadScratch.empty()) {
+            ZoneScopedN("CLodStreamingBeginFramePass::UploadNonResidentBits::UploadData");
             uploadInstance->UploadData(
                 m_nonResidentBitsUploadScratch.data(),
                 static_cast<uint32_t>(m_nonResidentBitsUploadScratch.size() * sizeof(uint32_t)),

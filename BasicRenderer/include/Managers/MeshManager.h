@@ -306,6 +306,7 @@ private:
 		uint32_t maxTraversalDepth = 0;
 		uint32_t vertexByteSize = 0;
 		ClusterLODCacheSource cacheSource{};
+		std::wstring resolvedContainerPath;
 		std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
 		std::vector<ClusterLODRuntimeSummary::GroupChunkHint> groupChunkHints;
 		std::unique_ptr<BufferView> ownedMeshMetadataView;
@@ -380,7 +381,7 @@ private:
 		uint32_t groupsBase = 0;
 		uint32_t groupLocalIndex = 0;
 		std::optional<CLodCache::GroupPayloadLayoutMetadata> prefetchedLayout;
-		std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
+		std::shared_ptr<CLodSharedStreamingState> sharedState;
 		uint32_t pageMapBase = 0;
 		uint32_t pageCount = 0;
 		std::vector<uint32_t> meshPageIndices;
@@ -480,8 +481,7 @@ private:
 	static constexpr uint32_t kMaxAdaptiveDispatchedIoGroups = 2048u;
 
 	void DispatchCLodDiskStreamingBatch();
-	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u);
-	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);
+	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, const std::shared_ptr<CLodSharedStreamingState>& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);
 
 	enum class DiskStreamingApplyResult {
 		Prepared,
