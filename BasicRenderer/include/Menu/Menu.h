@@ -1810,6 +1810,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		if (ImGui::Checkbox("Shadows", &shadowsEnabled)) {
 			setShadowsEnabled(shadowsEnabled);
 		}
+        ImGui::Separator();
+
+        if (ImGui::CollapsingHeader("Geometry and Culling")) {
         if (m_meshShadersSupported) {
             if (ImGui::Checkbox("Use Mesh Shaders", &meshShaderEnabled)) {
                 setMeshShaderEnabled(meshShaderEnabled);
@@ -1860,6 +1863,27 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 setCLodPureComputePhase2ExpansionFactor(m_clodPureComputePhase2ExpansionFactor);
             }
         }
+        int visibleClusterCapacityM = static_cast<int>((m_clodVisibleClusterCapacity + 999999u) / 1000000u);
+        if (ImGui::SliderInt("CLod Visible Cluster Capacity (M)", &visibleClusterCapacityM, 1, 30)) {
+            const uint32_t capacity = static_cast<uint32_t>(std::clamp(visibleClusterCapacityM, 1, 30)) * 1000000u;
+            m_clodVisibleClusterCapacity = std::clamp(
+                capacity,
+                CLodMinVisibleClusterCapacity,
+                CLodMaxVisibleClusterCapacity);
+            setCLodVisibleClusterCapacity(m_clodVisibleClusterCapacity);
+        }
+        DrawCLodLodHeightModeCombo();
+        int clodCpuUploadBudget = static_cast<int>(std::min<uint32_t>(m_clodStreamingCpuUploadBudgetRequests, 4096u));
+        if (ImGui::SliderInt("CLod CPU Upload Budget", &clodCpuUploadBudget, 1, 4096)) {
+            m_clodStreamingCpuUploadBudgetRequests = static_cast<uint32_t>(std::max(clodCpuUploadBudget, 1));
+            setCLodStreamingCpuUploadBudgetRequests(m_clodStreamingCpuUploadBudgetRequests);
+        }
+        if (ImGui::Checkbox("CLod Streaming DirectStorage", &m_clodStreamingEnableDirectStorage)) {
+            setCLodStreamingEnableDirectStorage(m_clodStreamingEnableDirectStorage);
+        }
+        }
+
+        if (ImGui::CollapsingHeader("CLod Rasterization and Reyes")) {
         int clodSoftwareRasterModeIndex = static_cast<int>(m_clodSoftwareRasterMode);
         if (ImGui::Combo("Visibility/Alpha SW Raster Mode", &clodSoftwareRasterModeIndex, CLodSoftwareRasterModeNames, CLodSoftwareRasterModeCount)) {
             clodSoftwareRasterModeIndex = std::clamp(clodSoftwareRasterModeIndex, 0, CLodSoftwareRasterModeCount - 1);
@@ -1909,9 +1933,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Reyes AABB Occlusion", &m_clodReyesUseAabbOcclusion)) {
             setCLodReyesUseAabbOcclusion(m_clodReyesUseAabbOcclusion);
         }
-        if (ImGui::Checkbox("Disable VSM Page Caching", &m_clodDisableVirtualShadowPageCaching)) {
-            setCLodDisableVirtualShadowPageCaching(m_clodDisableVirtualShadowPageCaching);
-        }
         bool forceTraversalDepthRoot = m_clodForceTraversalDepthRoot != CLodForceTraversalDepthRootDisabled;
         if (ImGui::Checkbox("Force CLod Traversal Depth Root", &forceTraversalDepthRoot)) {
             m_clodForceTraversalDepthRoot = forceTraversalDepthRoot ? 0u : CLodForceTraversalDepthRootDisabled;
@@ -1924,15 +1945,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 m_clodForceTraversalDepthRoot = static_cast<uint32_t>(forcedDepth);
                 setCLodForceTraversalDepthRoot(m_clodForceTraversalDepthRoot);
             }
-        }
-        int visibleClusterCapacityM = static_cast<int>((m_clodVisibleClusterCapacity + 999999u) / 1000000u);
-        if (ImGui::SliderInt("CLod Visible Cluster Capacity (M)", &visibleClusterCapacityM, 1, 30)) {
-            const uint32_t capacity = static_cast<uint32_t>(std::clamp(visibleClusterCapacityM, 1, 30)) * 1000000u;
-            m_clodVisibleClusterCapacity = std::clamp(
-                capacity,
-                CLodMinVisibleClusterCapacity,
-                CLodMaxVisibleClusterCapacity);
-            setCLodVisibleClusterCapacity(m_clodVisibleClusterCapacity);
         }
         if (ImGui::SliderFloat(
                 "Shadow Reyes Coarse Target Pages/Triangle",
@@ -1968,6 +1980,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             if (ImGui::Checkbox("Force All Opaque VSM -> Page-Job", &m_clodPageJobForceAll)) {
                 setCLodPageJobForceAll(m_clodPageJobForceAll);
             }
+        }
+        }
+
+        if (ImGui::CollapsingHeader("Virtual Shadows")) {
+        if (ImGui::Checkbox("Disable VSM Page Caching", &m_clodDisableVirtualShadowPageCaching)) {
+            setCLodDisableVirtualShadowPageCaching(m_clodDisableVirtualShadowPageCaching);
         }
         int directionalLightClipmaps = static_cast<int>(m_numDirectionalLightCascades);
         if (ImGui::SliderInt("Directional VSM Clipmaps", &directionalLightClipmaps, 1, static_cast<int>(CLodVirtualShadowMaxSupportedClipmapCount))) {
@@ -2119,15 +2137,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_directionalShadowVerticalExtent = std::max(m_directionalShadowVerticalExtent, 1.0f);
             setDirectionalShadowVerticalExtent(m_directionalShadowVerticalExtent);
         }
-		if (ImGui::Checkbox("Wireframe", &wireframeEnabled)) {
-			setWireframeEnabled(wireframeEnabled);
-		}
-        if (ImGui::Checkbox("Uncap Framerate", &allowTearing)) {
-			setAllowTearing(allowTearing);
         }
-		if (ImGui::Checkbox("Draw Bounding Spheres", &drawBoundingSpheres)) {
-			setDrawBoundingSpheres(drawBoundingSpheres);
-		}
+
+        if (ImGui::CollapsingHeader("Terrain and Materials")) {
         if (ImGui::Checkbox("Clustered Lighting", &clusteredLighting)) {
 			setClusteredLightingEnabled(clusteredLighting);
         }
@@ -2228,6 +2240,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_terrainParallaxFadeEndDistance = std::max(0.0f, m_terrainParallaxFadeEndDistance);
             setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
         }
+        }
+
+        if (ImGui::CollapsingHeader("Post Processing and Ray Tracing")) {
 		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);
 		}
@@ -2273,22 +2288,49 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Enable Jitter", &m_jitterEnabled)) {
             setJitterEnabled(m_jitterEnabled);
         }
-        if (ImGui::Checkbox("Collect Pass Statistics", &m_collectPassStatistics)) {
-            setCollectPassStatistics(m_collectPassStatistics);
         }
-		if (ImGui::Checkbox("Collect Pipeline Statistics", &m_collectPipelineStatistics)) {
-			setCollectPipelineStatistics(m_collectPipelineStatistics);
-		}
+
+        if (ImGui::CollapsingHeader("Display and Assets")) {
         DrawWindowResolutionCombo();
         DrawUpscalingCombo();
         DrawUpscalingQualityCombo();
-        DrawCLodLodHeightModeCombo();
         DrawTonemapTypeDropdown();
 
         DrawEnvironmentsDropdown();
         DrawBrowseButton(environmentsDir.wstring());
 		DrawOutputTypeDropdown();
         DrawLoadModelButton();
+        }
+
+        if (ImGui::CollapsingHeader("Statistics and Debug Windows")) {
+        if (ImGui::Checkbox("Collect Pass Statistics", &m_collectPassStatistics)) {
+            setCollectPassStatistics(m_collectPassStatistics);
+        }
+		if (ImGui::Checkbox("Collect Pipeline Statistics", &m_collectPipelineStatistics)) {
+			setCollectPipelineStatistics(m_collectPipelineStatistics);
+		}
+        ImGui::Checkbox("Render Graph Inspector", &showRG);
+        ImGui::Checkbox("Memory introspection", &showMemoryIntrospection);
+        ImGui::Checkbox("CLod telemetry", &showCLodTelemetry);
+        ImGui::Checkbox("CPU frame task graph", &showFrameTaskGraph);
+        ImGui::Checkbox("Auto Alias Planner", &showAutoAliasPlanner);
+        if (setAutoAliasBuildDebugData) {
+            setAutoAliasBuildDebugData(showAutoAliasPlanner);
+        }
+        ImGui::Checkbox("GPU instrumentation", &showGpuInstrumentation);
+        ImGui::Checkbox("Material texture streaming", &showMaterialTextureStreaming);
+        }
+
+        ImGui::Separator();
+		if (ImGui::Checkbox("Wireframe", &wireframeEnabled)) {
+			setWireframeEnabled(wireframeEnabled);
+		}
+        if (ImGui::Checkbox("Uncap Framerate", &allowTearing)) {
+			setAllowTearing(allowTearing);
+        }
+		if (ImGui::Checkbox("Draw Bounding Spheres", &drawBoundingSpheres)) {
+			setDrawBoundingSpheres(drawBoundingSpheres);
+		}
 		if (ImGui::Checkbox("Use Async Compute", &m_useAsyncCompute)) {
 			setUseAsyncCompute(m_useAsyncCompute);
 		}
@@ -2307,24 +2349,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("ReShape texel addressing (requires recreate)", &m_reshapeTexelAddressing)) {
             setReshapeTexelAddressing(m_reshapeTexelAddressing);
         }
-        int clodCpuUploadBudget = static_cast<int>(std::min<uint32_t>(m_clodStreamingCpuUploadBudgetRequests, 4096u));
-        if (ImGui::SliderInt("CLod CPU Upload Budget", &clodCpuUploadBudget, 1, 4096)) {
-            m_clodStreamingCpuUploadBudgetRequests = static_cast<uint32_t>(std::max(clodCpuUploadBudget, 1));
-            setCLodStreamingCpuUploadBudgetRequests(m_clodStreamingCpuUploadBudgetRequests);
-        }
-        if (ImGui::Checkbox("CLod Streaming DirectStorage", &m_clodStreamingEnableDirectStorage)) {
-            setCLodStreamingEnableDirectStorage(m_clodStreamingEnableDirectStorage);
-        }
-        ImGui::Checkbox("Render Graph Inspector", &showRG);
-        ImGui::Checkbox("Memory introspection", &showMemoryIntrospection);
-        ImGui::Checkbox("CLod telemetry", &showCLodTelemetry);
-        ImGui::Checkbox("CPU frame task graph", &showFrameTaskGraph);
-        ImGui::Checkbox("Auto Alias Planner", &showAutoAliasPlanner);
-        if (setAutoAliasBuildDebugData) {
-            setAutoAliasBuildDebugData(showAutoAliasPlanner);
-        }
-        ImGui::Checkbox("GPU instrumentation", &showGpuInstrumentation);
-        ImGui::Checkbox("Material texture streaming", &showMaterialTextureStreaming);
         std::string memoryString = "Memory usage: unavailable";
         const double KiB = 1024.0;
         const double MiB = KiB * 1024.0;
