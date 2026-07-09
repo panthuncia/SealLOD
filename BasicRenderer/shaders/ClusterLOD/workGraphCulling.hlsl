@@ -2059,14 +2059,10 @@ bool CLodPrepareRenderableLeaf(
 
     const float3 groupWorldCenter = mul(float4(leaf.group.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
     const float groupWorldRadius = leaf.group.bounds.centerAndRadius.w * lodUniformScale;
-    // Leaf LOD is a group-level decision. Use the live group traversal
-    // boundary so condition 1 matches condition 2's refined-child test even
-    // for copied part-library nodes whose cached node metric predates an
-    // assembly/voxel boundary rewrite.
     leaf.errorOverDistance = ProjectedGeometricError(
         groupWorldCenter,
         groupWorldRadius,
-        leaf.group.bounds.error,
+        node.metric.maxQuadricError,
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
