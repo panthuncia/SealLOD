@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -127,6 +128,38 @@ constexpr uint32_t kGlbMagic = 0x46546C67;
 constexpr uint32_t kGlbJsonChunkType = 0x4E4F534A;
 constexpr uint32_t kGlbBinChunkType = 0x004E4942;
 constexpr uint32_t kMaterialTextureMaxAnisotropy = 16;
+
+TextureProcessingSettings MakeGlTFMaterialTextureProcessingSettings(
+    TextureSemantic semantic,
+    bool preferSRGB,
+    const std::string& sourceIdentity,
+    bool preservePackedChannels = false,
+    NormalMapConvention normalConvention = NormalMapConvention::DirectX)
+{
+    TextureProcessingSettings settings = MakeMaterialTextureProcessingSettings(
+        semantic,
+        preferSRGB,
+        sourceIdentity,
+        preservePackedChannels,
+        normalConvention);
+    settings.allowCpuBootstrapBeforeAsyncProcessing = true;
+    return settings;
+}
+
+bool GltfMaterialDebugLoggingEnabled() {
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t valueLength = 0;
+        const bool isSet =
+            _dupenv_s(&value, &valueLength, "SARP_GLTF_MATERIAL_LOG") == 0 &&
+            value != nullptr &&
+            value[0] != '\0' &&
+            value[0] != '0';
+        std::free(value);
+        return isSet;
+    }();
+    return enabled;
+}
 
 std::string NormalizeSourceKey(const std::filesystem::path& path) {
     std::error_code ec;
@@ -966,7 +999,7 @@ std::shared_ptr<TextureAsset> LoadTexture(
     TextureFileMeta cacheProbeMeta{};
     cacheProbeMeta.filePath = cacheProbePath.string();
     cacheProbeMeta.preferSRGB = preferSRGB;
-    cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention);
+    cacheProbeMeta.processing = MakeGlTFMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention);
 
     const std::string sharedCacheKey = cacheKey;
 
@@ -985,6 +1018,21 @@ std::shared_ptr<TextureAsset> LoadTexture(
         }
 
         spdlog::info("GlTFLoader: texture processing cache hit for '{}' -> '{}'", cacheProbeDetail, ws2s(cachePath));
+        if (GltfMaterialDebugLoggingEnabled()) {
+            spdlog::info(
+                "SARPDBG glTF texture textureIndex={} imageIndex={} semantic={} srgb={} packed={} normalConvention={} source='{}' cacheHit='{}' alphaOpaque={} fallback={} usable={}",
+                textureIndex,
+                imageIndex,
+                static_cast<uint32_t>(semantic),
+                preferSRGB,
+                preservePackedChannels,
+                static_cast<uint32_t>(normalConvention),
+                cacheProbeDetail,
+                ws2s(cachePath),
+                cachedTexture->Meta().alphaIsAllOpaque,
+                cachedTexture->IsUsingFallbackImage(),
+                cachedTexture->HasUsableImage());
+        }
         return cachedTexture;
     }
 
@@ -1004,13 +1052,29 @@ std::shared_ptr<TextureAsset> LoadTexture(
     auto textureBytes = ReadImageBytes(gltf, sourcePath, cache.bufferSources, imageIndex);
     auto texture = LoadTextureFromMemory(textureBytes.data(), textureBytes.size(), sampler, {}, preferSRGB);
     texture->Meta().filePath = cacheProbeMeta.filePath;
-    texture->SetProcessingSettings(MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention));
+    texture->SetProcessingSettings(cacheProbeMeta.processing);
     texture->SetGenerateMipmaps(true);
     cache.textureCache[cacheKey] = texture;
 
     {
         std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
         g_sharedTextureCache[sharedCacheKey] = SharedTextureCacheEntry{ texture };
+    }
+
+    if (GltfMaterialDebugLoggingEnabled()) {
+        spdlog::info(
+            "SARPDBG glTF texture textureIndex={} imageIndex={} semantic={} srgb={} packed={} normalConvention={} source='{}' bytes={} alphaOpaque={} fallback={} usable={}",
+            textureIndex,
+            imageIndex,
+            static_cast<uint32_t>(semantic),
+            preferSRGB,
+            preservePackedChannels,
+            static_cast<uint32_t>(normalConvention),
+            cacheProbeDetail,
+            textureBytes.size(),
+            texture->Meta().alphaIsAllOpaque,
+            texture->IsUsingFallbackImage(),
+            texture->HasUsableImage());
     }
 
     return texture;
@@ -1161,7 +1225,33 @@ std::shared_ptr<Material> LoadMaterial(
 
     desc.forceDoubleSided = materialNode.value("doubleSided", false);
 
-    cache.materialCache[materialIndex] = Material::CreateShared(desc);
+    auto material = Material::CreateShared(desc);
+    cache.materialCache[materialIndex] = material;
+
+    if (GltfMaterialDebugLoggingEnabled()) {
+        const auto data = material->GetData();
+        spdlog::info(
+            "SARPDBG glTF material index={} name='{}' baseTex={} mrTex=({}, {}) normalTex={} aoTex={} emissiveTex={} opacityTex={} factors base=({}, {}, {}, {}) metal={} rough={} alphaMode='{}' doubleSided={} flags=0x{:x} techniqueFlags=0x{:x}",
+            materialIndex,
+            desc.name,
+            desc.baseColor.texture != nullptr,
+            desc.metallic.texture != nullptr,
+            desc.roughness.texture != nullptr,
+            desc.normal.texture != nullptr,
+            desc.aoMap.texture != nullptr,
+            desc.emissive.texture != nullptr,
+            desc.opacity.texture != nullptr,
+            desc.diffuseColor.x,
+            desc.diffuseColor.y,
+            desc.diffuseColor.z,
+            desc.diffuseColor.w,
+            desc.metallic.factor.Get(),
+            desc.roughness.factor.Get(),
+            alphaMode,
+            desc.forceDoubleSided,
+            data.materialFlags,
+            static_cast<uint64_t>(material->Technique().compileFlags));
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
@@ -1599,6 +1689,16 @@ std::shared_ptr<Scene> LoadModel(std::string filePath) {
                 materialCache,
                 primitiveNode,
                 defaultMaterial);
+            if (GltfMaterialDebugLoggingEnabled()) {
+                const bool hasMaterialIndex = primitiveNode.contains("material");
+                spdlog::info(
+                    "SARPDBG glTF primitive mesh={} primitive={} gltfMaterial={} resolvedDefault={} materialPtr={}",
+                    ep.meshIndex,
+                    ep.primitiveIndex,
+                    hasMaterialIndex ? primitiveNode["material"].get<int>() : -1,
+                    material == defaultMaterial,
+                    static_cast<const void*>(material.get()));
+            }
             PreparedPrimitiveData preparedPrimitive{
                 std::move(ep.result),
                 material

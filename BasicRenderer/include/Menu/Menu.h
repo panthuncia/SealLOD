@@ -3964,12 +3964,25 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.loadUnique = std::max(max5s.loadUnique, sample.stats.loadUnique);
             max5s.loadApplied = std::max(max5s.loadApplied, sample.stats.loadApplied);
             max5s.loadFailed = std::max(max5s.loadFailed, sample.stats.loadFailed);
+            max5s.decodedRequests = std::max(max5s.decodedRequests, sample.stats.decodedRequests);
+            max5s.queuedLoadRequests = std::max(max5s.queuedLoadRequests, sample.stats.queuedLoadRequests);
+            max5s.duplicateRequests = std::max(max5s.duplicateRequests, sample.stats.duplicateRequests);
 
             max5s.unloadRequested = std::max(max5s.unloadRequested, sample.stats.unloadRequested);
             max5s.unloadUnique = std::max(max5s.unloadUnique, sample.stats.unloadUnique);
             max5s.unloadApplied = std::max(max5s.unloadApplied, sample.stats.unloadApplied);
             max5s.unloadFailed = std::max(max5s.unloadFailed, sample.stats.unloadFailed);
 
+            max5s.pendingCpuRequests = std::max(max5s.pendingCpuRequests, sample.stats.pendingCpuRequests);
+            max5s.inProgressRequests = std::max(max5s.inProgressRequests, sample.stats.inProgressRequests);
+            max5s.diskIoRequests = std::max(max5s.diskIoRequests, sample.stats.diskIoRequests);
+            max5s.pendingCommitGroups = std::max(max5s.pendingCommitGroups, sample.stats.pendingCommitGroups);
+            max5s.readyCompletions = std::max(max5s.readyCompletions, sample.stats.readyCompletions);
+            max5s.preallocationDeferrals = std::max(max5s.preallocationDeferrals, sample.stats.preallocationDeferrals);
+            max5s.promotionDeferrals = std::max(max5s.promotionDeferrals, sample.stats.promotionDeferrals);
+            max5s.completionSuccess = std::max(max5s.completionSuccess, sample.stats.completionSuccess);
+            max5s.completionFailed = std::max(max5s.completionFailed, sample.stats.completionFailed);
+            max5s.uploadQueuedGroups = std::max(max5s.uploadQueuedGroups, sample.stats.uploadQueuedGroups);
             max5s.residentGroups = std::max(max5s.residentGroups, sample.stats.residentGroups);
             max5s.residentAllocations = std::max(max5s.residentAllocations, sample.stats.residentAllocations);
             max5s.queuedRequests = std::max(max5s.queuedRequests, sample.stats.queuedRequests);
@@ -3977,6 +3990,37 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.residentAllocationBytes = std::max(max5s.residentAllocationBytes, sample.stats.residentAllocationBytes);
             max5s.completedResultBytes = std::max(max5s.completedResultBytes, sample.stats.completedResultBytes);
             max5s.streamedBytesThisFrame = std::max(max5s.streamedBytesThisFrame, sample.stats.streamedBytesThisFrame);
+            max5s.uploadQueuedBytes = std::max(max5s.uploadQueuedBytes, sample.stats.uploadQueuedBytes);
+            max5s.requestToUploadSamples = std::max(max5s.requestToUploadSamples, sample.stats.requestToUploadSamples);
+            max5s.requestToUploadAvgTicks = std::max(max5s.requestToUploadAvgTicks, sample.stats.requestToUploadAvgTicks);
+            max5s.requestToUploadWorstTicks = std::max(max5s.requestToUploadWorstTicks, sample.stats.requestToUploadWorstTicks);
+            max5s.requestToUploadWorstGroup = sample.stats.requestToUploadWorstTicks >= max5s.requestToUploadWorstTicks
+                ? sample.stats.requestToUploadWorstGroup
+                : max5s.requestToUploadWorstGroup;
+            max5s.requestToResidentSamples = std::max(max5s.requestToResidentSamples, sample.stats.requestToResidentSamples);
+            max5s.requestToResidentAvgTicks = std::max(max5s.requestToResidentAvgTicks, sample.stats.requestToResidentAvgTicks);
+            max5s.requestToResidentWorstTicks = std::max(max5s.requestToResidentWorstTicks, sample.stats.requestToResidentWorstTicks);
+            max5s.requestToResidentWorstGroup = sample.stats.requestToResidentWorstTicks >= max5s.requestToResidentWorstTicks
+                ? sample.stats.requestToResidentWorstGroup
+                : max5s.requestToResidentWorstGroup;
+            max5s.diskQueueToCompleteAvgTicks = std::max(max5s.diskQueueToCompleteAvgTicks, sample.stats.diskQueueToCompleteAvgTicks);
+            max5s.diskQueueToCompleteWorstTicks = std::max(max5s.diskQueueToCompleteWorstTicks, sample.stats.diskQueueToCompleteWorstTicks);
+            max5s.uploadToResidentAvgTicks = std::max(max5s.uploadToResidentAvgTicks, sample.stats.uploadToResidentAvgTicks);
+            max5s.uploadToResidentWorstTicks = std::max(max5s.uploadToResidentWorstTicks, sample.stats.uploadToResidentWorstTicks);
+            max5s.commitToResidentAvgTicks = std::max(max5s.commitToResidentAvgTicks, sample.stats.commitToResidentAvgTicks);
+            max5s.commitToResidentWorstTicks = std::max(max5s.commitToResidentWorstTicks, sample.stats.commitToResidentWorstTicks);
+            max5s.pendingCpuMaxAgeTicks = std::max(max5s.pendingCpuMaxAgeTicks, sample.stats.pendingCpuMaxAgeTicks);
+            max5s.pendingCpuMaxAgeGroup = sample.stats.pendingCpuMaxAgeTicks >= max5s.pendingCpuMaxAgeTicks
+                ? sample.stats.pendingCpuMaxAgeGroup
+                : max5s.pendingCpuMaxAgeGroup;
+            max5s.diskIoMaxAgeTicks = std::max(max5s.diskIoMaxAgeTicks, sample.stats.diskIoMaxAgeTicks);
+            max5s.diskIoMaxAgeGroup = sample.stats.diskIoMaxAgeTicks >= max5s.diskIoMaxAgeTicks
+                ? sample.stats.diskIoMaxAgeGroup
+                : max5s.diskIoMaxAgeGroup;
+            max5s.pendingCommitMaxAgeTicks = std::max(max5s.pendingCommitMaxAgeTicks, sample.stats.pendingCommitMaxAgeTicks);
+            max5s.pendingCommitMaxAgeGroup = sample.stats.pendingCommitMaxAgeTicks >= max5s.pendingCommitMaxAgeTicks
+                ? sample.stats.pendingCommitMaxAgeGroup
+                : max5s.pendingCommitMaxAgeGroup;
         }
 
         auto formatBytes = [](uint64_t bytes) {
@@ -4004,11 +4048,26 @@ inline void Menu::DrawCLodTelemetryWindow() {
             m_clodStreamingOpsLatest.loadUnique,
             m_clodStreamingOpsLatest.loadApplied,
             m_clodStreamingOpsLatest.loadFailed);
+        ImGui::Text("Feedback: decoded=%u queued=%u duplicates=%u",
+            m_clodStreamingOpsLatest.decodedRequests,
+            m_clodStreamingOpsLatest.queuedLoadRequests,
+            m_clodStreamingOpsLatest.duplicateRequests);
         ImGui::Text("Unload: requested=%u unique=%u applied=%u failed=%u",
             m_clodStreamingOpsLatest.unloadRequested,
             m_clodStreamingOpsLatest.unloadUnique,
             m_clodStreamingOpsLatest.unloadApplied,
             m_clodStreamingOpsLatest.unloadFailed);
+        ImGui::Text("CPU backlog: pending=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+            m_clodStreamingOpsLatest.pendingCpuRequests,
+            m_clodStreamingOpsLatest.inProgressRequests,
+            m_clodStreamingOpsLatest.diskIoRequests,
+            m_clodStreamingOpsLatest.readyCompletions,
+            m_clodStreamingOpsLatest.pendingCommitGroups);
+        ImGui::Text("Deferrals: prealloc=%u promotion=%u completions ok=%u failed=%u",
+            m_clodStreamingOpsLatest.preallocationDeferrals,
+            m_clodStreamingOpsLatest.promotionDeferrals,
+            m_clodStreamingOpsLatest.completionSuccess,
+            m_clodStreamingOpsLatest.completionFailed);
         ImGui::Text("Resident: groups=%u allocations=%u bytes=%s",
             m_clodStreamingOpsLatest.residentGroups,
             m_clodStreamingOpsLatest.residentAllocations,
@@ -4023,8 +4082,36 @@ inline void Menu::DrawCLodTelemetryWindow() {
             const double gbPerSec = (fps > 0.0f)
                 ? (static_cast<double>(m_clodStreamingOpsLatest.streamedBytesThisFrame) * static_cast<double>(fps)) / (1024.0 * 1024.0 * 1024.0)
                 : 0.0;
-            ImGui::Text("Throughput: %.1f KB/frame  %.3f GB/s", kbPerFrame, gbPerSec);
+            ImGui::Text("Throughput: %.1f KB/frame  %.3f GB/s uploadQueued=%s groups=%u",
+                kbPerFrame,
+                gbPerSec,
+                formatBytes(m_clodStreamingOpsLatest.uploadQueuedBytes).c_str(),
+                m_clodStreamingOpsLatest.uploadQueuedGroups);
         }
+        ImGui::Text("Latency ticks: req->upload avg=%u worst=%u group=%u samples=%u",
+            m_clodStreamingOpsLatest.requestToUploadAvgTicks,
+            m_clodStreamingOpsLatest.requestToUploadWorstTicks,
+            m_clodStreamingOpsLatest.requestToUploadWorstGroup,
+            m_clodStreamingOpsLatest.requestToUploadSamples);
+        ImGui::Text("Latency ticks: req->resident avg=%u worst=%u group=%u samples=%u",
+            m_clodStreamingOpsLatest.requestToResidentAvgTicks,
+            m_clodStreamingOpsLatest.requestToResidentWorstTicks,
+            m_clodStreamingOpsLatest.requestToResidentWorstGroup,
+            m_clodStreamingOpsLatest.requestToResidentSamples);
+        ImGui::Text("Stage ticks: disk avg=%u worst=%u upload->resident avg=%u worst=%u commit->resident avg=%u worst=%u",
+            m_clodStreamingOpsLatest.diskQueueToCompleteAvgTicks,
+            m_clodStreamingOpsLatest.diskQueueToCompleteWorstTicks,
+            m_clodStreamingOpsLatest.uploadToResidentAvgTicks,
+            m_clodStreamingOpsLatest.uploadToResidentWorstTicks,
+            m_clodStreamingOpsLatest.commitToResidentAvgTicks,
+            m_clodStreamingOpsLatest.commitToResidentWorstTicks);
+        ImGui::Text("Oldest active: pendingCpu=%u group=%u diskIo=%u group=%u commit=%u group=%u",
+            m_clodStreamingOpsLatest.pendingCpuMaxAgeTicks,
+            m_clodStreamingOpsLatest.pendingCpuMaxAgeGroup,
+            m_clodStreamingOpsLatest.diskIoMaxAgeTicks,
+            m_clodStreamingOpsLatest.diskIoMaxAgeGroup,
+            m_clodStreamingOpsLatest.pendingCommitMaxAgeTicks,
+            m_clodStreamingOpsLatest.pendingCommitMaxAgeGroup);
 
         ImGui::TextUnformatted("Max in last 5 seconds");
         ImGui::Text("Load max: requested=%u unique=%u applied=%u failed=%u",
@@ -4032,11 +4119,26 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.loadUnique,
             max5s.loadApplied,
             max5s.loadFailed);
+        ImGui::Text("Feedback max: decoded=%u queued=%u duplicates=%u",
+            max5s.decodedRequests,
+            max5s.queuedLoadRequests,
+            max5s.duplicateRequests);
         ImGui::Text("Unload max: requested=%u unique=%u applied=%u failed=%u",
             max5s.unloadRequested,
             max5s.unloadUnique,
             max5s.unloadApplied,
             max5s.unloadFailed);
+        ImGui::Text("CPU backlog max: pending=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+            max5s.pendingCpuRequests,
+            max5s.inProgressRequests,
+            max5s.diskIoRequests,
+            max5s.readyCompletions,
+            max5s.pendingCommitGroups);
+        ImGui::Text("Deferrals max: prealloc=%u promotion=%u completions ok=%u failed=%u",
+            max5s.preallocationDeferrals,
+            max5s.promotionDeferrals,
+            max5s.completionSuccess,
+            max5s.completionFailed);
         ImGui::Text("Resident max: groups=%u allocations=%u bytes=%s",
             max5s.residentGroups,
             max5s.residentAllocations,
@@ -4051,8 +4153,36 @@ inline void Menu::DrawCLodTelemetryWindow() {
             const double gbPerSec = (fps > 0.0f)
                 ? (static_cast<double>(max5s.streamedBytesThisFrame) * static_cast<double>(fps)) / (1024.0 * 1024.0 * 1024.0)
                 : 0.0;
-            ImGui::Text("Throughput max: %.1f KB/frame  %.3f GB/s", kbPerFrame, gbPerSec);
+            ImGui::Text("Throughput max: %.1f KB/frame  %.3f GB/s uploadQueued=%s groups=%u",
+                kbPerFrame,
+                gbPerSec,
+                formatBytes(max5s.uploadQueuedBytes).c_str(),
+                max5s.uploadQueuedGroups);
         }
+        ImGui::Text("Latency max ticks: req->upload avg=%u worst=%u group=%u samples=%u",
+            max5s.requestToUploadAvgTicks,
+            max5s.requestToUploadWorstTicks,
+            max5s.requestToUploadWorstGroup,
+            max5s.requestToUploadSamples);
+        ImGui::Text("Latency max ticks: req->resident avg=%u worst=%u group=%u samples=%u",
+            max5s.requestToResidentAvgTicks,
+            max5s.requestToResidentWorstTicks,
+            max5s.requestToResidentWorstGroup,
+            max5s.requestToResidentSamples);
+        ImGui::Text("Stage max ticks: disk avg=%u worst=%u upload->resident avg=%u worst=%u commit->resident avg=%u worst=%u",
+            max5s.diskQueueToCompleteAvgTicks,
+            max5s.diskQueueToCompleteWorstTicks,
+            max5s.uploadToResidentAvgTicks,
+            max5s.uploadToResidentWorstTicks,
+            max5s.commitToResidentAvgTicks,
+            max5s.commitToResidentWorstTicks);
+        ImGui::Text("Oldest active max: pendingCpu=%u group=%u diskIo=%u group=%u commit=%u group=%u",
+            max5s.pendingCpuMaxAgeTicks,
+            max5s.pendingCpuMaxAgeGroup,
+            max5s.diskIoMaxAgeTicks,
+            max5s.diskIoMaxAgeGroup,
+            max5s.pendingCommitMaxAgeTicks,
+            max5s.pendingCommitMaxAgeGroup);
     }
 
     const auto drawWorkGraphCaptureSection = [&](const char* title, const CLodWorkGraphCaptureState& captureState) {

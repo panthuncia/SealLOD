@@ -2664,12 +2664,18 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			}
 		}
 		if (!sourceData && !allowBlockingFallback) {
-			requestAsyncSourceDataIfNeeded(
-				0u,
-				false,
-				"ShouldProcessTextureInitial::AsyncProcessingSourceBuild");
-			ensureProcessingPlaceholder("async source-data build queued; placeholder texture uploaded");
-			return makeResult();
+			if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !m_originalSourceBytes.empty()) {
+				ZoneScopedN("TextureAsset::EnsureUploaded::ShouldProcessTextureInitial::InMemoryCpuBootstrap");
+				sourceData = BuildSourceData("ShouldProcessTextureInitial::InMemoryCpuBootstrap");
+			}
+			else {
+				requestAsyncSourceDataIfNeeded(
+					0u,
+					false,
+					"ShouldProcessTextureInitial::AsyncProcessingSourceBuild");
+				ensureProcessingPlaceholder("async source-data build queued; placeholder texture uploaded");
+				return makeResult();
+			}
 		}
 		if (!sourceData) {
 			ZoneScopedN("TextureAsset::EnsureUploaded::ShouldProcessTextureInitial::BlockingBuildSourceData");
