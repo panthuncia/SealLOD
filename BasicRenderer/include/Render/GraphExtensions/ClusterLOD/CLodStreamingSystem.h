@@ -187,6 +187,8 @@ private:
     void ProtectGroupAndAncestors(uint32_t groupIndex);
     void BeginPageProtectionUpdate();
     bool MarkGroupProtectedThisUpdate(uint32_t groupIndex);
+    void MarkPageProtectedThisUpdate(uint32_t page);
+    bool TryGetCachedParentGroup(uint32_t groupIndex, uint32_t& outParentGroupIndex);
     bool IsPhysicalPageCleanForFreshAllocation(uint32_t page) const;
     bool IsPhysicalPageEvictable(uint32_t page) const;
     bool EvictPhysicalPage(uint32_t page, MeshManager* meshManager);
@@ -251,7 +253,9 @@ private:
     std::vector<uint32_t> m_streamingPinnedGroupsBitsCpu;
     std::vector<uint32_t> m_streamingResidencyInitializedBitsCpu;
     std::vector<uint32_t> m_usedGroupsBitsCpu; // groups reported as visible by the GPU last frame
+    std::vector<uint32_t> m_usedGroupsWordsCpu;
     std::vector<uint64_t> m_groupLastUsedTick;
+    std::vector<uint32_t> m_parentGroupByGroup;
     std::unordered_map<uint32_t, CachedChildGroupLayout> m_prefetchedChildLayoutsByGroup;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_prefetchedChildLayoutKeysByOwner;
     std::unordered_set<uint32_t> m_errorOverriddenGroups; // groups whose GPU error is currently 0
@@ -269,6 +273,7 @@ private:
     std::vector<uint64_t> m_pageOwnerMeshPageKey;
     std::vector<std::unordered_set<uint32_t>> m_pageResidentGroups;
     std::vector<uint8_t> m_pageProtectedThisUpdate;
+    std::vector<uint32_t> m_pagesProtectedThisUpdate;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_groupOwnedPages; // group to page IDs by segment (~0u = no page)
     std::unordered_map<uint32_t, std::vector<uint64_t>> m_groupOwnedMeshPageKeys; // group to mesh-page keys by page slot
     std::unordered_map<uint32_t, CommittedGroupPageMap> m_groupCommittedPageMaps;

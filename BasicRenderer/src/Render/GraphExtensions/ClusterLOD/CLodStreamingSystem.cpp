@@ -1005,6 +1005,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_pageReuseNonResidentQueuedTick.clear();
     m_pageResidentGroups.clear();
     m_pageProtectedThisUpdate.clear();
+    m_pagesProtectedThisUpdate.clear();
     m_pageRetireAfterTick.clear();
     m_pageRetirePinned.clear();
     m_pagePinnedStorage.clear();
@@ -1030,6 +1031,8 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_readyStreamingCompletionsByGroup.clear();
     m_pendingResidencyCommitGroups.clear();
     m_groupsUsingPinnedStorage.clear();
+    m_usedGroupsWordsCpu.clear();
+    std::fill(m_parentGroupByGroup.begin(), m_parentGroupByGroup.end(), UINT32_MAX);
     m_pageLruInitialized = false;
     m_streamingResidentGroupsCount = 0u;
     std::fill(m_streamingNonResidentBitsCpu.begin(), m_streamingNonResidentBitsCpu.end(), ~0u);
@@ -2075,15 +2078,10 @@ uint32_t CLodStreamingSystem::QueueLoadRequestWithParents(const CLodStreamingReq
     uint32_t queuedCount = 0u;
     m_parentChainScratch.clear();
     uint32_t currentGroup = requestedLoad.groupGlobalIndex;
-    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
     const size_t maxHops = m_streamingStorageGroupCapacity;
     for (size_t hop = 0; hop < maxHops; ++hop) {
-        if (meshManager == nullptr) {
-            break;
-        }
-
         uint32_t parentGroup = 0;
-        if (!meshManager->TryGetCLodParentGroup(currentGroup, parentGroup)) {
+        if (!TryGetCachedParentGroup(currentGroup, parentGroup)) {
             break;
         }
         if (parentGroup == currentGroup) {
@@ -3227,7 +3225,12 @@ void CLodStreamingSystem::ReleaseGroupResidency(uint32_t groupIndex, MeshManager
 }
 
 void CLodStreamingSystem::BeginPageProtectionUpdate() {
-    std::fill(m_pageProtectedThisUpdate.begin(), m_pageProtectedThisUpdate.end(), 0u);
+    for (uint32_t page : m_pagesProtectedThisUpdate) {
+        if (page < m_pageProtectedThisUpdate.size()) {
+            m_pageProtectedThisUpdate[page] = 0u;
+        }
+    }
+    m_pagesProtectedThisUpdate.clear();
     for (uint32_t word : m_protectedGroupWordsScratch) {
         if (word < m_protectedGroupsBitsScratch.size()) {
             m_protectedGroupsBitsScratch[word] = 0u;
@@ -3255,6 +3258,49 @@ bool CLodStreamingSystem::MarkGroupProtectedThisUpdate(uint32_t groupIndex) {
     return true;
 }
 
+void CLodStreamingSystem::MarkPageProtectedThisUpdate(uint32_t page) {
+    if (page >= m_pageProtectedThisUpdate.size()) {
+        return;
+    }
+    if (m_pageProtectedThisUpdate[page] != 0u) {
+        return;
+    }
+
+    m_pageProtectedThisUpdate[page] = 1u;
+    m_pagesProtectedThisUpdate.push_back(page);
+}
+
+bool CLodStreamingSystem::TryGetCachedParentGroup(uint32_t groupIndex, uint32_t& outParentGroupIndex) {
+    static constexpr uint32_t kUnknownParent = UINT32_MAX;
+    static constexpr uint32_t kNoParent = UINT32_MAX - 1u;
+
+    if (groupIndex >= m_parentGroupByGroup.size()) {
+        EnsureStreamingStorageCapacity(groupIndex + 1u);
+    }
+    if (groupIndex >= m_parentGroupByGroup.size()) {
+        return false;
+    }
+
+    uint32_t cachedParent = m_parentGroupByGroup[groupIndex];
+    if (cachedParent == kUnknownParent) {
+        cachedParent = kNoParent;
+        if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+            uint32_t parent = 0u;
+            if (meshManager->TryGetCLodParentGroup(groupIndex, parent) && parent != groupIndex) {
+                cachedParent = parent;
+            }
+        }
+        m_parentGroupByGroup[groupIndex] = cachedParent;
+    }
+
+    if (cachedParent == kNoParent || cachedParent == kUnknownParent) {
+        return false;
+    }
+
+    outParentGroupIndex = cachedParent;
+    return true;
+}
+
 void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
     auto protectOne = [this](uint32_t g) {
         if (!MarkGroupProtectedThisUpdate(g)) {
@@ -3267,22 +3313,17 @@ void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
         }
         for (uint32_t page : pagesIt->second) {
             if (page != ~0u && page < m_pageProtectedThisUpdate.size()) {
-                m_pageProtectedThisUpdate[page] = 1u;
+                MarkPageProtectedThisUpdate(page);
                 m_pageLru.Touch(page);
             }
         }
     };
 
     protectOne(groupIndex);
-    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
     uint32_t current = groupIndex;
     for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
-        if (meshManager == nullptr) {
-            break;
-        }
-
         uint32_t parent = 0;
-        if (!meshManager->TryGetCLodParentGroup(current, parent) || parent == current) {
+        if (!TryGetCachedParentGroup(current, parent) || parent == current) {
             break;
         }
         protectOne(parent);
@@ -3593,9 +3634,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                 const uint32_t existingPage = residentIt->second;
                 result.pagesBySegment[seg] = existingPage;
                 result.segmentNeedsFetch[seg] = false;
-                if (existingPage < m_pageProtectedThisUpdate.size()) {
-                    m_pageProtectedThisUpdate[existingPage] = 1u;
-                }
+                MarkPageProtectedThisUpdate(existingPage);
                 if (!IsPhysicalPagePinnedStorage(existingPage)) {
                     m_pageLru.Touch(existingPage);
                 }
@@ -3608,9 +3647,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                 const uint32_t existingPage = pendingIt->second;
                 result.pagesBySegment[seg] = existingPage;
                 result.segmentNeedsFetch[seg] = false;
-                if (existingPage < m_pageProtectedThisUpdate.size()) {
-                    m_pageProtectedThisUpdate[existingPage] = 1u;
-                }
+                MarkPageProtectedThisUpdate(existingPage);
                 if (!IsPhysicalPagePinnedStorage(existingPage)) {
                     m_pageLru.Touch(existingPage);
                 }
@@ -4255,13 +4292,10 @@ void CLodStreamingSystem::TouchGroupPages(uint32_t groupIndex) {
         }
     }
 
-    // Walk parent chain.
-    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
     uint32_t current = groupIndex;
     for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
-        if (meshManager == nullptr) break;
         uint32_t parent = 0;
-        if (!meshManager->TryGetCLodParentGroup(current, parent) || parent == current) break;
+        if (!TryGetCachedParentGroup(current, parent) || parent == current) break;
 
         auto pit = m_groupOwnedPages.find(parent);
         if (pit != m_groupOwnedPages.end()) {
@@ -4291,6 +4325,7 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_streamingPinnedGroupsBitsCpu.resize(newWordCount, 0u);
     m_streamingResidencyInitializedBitsCpu.resize(newWordCount, 0u);
     m_usedGroupsBitsCpu.resize(newWordCount, 0u);
+    m_parentGroupByGroup.resize(newCapacity, UINT32_MAX);
     m_groupLastUsedTick.resize(newCapacity, 0u);
     m_streamingRequestStateByGroup.resize(newCapacity, StreamingRequestState::None);
     m_pendingLoadPriorityByGroup.resize(newCapacity, 0u);
@@ -4359,6 +4394,13 @@ void CLodStreamingSystem::RebuildStreamingDomainFromSnapshot(MeshManager* meshMa
     std::fill(m_streamingPinnedGroupsBitsCpu.begin(), m_streamingPinnedGroupsBitsCpu.end(), 0u);
     std::fill(m_streamingResidencyInitializedBitsCpu.begin(), m_streamingResidencyInitializedBitsCpu.end(), 0u);
     std::fill(m_streamingNonResidentBitsCpu.begin(), m_streamingNonResidentBitsCpu.end(), 0u);
+    std::fill(m_parentGroupByGroup.begin(), m_parentGroupByGroup.end(), UINT32_MAX);
+    for (uint32_t word : m_usedGroupsWordsCpu) {
+        if (word < m_usedGroupsBitsCpu.size()) {
+            m_usedGroupsBitsCpu[word] = 0u;
+        }
+    }
+    m_usedGroupsWordsCpu.clear();
     m_streamingResidentGroupsCount = 0u;
 
     EnsureStreamingStorageCapacity(snapshot.maxGroupIndex);
@@ -5352,10 +5394,18 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
         if (m_usedGroupsCpuSampleGeneration != m_decodedUsedGroupsSampleGeneration) {
             ZoneScopedN("CLodStreamingSystem::PollCompletedReadbackSlots::RebuildUsedGroupsBitset");
             m_usedGroupsCpuSampleGeneration = m_decodedUsedGroupsSampleGeneration;
-            std::fill(m_usedGroupsBitsCpu.begin(), m_usedGroupsBitsCpu.end(), 0u);
+            for (uint32_t word : m_usedGroupsWordsCpu) {
+                if (word < m_usedGroupsBitsCpu.size()) {
+                    m_usedGroupsBitsCpu[word] = 0u;
+                }
+            }
+            m_usedGroupsWordsCpu.clear();
             for (const uint32_t groupIndex : m_usedGroupsBatchScratch) {
                 const uint32_t wa = BitWordAddress(groupIndex);
                 if (wa < m_usedGroupsBitsCpu.size()) {
+                    if (m_usedGroupsBitsCpu[wa] == 0u) {
+                        m_usedGroupsWordsCpu.push_back(wa);
+                    }
                     m_usedGroupsBitsCpu[wa] |= BitMask(groupIndex);
                 }
                 if (groupIndex < m_groupLastUsedTick.size()) {
@@ -5406,18 +5456,13 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
             }
         };
 
-        MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
         for (const uint32_t groupIndex : m_usedGroupsBatchScratch) {
             touchGroupPagesOnce(groupIndex);
 
             uint32_t current = groupIndex;
             for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
-                if (meshManager == nullptr) {
-                    break;
-                }
-
                 uint32_t parent = 0;
-                if (!meshManager->TryGetCLodParentGroup(current, parent) || parent == current) {
+                if (!TryGetCachedParentGroup(current, parent) || parent == current) {
                     break;
                 }
 
@@ -5935,7 +5980,10 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages");
         BeginPageProtectionUpdate();
-        for (uint32_t wordIndex = 0; wordIndex < static_cast<uint32_t>(m_usedGroupsBitsCpu.size()); ++wordIndex) {
+        for (uint32_t wordIndex : m_usedGroupsWordsCpu) {
+            if (wordIndex >= m_usedGroupsBitsCpu.size()) {
+                continue;
+            }
             uint32_t bits = m_usedGroupsBitsCpu[wordIndex];
             while (bits != 0u) {
                 const uint32_t bit = static_cast<uint32_t>(std::countr_zero(bits));
