@@ -269,6 +269,7 @@ private:
     std::vector<uint64_t> m_pageReuseRequiresNonResidentEpoch;
     std::vector<uint64_t> m_pageReuseNonResidentQueuedTick;
     std::vector<uint64_t> m_pageReuseUploadFenceValue;
+    std::vector<uint32_t> m_retiringPhysicalPages;
     std::vector<uint32_t> m_retiringPagesAwaitingUploadFence;
     std::vector<uint32_t> m_pendingPageOwnerGroup;
     std::vector<uint32_t> m_pendingPageOwnerSegment;

@@ -1031,6 +1031,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     m_pageReuseRequiresNonResidentEpoch.clear();
     m_pageReuseNonResidentQueuedTick.clear();
     m_pageReuseUploadFenceValue.clear();
+    m_retiringPhysicalPages.clear();
     m_retiringPagesAwaitingUploadFence.clear();
     m_pageResidentGroups.clear();
     m_pageProtectedThisUpdate.clear();
@@ -2347,6 +2348,7 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
     m_pageReuseRequiresNonResidentEpoch.assign(totalPages, 0u);
     m_pageReuseNonResidentQueuedTick.assign(totalPages, 0u);
     m_pageReuseUploadFenceValue.assign(totalPages, 0u);
+    m_retiringPhysicalPages.clear();
     m_retiringPagesAwaitingUploadFence.clear();
     m_pendingPageOwnerGroup.assign(totalPages, ~0u);
     m_pendingPageOwnerSegment.assign(totalPages, 0u);
@@ -3289,6 +3291,7 @@ void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshMan
     }
 
     m_pageState[page] = CLodPhysicalPageState::Retiring;
+    m_retiringPhysicalPages.push_back(page);
     if (page < m_pageRetireAfterTick.size()) {
         const uint32_t framesInFlight = static_cast<uint32_t>(std::max<uint8_t>(
             rg::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
@@ -3334,13 +3337,17 @@ void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshMan
 }
 
 void CLodStreamingSystem::DrainRetiredPhysicalPages(MeshManager* meshManager) {
-    if (m_pageState.empty()) {
+    ZoneScopedN("CLodStreamingSystem::DrainRetiredPhysicalPages");
+    if (m_pageState.empty() || m_retiringPhysicalPages.empty()) {
         return;
     }
 
+    TracyPlot("CLodStreaming.RetiringPhysicalPages", static_cast<int64_t>(m_retiringPhysicalPages.size()));
     std::vector<uint32_t> pinnedPagesToFree;
-    for (uint32_t page = 0; page < static_cast<uint32_t>(m_pageState.size()); ++page) {
+    size_t pendingWriteIndex = 0u;
+    for (uint32_t page : m_retiringPhysicalPages) {
         if (!IsPhysicalPageRetired(page)) {
+            m_retiringPhysicalPages[pendingWriteIndex++] = page;
             continue;
         }
 
@@ -3374,6 +3381,7 @@ void CLodStreamingSystem::DrainRetiredPhysicalPages(MeshManager* meshManager) {
             m_pageLru.Insert(page);
         }
     }
+    m_retiringPhysicalPages.resize(pendingWriteIndex);
 
     if (!pinnedPagesToFree.empty() && meshManager != nullptr) {
         if (PagePool* pool = meshManager->GetCLodPagePool()) {
@@ -3552,14 +3560,14 @@ bool CLodStreamingSystem::TryGetCachedParentGroup(uint32_t groupIndex, uint32_t&
 }
 
 void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
-    auto protectOne = [this](uint32_t g) {
+    auto protectOne = [this](uint32_t g) -> bool {
         if (!MarkGroupProtectedThisUpdate(g)) {
-            return;
+            return false;
         }
 
         auto pagesIt = m_groupOwnedPages.find(g);
         if (pagesIt == m_groupOwnedPages.end()) {
-            return;
+            return true;
         }
         for (uint32_t page : pagesIt->second) {
             if (page != ~0u && page < m_pageProtectedThisUpdate.size()) {
@@ -3567,16 +3575,23 @@ void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
                 m_pageLru.Touch(page);
             }
         }
+        return true;
     };
 
-    protectOne(groupIndex);
+    // Every group is protected through this function, so an already-protected
+    // node implies that its ancestor chain was handled earlier this update.
+    if (!protectOne(groupIndex)) {
+        return;
+    }
     uint32_t current = groupIndex;
     for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
         uint32_t parent = 0;
         if (!TryGetCachedParentGroup(current, parent) || parent == current) {
             break;
         }
-        protectOne(parent);
+        if (!protectOne(parent)) {
+            break;
+        }
         current = parent;
     }
 }
@@ -6191,51 +6206,64 @@ void CLodStreamingSystem::StreamingWorkerMain() {
 void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
     ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted");
 
-    if (m_getStreamingCpuUploadBudgetRequests) {
-        m_streamingCpuUploadBudgetRequests = std::max(m_getStreamingCpuUploadBudgetRequests(), 1u);
+    {
+        ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::RefreshBudget");
+        if (m_getStreamingCpuUploadBudgetRequests) {
+            m_streamingCpuUploadBudgetRequests = std::max(m_getStreamingCpuUploadBudgetRequests(), 1u);
+        }
+        m_streamingCpuUploadBudgetRequests = std::max(m_streamingCpuUploadBudgetRequests, 1u);
     }
-    m_streamingCpuUploadBudgetRequests = std::max(m_streamingCpuUploadBudgetRequests, 1u);
     const uint32_t budget = m_streamingCpuUploadBudgetRequests;
-    m_pagePopEvictionsThisUpdate = 0u;
-    const uint32_t requestScaledEvictionBudget = std::clamp<uint32_t>(budget / 8u, 16u, 512u);
-    const uint32_t backlogScaledEvictionBudget =
-        std::clamp<uint32_t>(m_streamingRequestsInProgressCount / 16u, 16u, 512u);
-    m_pagePopEvictionBudgetThisUpdate = std::max<uint32_t>(
-        32u,
-        std::max(requestScaledEvictionBudget, backlogScaledEvictionBudget));
+    {
+        ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ConfigureEvictionBudget");
+        m_pagePopEvictionsThisUpdate = 0u;
+        const uint32_t requestScaledEvictionBudget = std::clamp<uint32_t>(budget / 8u, 16u, 512u);
+        const uint32_t backlogScaledEvictionBudget =
+            std::clamp<uint32_t>(m_streamingRequestsInProgressCount / 16u, 16u, 512u);
+        m_pagePopEvictionBudgetThisUpdate = std::max<uint32_t>(
+            32u,
+            std::max(requestScaledEvictionBudget, backlogScaledEvictionBudget));
+    }
     CLodStreamingOperationStats frameStats{};
 
     MeshManager* meshManager = nullptr;
-    if (m_getMeshManager) {
-        meshManager = m_getMeshManager();
+    {
+        ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::GetMeshManager");
+        if (m_getMeshManager) {
+            meshManager = m_getMeshManager();
+        }
     }
 
     if (meshManager != nullptr && m_directStorageArmedLaunchFenceValue != 0) {
+        ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::PollDirectStorageLaunchFence");
         const uint64_t armedFenceValue = m_directStorageArmedLaunchFenceValue;
-        uint64_t completedFenceValue = m_directStorageLaunchFenceHandle.GetCompletedValue();
+        const uint64_t completedFenceValue = m_directStorageLaunchFenceHandle.GetCompletedValue();
+        TracyPlot(
+            "CLodStreaming.DirectStorageLaunchFencePending",
+            static_cast<int64_t>(completedFenceValue < armedFenceValue ? 1 : 0));
         if (completedFenceValue < armedFenceValue) {
-            // Do not process completed IO into additional launch records while
-            // this batch is armed. That keeps the pending launch set frozen at
-            // the after-present safety point represented by armedFenceValue.
-            (void)m_directStorageLaunchFenceHandle.HostWait(armedFenceValue, 10);
-            completedFenceValue = m_directStorageLaunchFenceHandle.GetCompletedValue();
-            if (completedFenceValue < armedFenceValue) {
-                RequestStreamingFrameWork();
-                return;
-            }
+            // Do not block this worker for the render queue. The per-frame
+            // publisher will request another service tick after the signal,
+            // while returning here keeps the armed launch set frozen.
+            return;
         }
 
-        const auto [pendingLaunches, pendingUploads] = meshManager->GetPendingCLodDirectStorageCounts();
-        spdlog::info(
-            "CLod streaming DirectStorage GPU fence ready: armedValue={} completedValue={} pendingLaunches={} pendingUploads={}",
-            armedFenceValue,
-            completedFenceValue,
-            pendingLaunches,
-            pendingUploads);
-        meshManager->LaunchPendingCLodDirectStorageUploads(
-            m_directStorageLaunchFenceHandle,
-            armedFenceValue);
-        m_directStorageArmedLaunchFenceValue = 0;
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::LaunchArmedDirectStorageBatch");
+            if (SarpClodImportDebugLoggingEnabled()) {
+                const auto [pendingLaunches, pendingUploads] = meshManager->GetPendingCLodDirectStorageCounts();
+                spdlog::info(
+                    "CLod streaming DirectStorage GPU fence ready: armedValue={} completedValue={} pendingLaunches={} pendingUploads={}",
+                    armedFenceValue,
+                    completedFenceValue,
+                    pendingLaunches,
+                    pendingUploads);
+            }
+            meshManager->LaunchPendingCLodDirectStorageUploads(
+                m_directStorageLaunchFenceHandle,
+                armedFenceValue);
+            m_directStorageArmedLaunchFenceValue = 0;
+        }
     }
 
     if (meshManager != nullptr) {
@@ -6275,31 +6303,50 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
 
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages");
-        BeginPageProtectionUpdate();
-        for (uint32_t wordIndex : m_usedGroupsWordsCpu) {
-            if (wordIndex >= m_usedGroupsBitsCpu.size()) {
-                continue;
-            }
-            uint32_t bits = m_usedGroupsBitsCpu[wordIndex];
-            while (bits != 0u) {
-                const uint32_t bit = static_cast<uint32_t>(std::countr_zero(bits));
-                bits &= bits - 1u;
-                ProtectGroupAndAncestors((wordIndex << 5u) | bit);
+        TracyPlot("CLodStreaming.Protection.UsedGroupWords", static_cast<int64_t>(m_usedGroupsWordsCpu.size()));
+        TracyPlot("CLodStreaming.Protection.OwnedGroups", static_cast<int64_t>(m_groupOwnedPages.size()));
+        TracyPlot("CLodStreaming.Protection.PreallocatedGroups", static_cast<int64_t>(m_preAllocatedPagesByGroup.size()));
+        TracyPlot("CLodStreaming.Protection.PendingCommitGroups", static_cast<int64_t>(m_pendingResidencyCommitGroups.size()));
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::Reset");
+            BeginPageProtectionUpdate();
+        }
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::UsedGroups");
+            for (uint32_t wordIndex : m_usedGroupsWordsCpu) {
+                if (wordIndex >= m_usedGroupsBitsCpu.size()) {
+                    continue;
+                }
+                uint32_t bits = m_usedGroupsBitsCpu[wordIndex];
+                while (bits != 0u) {
+                    const uint32_t bit = static_cast<uint32_t>(std::countr_zero(bits));
+                    bits &= bits - 1u;
+                    ProtectGroupAndAncestors((wordIndex << 5u) | bit);
+                }
             }
         }
-        const uint64_t protectedUsedWindow = static_cast<uint64_t>(std::max<uint32_t>(m_streamingReadbackRingSize, 1u) + 1u);
-        for (const auto& [groupIndex, _] : m_groupOwnedPages) {
-            if (groupIndex < m_groupLastUsedTick.size() &&
-                m_groupLastUsedTick[groupIndex] != 0u &&
-                m_streamingDiagnosticTick <= m_groupLastUsedTick[groupIndex] + protectedUsedWindow) {
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::RecentlyUsedOwnedGroups");
+            const uint64_t protectedUsedWindow = static_cast<uint64_t>(std::max<uint32_t>(m_streamingReadbackRingSize, 1u) + 1u);
+            for (const auto& [groupIndex, _] : m_groupOwnedPages) {
+                if (groupIndex < m_groupLastUsedTick.size() &&
+                    m_groupLastUsedTick[groupIndex] != 0u &&
+                    m_streamingDiagnosticTick <= m_groupLastUsedTick[groupIndex] + protectedUsedWindow) {
+                    ProtectGroupAndAncestors(groupIndex);
+                }
+            }
+        }
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::PreallocatedGroups");
+            for (const auto& [groupIndex, _] : m_preAllocatedPagesByGroup) {
                 ProtectGroupAndAncestors(groupIndex);
             }
         }
-        for (const auto& [groupIndex, _] : m_preAllocatedPagesByGroup) {
-            ProtectGroupAndAncestors(groupIndex);
-        }
-        for (uint32_t groupIndex : m_pendingResidencyCommitGroups) {
-            ProtectGroupAndAncestors(groupIndex);
+        {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::PendingCommitGroups");
+            for (uint32_t groupIndex : m_pendingResidencyCommitGroups) {
+                ProtectGroupAndAncestors(groupIndex);
+            }
         }
     }
 
