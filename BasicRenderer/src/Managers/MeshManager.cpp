@@ -18,6 +18,7 @@
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,13 @@
 #include "Render/MemoryIntrospectionAPI.h"
 
 namespace {
+
+uint64_t CLodStreamingNowMs()
+{
+	using Clock = std::chrono::steady_clock;
+	return static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
+}
 
 bool SarpClodImportDebugLoggingEnabled()
 {
@@ -204,13 +212,31 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 			return;
 		}
 
+		const uint32_t queuedRequestCount = static_cast<uint32_t>(m_clodDiskStreamingRequests.size());
+		const uint32_t queuedOrInFlightCount = static_cast<uint32_t>(m_clodDiskStreamingQueuedGroups.size());
+		const uint32_t dispatchedOrInFlightCount =
+			queuedOrInFlightCount > queuedRequestCount ? queuedOrInFlightCount - queuedRequestCount : 0u;
+		const uint32_t adaptiveDispatchedTarget = std::clamp<uint32_t>(
+			kMinAdaptiveDispatchedIoGroups + queuedRequestCount / 4u,
+			kMinAdaptiveDispatchedIoGroups,
+			kMaxAdaptiveDispatchedIoGroups);
+		if (dispatchedOrInFlightCount >= adaptiveDispatchedTarget) {
+			return;
+		}
+
 		// Sort so highest-priority requests are at the back.
 		std::sort(m_clodDiskStreamingRequests.begin(), m_clodDiskStreamingRequests.end(),
 			[](const CLodDiskStreamingRequest& a, const CLodDiskStreamingRequest& b) {
 				return a.priority < b.priority;
 			});
 
-		const uint32_t toDrain = std::min<uint32_t>(kMaxIoBatchSize, static_cast<uint32_t>(m_clodDiskStreamingRequests.size()));
+		const uint32_t dispatchHeadroom = adaptiveDispatchedTarget - dispatchedOrInFlightCount;
+		const uint32_t toDrain = std::min<uint32_t>(
+			std::min<uint32_t>(kMaxIoBatchSize, dispatchHeadroom),
+			static_cast<uint32_t>(m_clodDiskStreamingRequests.size()));
+		if (toDrain == 0u) {
+			return;
+		}
 		// Take from the back (highest priority).
 		batch.reserve(toDrain);
 		for (uint32_t i = 0; i < toDrain; ++i) {
@@ -268,7 +294,10 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 			bool loaded = false;
 			const std::wstring containerPath = CLodCache::ResolveContainerPath(request.cacheSource);
 			const bool clodDirectStorageEnabled = m_clodStreamingDirectStorageEnabled.load(std::memory_order_acquire);
-			const bool clodGpuDirectStorageEnabled = false;
+			const bool clodGpuDirectStorageEnabled =
+				clodDirectStorageEnabled &&
+				DirectStorageManager::GetInstance().CanServiceQueue(DirectStorageQueueKind::Gpu) &&
+				request.preAllocatedPages.size() == request.meshPageIndices.size();
 			if (clodGpuDirectStorageEnabled && !containerPath.empty()) {
 				if (request.prefetchedLayout.has_value() && request.prefetchedLayout->IsValid()) {
 					result.groupChunkMetadata = request.prefetchedLayout->groupChunkMetadata;
@@ -284,6 +313,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 						std::span<const uint32_t>(request.meshPageIndices.data(), request.meshPageIndices.size()),
 						layout);
 					if (loaded) {
+						result.groupChunkMetadata = layout.groupChunkMetadata;
 						result.directStoragePageBlobSizes = std::move(layout.pageBlobSizes);
 						result.directStoragePageBlobOffsets = std::move(layout.pageBlobOffsets);
 					}
@@ -1640,6 +1670,149 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 		return DiskStreamingApplyResult::FailedPermanent;
 	}
 	const uint32_t sCount = static_cast<uint32_t>(result.meshPageIndices.size());
+	if (result.directStorageGpuUploadPending) {
+		if (preAllocatedPages.size() != sCount ||
+			result.directStoragePageBlobSizes.size() != sCount ||
+			result.directStoragePageBlobOffsets.size() != sCount ||
+			(!result.segmentNeedsFetch.empty() && result.segmentNeedsFetch.size() != sCount)) {
+			spdlog::error(
+				"CLod streaming: DirectStorage GPU upload for group {} has mismatched page metadata (pages={}, allocs={}, sizes={}, offsets={}, fetchMask={})",
+				result.groupGlobalIndex,
+				sCount,
+				preAllocatedPages.size(),
+				result.directStoragePageBlobSizes.size(),
+				result.directStoragePageBlobOffsets.size(),
+				result.segmentNeedsFetch.size());
+			return DiskStreamingApplyResult::FailedPermanent;
+		}
+
+		if (m_clodPagePool == nullptr) {
+			spdlog::error(
+				"CLod streaming: DirectStorage GPU upload for group {} has no page pool",
+				result.groupGlobalIndex);
+			return DiskStreamingApplyResult::FailedPermanent;
+		}
+
+		CLodPendingDirectStorageLaunch launch{};
+		launch.groupGlobalIndex = result.groupGlobalIndex;
+		launch.generation = result.generation;
+		launch.cacheSource = result.cacheSource;
+		launch.sharedState = sharedState;
+		launch.groupLocalIndex = localIndex;
+		launch.chunk = chunk;
+		launch.meshPageIndices = result.meshPageIndices;
+		launch.segmentNeedsFetch = result.segmentNeedsFetch;
+		launch.pageIds = preAllocatedPages;
+		launch.pageAllocations.resize(sCount);
+		launch.pageMapEntries.resize(sCount);
+		launch.uploadPathLabel = result.uploadPathLabel;
+		launch.prefetchedChildLayouts = std::move(result.prefetchedChildLayouts);
+
+		for (uint32_t ci = 0; ci < sCount; ++ci) {
+			const uint32_t page = preAllocatedPages[ci];
+			if (page >= m_clodPagePool->GetTotalPageCount()) {
+				spdlog::error(
+					"CLod streaming: DirectStorage GPU upload for group {} page {} targets invalid physical page {}",
+					result.groupGlobalIndex,
+					ci,
+					page);
+				return DiskStreamingApplyResult::FailedPermanent;
+			}
+
+			const PagePool::PageAllocation allocation{ page, 1u };
+			launch.pageAllocations[ci] = allocation;
+			launch.pageMapEntries[ci].slabDescriptorIndex = m_clodPagePool->GetSlabDescriptorIndex(allocation);
+			launch.pageMapEntries[ci].slabByteOffset =
+				static_cast<uint32_t>(m_clodPagePool->PageToSlabByteOffset(page));
+			if (launch.pageMapEntries[ci].slabDescriptorIndex == 0u) {
+				spdlog::error(
+					"CLod streaming: DirectStorage GPU upload for group {} page {} has no valid slab descriptor",
+					result.groupGlobalIndex,
+					ci);
+				return DiskStreamingApplyResult::FailedPermanent;
+			}
+
+			const bool needsFetch = result.segmentNeedsFetch.empty()
+				|| ci >= static_cast<uint32_t>(result.segmentNeedsFetch.size())
+				|| result.segmentNeedsFetch[ci];
+			if (!needsFetch) {
+				continue;
+			}
+
+			const uint32_t blobSize = result.directStoragePageBlobSizes[ci];
+			if (blobSize == 0u || blobSize > m_clodPagePool->GetPageSize()) {
+				spdlog::error(
+					"CLod streaming: DirectStorage GPU upload for group {} page {} has invalid payload size {}",
+					result.groupGlobalIndex,
+					ci,
+					blobSize);
+				return DiskStreamingApplyResult::FailedPermanent;
+			}
+
+			const uint32_t slabIndex = m_clodPagePool->PageToSlabIndex(page);
+			auto slab = m_clodPagePool->GetSlab(slabIndex);
+			if (!slab) {
+				spdlog::error(
+					"CLod streaming: DirectStorage GPU upload for group {} page {} has no destination slab {}",
+					result.groupGlobalIndex,
+					ci,
+					slabIndex);
+				return DiskStreamingApplyResult::FailedPermanent;
+			}
+
+			br::DirectStorageBufferRegionCopy copy{};
+			copy.sourceOffset = result.directStoragePageBlobOffsets[ci];
+			copy.sourceSizeBytes = blobSize;
+			copy.uncompressedSizeBytes = blobSize;
+			copy.destinationResource = slab->GetAPIResource();
+			copy.destinationOffset = m_clodPagePool->PageToSlabByteOffset(page);
+			launch.copies.push_back(copy);
+			++launch.fetchedPageCount;
+			launch.totalBlobBytes += blobSize;
+		}
+
+		if (launch.fetchedPageCount == 0u) {
+			outCompletion.groupGlobalIndex = result.groupGlobalIndex;
+			outCompletion.success = true;
+			outCompletion.payloadKind = CLodDiskStreamingPayloadKind::ReusedExistingPages;
+			outCompletion.chunk = chunk;
+			outCompletion.meshPageIndices = std::move(launch.meshPageIndices);
+			outCompletion.segmentNeedsFetch = std::move(launch.segmentNeedsFetch);
+			outCompletion.preAllocatedPages = std::move(launch.pageIds);
+			outCompletion.pageAllocations = std::move(launch.pageAllocations);
+			outCompletion.pageMapEntries = std::move(launch.pageMapEntries);
+			outCompletion.generation = result.generation;
+			outCompletion.totalStreamedBytes = 0u;
+			outCompletion.fetchedPageCount = 0u;
+			outCompletion.uploadPathLabel = "ReusedExistingPages";
+			outCompletion.prefetchedChildLayouts = std::move(launch.prefetchedChildLayouts);
+			return DiskStreamingApplyResult::Prepared;
+		}
+
+		spdlog::debug(
+			"CLod streaming: group {} prepared DirectStorage GPU launch (fetchedPages={}/{}, bytes={}, reusedPages={})",
+			result.groupGlobalIndex,
+			launch.fetchedPageCount,
+			sCount,
+			launch.totalBlobBytes,
+			sCount - launch.fetchedPageCount);
+		static std::atomic<uint64_t> s_preparedDirectStorageGpuLaunchCount{ 0 };
+		const uint64_t preparedLaunchCount = s_preparedDirectStorageGpuLaunchCount.fetch_add(1, std::memory_order_relaxed) + 1u;
+		if (preparedLaunchCount == 1u || (preparedLaunchCount % 256u) == 0u) {
+			spdlog::info(
+				"CLod streaming DirectStorage GPU prepared: totalPrepared={} latestGroup={} fetchedPages={}/{} bytes={}",
+				preparedLaunchCount,
+				result.groupGlobalIndex,
+				launch.fetchedPageCount,
+				sCount,
+				launch.totalBlobBytes);
+		}
+
+		std::lock_guard<std::mutex> lock(m_clodDiskStreamingResultsMutex);
+		m_clodPendingDirectStorageLaunches.push_back(std::move(launch));
+		return DiskStreamingApplyResult::DeferredPendingUpload;
+	}
+
 	if (result.pageBlobs.size() != sCount) {
 		spdlog::error("CLod streaming: group {} (local {}) expected {} page blobs but got {}",
 			result.groupGlobalIndex, localIndex, sCount, result.pageBlobs.size());
@@ -1677,6 +1850,7 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 
 	outCompletion.groupGlobalIndex = result.groupGlobalIndex;
 	outCompletion.success = true;
+	outCompletion.payloadKind = CLodDiskStreamingPayloadKind::CpuPageBlobs;
 	outCompletion.chunk = chunk;
 	outCompletion.meshPageIndices = result.meshPageIndices;
 	outCompletion.segmentNeedsFetch = result.segmentNeedsFetch;
@@ -1695,19 +1869,33 @@ void MeshManager::FinalizePendingCLodDirectStorageUploads(
 	const std::size_t pendingBefore = m_clodPendingDirectStorageUploads.size();
 	std::size_t readyCount = 0u;
 	std::size_t failedCount = 0u;
+	std::size_t waitingForDsFenceCount = 0u;
+	uint64_t worstDsReadyMs = 0u;
+	uint32_t worstDsReadyGroup = 0u;
+	uint64_t worstPublishMs = 0u;
+	uint32_t worstPublishGroup = 0u;
 	for (size_t uploadIndex = 0; uploadIndex < m_clodPendingDirectStorageUploads.size();) {
 		auto& pendingUpload = m_clodPendingDirectStorageUploads[uploadIndex];
 
 		auto finishUpload = [&](bool success) {
+			const uint64_t nowMs = CLodStreamingNowMs();
 			if (success) {
 				++readyCount;
 			} else {
 				++failedCount;
 			}
+			if (pendingUpload.launchQueuedMs != 0u) {
+				const uint64_t publishMs = nowMs - pendingUpload.launchQueuedMs;
+				if (publishMs > worstPublishMs) {
+					worstPublishMs = publishMs;
+					worstPublishGroup = pendingUpload.groupGlobalIndex;
+				}
+			}
 			CLodDiskStreamingCompletion completion{};
 			completion.groupGlobalIndex = pendingUpload.groupGlobalIndex;
 			completion.success = success;
 			if (success) {
+				completion.payloadKind = CLodDiskStreamingPayloadKind::GpuPagesReady;
 				completion.chunk = pendingUpload.chunk;
 				completion.meshPageIndices = pendingUpload.meshPageIndices;
 				completion.preAllocatedPages = pendingUpload.pageIds;
@@ -1722,14 +1910,30 @@ void MeshManager::FinalizePendingCLodDirectStorageUploads(
 			}
 			outCompletions.push_back(std::move(completion));
 			outFinishedGroups.push_back(pendingUpload.groupGlobalIndex);
-			m_clodPendingDirectStorageUploads.erase(m_clodPendingDirectStorageUploads.begin() + static_cast<std::ptrdiff_t>(uploadIndex));
+			if (uploadIndex + 1u < m_clodPendingDirectStorageUploads.size()) {
+				m_clodPendingDirectStorageUploads[uploadIndex] = std::move(m_clodPendingDirectStorageUploads.back());
+			}
+			m_clodPendingDirectStorageUploads.pop_back();
 		};
 
 		const bool isStale = pendingUpload.generation != currentGeneration;
 		const DirectStorageAsyncRequestStatus uploadStatus = DirectStorageManager::GetInstance().PollRequest(pendingUpload.uploadHandle);
 		if (uploadStatus.state == DirectStorageAsyncRequestState::Pending) {
+			++waitingForDsFenceCount;
 			++uploadIndex;
 			continue;
+		}
+		if (uploadStatus.state == DirectStorageAsyncRequestState::Ready) {
+			if (pendingUpload.dsReadyMs == 0u) {
+				pendingUpload.dsReadyMs = CLodStreamingNowMs();
+			}
+			if (pendingUpload.launchQueuedMs != 0u) {
+				const uint64_t readyMs = pendingUpload.dsReadyMs - pendingUpload.launchQueuedMs;
+				if (readyMs > worstDsReadyMs) {
+					worstDsReadyMs = readyMs;
+					worstDsReadyGroup = pendingUpload.groupGlobalIndex;
+				}
+			}
 		}
 
 		if (isStale) {
@@ -1768,6 +1972,27 @@ void MeshManager::FinalizePendingCLodDirectStorageUploads(
 			readyCount,
 			failedCount,
 			m_clodPendingDirectStorageUploads.size());
+	}
+	if (readyCount != 0u || failedCount != 0u) {
+		spdlog::info(
+			"CLod streaming DirectStorage GPU finalized: pendingBefore={} ready={} failed={} waitingDsFence={} pendingAfter={} worstDsReadyMs={} group={} worstPublishMs={} group={}",
+			pendingBefore,
+			readyCount,
+			failedCount,
+			waitingForDsFenceCount,
+			m_clodPendingDirectStorageUploads.size(),
+			worstDsReadyMs,
+			worstDsReadyGroup,
+			worstPublishMs,
+			worstPublishGroup);
+	}
+	else if (pendingBefore != 0u && SarpClodImportDebugLoggingEnabled()) {
+		spdlog::info(
+			"SARPDBG CLod DirectStorage pending timing: pending={} waitingDsFence={} worstDsReadyMs={} group={}",
+			pendingBefore,
+			waitingForDsFenceCount,
+			worstDsReadyMs,
+			worstDsReadyGroup);
 	}
 }
 
@@ -1952,16 +2177,6 @@ void MeshManager::SetCLodStreamingUploadFunction(PagePool::UploadFn fn) {
 	}
 }
 
-void MeshManager::CollectCLodDirectStorageCompletionWaits(std::vector<ExternalTimelinePoint>& outWaits) const {
-	std::lock_guard<std::mutex> lock(m_clodDiskStreamingResultsMutex);
-	outWaits.reserve(outWaits.size() + m_clodPendingDirectStorageUploads.size());
-	for (const auto& pendingUpload : m_clodPendingDirectStorageUploads) {
-		if (pendingUpload.completionTimeline.IsValid() && pendingUpload.completionValue != 0) {
-			outWaits.push_back({ pendingUpload.completionTimeline, pendingUpload.completionValue });
-		}
-	}
-}
-
 bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeline, uint64_t waitValue) {
 	if (!waitTimeline.IsValid() || waitValue == 0 || !m_clodDirectStorageCompletionFenceHandle.IsValid()) {
 		return false;
@@ -1986,6 +2201,7 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 	std::vector<CLodPendingDirectStorageUpload> activeUploads;
 	std::vector<CLodDiskStreamingCompletion> failedCompletions;
 	std::vector<uint32_t> failedGroups;
+	const uint64_t launchQueuedMs = CLodStreamingNowMs();
 	activeUploads.reserve(launches.size());
 	failedCompletions.reserve(launches.size());
 	failedGroups.reserve(launches.size());
@@ -2028,8 +2244,7 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 		pendingUpload.totalBlobBytes = launch.totalBlobBytes;
 		pendingUpload.uploadPathLabel = std::move(launch.uploadPathLabel);
 		pendingUpload.uploadHandle = std::move(uploadHandle);
-		pendingUpload.completionTimeline = m_clodDirectStorageCompletionFenceHandle;
-		pendingUpload.completionValue = completionValue;
+		pendingUpload.launchQueuedMs = launchQueuedMs;
 		pendingUpload.pageIds = std::move(launch.pageIds);
 		pendingUpload.prefetchedChildLayouts = std::move(launch.prefetchedChildLayouts);
 		activeUploads.push_back(std::move(pendingUpload));
@@ -2055,6 +2270,13 @@ bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeli
 	if (SarpClodImportDebugLoggingEnabled()) {
 		spdlog::info(
 			"SARPDBG LaunchPendingCLodDirectStorageUploads activeUploads={} failed={} pendingUploadsNow={}",
+			activeUploads.size(),
+			failedGroups.size(),
+			HasPendingCLodDirectStorageUploads() ? 1 : 0);
+	}
+	if (!activeUploads.empty() || !failedGroups.empty()) {
+		spdlog::info(
+			"CLod streaming DirectStorage GPU launched: activeUploads={} failed={} pendingUploadsNow={}",
 			activeUploads.size(),
 			failedGroups.size(),
 			HasPendingCLodDirectStorageUploads() ? 1 : 0);
@@ -2159,13 +2381,31 @@ uint32_t MeshManager::QueueCLodGroupDiskIOBatch(const std::vector<CLodGroupDiskI
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
 		for (auto& preparedRequest : prepared) {
 			const uint32_t groupGlobalIndex = preparedRequest.request.groupGlobalIndex;
-			const bool queued = m_clodDiskStreamingQueuedGroups.insert(groupGlobalIndex).second;
-			if (outQueuedByRequest != nullptr) {
-				(*outQueuedByRequest)[preparedRequest.sourceIndex] = queued;
+			auto queuedIt = std::find_if(
+				m_clodDiskStreamingRequests.begin(),
+				m_clodDiskStreamingRequests.end(),
+				[groupGlobalIndex](const CLodDiskStreamingRequest& request) {
+					return request.groupGlobalIndex == groupGlobalIndex;
+				});
+			if (queuedIt != m_clodDiskStreamingRequests.end()) {
+				if (preparedRequest.request.priority >= queuedIt->priority) {
+					*queuedIt = std::move(preparedRequest.request);
+				} else {
+					queuedIt->priority = std::max(queuedIt->priority, preparedRequest.request.priority);
+				}
+				if (outQueuedByRequest != nullptr) {
+					(*outQueuedByRequest)[preparedRequest.sourceIndex] = true;
+				}
+				continue;
 			}
-			if (queued) {
+
+			const auto [_, inserted] = m_clodDiskStreamingQueuedGroups.insert(groupGlobalIndex);
+			if (outQueuedByRequest != nullptr) {
+				(*outQueuedByRequest)[preparedRequest.sourceIndex] = true;
+			}
+			if (inserted) {
 				m_clodDiskStreamingRequests.push_back(std::move(preparedRequest.request));
-				queuedCount++;
+				++queuedCount;
 			}
 		}
 	}
@@ -2690,10 +2930,16 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
 		stats.queuedRequests = static_cast<uint32_t>(m_clodDiskStreamingRequests.size());
 		stats.queuedOrInFlightGroups = static_cast<uint32_t>(m_clodDiskStreamingQueuedGroups.size());
+		stats.dispatchedOrInFlightGroups =
+			stats.queuedOrInFlightGroups > stats.queuedRequests
+				? stats.queuedOrInFlightGroups - stats.queuedRequests
+				: 0u;
 	}
 	{
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingResultsMutex);
 		stats.completedResults = static_cast<uint32_t>(m_clodDiskStreamingResults.size());
+		stats.pendingDirectStorageLaunches = static_cast<uint32_t>(m_clodPendingDirectStorageLaunches.size());
+		stats.pendingDirectStorageUploads = static_cast<uint32_t>(m_clodPendingDirectStorageUploads.size());
 
 		auto getCompletedResultSizeBytes = [](const CLodDiskStreamingResult& result) -> uint64_t {
 			uint64_t total = 0;

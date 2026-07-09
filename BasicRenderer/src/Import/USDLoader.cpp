@@ -1046,9 +1046,11 @@ namespace USDLoader {
 			}
 
 			const std::filesystem::path root(rootText);
-			const std::array<std::filesystem::path, 2> candidates = {
+			const std::array<std::filesystem::path, 4> candidates = {
 				root / normalizedRelative,
-				root / "textures" / withoutTexturesPrefix
+				root / "textures" / withoutTexturesPrefix,
+				root / "Assets" / normalizedRelative,
+				root / "Assets" / "textures" / withoutTexturesPrefix
 			};
 			for (const auto& candidate : candidates) {
 				ec.clear();
@@ -1549,12 +1551,23 @@ namespace USDLoader {
 			}
 		}
 		else if (std::shared_ptr<ArAsset> arAsset = resolver.OpenAsset(resolved)) {
-			tex = LoadTextureFromMemory(
-				static_cast<const void*>(arAsset->GetBuffer().get()),
-				arAsset->GetSize(),
-				nullptr,
-				{},
-				preferSRGB);
+			try {
+				tex = LoadTextureFromMemory(
+					static_cast<const void*>(arAsset->GetBuffer().get()),
+					arAsset->GetSize(),
+					nullptr,
+					{},
+					preferSRGB);
+			}
+			catch (const std::exception& ex) {
+				spdlog::warn(
+					"USDLoader: unable to decode texture '{}' from resolver asset memory ({}); falling back to deferred file load '{}'",
+					logicalPath,
+					ex.what(),
+					resolvedPath);
+				TextureFileMeta deferredMeta = cacheProbeMeta;
+				tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
+			}
 		}
 		else {
 			TextureFileMeta deferredMeta = cacheProbeMeta;
@@ -3549,10 +3562,43 @@ namespace USDLoader {
 		const UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
 		UsdSkelCache preprocessSkelCache;
 		std::vector<MeshPreprocessWorkItem> workItems;
+		std::unordered_set<std::string> queuedWorkItemKeys;
 		auto markSkippedMesh = [](const std::string& meshPath, std::string reason) {
 			if (!meshPath.empty()) {
 				loadingCache.skippedPreprocessedMeshReasons.emplace(meshPath, std::move(reason));
 			}
+		};
+		auto enqueueWorkItem = [&](MeshPreprocessWorkItem&& item) {
+			std::ostringstream key;
+			key << item.meshPath << '|';
+			if (item.subsets.empty()) {
+				key << "<mesh>";
+			}
+			else {
+				for (const auto& subset : item.subsets) {
+					key << subset.GetPrim().GetPath().GetString() << ';';
+				}
+			}
+			key << '|'
+				<< (item.material ? item.material.GetPrim().GetPath().GetString() : std::string("<unbound>")) << '|'
+				<< static_cast<int>(item.authoredDoubleSided) << '|'
+				<< static_cast<int>(item.inferredDoubleSided) << '|'
+				<< static_cast<int>(item.skinQ.has_value()) << '|'
+				<< static_cast<int>(item.extractOptions.retainClusterLODArtifacts) << '|'
+				<< static_cast<int>(item.extractOptions.importSkinningAsRigidBindPose) << '|'
+				<< static_cast<int>(item.extractOptions.objectSurfaceSamplingMode) << '|'
+				<< item.extractOptions.objectSurfaceSamplingConfigHash << '|'
+				<< static_cast<int>(item.extractOptions.objectSurfaceUseTriplanarProjection) << '|'
+				<< static_cast<int>(item.extractOptions.objectSurfaceUseTripleTapStochastic) << '|'
+				<< static_cast<int>(item.extractOptions.brniflyVertexAlpha) << '|'
+				<< static_cast<int>(item.extractOptions.brniflyZBufferWrite) << '|'
+				<< static_cast<int>(item.extractOptions.brniflyDecal) << '|'
+				<< static_cast<int>(item.extractOptions.brniflyDynamicDecal) << '|'
+				<< static_cast<int>(item.extractOptions.brniflyModelSpaceNormals);
+			if (!queuedWorkItemKeys.insert(key.str()).second) {
+				return;
+			}
+			workItems.push_back(std::move(item));
 		};
 
 		std::function<void(const UsdPrim&)> gatherMeshJobs = [&](const UsdPrim& prim) {
@@ -3626,6 +3672,7 @@ namespace USDLoader {
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 					extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
 					extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
+					extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
 							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -3639,7 +3686,7 @@ namespace USDLoader {
 						return;
 					}
 					const bool inferredDoubleSided = ShouldForceDoubleSidedByName(mat, std::nullopt, importSettings);
-					workItems.push_back(MeshPreprocessWorkItem{
+					enqueueWorkItem(MeshPreprocessWorkItem{
 						.meshPath = meshPath,
 						.mesh = mesh,
 						.subsets = {},
@@ -3662,6 +3709,7 @@ namespace USDLoader {
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 						extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
 						extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
+						extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
 								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -3700,10 +3748,9 @@ namespace USDLoader {
 					}
 					else {
 						auto combinedSubsetWorkItems = CombineCompatibleTriplanarSubsetWorkItems(std::move(subsetWorkItems));
-						workItems.insert(
-							workItems.end(),
-							std::make_move_iterator(combinedSubsetWorkItems.begin()),
-							std::make_move_iterator(combinedSubsetWorkItems.end()));
+						for (MeshPreprocessWorkItem& item : combinedSubsetWorkItems) {
+							enqueueWorkItem(std::move(item));
+						}
 					}
 				}
 			}
@@ -6858,36 +6905,10 @@ namespace USDLoader {
 			return scene;
 		}
 
-		bool preprocessedForAssembly = false;
 		if (!assetAssemblyBuckets.empty()) {
-			PreprocessAllMeshes(
-				stage,
-				stageContext.metersPerUnit,
-				stageContext.directory,
-				stageContext.isUSDZ,
-				importSettings,
-				options,
-				options.sourceIdentifier,
-				true);
-			preprocessedForAssembly = true;
-
-			if (BuildAssetAssemblyMeshesFromPreprocessedData(
-				stage,
-				stageContext,
-				importSettings,
-				options,
-				options.sourceIdentifier,
-				geomTimeCode,
-				assetAssemblyBuckets,
-				assetAssemblyMeshes)) {
-				spdlog::info(
-					"USD whole-asset CLod assembly built: buckets={}, renderables={}.",
-					assetAssemblyBuckets.size(),
-					assetAssemblyMeshes.size());
-				auto scene = CreateCollapsedAssetAssemblyScene(assetAssemblyMeshes, assetAssemblyBuckets);
-				loadingCache.Clear();
-				return scene;
-			}
+			spdlog::warn(
+				"USD whole-asset CLod assembly cache miss for {} bucket(s); falling back to expanded CPU-side instancing.",
+				assetAssemblyBuckets.size());
 		}
 
 		{
@@ -6895,19 +6916,20 @@ namespace USDLoader {
 			if (!assetAssemblyFallbackReason.empty()) {
 				spdlog::warn("USD whole-asset CLod assembly fallback: {}", assetAssemblyFallbackReason);
 			}
+			else if (!assetAssemblyBuckets.empty()) {
+				spdlog::warn("USD whole-asset CLod assembly fallback: full assembly cache was missing.");
+			}
 			else {
 				spdlog::warn("USD whole-asset CLod assembly fallback: cache/build path did not produce renderables.");
 			}
-			if (!preprocessedForAssembly) {
-				PreprocessAllMeshes(
-					stage,
-					stageContext.metersPerUnit,
-					stageContext.directory,
-					stageContext.isUSDZ,
-					importSettings,
-					options,
-					options.sourceIdentifier);
-			}
+			PreprocessAllMeshes(
+				stage,
+				stageContext.metersPerUnit,
+				stageContext.directory,
+				stageContext.isUSDZ,
+				importSettings,
+				options,
+				options.sourceIdentifier);
 
 			auto scene = std::make_shared<Scene>();
 			ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);

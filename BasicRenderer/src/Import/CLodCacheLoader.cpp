@@ -2,6 +2,8 @@
 
 #include "Import/CLodCache.h"
 
+#include <atomic>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -220,8 +222,40 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 	auto cached = CLodCache::TryLoad(cacheKey, buildHash);
 	TracyPlot("CLOD.Cache.TryLoadPrebuilt.Hit", cached.has_value() ? int64_t{ 1 } : int64_t{ 0 });
 	if (!cached.has_value()) {
+		static std::atomic<uint32_t> loggedMisses{ 0u };
+		const uint32_t logIndex = loggedMisses.fetch_add(1u, std::memory_order_relaxed);
+		if (logIndex < 128u) {
+			std::error_code metadataEc;
+			std::error_code containerEc;
+			const bool metadataExists = std::filesystem::exists(lookup.metadataPath, metadataEc);
+			const bool containerExists = std::filesystem::exists(lookup.containerPath, containerEc);
+			spdlog::info(
+				"CLod cache MISS src='{}' prim='{}' subset='{}' hash=0x{:016X} metadata='{}' metadataExists={} container='{}' containerExists={}",
+				identity.sourceIdentifier,
+				identity.primPath,
+				identity.subsetName,
+				buildHash,
+				ws2s(lookup.metadataPath),
+				metadataExists,
+				ws2s(lookup.containerPath),
+				containerExists);
+		}
 		spdlog::debug("  -> cache not found on disk.");
 		return std::nullopt;
+	}
+
+	{
+		static std::atomic<uint32_t> loggedHits{ 0u };
+		const uint32_t logIndex = loggedHits.fetch_add(1u, std::memory_order_relaxed);
+		if (logIndex < 32u) {
+			spdlog::info(
+				"CLod cache HIT src='{}' prim='{}' subset='{}' hash=0x{:016X} metadata='{}'",
+				identity.sourceIdentifier,
+				identity.primPath,
+				identity.subsetName,
+				buildHash,
+				ws2s(lookup.metadataPath));
+		}
 	}
 
 	spdlog::debug("  -> cache HIT (groups={}).", cached->prebuiltData.groups.size());

@@ -3974,6 +3974,7 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.unloadFailed = std::max(max5s.unloadFailed, sample.stats.unloadFailed);
 
             max5s.pendingCpuRequests = std::max(max5s.pendingCpuRequests, sample.stats.pendingCpuRequests);
+            max5s.waitingForPagesRequests = std::max(max5s.waitingForPagesRequests, sample.stats.waitingForPagesRequests);
             max5s.inProgressRequests = std::max(max5s.inProgressRequests, sample.stats.inProgressRequests);
             max5s.diskIoRequests = std::max(max5s.diskIoRequests, sample.stats.diskIoRequests);
             max5s.pendingCommitGroups = std::max(max5s.pendingCommitGroups, sample.stats.pendingCommitGroups);
@@ -4057,8 +4058,9 @@ inline void Menu::DrawCLodTelemetryWindow() {
             m_clodStreamingOpsLatest.unloadUnique,
             m_clodStreamingOpsLatest.unloadApplied,
             m_clodStreamingOpsLatest.unloadFailed);
-        ImGui::Text("CPU backlog: pending=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+        ImGui::Text("CPU backlog: pending=%u waitingPages=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
             m_clodStreamingOpsLatest.pendingCpuRequests,
+            m_clodStreamingOpsLatest.waitingForPagesRequests,
             m_clodStreamingOpsLatest.inProgressRequests,
             m_clodStreamingOpsLatest.diskIoRequests,
             m_clodStreamingOpsLatest.readyCompletions,
@@ -4128,8 +4130,9 @@ inline void Menu::DrawCLodTelemetryWindow() {
             max5s.unloadUnique,
             max5s.unloadApplied,
             max5s.unloadFailed);
-        ImGui::Text("CPU backlog max: pending=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
+        ImGui::Text("CPU backlog max: pending=%u waitingPages=%u inProgress=%u diskIo=%u readyCompletions=%u commitPending=%u",
             max5s.pendingCpuRequests,
+            max5s.waitingForPagesRequests,
             max5s.inProgressRequests,
             max5s.diskIoRequests,
             max5s.readyCompletions,

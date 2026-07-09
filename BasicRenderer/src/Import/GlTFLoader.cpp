@@ -129,23 +129,6 @@ constexpr uint32_t kGlbJsonChunkType = 0x4E4F534A;
 constexpr uint32_t kGlbBinChunkType = 0x004E4942;
 constexpr uint32_t kMaterialTextureMaxAnisotropy = 16;
 
-TextureProcessingSettings MakeGlTFMaterialTextureProcessingSettings(
-    TextureSemantic semantic,
-    bool preferSRGB,
-    const std::string& sourceIdentity,
-    bool preservePackedChannels = false,
-    NormalMapConvention normalConvention = NormalMapConvention::DirectX)
-{
-    TextureProcessingSettings settings = MakeMaterialTextureProcessingSettings(
-        semantic,
-        preferSRGB,
-        sourceIdentity,
-        preservePackedChannels,
-        normalConvention);
-    settings.allowCpuBootstrapBeforeAsyncProcessing = true;
-    return settings;
-}
-
 bool GltfMaterialDebugLoggingEnabled() {
     static const bool enabled = [] {
         char* value = nullptr;
@@ -999,7 +982,7 @@ std::shared_ptr<TextureAsset> LoadTexture(
     TextureFileMeta cacheProbeMeta{};
     cacheProbeMeta.filePath = cacheProbePath.string();
     cacheProbeMeta.preferSRGB = preferSRGB;
-    cacheProbeMeta.processing = MakeGlTFMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention);
+    cacheProbeMeta.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, cacheKey, preservePackedChannels, normalConvention);
 
     const std::string sharedCacheKey = cacheKey;
 

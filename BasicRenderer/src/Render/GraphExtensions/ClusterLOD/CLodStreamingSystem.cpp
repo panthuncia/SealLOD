@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -18,8 +19,6 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingFeedbackSortPass.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingReadbackCopyPass.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodAsyncUploadPass.h"
-#include "Render/GraphExtensions/ClusterLOD/CLodDirectStorageCompletionWaitPass.h"
-#include "Render/GraphExtensions/ClusterLOD/CLodDirectStorageLaunchPass.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "Managers/UploadInstance.h"
 #include "Interfaces/IDynamicDeclaredResources.h"
@@ -33,6 +32,13 @@
 #include "BuiltinResources.h"
 
 namespace {
+uint64_t ClodDiagNowMs()
+{
+    using Clock = std::chrono::steady_clock;
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
+}
+
 bool SarpClodImportDebugLoggingEnabled()
 {
     static const bool enabled = [] {
@@ -217,7 +223,7 @@ namespace {
             if (m_inputs.poolResolver) {
                 builder->WithCopyDest(*m_inputs.poolResolver);
             }
-            builder->PreferQueue(QueueKind::Copy);
+            builder->PreferQueue(QueueKind::Graphics);
         }
 
         void Setup() override {}
@@ -326,7 +332,7 @@ namespace {
                     builder->WithCopyDest(m_snapshot.sourceGroupMismatchDetailsStaging);
                 }
             }
-            builder->PreferQueue(QueueKind::Copy);
+            builder->PreferQueue(QueueKind::Graphics);
         }
 
         void Setup() override {}
@@ -833,9 +839,12 @@ CLodStreamingSystem::CLodStreamingSystem() {
         if (result == rhi::Result::Ok && m_streamingReadbackFencePtr) {
             m_streamingReadbackFenceHandle = m_streamingReadbackFencePtr.Get();
         }
-        result = device.CreateTimeline(m_directStorageLaunchFencePtr, 0, "CLodDirectStorageLaunchFence");
-        if (result == rhi::Result::Ok && m_directStorageLaunchFencePtr) {
-            m_directStorageLaunchFenceHandle = m_directStorageLaunchFencePtr.Get();
+        result = device.CreateTimeline(
+            m_streamingDirectStorageFencePtr,
+            kStreamingDirectStorageFenceReadyValue,
+            "CLodStreamingDirectStorageFence");
+        if (result == rhi::Result::Ok && m_streamingDirectStorageFencePtr) {
+            m_streamingDirectStorageFenceHandle = m_streamingDirectStorageFencePtr.Get();
         }
     }
 
@@ -906,23 +915,10 @@ void CLodStreamingSystem::Shutdown() {
         if (MeshManager* meshManager = m_getMeshManager()) {
             const auto [pendingLaunches, pendingUploads] = meshManager->GetPendingCLodDirectStorageCounts();
             if (pendingLaunches != 0u || pendingUploads != 0u) {
-                std::vector<ExternalTimelinePoint> waits;
-                meshManager->CollectCLodDirectStorageCompletionWaits(waits);
                 spdlog::warn(
-                    "CLod streaming shutdown with pending DirectStorage work: launches={} uploads={} completionWaits={}",
+                    "CLod streaming shutdown with pending DirectStorage work: launches={} uploads={}",
                     pendingLaunches,
-                    pendingUploads,
-                    waits.size());
-                for (std::size_t i = 0; i < waits.size(); ++i) {
-                    const auto handle = waits[i].timeline.GetHandle();
-                    spdlog::warn(
-                        "CLod streaming shutdown pending DirectStorage wait[{}]: timeline(idx={}, gen={}) value={} completed={}",
-                        i,
-                        handle.index,
-                        handle.generation,
-                        waits[i].value,
-                        waits[i].timeline.GetCompletedValue());
-                }
+                    pendingUploads);
             }
         }
     }
@@ -1223,6 +1219,12 @@ void CLodStreamingSystem::PublishStreamingFrameWorkForFrame() {
 
 void CLodStreamingSystem::RunStreamingServiceWork() {
     ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork");
+    const uint64_t serviceStartMs = ClodDiagNowMs();
+    uint64_t afterAcquireMs = serviceStartMs;
+    uint64_t afterDomainMs = serviceStartMs;
+    uint64_t afterPollMs = serviceStartMs;
+    uint64_t afterProcessMs = serviceStartMs;
+    uint64_t afterBitsMs = serviceStartMs;
     if (NvPerfCaptureSuppressesCLodStreaming()) {
         return;
     }
@@ -1232,6 +1234,7 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::AcquireServiceLock");
         serviceLock.lock();
     }
+    afterAcquireMs = ClodDiagNowMs();
 
     MeshManager* meshManager = nullptr;
     {
@@ -1248,26 +1251,53 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingDomainEvents");
         ProcessStreamingDomainEvents();
     }
+    afterDomainMs = ClodDiagNowMs();
 
     if (meshManager != nullptr) {
         {
             ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PollCompletedReadbackSlots");
             PollCompletedReadbackSlots();
         }
+        afterPollMs = ClodDiagNowMs();
         {
             ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::ProcessStreamingRequestsBudgeted");
             ProcessStreamingRequestsBudgeted();
         }
+        afterProcessMs = ClodDiagNowMs();
+    }
+    else {
+        afterPollMs = afterDomainMs;
+        afterProcessMs = afterDomainMs;
     }
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::QueuePendingNonResidentBitsUpload");
         QueuePendingNonResidentBitsUpload();
     }
+    afterBitsMs = ClodDiagNowMs();
 
     {
         ZoneScopedN("CLodStreamingSystem::RunStreamingServiceWork::PublishTelemetry");
         TracyPlot("CLodStreaming.Service.PendingDecodedGroups", static_cast<int64_t>(m_readbackBatchScratch.size()));
         TracyPlot("CLodStreaming.Service.PendingCpuRequests", static_cast<int64_t>(m_pendingStreamingRequestCount));
+    }
+
+    const uint64_t serviceEndMs = ClodDiagNowMs();
+    const uint64_t totalMs = serviceEndMs - serviceStartMs;
+    if (totalMs >= 100u) {
+        spdlog::warn(
+            "CLod streaming service slow: totalMs={} lockMs={} domainMs={} pollMs={} processMs={} bitsMs={} decodedScratch={} pendingCpu={} waitingForPages={} inProgress={} readyCompletions={} pendingCommit={}",
+            totalMs,
+            afterAcquireMs - serviceStartMs,
+            afterDomainMs - afterAcquireMs,
+            afterPollMs - afterDomainMs,
+            afterProcessMs - afterPollMs,
+            afterBitsMs - afterProcessMs,
+            static_cast<uint32_t>(m_readbackBatchScratch.size()),
+            m_pendingStreamingRequestCount,
+            m_waitingForPagesRequestCount,
+            m_streamingRequestsInProgressCount,
+            static_cast<uint32_t>(m_readyStreamingCompletionsByGroup.size()),
+            static_cast<uint32_t>(m_pendingResidencyCommitGroups.size()));
     }
 }
 
@@ -1341,9 +1371,44 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
 		m_streamingActiveGroupsBits,
 		m_streamingRuntimeState,
 		[this](std::vector<uint32_t>& outBits, uint32_t& outFirstWord) {
-            (void)outFirstWord;
+            std::lock_guard serviceLock(m_streamingServiceMutex);
             outBits.clear();
-            return false;
+            outFirstWord = 0u;
+            if (!m_streamingNonResidentBitsUploadPending) {
+                return false;
+            }
+
+            const uint32_t gpuWordCount = CLodBitsetWordCount(m_streamingGpuStorageGroupCapacity);
+            const uint32_t cpuWordCount = static_cast<uint32_t>(m_streamingNonResidentBitsCpu.size());
+            const uint32_t originalDirtyEnd = m_streamingNonResidentBitsDirtyEnd;
+            const uint32_t validWordCount = std::min(gpuWordCount, cpuWordCount);
+            const uint32_t begin = std::min(m_streamingNonResidentBitsDirtyBegin, validWordCount);
+            const uint32_t end = std::min(m_streamingNonResidentBitsDirtyEnd, validWordCount);
+            if (begin >= end) {
+                if (m_pendingStreamingGpuStorageGroupCapacity == 0u) {
+                    m_streamingNonResidentBitsUploadPending = false;
+                    m_streamingNonResidentBitsDirtyBegin = 0u;
+                    m_streamingNonResidentBitsDirtyEnd = 0u;
+                }
+                return false;
+            }
+
+            outBits.assign(
+                m_streamingNonResidentBitsCpu.begin() + begin,
+                m_streamingNonResidentBitsCpu.begin() + end);
+            outFirstWord = begin;
+            if (originalDirtyEnd > gpuWordCount) {
+                m_streamingNonResidentBitsUploadPending = true;
+                m_streamingNonResidentBitsDirtyBegin = gpuWordCount;
+                m_streamingNonResidentBitsDirtyEnd = originalDirtyEnd;
+            }
+            else {
+                m_streamingNonResidentBitsUploadPending = false;
+                m_streamingNonResidentBitsDirtyBegin = 0u;
+                m_streamingNonResidentBitsDirtyEnd = 0u;
+            }
+            RecordNonResidentBitsUploadQueued();
+            return true;
 		},
 		[this](std::vector<uint32_t>& outBits, uint32_t& outActiveScanCount) {
             std::lock_guard publishLock(m_streamingPublishMutex);
@@ -1422,6 +1487,30 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
                 }
 
                 if (selectedSlot == UINT32_MAX) {
+                    static uint64_t s_lastNoReadbackSlotLogMs = 0u;
+                    const uint64_t nowMs = ClodDiagNowMs();
+                    if (nowMs >= s_lastNoReadbackSlotLogMs + 1000u) {
+                        s_lastNoReadbackSlotLogMs = nowMs;
+                        uint32_t inFlightSlots = 0u;
+                        uint64_t oldestArmedAgeMs = 0u;
+                        const uint64_t completedFence = m_streamingReadbackFenceHandle.GetCompletedValue();
+                        for (const auto& slot : m_readbackStagingSlots) {
+                            if (!slot.inFlight) {
+                                continue;
+                            }
+                            ++inFlightSlots;
+                            if (slot.armedMs != 0u) {
+                                oldestArmedAgeMs = std::max(oldestArmedAgeMs, nowMs - slot.armedMs);
+                            }
+                        }
+                        spdlog::warn(
+                            "CLod streaming readback ring full: slots={} inFlight={} submittedFence={} completedFence={} oldestSlotAgeMs={}",
+                            static_cast<uint32_t>(m_readbackStagingSlots.size()),
+                            inFlightSlots,
+                            m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
+                            completedFence,
+                            oldestArmedAgeMs);
+                    }
                     return false;
                 }
 
@@ -1429,6 +1518,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
                     (selectedSlot + 1u) % static_cast<uint32_t>(m_readbackStagingSlots.size());
                 auto& slot = m_readbackStagingSlots[selectedSlot];
                 slot.fenceValue = 0;
+                slot.armedMs = 0;
                 slot.inFlight = true;
             }
 
@@ -1467,6 +1557,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
 
                 fenceValue = m_streamingReadbackFenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
                 armedSlot.fenceValue = fenceValue;
+                armedSlot.armedMs = ClodDiagNowMs();
             }
 
             if (SarpClodImportDebugLoggingEnabled()) {
@@ -1486,7 +1577,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
             readbackPass)
             .At(RenderGraph::ExternalInsertPoint::After(
                 hasStreamingFeedbackSort ? "CLod::StreamingFeedbackSort" : "PresentPass"))
-            .PreferQueue(QueueKind::Copy));
+            .PreferQueue(QueueKind::Graphics));
 }
 
 void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) {
@@ -1503,76 +1594,13 @@ void CLodStreamingSystem::GatherFramePasses(RenderGraph& rg, std::vector<RenderG
     if (m_getMeshManager) {
         meshManager = m_getMeshManager();
     }
+
     if (SarpClodImportDebugLoggingEnabled() && meshManager != nullptr) {
         spdlog::info(
             "SARPDBG CLodStreaming GatherFramePasses pendingUploads={} pendingLaunches={} outPassesBefore={}",
             meshManager->HasPendingCLodDirectStorageUploads() ? 1 : 0,
             meshManager->HasPendingCLodDirectStorageLaunches() ? 1 : 0,
             outPasses.size());
-    }
-
-    if (meshManager != nullptr && meshManager->HasPendingCLodDirectStorageUploads()) {
-        std::vector<ExternalTimelinePoint> waits;
-        meshManager->CollectCLodDirectStorageCompletionWaits(waits);
-        if (!waits.empty()) {
-            CLodDirectStorageCompletionWaitInputs waitInputs{};
-            waitInputs.waits = std::move(waits);
-            if (PagePool* pool = meshManager->GetCLodPagePool()) {
-                auto slabGroup = pool->GetSlabResourceGroup();
-                if (auto pt = pool->GetPageTableBuffer()) {
-                    slabGroup->AddResource(pt);
-                }
-                waitInputs.targetSlabResolver = std::make_unique<ResourceGroupResolver>(slabGroup);
-            }
-            outPasses.push_back(
-                RenderGraph::ExternalPassDesc::Copy(
-                    "CLod::DirectStorageCompletionWait",
-                    std::make_shared<CLodDirectStorageCompletionWaitPass>(std::move(waitInputs)))
-                    .At(RenderGraph::ExternalInsertPoint::Before("CLod::StreamingBeginFramePass"))
-                    .PreferQueue(QueueKind::Graphics));
-            if (SarpClodImportDebugLoggingEnabled()) {
-                spdlog::info("SARPDBG CLodStreaming emitted DirectStorageCompletionWait waits={}", waits.size());
-            }
-        }
-    }
-
-    if (meshManager != nullptr
-        && meshManager->HasPendingCLodDirectStorageLaunches()
-        && m_directStorageLaunchFenceHandle.IsValid()) {
-        CLodDirectStorageLaunchInputs launchInputs{};
-        if (PagePool* pool = meshManager->GetCLodPagePool()) {
-            auto slabGroup = pool->GetSlabResourceGroup();
-            if (auto pt = pool->GetPageTableBuffer()) {
-                slabGroup->AddResource(pt);
-            }
-            launchInputs.targetSlabResolver = std::make_unique<ResourceGroupResolver>(slabGroup);
-        }
-        launchInputs.launchCallback = [this, meshManager]() -> PassReturn {
-            if (!m_directStorageLaunchFenceHandle.IsValid()) {
-                return {};
-            }
-
-            std::lock_guard serviceLock(m_streamingServiceMutex);
-            const uint64_t fenceValue =
-                m_directStorageLaunchFenceCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-            meshManager->LaunchPendingCLodDirectStorageUploads(
-                m_directStorageLaunchFenceHandle,
-                fenceValue);
-
-            PassReturn ret{};
-            ret.externalSignalsAfterCompletion.push_back({ m_directStorageLaunchFenceHandle, fenceValue });
-            return ret;
-        };
-
-        outPasses.push_back(
-            RenderGraph::ExternalPassDesc::Copy(
-                "CLod::DirectStorageLaunch",
-                std::make_shared<CLodDirectStorageLaunchPass>(std::move(launchInputs)))
-                .At(RenderGraph::ExternalInsertPoint::After("PresentPass"))
-                .PreferQueue(QueueKind::Graphics));
-        if (SarpClodImportDebugLoggingEnabled()) {
-            spdlog::info("SARPDBG CLodStreaming emitted DirectStorageLaunch");
-        }
     }
 
 }
@@ -1835,6 +1863,16 @@ bool CLodStreamingSystem::TryQueuePendingLoadRequest(const CLodStreamingRequest&
                 CLodStreamingRequest pendingReq = req;
                 pendingReq.groupGlobalIndex = groupIndex;
                 PushOrUpdatePendingStreamingRequest(pendingReq, newPriority);
+            } else if (groupIndex < m_streamingRequestStateByGroup.size()
+                && m_streamingRequestStateByGroup[groupIndex] == StreamingRequestState::WaitingForPages) {
+                PendingStreamingRequest pending{};
+                pending.request = req;
+                pending.request.groupGlobalIndex = groupIndex;
+                pending.priority = newPriority;
+                pending.generation = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+                    ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+                    : 0u;
+                ParkStreamingRequestWaitingForPages(pending);
             } else {
                 SetPendingLoadPriority(groupIndex, newPriority);
             }
@@ -2317,7 +2355,7 @@ void CLodStreamingSystem::RecordStreamingUploadQueued(uint32_t groupIndex, uint6
     if (diag.uploadQueuedTick == 0u) {
         diag.uploadQueuedTick = m_streamingDiagnosticTick;
         ++m_streamingDiagnosticsUploadQueuedGroupsThisFrame;
-        if (diag.firstRequestTick != 0u || m_streamingDiagnosticTick == 0u) {
+        if (diag.active) {
             const uint32_t ticks = static_cast<uint32_t>(
                 std::min<uint64_t>(m_streamingDiagnosticTick - diag.firstRequestTick, UINT32_MAX));
             ++m_streamingDiagnosticsRequestToUploadSamplesThisFrame;
@@ -2451,10 +2489,30 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
         }
     }
     stats.pendingCpuRequests = m_pendingStreamingRequestCount;
+    stats.pendingCpuHeapRequests = static_cast<uint32_t>(m_pendingStreamingRequests.size());
+    stats.waitingForPagesRequests = m_waitingForPagesRequestCount;
     stats.inProgressRequests = m_streamingRequestsInProgressCount;
     stats.diskIoRequests = diskIoCount;
     stats.pendingCommitGroups = static_cast<uint32_t>(m_pendingResidencyCommitGroups.size());
     stats.readyCompletions = static_cast<uint32_t>(m_readyStreamingCompletionsByGroup.size());
+
+    for (const PendingStreamingRequest& pending : m_pendingStreamingRequests) {
+        const uint32_t groupIndex = pending.request.groupGlobalIndex;
+        if (groupIndex >= m_streamingDiagnosticsByGroup.size()) {
+            continue;
+        }
+        const auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
+        if (!diag.active) {
+            continue;
+        }
+        const uint64_t queuedTick = diag.cpuQueuedTick != 0u ? diag.cpuQueuedTick : diag.firstRequestTick;
+        const uint32_t age = static_cast<uint32_t>(
+            std::min<uint64_t>(m_streamingDiagnosticTick - queuedTick, UINT32_MAX));
+        if (age > stats.pendingCpuMaxAgeTicks) {
+            stats.pendingCpuMaxAgeTicks = age;
+            stats.pendingCpuMaxAgeGroup = groupIndex;
+        }
+    }
 
     constexpr uint32_t kOutlierTicks = 180u;
     const bool hasOutlier =
@@ -2462,7 +2520,9 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
         stats.pendingCpuMaxAgeTicks >= kOutlierTicks ||
         stats.diskIoMaxAgeTicks >= kOutlierTicks ||
         stats.pendingCommitMaxAgeTicks >= kOutlierTicks;
-    if (hasOutlier && m_streamingDiagnosticTick >= m_streamingDiagnosticsLastOutlierLogTick + 120u) {
+    if (hasOutlier &&
+        (m_streamingDiagnosticsLastOutlierLogTick == 0u ||
+            m_streamingDiagnosticTick >= m_streamingDiagnosticsLastOutlierLogTick + 120u)) {
         m_streamingDiagnosticsLastOutlierLogTick = m_streamingDiagnosticTick;
         spdlog::warn(
             "CLod streaming latency diag[tick={}]: req->resident worst={} group={} samples={} req->upload worst={} group={} pendingCpuMax={} group={} diskIoMax={} group={} commitMax={} group={} pendingCpu={} inProgress={} diskIo={} pendingCommit={} readyCompletions={} preallocDeferrals={} promotionDeferrals={}",
@@ -2485,6 +2545,65 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
             stats.readyCompletions,
             stats.preallocationDeferrals,
             stats.promotionDeferrals);
+    }
+
+    const bool hasTimingActivity =
+        stats.requestToUploadSamples != 0u ||
+        stats.requestToResidentSamples != 0u ||
+        stats.pendingCpuRequests != 0u ||
+        stats.waitingForPagesRequests != 0u ||
+        stats.inProgressRequests != 0u ||
+        stats.diskIoRequests != 0u ||
+        stats.pendingCommitGroups != 0u ||
+        stats.readyCompletions != 0u ||
+        stats.preallocationDeferrals != 0u ||
+        stats.promotionDeferrals != 0u ||
+        stats.uploadQueuedGroups != 0u;
+    if (hasTimingActivity &&
+        (m_streamingDiagnosticsLastPeriodicLogTick == 0u ||
+            m_streamingDiagnosticTick >= m_streamingDiagnosticsLastPeriodicLogTick + 120u)) {
+        m_streamingDiagnosticsLastPeriodicLogTick = m_streamingDiagnosticTick;
+        spdlog::info(
+            "CLod streaming timing[tick={}]: decoded={} queued={} req->upload avg={} worst={} group={} samples={} req->resident avg={} worst={} group={} samples={} disk avg={} worst={} upload->resident avg={} worst={} commit->resident avg={} worst={} pendingCpu={} heap={} waitingForPages={} maxAge={} group={} inProgress={} diskIo={} maxAge={} group={} meshQueued={} meshQueuedOrInFlight={} meshDispatched={} pendingDsLaunches={} pendingDsUploads={} pendingCommit={} maxAge={} group={} readyCompletions={} preallocDeferrals={} promotionDeferrals={} uploadQueuedGroups={} uploadQueuedBytes={}",
+            m_streamingDiagnosticTick,
+            stats.decodedRequests,
+            stats.queuedLoadRequests,
+            stats.requestToUploadAvgTicks,
+            stats.requestToUploadWorstTicks,
+            stats.requestToUploadWorstGroup,
+            stats.requestToUploadSamples,
+            stats.requestToResidentAvgTicks,
+            stats.requestToResidentWorstTicks,
+            stats.requestToResidentWorstGroup,
+            stats.requestToResidentSamples,
+            stats.diskQueueToCompleteAvgTicks,
+            stats.diskQueueToCompleteWorstTicks,
+            stats.uploadToResidentAvgTicks,
+            stats.uploadToResidentWorstTicks,
+            stats.commitToResidentAvgTicks,
+            stats.commitToResidentWorstTicks,
+            stats.pendingCpuRequests,
+            stats.pendingCpuHeapRequests,
+            stats.waitingForPagesRequests,
+            stats.pendingCpuMaxAgeTicks,
+            stats.pendingCpuMaxAgeGroup,
+            stats.inProgressRequests,
+            stats.diskIoRequests,
+            stats.diskIoMaxAgeTicks,
+            stats.diskIoMaxAgeGroup,
+            stats.queuedRequests,
+            stats.queuedOrInFlightGroups,
+            stats.dispatchedOrInFlightGroups,
+            stats.pendingDirectStorageLaunches,
+            stats.pendingDirectStorageUploads,
+            stats.pendingCommitGroups,
+            stats.pendingCommitMaxAgeTicks,
+            stats.pendingCommitMaxAgeGroup,
+            stats.readyCompletions,
+            stats.preallocationDeferrals,
+            stats.promotionDeferrals,
+            stats.uploadQueuedGroups,
+            stats.uploadQueuedBytes);
     }
 }
 
@@ -2607,19 +2726,28 @@ void CLodStreamingSystem::RecordPageMapWrite(const MeshManager::CLodPageMapWrite
         (event.previousSlabDescriptorIndex != event.slabDescriptorIndex ||
             event.previousSlabByteOffset != event.slabByteOffset);
     if (overwroteNonZeroEntry) {
-        spdlog::warn(
-            "CLod page-map provenance: commit for group {} localGroup={} meshPage={} pageMapOffset={} groupsBase={} physicalPage={} overwrote nonzero map {}:{} with {}:{} tick={}",
-            event.groupGlobalIndex,
-            event.groupLocalIndex,
-            event.meshPageIndex,
-            event.pageMapOffset,
-            event.groupsBase,
-            event.physicalPage,
-            event.previousSlabDescriptorIndex,
-            event.previousSlabByteOffset,
-            event.slabDescriptorIndex,
-            event.slabByteOffset,
-            m_streamingDiagnosticTick);
+        static uint64_t s_lastOverwriteLogTick = 0u;
+        static uint32_t s_suppressedOverwriteCount = 0u;
+        ++s_suppressedOverwriteCount;
+        if (SarpClodImportDebugLoggingEnabled() ||
+            m_streamingDiagnosticTick >= s_lastOverwriteLogTick + 120u) {
+            spdlog::warn(
+                "CLod page-map provenance: commit overwrote nonzero map count={} latestGroup={} localGroup={} meshPage={} pageMapOffset={} groupsBase={} physicalPage={} previous={}:{} current={}:{} tick={}",
+                s_suppressedOverwriteCount,
+                event.groupGlobalIndex,
+                event.groupLocalIndex,
+                event.meshPageIndex,
+                event.pageMapOffset,
+                event.groupsBase,
+                event.physicalPage,
+                event.previousSlabDescriptorIndex,
+                event.previousSlabByteOffset,
+                event.slabDescriptorIndex,
+                event.slabByteOffset,
+                m_streamingDiagnosticTick);
+            s_suppressedOverwriteCount = 0u;
+            s_lastOverwriteLogTick = m_streamingDiagnosticTick;
+        }
     }
 }
 
@@ -3170,9 +3298,23 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
     };
 
     const uint32_t lruSize = m_pageLru.Size();
-    const uint32_t scanLimit = std::min<uint32_t>(
-        lruSize,
-        std::max<uint32_t>(64u, count > UINT32_MAX / 8u ? UINT32_MAX : count * 8u));
+    const uint32_t requestScanLimit = count > UINT32_MAX / 64u ? UINT32_MAX : count * 64u;
+    const uint32_t backlogPressure = std::max<uint32_t>(m_pendingStreamingRequestCount, m_streamingRequestsInProgressCount);
+    const uint32_t pressureScanLimit = std::clamp<uint32_t>(backlogPressure / 8u, 64u, 2048u);
+    const uint32_t desiredScanLimit = std::max<uint32_t>(
+        256u,
+        std::max<uint32_t>(requestScanLimit, pressureScanLimit));
+    const uint32_t scanLimit = std::min<uint32_t>(lruSize, desiredScanLimit);
+    if (outStats != nullptr) {
+        outStats->scanLimit = scanLimit;
+        outStats->evictionBudgetLimit = m_pagePopEvictionBudgetThisUpdate;
+        outStats->evictionsUsed = m_pagePopEvictionsThisUpdate;
+    }
+    const auto stampFinalStats = [&]() {
+        if (outStats != nullptr) {
+            outStats->evictionsUsed = m_pagePopEvictionsThisUpdate;
+        }
+    };
 
     {
         ZoneScopedN("CLodStreamingSystem::PopFreePages::ScanFreePages");
@@ -3198,6 +3340,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
     }
 
     if (pages.size() >= count) {
+        stampFinalStats();
         return pages;
     }
 
@@ -3276,6 +3419,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
         }
     }
 
+    stampFinalStats();
     return pages;
 }
 
@@ -3403,19 +3547,22 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                         }
                     }
                     spdlog::warn(
-                        "CLod streaming diag[tick={}]: preallocation failed for group {} missingPages={} acquired={} lruSize={} scanned={} reject(protected={}, pendingWrite={}, evictFailed={}, evictionBudget={}, dirtyMetadata={}) evicted={} freeClean={} pendingCpu={} inProgress={} residentGroups={} preallocGroups={} preallocFreshPages={}",
+                        "CLod streaming diag[tick={}]: preallocation failed for group {} missingPages={} acquired={} lruSize={} scanned={} scanLimit={} reject(protected={}, pendingWrite={}, evictFailed={}, evictionBudget={}, dirtyMetadata={}) evicted={} evictionBudgetLimit={} evictionsUsed={} freeClean={} pendingCpu={} inProgress={} residentGroups={} preallocGroups={} preallocFreshPages={}",
                         m_streamingDiagnosticTick,
                         groupIndex,
                         missingCount,
                         static_cast<uint32_t>(freshPages.size()),
                         m_pageLru.Size(),
                         popStats.scanned,
+                        popStats.scanLimit,
                         popStats.rejectedProtected,
                         popStats.rejectedPendingWrite,
                         popStats.rejectedEvictFailed,
                         popStats.rejectedEvictionBudget,
                         popStats.rejectedDirtyMetadata,
                         popStats.evicted,
+                        popStats.evictionBudgetLimit,
+                        popStats.evictionsUsed,
                         popStats.freeClean,
                         m_pendingStreamingRequestCount,
                         m_streamingRequestsInProgressCount,
@@ -4022,6 +4169,7 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_pendingLoadPriorityByGroup.resize(newCapacity, 0u);
     m_pendingStreamingRequestHeapIndexByGroup.resize(newCapacity, UINT32_MAX);
     m_pendingStreamingRequestGenerationByGroup.resize(newCapacity, 0u);
+    m_waitingForPagesRequestIndexByGroup.resize(newCapacity, UINT32_MAX);
     EnsureStreamingDiagnosticsCapacity(newCapacity);
     m_streamingStorageGroupCapacity = newCapacity;
 
@@ -4188,7 +4336,28 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
                 continue;
             }
 
-            const bool queued = meshManager->QueueCLodGroupDiskIO(groupIndex);
+            const MeshManager::CLodGroupStreamingInfo info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
+            PreAllocatedPages preAlloc{};
+            if (info.valid && info.pageCount > 0u) {
+                preAlloc = PreAllocatePagesForGroup(groupIndex, info, meshManager);
+                if (preAlloc.segmentCount == 0u) {
+                    SetGroupResidentBit(groupIndex, false);
+                    m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                    if (SarpClodImportDebugLoggingEnabled()) {
+                        spdlog::warn("SARPDBG CLodStreaming failed to preallocate pinned root group={}", groupIndex);
+                    }
+                    continue;
+                }
+                preAlloc.requestGeneration = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+                    ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+                    : 0u;
+                m_preAllocatedPagesByGroup[groupIndex] = preAlloc;
+            }
+
+            const bool queued = meshManager->QueueCLodGroupDiskIO(
+                groupIndex,
+                preAlloc.segmentNeedsFetch,
+                preAlloc.pagesBySegment);
             if (queued) {
                 ++queuedPinnedGroups;
                 MarkStreamingRequestDiskIo(groupIndex);
@@ -4197,7 +4366,10 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
                     spdlog::info("SARPDBG CLodStreaming queued pinned root group={}", groupIndex);
                 }
             } else {
-                const MeshManager::CLodGroupStreamingInfo info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
+                if (preAlloc.segmentCount != 0u) {
+                    ReleasePreAllocatedPages(preAlloc, meshManager);
+                    m_preAllocatedPagesByGroup.erase(groupIndex);
+                }
                 if (info.valid && info.pageCount == 0u) {
                     SetGroupResidentBit(groupIndex, true);
                 } else {
@@ -4313,7 +4485,28 @@ void CLodStreamingSystem::MarkStreamingRequestPending(uint32_t groupIndex) {
     if (state != StreamingRequestState::PendingCpu) {
         ++m_pendingStreamingRequestCount;
     }
+    if (state == StreamingRequestState::WaitingForPages && m_waitingForPagesRequestCount > 0u) {
+        --m_waitingForPagesRequestCount;
+    }
     state = StreamingRequestState::PendingCpu;
+}
+
+void CLodStreamingSystem::MarkStreamingRequestWaitingForPages(uint32_t groupIndex) {
+    if (groupIndex >= m_streamingStorageGroupCapacity) {
+        EnsureStreamingStorageCapacity(groupIndex + 1u);
+    }
+
+    auto& state = m_streamingRequestStateByGroup[groupIndex];
+    if (state == StreamingRequestState::None) {
+        ++m_streamingRequestsInProgressCount;
+    }
+    if (state == StreamingRequestState::PendingCpu && m_pendingStreamingRequestCount > 0u) {
+        --m_pendingStreamingRequestCount;
+    }
+    if (state != StreamingRequestState::WaitingForPages) {
+        ++m_waitingForPagesRequestCount;
+    }
+    state = StreamingRequestState::WaitingForPages;
 }
 
 void CLodStreamingSystem::MarkStreamingRequestDiskIo(uint32_t groupIndex) {
@@ -4327,6 +4520,9 @@ void CLodStreamingSystem::MarkStreamingRequestDiskIo(uint32_t groupIndex) {
     }
     if (state == StreamingRequestState::PendingCpu && m_pendingStreamingRequestCount > 0u) {
         --m_pendingStreamingRequestCount;
+    }
+    if (state == StreamingRequestState::WaitingForPages && m_waitingForPagesRequestCount > 0u) {
+        --m_waitingForPagesRequestCount;
     }
     state = StreamingRequestState::DiskIo;
     RecordStreamingDiskQueued(groupIndex);
@@ -4411,6 +4607,9 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
     if (state == StreamingRequestState::PendingCpu && m_pendingStreamingRequestCount > 0u) {
         --m_pendingStreamingRequestCount;
     }
+    if (state == StreamingRequestState::WaitingForPages && m_waitingForPagesRequestCount > 0u) {
+        --m_waitingForPagesRequestCount;
+    }
     if (m_streamingRequestsInProgressCount > 0u) {
         --m_streamingRequestsInProgressCount;
     }
@@ -4421,6 +4620,22 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
     }
     if (groupIndex < m_pendingStreamingRequestGenerationByGroup.size()) {
         ++m_pendingStreamingRequestGenerationByGroup[groupIndex];
+    }
+    if (groupIndex < m_waitingForPagesRequestIndexByGroup.size()) {
+        const uint32_t waitingIndex = m_waitingForPagesRequestIndexByGroup[groupIndex];
+        if (waitingIndex != UINT32_MAX &&
+            waitingIndex < m_waitingForPagesRequests.size() &&
+            m_waitingForPagesRequests[waitingIndex].request.groupGlobalIndex == groupIndex) {
+            if (waitingIndex + 1u != m_waitingForPagesRequests.size()) {
+                m_waitingForPagesRequests[waitingIndex] = m_waitingForPagesRequests.back();
+                const uint32_t movedGroup = m_waitingForPagesRequests[waitingIndex].request.groupGlobalIndex;
+                if (movedGroup < m_waitingForPagesRequestIndexByGroup.size()) {
+                    m_waitingForPagesRequestIndexByGroup[movedGroup] = waitingIndex;
+                }
+            }
+            m_waitingForPagesRequests.pop_back();
+        }
+        m_waitingForPagesRequestIndexByGroup[groupIndex] = UINT32_MAX;
     }
     RecordStreamingTerminal(groupIndex);
 }
@@ -4519,6 +4734,80 @@ void CLodStreamingSystem::PushOrUpdatePendingStreamingRequest(const CLodStreamin
         siftUp(heapIndex);
     } else if (priority < oldPriority) {
         siftDown(heapIndex);
+    }
+}
+
+void CLodStreamingSystem::ParkStreamingRequestWaitingForPages(const PendingStreamingRequest& pending) {
+    const uint32_t groupIndex = pending.request.groupGlobalIndex;
+    if (groupIndex >= m_streamingStorageGroupCapacity) {
+        EnsureStreamingStorageCapacity(groupIndex + 1u);
+    }
+    if (groupIndex >= m_streamingRequestStateByGroup.size()) {
+        return;
+    }
+
+    MarkStreamingRequestWaitingForPages(groupIndex);
+    SetPendingLoadPriority(groupIndex, pending.priority);
+
+    uint32_t waitingIndex = groupIndex < m_waitingForPagesRequestIndexByGroup.size()
+        ? m_waitingForPagesRequestIndexByGroup[groupIndex]
+        : UINT32_MAX;
+    if (waitingIndex != UINT32_MAX &&
+        waitingIndex < m_waitingForPagesRequests.size() &&
+        m_waitingForPagesRequests[waitingIndex].request.groupGlobalIndex == groupIndex) {
+        m_waitingForPagesRequests[waitingIndex] = pending;
+        return;
+    }
+
+    PendingStreamingRequest parked = pending;
+    parked.generation = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+        ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+        : pending.generation;
+    m_waitingForPagesRequests.push_back(parked);
+    waitingIndex = static_cast<uint32_t>(m_waitingForPagesRequests.size() - 1u);
+    m_waitingForPagesRequestIndexByGroup[groupIndex] = waitingIndex;
+}
+
+void CLodStreamingSystem::RequeueWaitingForPagesRequests(uint32_t maxRequests) {
+    if (maxRequests == 0u || m_waitingForPagesRequests.empty()) {
+        return;
+    }
+
+    uint32_t requeued = 0u;
+    uint32_t scanCount = std::min<uint32_t>(maxRequests, static_cast<uint32_t>(m_waitingForPagesRequests.size()));
+    while (scanCount-- > 0u && !m_waitingForPagesRequests.empty()) {
+        PendingStreamingRequest pending = m_waitingForPagesRequests.back();
+        m_waitingForPagesRequests.pop_back();
+
+        const uint32_t groupIndex = pending.request.groupGlobalIndex;
+        if (groupIndex < m_waitingForPagesRequestIndexByGroup.size()) {
+            m_waitingForPagesRequestIndexByGroup[groupIndex] = UINT32_MAX;
+        }
+        if (groupIndex >= m_streamingRequestStateByGroup.size() ||
+            groupIndex >= m_pendingStreamingRequestGenerationByGroup.size()) {
+            continue;
+        }
+        if (m_streamingRequestStateByGroup[groupIndex] != StreamingRequestState::WaitingForPages) {
+            continue;
+        }
+        if (pending.generation != m_pendingStreamingRequestGenerationByGroup[groupIndex]) {
+            ClearStreamingRequestInProgress(groupIndex);
+            ClearPendingLoadPriority(groupIndex);
+            continue;
+        }
+        if (!IsGroupActive(groupIndex) || IsGroupResident(groupIndex)) {
+            ClearStreamingRequestInProgress(groupIndex);
+            ClearPendingLoadPriority(groupIndex);
+            continue;
+        }
+
+        const uint32_t priority = std::max<uint32_t>(pending.priority, GetPendingLoadPriority(groupIndex));
+        PushOrUpdatePendingStreamingRequest(pending.request, priority);
+        ++requeued;
+    }
+
+    if (requeued != 0u) {
+        TracyPlot("CLodStreaming.Service.RequeuedWaitingForPages", static_cast<int64_t>(requeued));
     }
 }
 
@@ -4768,8 +5057,33 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
 
                 completion.segmentNeedsFetch = preAlloc.segmentNeedsFetch;
                 completion.preAllocatedPages = preAlloc.pagesBySegment;
-                completion.pageAllocations.resize(expectedPageCount);
-                completion.pageMapEntries.resize(expectedPageCount);
+                const bool payloadGpuReady =
+                    completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::GpuPagesReady;
+                const bool payloadUsesExistingPages =
+                    completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::ReusedExistingPages;
+                const bool payloadNeedsCpuUpload =
+                    completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::CpuPageBlobs;
+                if (payloadGpuReady) {
+                    if (completion.pageAllocations.size() != expectedPageCount ||
+                        completion.pageMapEntries.size() != expectedPageCount ||
+                        completion.preAllocatedPages.size() != expectedPageCount) {
+                        spdlog::warn(
+                            "CLod streaming: dropping DirectStorage completion for group {} because ready GPU payload has invalid render metadata (allocations={}, pageMapEntries={}, preAllocated={}, expected={})",
+                            groupIndex,
+                            completion.pageAllocations.size(),
+                            completion.pageMapEntries.size(),
+                            completion.preAllocatedPages.size(),
+                            expectedPageCount);
+                        ReleasePreAllocatedPages(preAlloc, meshManager);
+                        m_pendingResidencyCommitGroups.erase(groupIndex);
+                        clearCompletionRequestState();
+                        continue;
+                    }
+                }
+                else {
+                    completion.pageAllocations.resize(expectedPageCount);
+                    completion.pageMapEntries.resize(expectedPageCount);
+                }
 
                 PagePool* pool = meshManager->GetCLodPagePool();
                 bool payloadValid = true;
@@ -4777,9 +5091,11 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const uint32_t page = preAlloc.pagesBySegment[seg];
                     PagePool::PageAllocation allocation{ page, 1u };
-                    completion.pageAllocations[seg] = allocation;
+                    if (!payloadGpuReady) {
+                        completion.pageAllocations[seg] = allocation;
+                    }
                     const bool needsFetch = seg < preAlloc.segmentNeedsFetch.size() && preAlloc.segmentNeedsFetch[seg];
-                    if (needsFetch) {
+                    if (needsFetch && payloadNeedsCpuUpload) {
                         if (pool == nullptr ||
                             seg >= completion.pageBlobs.size() ||
                             completion.pageBlobs[seg].empty() ||
@@ -4799,8 +5115,18 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         RecordStreamingUploadQueued(groupIndex, static_cast<uint64_t>(completion.pageBlobs[seg].size()));
                         queuedPayloadUpload = true;
                     }
-                    completion.pageMapEntries[seg].slabDescriptorIndex = pool != nullptr ? pool->GetSlabDescriptorIndex(allocation) : 0u;
-                    completion.pageMapEntries[seg].slabByteOffset = pool != nullptr ? static_cast<uint32_t>(pool->PageToSlabByteOffset(page)) : 0u;
+                    else if (needsFetch && !payloadGpuReady && !payloadUsesExistingPages) {
+                        spdlog::warn(
+                            "CLod streaming: dropping completion for group {} because segment {} needs fetch but payload kind is invalid",
+                            groupIndex,
+                            seg);
+                        payloadValid = false;
+                        break;
+                    }
+                    if (!payloadGpuReady) {
+                        completion.pageMapEntries[seg].slabDescriptorIndex = pool != nullptr ? pool->GetSlabDescriptorIndex(allocation) : 0u;
+                        completion.pageMapEntries[seg].slabByteOffset = pool != nullptr ? static_cast<uint32_t>(pool->PageToSlabByteOffset(page)) : 0u;
+                    }
                 }
                 if (!payloadValid) {
                     ReleasePreAllocatedPages(preAlloc, meshManager);
@@ -4808,7 +5134,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     clearCompletionRequestState();
                     continue;
                 }
-                if (!queuedPayloadUpload && completion.fetchedPageCount != 0u) {
+                if ((!queuedPayloadUpload || payloadGpuReady) && completion.fetchedPageCount != 0u) {
                     RecordStreamingUploadQueued(groupIndex, completion.totalStreamedBytes);
                 }
 
@@ -5021,27 +5347,47 @@ void CLodStreamingSystem::StreamingWorkerMain() {
             lastProcessed = discardedThrough;
         }
 
-        const uint64_t target = m_streamingReadbackFenceCounter.load(std::memory_order_acquire);
-        const bool hasFenceWork = target > lastProcessed;
+        const uint64_t submittedTarget = m_streamingReadbackFenceCounter.load(std::memory_order_acquire);
+        const bool hasFenceWork = submittedTarget > lastProcessed;
         bool readbackReady = false;
+        uint64_t decodeTarget = lastProcessed;
         if (hasFenceWork) {
             ZoneScopedN("CLodStreamingWorker::WaitReadbackFence");
+            uint64_t completed = m_streamingReadbackFenceHandle.GetCompletedValue();
+            if (completed > lastProcessed) {
+                decodeTarget = std::min(completed, submittedTarget);
+                readbackReady = true;
+            }
             if (SarpClodImportDebugLoggingEnabled()) {
                 spdlog::info(
-                    "SARPDBG StreamingWorker wait-readback target={} lastProcessed={}",
-                    target,
-                    lastProcessed);
+                    "SARPDBG StreamingWorker wait-readback submittedTarget={} lastProcessed={} completed={} decodeTarget={}",
+                    submittedTarget,
+                    lastProcessed,
+                    completed,
+                    decodeTarget);
             }
             uint32_t waitTimeouts = 0u;
-            // HostWait with a timeout so we can check for shutdown and frame service work periodically.
-            while (!m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-                auto result = m_streamingReadbackFenceHandle.HostWait(target, 100);
+            // Decode already-completed readbacks instead of waiting for the newest submitted fence.
+            // If nothing is complete yet, wait only for the next unprocessed value so feedback stays
+            // low-latency while the copy queue is backlogged.
+            while (!readbackReady && !m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
+                if (m_streamingServiceRequested.load(std::memory_order_acquire)) {
+                    break;
+                }
+
+                const uint64_t waitTarget = lastProcessed + 1u;
+                auto result = m_streamingReadbackFenceHandle.HostWait(waitTarget, 10);
                 if (result != rhi::Result::WaitTimeout) {
-                    readbackReady = true;
+                    completed = m_streamingReadbackFenceHandle.GetCompletedValue();
+                    decodeTarget = std::min(std::max(completed, waitTarget), submittedTarget);
+                    readbackReady = decodeTarget > lastProcessed;
                     if (SarpClodImportDebugLoggingEnabled() && waitTimeouts != 0u) {
                         spdlog::info(
-                            "SARPDBG StreamingWorker readback-ready target={} waitTimeouts={}",
-                            target,
+                            "SARPDBG StreamingWorker readback-ready submittedTarget={} waitTarget={} completed={} decodeTarget={} waitTimeouts={}",
+                            submittedTarget,
+                            waitTarget,
+                            completed,
+                            decodeTarget,
                             waitTimeouts);
                     }
                     break;
@@ -5052,8 +5398,9 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                 }
                 if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 100u) == 0u) {
                     spdlog::warn(
-                        "CLod StreamingWorker readback fence wait timed out: target={} waitTimeouts={} completed={}",
-                        target,
+                        "CLod StreamingWorker readback fence wait timed out: submittedTarget={} waitTarget={} waitTimeouts={} completed={}",
+                        submittedTarget,
+                        waitTarget,
                         waitTimeouts,
                         m_streamingReadbackFenceHandle.GetCompletedValue());
                 }
@@ -5073,8 +5420,10 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                 uint32_t totalRequestCount = 0;
                 uint32_t totalUsedGroupsCount = 0;
                 uint32_t completedSlotCount = 0;
+                uint64_t oldestDecodedSlotAgeMs = 0u;
                 bool decodedAnyCompletedSlot = false;
                 const bool sortedFeedback = m_parallelSortAvailable;
+                const uint64_t decodeNowMs = ClodDiagNowMs();
 
                 auto beginDecodeGeneration = [](uint32_t& generation, std::vector<uint32_t>& seen) {
                     ++generation;
@@ -5088,11 +5437,14 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                 beginDecodeGeneration(m_decodeUsedSeenGeneration, m_decodeUsedSeenGenerationByGroup);
 
                 for (auto& slot : m_readbackStagingSlots) {
-                    if (!slot.inFlight || slot.fenceValue == 0 || slot.fenceValue > target) {
+                    if (!slot.inFlight || slot.fenceValue == 0 || slot.fenceValue > decodeTarget) {
                         continue;
                     }
                     decodedAnyCompletedSlot = true;
                     ++completedSlotCount;
+                    if (slot.armedMs != 0u) {
+                        oldestDecodedSlotAgeMs = std::max(oldestDecodedSlotAgeMs, decodeNowMs - slot.armedMs);
+                    }
 
                     // Map and read the load counter
                     uint32_t requestCount = 0;
@@ -5238,6 +5590,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     }
 
                     slot.inFlight = false;
+                    slot.armedMs = 0;
                 }
 
                 if (!sumSeenGroups.empty()) {
@@ -5270,13 +5623,104 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         m_decodedUsedGroupsBatch.push_back(g);
                     }
                 }
+                if (!decodedRequests.empty() || !decodedUsedGroups.empty()) {
+                    RequestStreamingFrameWork();
+                }
+
+                if (decodedAnyCompletedSlot) {
+                    static uint64_t s_lastDelayedReadbackDecodeLogMs = 0u;
+                    if (oldestDecodedSlotAgeMs >= 500u && decodeNowMs >= s_lastDelayedReadbackDecodeLogMs + 1000u) {
+                        s_lastDelayedReadbackDecodeLogMs = decodeNowMs;
+                        spdlog::warn(
+                            "CLod streaming delayed readback decode: decodeTarget={} submittedFence={} completedFence={} slots={} oldestSlotAgeMs={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={}",
+                            decodeTarget,
+                            m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
+                            m_streamingReadbackFenceHandle.GetCompletedValue(),
+                            completedSlotCount,
+                            oldestDecodedSlotAgeMs,
+                            totalRequestCount,
+                            static_cast<uint32_t>(decodedRequests.size()),
+                            totalUsedGroupsCount,
+                            static_cast<uint32_t>(decodedUsedGroups.size()));
+                    }
+
+                    static uint32_t s_consecutiveZeroRequestReadbackBatches = 0u;
+                    static uint32_t s_consecutiveZeroUsedGroupReadbackBatches = 0u;
+                    static uint64_t s_lastZeroRequestFeedbackLogMs = 0u;
+                    if (totalRequestCount == 0u) {
+                        ++s_consecutiveZeroRequestReadbackBatches;
+                    }
+                    else {
+                        if (s_consecutiveZeroRequestReadbackBatches >= 30u) {
+                            spdlog::warn(
+                                "CLod streaming feedback resumed after zero-request streak: zeroBatches={} decodeTarget={} submittedFence={} completedFence={} slots={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={} activeScan={} sortedFeedback={}",
+                                s_consecutiveZeroRequestReadbackBatches,
+                                decodeTarget,
+                                m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
+                                m_streamingReadbackFenceHandle.GetCompletedValue(),
+                                completedSlotCount,
+                                totalRequestCount,
+                                static_cast<uint32_t>(decodedRequests.size()),
+                                totalUsedGroupsCount,
+                                static_cast<uint32_t>(decodedUsedGroups.size()),
+                                m_streamingActiveGroupScanCount,
+                                sortedFeedback ? 1 : 0);
+                        }
+                        s_consecutiveZeroRequestReadbackBatches = 0u;
+                    }
+
+                    if (totalUsedGroupsCount == 0u) {
+                        ++s_consecutiveZeroUsedGroupReadbackBatches;
+                    }
+                    else {
+                        s_consecutiveZeroUsedGroupReadbackBatches = 0u;
+                    }
+
+                    if (totalRequestCount == 0u && decodeNowMs >= s_lastZeroRequestFeedbackLogMs + 1000u) {
+                        s_lastZeroRequestFeedbackLogMs = decodeNowMs;
+                        spdlog::warn(
+                            "CLod streaming feedback zero requests: zeroRequestBatches={} zeroUsedGroupBatches={} decodeTarget={} submittedFence={} completedFence={} slots={} rawUsedGroups={} decodedUsedGroups={} activeScan={} sortedFeedback={}",
+                            s_consecutiveZeroRequestReadbackBatches,
+                            s_consecutiveZeroUsedGroupReadbackBatches,
+                            decodeTarget,
+                            m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
+                            m_streamingReadbackFenceHandle.GetCompletedValue(),
+                            completedSlotCount,
+                            totalUsedGroupsCount,
+                            static_cast<uint32_t>(decodedUsedGroups.size()),
+                            m_streamingActiveGroupScanCount,
+                            sortedFeedback ? 1 : 0);
+                    }
+
+                    static uint32_t s_consecutiveZeroRequestReadbacksWithVisibleGroups = 0u;
+                    if (totalRequestCount == 0u && totalUsedGroupsCount != 0u) {
+                        ++s_consecutiveZeroRequestReadbacksWithVisibleGroups;
+                    }
+                    else {
+                        s_consecutiveZeroRequestReadbacksWithVisibleGroups = 0u;
+                    }
+
+                    if (s_consecutiveZeroRequestReadbacksWithVisibleGroups == 60u ||
+                        (s_consecutiveZeroRequestReadbacksWithVisibleGroups > 60u &&
+                            s_consecutiveZeroRequestReadbacksWithVisibleGroups % 300u == 0u)) {
+                        spdlog::warn(
+                            "CLod streaming feedback produced no load requests for {} completed readback batch(es) while visible groups were reported; target={} slots={} rawUsedGroups={} decodedUsedGroups={} activeScan={} sortedFeedback={}",
+                            s_consecutiveZeroRequestReadbacksWithVisibleGroups,
+                            decodeTarget,
+                            completedSlotCount,
+                            totalUsedGroupsCount,
+                            static_cast<uint32_t>(decodedUsedGroups.size()),
+                            m_streamingActiveGroupScanCount,
+                            sortedFeedback ? 1 : 0);
+                    }
+                }
 
                 TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
                 TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
                 if (SarpClodImportDebugLoggingEnabled() && decodedAnyCompletedSlot) {
                     spdlog::info(
                         "SARPDBG StreamingWorker decoded target={} slots={} rawRequests={} decodedRequests={} rawUsedGroups={} decodedUsedGroups={} sortedFeedback={}",
-                        target,
+                        decodeTarget,
                         completedSlotCount,
                         totalRequestCount,
                         static_cast<uint32_t>(decodedRequests.size()),
@@ -5286,7 +5730,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                 }
             }
 
-            lastProcessed = target;
+            lastProcessed = decodeTarget;
         }
 
         if (m_streamingServiceRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -5307,9 +5751,12 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
     m_streamingCpuUploadBudgetRequests = std::max(m_streamingCpuUploadBudgetRequests, 1u);
     const uint32_t budget = m_streamingCpuUploadBudgetRequests;
     m_pagePopEvictionsThisUpdate = 0u;
+    const uint32_t requestScaledEvictionBudget = std::clamp<uint32_t>(budget / 8u, 16u, 512u);
+    const uint32_t backlogScaledEvictionBudget =
+        std::clamp<uint32_t>(m_streamingRequestsInProgressCount / 16u, 16u, 512u);
     m_pagePopEvictionBudgetThisUpdate = std::max<uint32_t>(
-        4u,
-        std::min<uint32_t>(16u, std::max<uint32_t>(budget / 4u, 1u)));
+        32u,
+        std::max(requestScaledEvictionBudget, backlogScaledEvictionBudget));
     CLodStreamingOperationStats frameStats{};
 
     MeshManager* meshManager = nullptr;
@@ -5328,6 +5775,10 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
             DrainRetiredPhysicalPages(meshManager);
         }
         {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::RequeueWaitingForPagesRequests");
+            RequeueWaitingForPagesRequests(std::max<uint32_t>(budget, 64u));
+        }
+        {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::CommitPendingResidencyPromotions");
             CommitPendingResidencyPromotions();
         }
@@ -5337,6 +5788,12 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 ZoneScopedN("CLodStreamingWorker::ProcessDiskStreamingIO");
                 meshManager->ProcessCLodDiskStreamingIO();
             }
+        }
+        if (m_streamingDirectStorageFenceHandle.IsValid() && meshManager->HasPendingCLodDirectStorageLaunches()) {
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::LaunchDirectStorageUploads");
+            meshManager->LaunchPendingCLodDirectStorageUploads(
+                m_streamingDirectStorageFenceHandle,
+                kStreamingDirectStorageFenceReadyValue);
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ApplyDiskStreamingCompletions");
@@ -5413,6 +5870,13 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                     || priority != GetPendingLoadPriority(groupIndex)
                     || groupIndex >= m_pendingStreamingRequestGenerationByGroup.size()
                     || pending.generation != m_pendingStreamingRequestGenerationByGroup[groupIndex]) {
+                    if (groupIndex < m_streamingRequestStateByGroup.size()
+                        && m_streamingRequestStateByGroup[groupIndex] == StreamingRequestState::PendingCpu
+                        && groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()
+                        && m_pendingStreamingRequestHeapIndexByGroup[groupIndex] == UINT32_MAX) {
+                        ClearStreamingRequestInProgress(groupIndex);
+                        ClearPendingLoadPriority(groupIndex);
+                    }
                     continue;
                 }
             }
@@ -5476,8 +5940,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                                 (m_streamingPinnedGroupsBitsCpu[wordAddress] & bitMask) != 0u) {
                                 m_streamingResidencyInitializedBitsCpu[wordAddress] &= ~bitMask;
                             }
-                            RequeuePendingStreamingRequest(pending);
-                            break;
+                            ParkStreamingRequestWaitingForPages(pending);
+                            processed++;
+                            continue;
                         }
                     }
                     paIt = m_preAllocatedPagesByGroup.emplace(groupIndex, std::move(preAlloc)).first;
@@ -5535,10 +6000,12 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
 
             {
                 ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::ApplyResults");
+                uint32_t queuedCount = 0u;
                 for (uint32_t i = 0; i < static_cast<uint32_t>(diskIoBatch.size()); ++i) {
                     const uint32_t groupIndex = diskIoBatch[i].groupIndex;
                     const bool queued = i < queuedByRequest.size() && queuedByRequest[i];
                     if (queued) {
+                        ++queuedCount;
                         MarkStreamingRequestDiskIo(groupIndex);
                         continue;
                     }
@@ -5552,6 +6019,35 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                     ClearStreamingRequestInProgress(groupIndex);
                     ClearPendingLoadPriority(groupIndex);
                 }
+
+                static uint64_t s_lastDiskQueueSummaryTick = 0u;
+                if (queuedCount != 0u &&
+                    (s_lastDiskQueueSummaryTick == 0u ||
+                        m_streamingDiagnosticTick >= s_lastDiskQueueSummaryTick + 120u)) {
+                    s_lastDiskQueueSummaryTick = m_streamingDiagnosticTick;
+                    const auto debugStats = meshManager->GetCLodStreamingDebugStats();
+                    spdlog::info(
+                        "CLod streaming disk queue[tick={}]: requested={} queued={} pendingCpu={} inProgress={} meshQueued={} meshQueuedOrInFlight={} meshDispatched={} readyCompletions={}",
+                        m_streamingDiagnosticTick,
+                        static_cast<uint32_t>(diskIoBatch.size()),
+                        queuedCount,
+                        m_pendingStreamingRequestCount,
+                        m_streamingRequestsInProgressCount,
+                        debugStats.queuedRequests,
+                        debugStats.queuedOrInFlightGroups,
+                        debugStats.dispatchedOrInFlightGroups,
+                        debugStats.completedResults);
+                }
+            }
+            {
+                ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::DispatchQueuedIo");
+                meshManager->ProcessCLodDiskStreamingIO();
+            }
+            if (m_streamingDirectStorageFenceHandle.IsValid() && meshManager->HasPendingCLodDirectStorageLaunches()) {
+                ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::QueueDiskIoBatch::LaunchDirectStorageUploads");
+                meshManager->LaunchPendingCLodDirectStorageUploads(
+                    m_streamingDirectStorageFenceHandle,
+                    kStreamingDirectStorageFenceReadyValue);
             }
         }
     }
@@ -5564,7 +6060,11 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         frameStats.residentGroups = debugStats.residentGroups;
         frameStats.residentAllocations = debugStats.residentAllocations;
         frameStats.queuedRequests = debugStats.queuedRequests;
+        frameStats.queuedOrInFlightGroups = debugStats.queuedOrInFlightGroups;
+        frameStats.dispatchedOrInFlightGroups = debugStats.dispatchedOrInFlightGroups;
         frameStats.completedResults = debugStats.completedResults;
+        frameStats.pendingDirectStorageLaunches = debugStats.pendingDirectStorageLaunches;
+        frameStats.pendingDirectStorageUploads = debugStats.pendingDirectStorageUploads;
         frameStats.residentAllocationBytes = debugStats.residentAllocationBytes;
         frameStats.completedResultBytes = debugStats.completedResultBytes;
         frameStats.streamedBytesThisFrame = debugStats.totalStreamedBytes - m_prevTotalStreamedBytes;

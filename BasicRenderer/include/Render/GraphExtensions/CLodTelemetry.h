@@ -306,6 +306,8 @@ struct CLodStreamingOperationStats {
     uint32_t unloadFailed = 0;
 
     uint32_t pendingCpuRequests = 0;
+    uint32_t pendingCpuHeapRequests = 0;
+    uint32_t waitingForPagesRequests = 0;
     uint32_t inProgressRequests = 0;
     uint32_t diskIoRequests = 0;
     uint32_t pendingCommitGroups = 0;
@@ -319,7 +321,11 @@ struct CLodStreamingOperationStats {
     uint32_t residentGroups = 0;
     uint32_t residentAllocations = 0;
     uint32_t queuedRequests = 0;
+    uint32_t queuedOrInFlightGroups = 0;
+    uint32_t dispatchedOrInFlightGroups = 0;
     uint32_t completedResults = 0;
+    uint32_t pendingDirectStorageLaunches = 0;
+    uint32_t pendingDirectStorageUploads = 0;
 
     uint64_t residentAllocationBytes = 0;
     uint64_t completedResultBytes = 0;
@@ -361,6 +367,8 @@ inline std::atomic<uint32_t> g_clodStreamingUnloadUnique = 0;
 inline std::atomic<uint32_t> g_clodStreamingUnloadApplied = 0;
 inline std::atomic<uint32_t> g_clodStreamingUnloadFailed = 0;
 inline std::atomic<uint32_t> g_clodStreamingPendingCpuRequests = 0;
+inline std::atomic<uint32_t> g_clodStreamingPendingCpuHeapRequests = 0;
+inline std::atomic<uint32_t> g_clodStreamingWaitingForPagesRequests = 0;
 inline std::atomic<uint32_t> g_clodStreamingInProgressRequests = 0;
 inline std::atomic<uint32_t> g_clodStreamingDiskIoRequests = 0;
 inline std::atomic<uint32_t> g_clodStreamingPendingCommitGroups = 0;
@@ -373,7 +381,11 @@ inline std::atomic<uint32_t> g_clodStreamingUploadQueuedGroups = 0;
 inline std::atomic<uint32_t> g_clodStreamingResidentGroups = 0;
 inline std::atomic<uint32_t> g_clodStreamingResidentAllocations = 0;
 inline std::atomic<uint32_t> g_clodStreamingQueuedRequests = 0;
+inline std::atomic<uint32_t> g_clodStreamingQueuedOrInFlightGroups = 0;
+inline std::atomic<uint32_t> g_clodStreamingDispatchedOrInFlightGroups = 0;
 inline std::atomic<uint32_t> g_clodStreamingCompletedResults = 0;
+inline std::atomic<uint32_t> g_clodStreamingPendingDirectStorageLaunches = 0;
+inline std::atomic<uint32_t> g_clodStreamingPendingDirectStorageUploads = 0;
 inline std::atomic<uint64_t> g_clodStreamingResidentAllocationBytes = 0;
 inline std::atomic<uint64_t> g_clodStreamingCompletedResultBytes = 0;
 inline std::atomic<uint64_t> g_clodStreamingStreamedBytesThisFrame = 0;
@@ -413,6 +425,8 @@ inline void PublishCLodStreamingOperationStats(const CLodStreamingOperationStats
     g_clodStreamingUnloadApplied.store(stats.unloadApplied, std::memory_order_relaxed);
     g_clodStreamingUnloadFailed.store(stats.unloadFailed, std::memory_order_relaxed);
     g_clodStreamingPendingCpuRequests.store(stats.pendingCpuRequests, std::memory_order_relaxed);
+    g_clodStreamingPendingCpuHeapRequests.store(stats.pendingCpuHeapRequests, std::memory_order_relaxed);
+    g_clodStreamingWaitingForPagesRequests.store(stats.waitingForPagesRequests, std::memory_order_relaxed);
     g_clodStreamingInProgressRequests.store(stats.inProgressRequests, std::memory_order_relaxed);
     g_clodStreamingDiskIoRequests.store(stats.diskIoRequests, std::memory_order_relaxed);
     g_clodStreamingPendingCommitGroups.store(stats.pendingCommitGroups, std::memory_order_relaxed);
@@ -425,7 +439,11 @@ inline void PublishCLodStreamingOperationStats(const CLodStreamingOperationStats
     g_clodStreamingResidentGroups.store(stats.residentGroups, std::memory_order_relaxed);
     g_clodStreamingResidentAllocations.store(stats.residentAllocations, std::memory_order_relaxed);
     g_clodStreamingQueuedRequests.store(stats.queuedRequests, std::memory_order_relaxed);
+    g_clodStreamingQueuedOrInFlightGroups.store(stats.queuedOrInFlightGroups, std::memory_order_relaxed);
+    g_clodStreamingDispatchedOrInFlightGroups.store(stats.dispatchedOrInFlightGroups, std::memory_order_relaxed);
     g_clodStreamingCompletedResults.store(stats.completedResults, std::memory_order_relaxed);
+    g_clodStreamingPendingDirectStorageLaunches.store(stats.pendingDirectStorageLaunches, std::memory_order_relaxed);
+    g_clodStreamingPendingDirectStorageUploads.store(stats.pendingDirectStorageUploads, std::memory_order_relaxed);
     g_clodStreamingResidentAllocationBytes.store(stats.residentAllocationBytes, std::memory_order_relaxed);
     g_clodStreamingCompletedResultBytes.store(stats.completedResultBytes, std::memory_order_relaxed);
     g_clodStreamingStreamedBytesThisFrame.store(stats.streamedBytesThisFrame, std::memory_order_relaxed);
@@ -474,6 +492,8 @@ inline bool TryReadCLodStreamingOperationStats(uint64_t& inOutSequence, CLodStre
     outStats.unloadFailed = g_clodStreamingUnloadFailed.load(std::memory_order_relaxed);
 
     outStats.pendingCpuRequests = g_clodStreamingPendingCpuRequests.load(std::memory_order_relaxed);
+    outStats.pendingCpuHeapRequests = g_clodStreamingPendingCpuHeapRequests.load(std::memory_order_relaxed);
+    outStats.waitingForPagesRequests = g_clodStreamingWaitingForPagesRequests.load(std::memory_order_relaxed);
     outStats.inProgressRequests = g_clodStreamingInProgressRequests.load(std::memory_order_relaxed);
     outStats.diskIoRequests = g_clodStreamingDiskIoRequests.load(std::memory_order_relaxed);
     outStats.pendingCommitGroups = g_clodStreamingPendingCommitGroups.load(std::memory_order_relaxed);
@@ -486,7 +506,11 @@ inline bool TryReadCLodStreamingOperationStats(uint64_t& inOutSequence, CLodStre
     outStats.residentGroups = g_clodStreamingResidentGroups.load(std::memory_order_relaxed);
     outStats.residentAllocations = g_clodStreamingResidentAllocations.load(std::memory_order_relaxed);
     outStats.queuedRequests = g_clodStreamingQueuedRequests.load(std::memory_order_relaxed);
+    outStats.queuedOrInFlightGroups = g_clodStreamingQueuedOrInFlightGroups.load(std::memory_order_relaxed);
+    outStats.dispatchedOrInFlightGroups = g_clodStreamingDispatchedOrInFlightGroups.load(std::memory_order_relaxed);
     outStats.completedResults = g_clodStreamingCompletedResults.load(std::memory_order_relaxed);
+    outStats.pendingDirectStorageLaunches = g_clodStreamingPendingDirectStorageLaunches.load(std::memory_order_relaxed);
+    outStats.pendingDirectStorageUploads = g_clodStreamingPendingDirectStorageUploads.load(std::memory_order_relaxed);
     outStats.residentAllocationBytes = g_clodStreamingResidentAllocationBytes.load(std::memory_order_relaxed);
     outStats.completedResultBytes = g_clodStreamingCompletedResultBytes.load(std::memory_order_relaxed);
     outStats.streamedBytesThisFrame = g_clodStreamingStreamedBytesThisFrame.load(std::memory_order_relaxed);

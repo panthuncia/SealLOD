@@ -86,6 +86,7 @@ inline TextureProcessingSettings MakeMaterialTextureProcessingSettings(
     settings.requestMipChain = true;
     settings.requestBlockCompression = semantic != TextureSemantic::Height;
     settings.allowAsyncPlaceholder = true;
+    settings.allowCpuBootstrapBeforeAsyncProcessing = true;
     settings.preferSRGB = preferSRGB;
     settings.preservePackedChannels = preservePackedChannels;
     settings.normalConvention = normalConvention;

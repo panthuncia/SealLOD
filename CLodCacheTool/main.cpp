@@ -1183,6 +1183,7 @@ static bool ProcessFile(const fs::path& path) {
             WriteUsdAssemblyReport(canonical, "USD source", stage);
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
+            extractOptions.skipCachedClusterLODMeshBuilds = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
             extractOptions.buildWholeAssetAssemblyCaches = true;
             extractOptions.importSkinningAsRigidBindPose = true;
@@ -1263,6 +1264,7 @@ static bool ProcessFile(const fs::path& path) {
             WriteUsdAssemblyReport(canonical, "NIF/USD source", stage);
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
+            extractOptions.skipCachedClusterLODMeshBuilds = true;
             extractOptions.buildPointInstancerAssemblyCaches = true;
             extractOptions.buildWholeAssetAssemblyCaches = true;
             extractOptions.importSkinningAsRigidBindPose = true;

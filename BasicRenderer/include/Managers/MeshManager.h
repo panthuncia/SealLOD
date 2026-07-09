@@ -41,7 +41,10 @@ public:
 		uint32_t residentAllocations = 0;
 		uint32_t queuedRequests = 0;
 		uint32_t queuedOrInFlightGroups = 0;
+		uint32_t dispatchedOrInFlightGroups = 0;
 		uint32_t completedResults = 0;
+		uint32_t pendingDirectStorageLaunches = 0;
+		uint32_t pendingDirectStorageUploads = 0;
 		uint64_t residentAllocationBytes = 0;
 		uint64_t completedResultBytes = 0;
 		uint64_t totalStreamedBytes = 0;
@@ -69,9 +72,16 @@ public:
 		CLodCache::GroupPayloadLayoutMetadata layout;
 	};
 
+	enum class CLodDiskStreamingPayloadKind : uint8_t {
+		CpuPageBlobs,
+		GpuPagesReady,
+		ReusedExistingPages,
+	};
+
 	struct CLodDiskStreamingCompletion {
 		uint32_t groupGlobalIndex = 0;
 		bool success = false;
+		CLodDiskStreamingPayloadKind payloadKind = CLodDiskStreamingPayloadKind::CpuPageBlobs;
 		ClusterLODGroupChunk chunk{};
 		std::vector<uint32_t> meshPageIndices;
 		std::vector<bool> segmentNeedsFetch;
@@ -207,7 +217,6 @@ public:
 	bool HasPendingCLodDirectStorageLaunches() const;
 	bool HasPendingCLodDirectStorageUploads() const;
 	std::pair<std::size_t, std::size_t> GetPendingCLodDirectStorageCounts() const;
-	void CollectCLodDirectStorageCompletionWaits(std::vector<ExternalTimelinePoint>& outWaits) const;
 	bool LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeline, uint64_t waitValue);
 
 	// Returns true if the group currently has disk I/O queued or in-flight.
@@ -413,8 +422,8 @@ private:
 		uint64_t totalBlobBytes = 0;
 		std::string uploadPathLabel = "DirectStorageGpuDirect";
 		DirectStorageAsyncRequestHandle uploadHandle;
-		rhi::Timeline completionTimeline;
-		uint64_t completionValue = 0;
+		uint64_t launchQueuedMs = 0;
+		uint64_t dsReadyMs = 0;
 		std::vector<uint32_t> pageIds;
 		std::vector<CLodPrefetchedChildLayout> prefetchedChildLayouts;
 	};
@@ -467,6 +476,8 @@ private:
 
 	// Maximum number of IO requests dispatched per ProcessCLodDiskStreamingIO call.
 	static constexpr uint32_t kMaxIoBatchSize = 128u;
+	static constexpr uint32_t kMinAdaptiveDispatchedIoGroups = 512u;
+	static constexpr uint32_t kMaxAdaptiveDispatchedIoGroups = 2048u;
 
 	void DispatchCLodDiskStreamingBatch();
 	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u);

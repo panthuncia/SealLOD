@@ -51,6 +51,7 @@ private:
     enum class StreamingRequestState : uint8_t {
         None,
         PendingCpu,
+        WaitingForPages,
         DiskIo,
     };
 
@@ -87,12 +88,15 @@ private:
     void RebuildStreamingDomainFromSnapshot(MeshManager* meshManager);
     bool IsStreamingRequestInProgress(uint32_t groupIndex) const;
     void MarkStreamingRequestPending(uint32_t groupIndex);
+    void MarkStreamingRequestWaitingForPages(uint32_t groupIndex);
     void MarkStreamingRequestDiskIo(uint32_t groupIndex);
     void ClearStreamingRequestInProgress(uint32_t groupIndex);
     uint32_t GetPendingLoadPriority(uint32_t groupIndex) const;
     void SetPendingLoadPriority(uint32_t groupIndex, uint32_t priority);
     void ClearPendingLoadPriority(uint32_t groupIndex);
     void PushOrUpdatePendingStreamingRequest(const CLodStreamingRequest& req, uint32_t priority);
+    void ParkStreamingRequestWaitingForPages(const PendingStreamingRequest& pending);
+    void RequeueWaitingForPagesRequests(uint32_t maxRequests);
     void RequeuePendingStreamingRequest(const PendingStreamingRequest& pending);
     bool PopHighestPriorityPendingStreamingRequest(PendingStreamingRequest& outRequest);
     void SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage);
@@ -146,6 +150,9 @@ private:
     void EnsurePageTrackingCapacity(MeshManager* meshManager);
     struct PagePopFailureStats {
         uint32_t scanned = 0;
+        uint32_t scanLimit = 0;
+        uint32_t evictionBudgetLimit = 0;
+        uint32_t evictionsUsed = 0;
         uint32_t rejectedUncommittedRef = 0;
         uint32_t rejectedProtected = 0;
         uint32_t rejectedPendingWrite = 0;
@@ -275,6 +282,9 @@ private:
     std::unordered_set<uint32_t> m_pendingResidencyCommitGroups;
     std::vector<StreamingRequestState> m_streamingRequestStateByGroup;
     std::vector<uint32_t> m_pendingLoadPriorityByGroup;
+    std::vector<PendingStreamingRequest> m_waitingForPagesRequests;
+    std::vector<uint32_t> m_waitingForPagesRequestIndexByGroup;
+    uint32_t m_waitingForPagesRequestCount = 0u;
 
     struct StreamingDiagnosticsRecord {
         uint64_t firstRequestTick = 0u;
@@ -319,6 +329,7 @@ private:
     uint64_t m_streamingDiagnosticsCommitToResidentSumThisFrame = 0u;
     uint32_t m_streamingDiagnosticsCommitToResidentWorstThisFrame = 0u;
     uint64_t m_streamingDiagnosticsLastOutlierLogTick = 0u;
+    uint64_t m_streamingDiagnosticsLastPeriodicLogTick = 0u;
     uint32_t m_streamingRequestsInProgressCount = 0u;
     uint32_t m_pendingStreamingRequestCount = 0u;
     uint32_t m_pagePopEvictionsThisUpdate = 0u;
@@ -373,9 +384,9 @@ private:
     rhi::Timeline m_streamingReadbackFenceHandle;
     std::atomic<uint64_t> m_streamingReadbackFenceCounter{0};
     std::atomic<uint64_t> m_streamingReadbackDiscardedFenceCounter{0};
-    rhi::TimelinePtr m_directStorageLaunchFencePtr;
-    rhi::Timeline m_directStorageLaunchFenceHandle;
-    std::atomic<uint64_t> m_directStorageLaunchFenceCounter{0};
+    rhi::TimelinePtr m_streamingDirectStorageFencePtr;
+    rhi::Timeline m_streamingDirectStorageFenceHandle;
+    static constexpr uint64_t kStreamingDirectStorageFenceReadyValue = 1u;
 
     struct ReadbackStagingSlot {
         std::shared_ptr<Buffer> counterStaging;
@@ -385,6 +396,7 @@ private:
         std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
         uint64_t fenceValue = 0;
+        uint64_t armedMs = 0;
         bool inFlight = false;
     };
     std::vector<ReadbackStagingSlot> m_readbackStagingSlots;

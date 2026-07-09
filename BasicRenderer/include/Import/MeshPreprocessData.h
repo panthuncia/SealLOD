@@ -28,6 +28,9 @@ struct MeshPreprocessResult {
 	ObjectSurfaceSamplingMode objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
 	bool objectSurfaceUseTriplanarProjection = false;
 	bool objectSurfaceUseTripleTapStochastic = false;
+	bool clodCacheHit = false;
+	bool clodCacheBuilt = false;
+	bool clodCacheSkippedBuild = false;
 	float objectSurfaceTexelDensity = 1.0f;
 	bool objectAtlasBakedHeight = false;
 	std::uint32_t objectAtlasHeightUvSetIndex = 0;

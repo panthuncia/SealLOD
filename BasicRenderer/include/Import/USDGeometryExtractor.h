@@ -41,6 +41,7 @@ struct ExtractOptions {
 	bool objectSurfaceUseTripleTapStochastic = false;
 	std::string objectSurfaceSamplingConfigHash;
 	bool retainClusterLODArtifacts = false;
+	bool skipCachedClusterLODMeshBuilds = false;
 	bool buildPointInstancerAssemblyCaches = false;
 	bool buildWholeAssetAssemblyCaches = false;
 	bool importSkinningAsRigidBindPose = false;

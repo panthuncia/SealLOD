@@ -54,6 +54,32 @@ namespace {
 
 constexpr size_t kMaxSkinInfluences = 8u;
 
+std::mutex& GetClusterLODCacheBuildMutex(const CLodCacheLoader::MeshCacheIdentity& identity)
+{
+	static std::mutex tableMutex;
+	static std::unordered_map<std::string, std::unique_ptr<std::mutex>> mutexes;
+	std::string key;
+	key.reserve(
+		identity.sourceIdentifier.size() +
+		identity.primPath.size() +
+		identity.subsetName.size() +
+		32u);
+	key.append(identity.sourceIdentifier);
+	key.push_back('|');
+	key.append(identity.primPath);
+	key.push_back('|');
+	key.append(identity.subsetName);
+	key.push_back('|');
+	key.append(identity.doubleSidedVoxelSourceNormals ? "ds1" : "ds0");
+
+	std::lock_guard<std::mutex> lock(tableMutex);
+	auto& mutex = mutexes[key];
+	if (!mutex) {
+		mutex = std::make_unique<std::mutex>();
+	}
+	return *mutex;
+}
+
 // Interpolation
 
 enum class InterpolationType {
@@ -1703,6 +1729,51 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	else
 		spdlog::debug("    Cache MISS for prim='{}' subset='{}' — will build", cacheIdentity.primPath, subsetName);
 
+	std::unique_lock<std::mutex> cacheBuildLock;
+	if (!prebuiltData.has_value()) {
+		cacheBuildLock = std::unique_lock<std::mutex>(GetClusterLODCacheBuildMutex(cacheIdentity));
+		const auto lockedReloadBegin = std::chrono::steady_clock::now();
+		prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+		AddMs(g_benchmarkStats.clodReloadMs, lockedReloadBegin);
+		if (prebuiltData.has_value()) {
+			g_benchmarkStats.clodCacheHits.fetch_add(1, std::memory_order_relaxed);
+			spdlog::info(
+				"    Cache HIT for prim='{}' subset='{}' after waiting for another worker; skipping duplicate build.",
+				cacheIdentity.primPath,
+				subsetName);
+		}
+	}
+
+	const bool cacheHitBeforeBuild = prebuiltData.has_value();
+	if (prebuiltData.has_value() && options.skipCachedClusterLODMeshBuilds) {
+		spdlog::debug("    Cache HIT for prim='{}' subset='{}'; skipping geometry extraction and CLod rebuild.",
+			cacheIdentity.primPath,
+			subsetName);
+
+		TfToken subdivisionScheme = UsdGeomTokens->catmullClark;
+		mesh.GetSubdivisionSchemeAttr().Get(&subdivisionScheme);
+		const bool previewSubdiv = (subdivisionScheme != UsdGeomTokens->none);
+		const bool previewTopology =
+			HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexCountsAttr()) ||
+			HasMultipleAuthoredTimeSamples(mesh.GetFaceVertexIndicesAttr()) ||
+			HasMultipleAuthoredTimeSamples(mesh.GetHoleIndicesAttr());
+
+		MeshIngestBuilder dummyIngest(0u, 0u, 0u, GetDefaultBuilderSettings());
+		MeshPreprocessResult result(
+			std::move(dummyIngest),
+			std::move(cacheIdentity),
+			std::move(prebuiltData),
+			previewSubdiv || previewTopology);
+		result.sourcePrimPath = mesh.GetPrim().GetPath().GetString();
+		result.geometricDisplacementOptIn = options.geometricDisplacementOptIn;
+		result.objectSurfaceSamplingMode = options.objectSurfaceSamplingMode;
+		result.objectSurfaceUseTriplanarProjection = options.objectSurfaceUseTriplanarProjection;
+		result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
+		result.clodCacheHit = true;
+		result.clodCacheSkippedBuild = true;
+		return result;
+	}
+
 	// Load raw geometry
 	std::unique_ptr<std::vector<std::byte>> rawData;
 	std::optional<std::unique_ptr<std::vector<std::byte>>> skinningData;
@@ -1793,6 +1864,7 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	ingest.AppendIndices(indices.data(), indices.size());
 
 	std::shared_ptr<const ClusterLODPrebuildArtifacts> transientArtifacts;
+	bool builtClusterLODArtifacts = false;
 
 	// Build CLod cache if needed. Assembly construction can request retained
 	// artifacts even on cache hits because it needs page blobs, not metadata only.
@@ -1800,6 +1872,7 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		spdlog::info("    Building CLod artifacts...");
 		const auto clodBuildBegin = std::chrono::steady_clock::now();
 		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+		builtClusterLODArtifacts = true;
 		AddMs(g_benchmarkStats.clodBuildMs, clodBuildBegin);
 		ClusterLODPrebuiltData savedPrebuiltData;
 		spdlog::info("    CLod artifacts built: {} groups, {} nodes",
@@ -1855,6 +1928,8 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	result.objectSurfaceUseTripleTapStochastic = options.objectSurfaceUseTripleTapStochastic;
 	result.objectSurfaceTexelDensity = objectSurfaceTexelDensity;
 	result.transientArtifacts = std::move(transientArtifacts);
+	result.clodCacheHit = cacheHitBeforeBuild;
+	result.clodCacheBuilt = builtClusterLODArtifacts;
 	return result;
 }
 
@@ -2633,7 +2708,12 @@ StageExtractionResult ExtractAllFromStage(
 	for (const MeshWorkItem& workItem : meshWorkItems) {
 		result.submeshesProcessed += workItem.subsets.empty() ? 1 : workItem.subsets.size();
 	}
-	result.cachesBuilt = result.submeshesProcessed;
+	result.cachesBuilt = static_cast<size_t>(std::count_if(
+		result.submeshes.begin(),
+		result.submeshes.end(),
+		[](const MeshPreprocessResult& submesh) {
+			return submesh.clodCacheBuilt;
+		}));
 	if (options.buildPointInstancerAssemblyCaches) {
 		AppendPointInstancerAssemblyCaches(stage, sourceIdentifier, geomTimeCode, result);
 	}
