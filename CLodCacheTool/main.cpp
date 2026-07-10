@@ -29,6 +29,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <tracy/Tracy.hpp>
@@ -57,6 +59,8 @@ static bool g_reportEnabled = false;
 static fs::path g_reportPath;
 static bool g_reportInitialized = false;
 static uint32_t g_usdTessellationFactor = 1u;
+static fs::path g_assetOverridesConfig;
+static std::unordered_map<std::string, std::string> g_sourceIdentifierOverrides;
 
 // Helpers
 
@@ -114,6 +118,21 @@ static const char* NodeKindName(uint32_t kind) {
     case CLOD_NODE_INSTANCE_ROOT: return "instance-root";
     default: return "invalid";
     }
+}
+
+static std::string CanonicalPathKey(const fs::path& path) {
+    std::error_code ec;
+    auto canonical = fs::weakly_canonical(path, ec);
+    if (ec)
+        canonical = fs::absolute(path).lexically_normal();
+    return ToLower(canonical.generic_string());
+}
+
+static std::string NormalizeLogicalAssetPath(std::string path) {
+    std::replace(path.begin(), path.end(), '/', '\\');
+    while (!path.empty() && (path.front() == '\\' || path.front() == '/'))
+        path.erase(path.begin());
+    return path;
 }
 
 static bool EnsureClusterLODReportInitialized() {
@@ -1112,6 +1131,13 @@ static bool TryConsumeOption(const std::string& arg) {
     constexpr const char* pruningPrefix = "--clod-voxel-pruning=";
     constexpr const char* disableSloppyPrefix = "--clod-disable-sloppy-fallback=";
     constexpr const char* sloppyFactorPrefix = "--clod-sloppy-error-factor=";
+    constexpr const char* assetOverridesPrefix = "--asset-overrides=";
+
+    const std::string assetOverridesPrefixString(assetOverridesPrefix);
+    if (arg.rfind(assetOverridesPrefixString, 0) == 0) {
+        g_assetOverridesConfig = arg.substr(assetOverridesPrefixString.size());
+        return true;
+    }
 
     auto consumeValue = [&arg](const char* prefix, const char* envName) -> bool {
         const std::string prefixString(prefix);
@@ -1159,6 +1185,10 @@ static bool ProcessFile(const fs::path& path) {
     ZoneScopedN("CLodCacheTool::ProcessFile");
     auto canonical = fs::weakly_canonical(path);
     auto pathStr   = canonical.string();
+    const auto sourceOverride = g_sourceIdentifierOverrides.find(CanonicalPathKey(canonical));
+    const std::string sourceIdentifier = sourceOverride != g_sourceIdentifierOverrides.end()
+        ? sourceOverride->second
+        : pathStr;
     auto fmt       = DetectFormat(canonical);
 
     spdlog::info("---------------------------------------------------");
@@ -1183,14 +1213,16 @@ static bool ProcessFile(const fs::path& path) {
             WriteUsdAssemblyReport(canonical, "USD source", stage);
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
-            extractOptions.skipCachedClusterLODMeshBuilds = true;
-            extractOptions.buildPointInstancerAssemblyCaches = true;
+            // Material-bucket assembly baking needs retained child artifacts even when
+            // each child already has a disk cache.
+            extractOptions.skipCachedClusterLODMeshBuilds = false;
+            extractOptions.buildPointInstancerAssemblyCaches = false;
             extractOptions.buildWholeAssetAssemblyCaches = true;
             extractOptions.importSkinningAsRigidBindPose = true;
             USDGeometryExtractor::StageExtractionResult result;
             {
                 ZoneScopedN("CLodCacheTool::USD::ExtractAllFromStage");
-                result = USDGeometryExtractor::ExtractAllFromStage(stage, pathStr, g_usdTessellationFactor, extractOptions);
+                result = USDGeometryExtractor::ExtractAllFromStage(stage, sourceIdentifier, g_usdTessellationFactor, extractOptions);
             }
             spdlog::info("  USD result: meshes={}, submeshes={}, caches_built={}, source_triangles={}",
                          result.meshesProcessed,
@@ -1264,8 +1296,8 @@ static bool ProcessFile(const fs::path& path) {
             WriteUsdAssemblyReport(canonical, "NIF/USD source", stage);
             USDGeometryExtractor::ExtractOptions extractOptions{};
             extractOptions.retainClusterLODArtifacts = true;
-            extractOptions.skipCachedClusterLODMeshBuilds = true;
-            extractOptions.buildPointInstancerAssemblyCaches = true;
+            extractOptions.skipCachedClusterLODMeshBuilds = false;
+            extractOptions.buildPointInstancerAssemblyCaches = false;
             extractOptions.buildWholeAssetAssemblyCaches = true;
             extractOptions.importSkinningAsRigidBindPose = true;
             USDGeometryExtractor::StageExtractionResult result;
@@ -1340,7 +1372,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         spdlog::error("No arguments provided.");
-            std::cerr << "Usage: CLodCacheTool [--clod-report=path] [--usd-tessellation-factor=N] [--clod-voxel-mode=mesh|auto|voxel] <file1|dir1> [file2|dir2 ...]\n";
+            std::cerr << "Usage: CLodCacheTool [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-voxel-mode=mesh|auto|voxel] <file1|dir1> [file2|dir2 ...]\n";
         return 1;
     }
 
@@ -1380,6 +1412,81 @@ int main(int argc, char* argv[]) {
         } else {
             files.push_back(p);
         }
+        }
+
+        if (!g_assetOverridesConfig.empty()) {
+            try {
+                std::ifstream input(g_assetOverridesConfig);
+                if (!input)
+                    throw std::runtime_error("could not open asset override config");
+                const auto document = nlohmann::json::parse(input);
+                const auto overridesIt = document.find("overrides");
+                if (overridesIt == document.end())
+                    throw std::runtime_error("asset override config is missing 'overrides'");
+
+                std::vector<std::string> replacements;
+                auto addReplacement = [&](const nlohmann::json& value) {
+                    if (value.is_string())
+                        replacements.push_back(value.get<std::string>());
+                    else if (value.is_object()) {
+                        const std::string replacement = value.value("replacement", std::string{});
+                        if (!replacement.empty())
+                            replacements.push_back(replacement);
+                    }
+                };
+                if (overridesIt->is_object()) {
+                    for (const auto& [_, value] : overridesIt->items())
+                        addReplacement(value);
+                } else if (overridesIt->is_array()) {
+                    for (const auto& value : *overridesIt)
+                        addReplacement(value);
+                } else {
+                    throw std::runtime_error("'overrides' must be an object or array");
+                }
+
+                std::vector<fs::path> roots;
+                if (const char* dataPath = std::getenv("SARP_DATA_PATH"); dataPath && *dataPath)
+                    roots.emplace_back(dataPath);
+                if (const auto rootsIt = document.find("assetRoots"); rootsIt != document.end() && rootsIt->is_array()) {
+                    for (const auto& rootValue : *rootsIt) {
+                        if (!rootValue.is_string())
+                            continue;
+                        fs::path root(rootValue.get<std::string>());
+                        if (root.is_relative())
+                            root = g_assetOverridesConfig.parent_path() / root;
+                        roots.push_back(std::move(root));
+                    }
+                }
+                roots.push_back(g_assetOverridesConfig.parent_path());
+                roots.push_back(g_assetOverridesConfig.parent_path().parent_path());
+                roots.push_back(fs::current_path());
+
+                std::unordered_set<std::string> addedPaths;
+                for (const std::string& replacementText : replacements) {
+                    const std::string logicalPath = NormalizeLogicalAssetPath(replacementText);
+                    fs::path relativePath(logicalPath);
+                    fs::path resolved;
+                    for (const fs::path& root : roots) {
+                        const fs::path candidate = root / relativePath;
+                        if (fs::exists(candidate)) {
+                            resolved = candidate;
+                            break;
+                        }
+                    }
+                    if (resolved.empty()) {
+                        spdlog::warn("Asset override replacement was not found: {}", logicalPath);
+                        continue;
+                    }
+                    const std::string pathKey = CanonicalPathKey(resolved);
+                    g_sourceIdentifierOverrides.insert_or_assign(pathKey, logicalPath);
+                    if (addedPaths.insert(pathKey).second) {
+                        files.push_back(std::move(resolved));
+                        spdlog::info("Asset override cache input: logical='{}' resolved='{}'", logicalPath, files.back().string());
+                    }
+                }
+            } catch (const std::exception& error) {
+                spdlog::error("Failed to load asset overrides '{}': {}", g_assetOverridesConfig.string(), error.what());
+            }
         }
     }
 

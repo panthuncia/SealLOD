@@ -20,6 +20,8 @@ struct MeshPreprocessResult {
 	MeshIngestBuilder ingest;
 	CLodCacheLoader::MeshCacheIdentity cacheIdentity;
 	std::string sourcePrimPath;
+	std::string materialPath;
+	MaterialDescription cachedMaterial;
 	std::optional<ClusterLODPrebuiltData> prebuiltData;
 	std::shared_ptr<const ClusterLODPrebuildArtifacts> transientArtifacts;
 	br::import::RenderablePrototypeGeometry prototypeGeometry;

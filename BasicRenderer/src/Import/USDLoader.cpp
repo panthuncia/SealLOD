@@ -85,6 +85,7 @@
 #include "Managers/Singletons/TextureProcessingManager.h"
 
 #include "Import/USDLoader.h"
+#include "Import/USDMaterialCache.h"
 #include "Import/CLodCacheLoader.h"
 #include "Import/ObjectReyesAtlasBaker.h"
 #include "Import/USDGeometryExtractor.h"
@@ -1518,7 +1519,7 @@ namespace USDLoader {
 		}
 
 		auto& resolver = ArGetResolver();
-		auto ctx = stage->GetPathResolverContext();
+		auto ctx = stage ? stage->GetPathResolverContext() : ArResolverContext{};
 		ArResolverContextBinder binder(ctx);
 
 		ArResolvedPath resolved = resolver.Resolve(logicalPath);
@@ -6816,6 +6817,25 @@ namespace USDLoader {
 	{
 		ZoneScopedN("USDLoader::ParseImportedAssetPayload");
 		ImportedAssetPayload payload;
+		if (!loadingCache.stageAssemblyMeshes.empty()) {
+			RenderablePartPayload part;
+			part.localMatrix = DirectX::XMMatrixIdentity();
+			part.name = "__CLodAssembly";
+			for (const auto& mesh : loadingCache.stageAssemblyMeshes) {
+				if (!mesh) {
+					continue;
+				}
+				part.meshes.push_back(mesh);
+				payload.meshes.push_back(mesh);
+			}
+			if (!part.meshes.empty()) {
+				payload.parts.push_back(std::move(part));
+				spdlog::info(
+					"USD payload import using point-instancer CLod assembly with {} mesh(es).",
+					payload.meshes.size());
+			}
+			return payload;
+		}
 		std::unordered_set<std::uint64_t> meshIDs;
 		std::uint32_t skinnedShapeIndex = 0;
 		const UsdTimeCode geomTimeCode = GetUsdGeometrySampleTime(stage);
@@ -7024,7 +7044,22 @@ namespace USDLoader {
 
 			{
 				const auto begin = std::chrono::steady_clock::now();
-				PreprocessAllMeshes(stage, stageContext.metersPerUnit, stageContext.directory, stageContext.isUSDZ, importSettings, options, options.sourceIdentifier);
+				const auto pointInstancerAssemblyIdentity = BuildPointInstancerAssemblyIdentity(
+					stage, options.sourceIdentifier, GetUsdGeometrySampleTime(stage));
+				if (pointInstancerAssemblyIdentity) {
+					TryLoadPointInstancerAssemblyMesh(
+						stage, GetUsdGeometrySampleTime(stage), options.sourceIdentifier);
+				}
+				if (loadingCache.stageAssemblyMeshes.empty()) {
+					PreprocessAllMeshes(
+						stage,
+						stageContext.metersPerUnit,
+						stageContext.directory,
+						stageContext.isUSDZ,
+						importSettings,
+						options,
+						options.sourceIdentifier);
+				}
 				if (timingStats) {
 					timingStats->meshPreprocessMs += ElapsedMs(begin);
 				}
@@ -7074,6 +7109,107 @@ namespace USDLoader {
 		ImportTimingStats* timingStats) {
 		ZoneScopedN("USDLoader::LoadImportedAssetFromFile");
 		ZoneText(filePath.data(), filePath.size());
+
+		std::string canonicalFileKey = std::filesystem::absolute(filePath).lexically_normal().generic_string();
+		std::transform(canonicalFileKey.begin(), canonicalFileKey.end(), canonicalFileKey.begin(),
+			[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		static std::mutex fileLoadMutexTableGuard;
+		static std::unordered_map<std::string, std::unique_ptr<std::mutex>> fileLoadMutexTable;
+		std::mutex* fileLoadMutex = nullptr;
+		{
+			std::lock_guard tableLock(fileLoadMutexTableGuard);
+			auto& entry = fileLoadMutexTable[canonicalFileKey];
+			if (!entry) {
+				entry = std::make_unique<std::mutex>();
+			}
+			fileLoadMutex = entry.get();
+		}
+		std::lock_guard fileLoadLock(*fileLoadMutex);
+
+		auto tryLoadCachedMaterialAssembly = [&]() -> std::optional<ImportedAssetPayload> {
+			auto manifest = USDMaterialCache::LoadAssemblyMaterialManifest(options.sourceIdentifier);
+			if (!manifest || manifest->empty()) return std::nullopt;
+
+			loadingCache.textureSearchRoots = options.textureSearchRoots;
+			if (!options.sourceDirectory.empty() &&
+				std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), options.sourceDirectory) == loadingCache.textureSearchRoots.end()) {
+				loadingCache.textureSearchRoots.push_back(options.sourceDirectory);
+			}
+			ImportedAssetPayload payload;
+			RenderablePartPayload part;
+			part.localMatrix = DirectX::XMMatrixIdentity();
+			part.name = "__CachedMaterialCLodAssembly";
+			for (auto& entry : *manifest) {
+				auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(entry.identity);
+				if (!prebuilt || prebuilt->assemblyInstances.empty()) {
+					loadingCache.Clear();
+					spdlog::warn("USD cached material assembly is incomplete for source '{}' material '{}'.", options.sourceIdentifier, entry.material.name);
+					return std::nullopt;
+				}
+				LoadSourcePathTextures(entry.material, {}, importSettings.loadMaterialTextures);
+				auto material = Material::CreateShared(entry.material);
+				MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
+				auto mesh = ingest.Build(material, std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
+				if (!mesh) {
+					loadingCache.Clear();
+					return std::nullopt;
+				}
+				payload.meshes.push_back(mesh);
+				part.meshes.push_back(std::move(mesh));
+			}
+			payload.parts.push_back(std::move(part));
+			loadingCache.Clear();
+			spdlog::info("USD cached material CLod assembly loaded without opening source: source='{}' buckets={}.", options.sourceIdentifier, payload.meshes.size());
+			return payload;
+		};
+		if (auto cachedPayload = tryLoadCachedMaterialAssembly()) {
+			return cachedPayload;
+		}
+		if (options.requireCachedAssembly) {
+			spdlog::error("Required USD cached material CLod assembly is unavailable for '{}'; source USD will not be opened.", options.sourceIdentifier);
+			return std::nullopt;
+		}
+
+		static std::mutex memoizedAssemblyGuard;
+		static std::unordered_map<std::string, CLodCacheLoader::MeshCacheIdentity> memoizedAssemblyIdentities;
+		auto tryLoadMemoizedAssembly = [&]() -> std::optional<ImportedAssetPayload> {
+			std::optional<CLodCacheLoader::MeshCacheIdentity> identity;
+			{
+				std::lock_guard memoLock(memoizedAssemblyGuard);
+				if (const auto it = memoizedAssemblyIdentities.find(canonicalFileKey);
+					it != memoizedAssemblyIdentities.end()) {
+					identity = it->second;
+				}
+			}
+			if (!identity) {
+				return std::nullopt;
+			}
+			auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
+			if (!prebuilt || prebuilt->assemblyInstances.empty()) {
+				std::lock_guard memoLock(memoizedAssemblyGuard);
+				memoizedAssemblyIdentities.erase(canonicalFileKey);
+				return std::nullopt;
+			}
+			MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
+			auto mesh = ingest.Build(
+				Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
+			if (!mesh) {
+				return std::nullopt;
+			}
+			ImportedAssetPayload payload;
+			payload.meshes.push_back(mesh);
+			RenderablePartPayload part;
+			part.meshes.push_back(std::move(mesh));
+			part.localMatrix = DirectX::XMMatrixIdentity();
+			part.name = "__CLodAssembly";
+			payload.parts.push_back(std::move(part));
+			spdlog::info("USD payload import reused memoized point-instancer CLod assembly for '{}'.", filePath);
+			return payload;
+		};
+		if (auto memoizedPayload = tryLoadMemoizedAssembly()) {
+			return memoizedPayload;
+		}
+
 		UsdStageRefPtr stage;
 		{
 			ZoneScopedN("USDLoader::LoadImportedAssetFromFile::UsdStageOpen");
@@ -7088,7 +7224,16 @@ namespace USDLoader {
 			return std::nullopt;
 		}
 
-		return LoadImportedAssetFromStage(stage, options, importSettings, timingStats);
+		auto payload = LoadImportedAssetFromStage(stage, options, importSettings, timingStats);
+		if (payload) {
+			if (auto identity = BuildPointInstancerAssemblyIdentity(
+				stage, options.sourceIdentifier, GetUsdGeometrySampleTime(stage));
+				identity && CLodCacheLoader::TryLoadPrebuilt(*identity).has_value()) {
+				std::lock_guard memoLock(memoizedAssemblyGuard);
+				memoizedAssemblyIdentities.insert_or_assign(canonicalFileKey, std::move(*identity));
+			}
+		}
+		return payload;
 	}
 
 	std::shared_ptr<Scene> LoadModelFromFile(

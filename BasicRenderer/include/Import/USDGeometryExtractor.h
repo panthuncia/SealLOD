@@ -104,6 +104,17 @@ StageExtractionResult ExtractAllFromStage(
 	std::uint32_t tessellationFactor = 1,
 	const ExtractOptions& options = {});
 
+// Build and persist the synthetic CLod assembly used to represent all
+// PointInstancers in a stage. The supplied submeshes must retain their
+// transient CLod artifacts. This lets runtime importers reuse preprocessing
+// they have already performed instead of expanding PointInstancers on CPU.
+std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
+	const pxr::UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	pxr::UsdTimeCode geomTimeCode,
+	const std::vector<const MeshPreprocessResult*>& preprocessedSubmeshes,
+	const std::string& identitySuffix = {});
+
 std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentity(
 	const pxr::UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier,

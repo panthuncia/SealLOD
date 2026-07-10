@@ -1,4 +1,5 @@
 #include "Import/USDGeometryExtractor.h"
+#include "Import/USDMaterialCache.h"
 
 #include <cstring>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <map>
 
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/imageable.h>
@@ -2126,11 +2128,12 @@ void AppendWholeAssetAssemblyBucketIdentity(
 	identity.sourceIdentifier += BuildWholeAssetAssemblyBucketIdentitySuffix(skinned, skinDomain, materialPath);
 }
 
-void AppendPointInstancerAssemblyCaches(
+std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
 	const UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier,
 	UsdTimeCode geomTimeCode,
-	StageExtractionResult& result)
+	const std::vector<const MeshPreprocessResult*>& preprocessedSubmeshes,
+	const std::string& identitySuffix)
 {
 	std::vector<UsdGeomPointInstancer> pointInstancers;
 	std::vector<SdfPath> prototypeRoots;
@@ -2155,12 +2158,16 @@ void AppendPointInstancerAssemblyCaches(
 	}
 
 	if (pointInstancers.empty()) {
-		return;
+		return std::nullopt;
 	}
 
 	std::unordered_map<std::string, std::vector<size_t>> resultsBySourcePrim;
-	for (size_t resultIndex = 0; resultIndex < result.submeshes.size(); ++resultIndex) {
-		const MeshPreprocessResult& submesh = result.submeshes[resultIndex];
+	for (size_t resultIndex = 0; resultIndex < preprocessedSubmeshes.size(); ++resultIndex) {
+		const MeshPreprocessResult* submeshPtr = preprocessedSubmeshes[resultIndex];
+		if (!submeshPtr) {
+			continue;
+		}
+		const MeshPreprocessResult& submesh = *submeshPtr;
 		if (!submesh.transientArtifacts) {
 			continue;
 		}
@@ -2168,7 +2175,7 @@ void AppendPointInstancerAssemblyCaches(
 	}
 	if (resultsBySourcePrim.empty()) {
 		spdlog::warn("USD point-instancer assembly requested, but no transient CLod artifacts were retained.");
-		return;
+		return std::nullopt;
 	}
 
 	std::vector<ClusterLODAssemblyPart> parts;
@@ -2179,7 +2186,7 @@ void AppendPointInstancerAssemblyCaches(
 			return existing->second;
 		}
 
-		const MeshPreprocessResult& submesh = result.submeshes[resultIndex];
+		const MeshPreprocessResult& submesh = *preprocessedSubmeshes[resultIndex];
 		if (!submesh.transientArtifacts) {
 			throw std::runtime_error("USD assembly part is missing retained CLod artifacts");
 		}
@@ -2314,7 +2321,7 @@ void AppendPointInstancerAssemblyCaches(
 
 	if (parts.empty() || instances.empty()) {
 		spdlog::warn("USD point-instancer assembly requested, but no assembly parts or instances were produced.");
-		return;
+		return std::nullopt;
 	}
 
 	try {
@@ -2338,6 +2345,7 @@ void AppendPointInstancerAssemblyCaches(
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
 		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=7#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
+		assemblyIdentity.sourceIdentifier += identitySuffix;
 
 		ClusterLODPrebuiltData savedPrebuiltData;
 		if (CLodCacheLoader::SavePrebuiltLocked(
@@ -2357,8 +2365,7 @@ void AppendPointInstancerAssemblyCaches(
 				std::make_optional(std::move(savedPrebuiltData)));
 			assemblyResult.sourcePrimPath = assemblyResult.cacheIdentity.primPath;
 			assemblyResult.transientArtifacts = std::make_shared<ClusterLODPrebuildArtifacts>(std::move(assemblyArtifacts));
-			result.submeshes.push_back(std::move(assemblyResult));
-			result.cachesBuilt++;
+			return assemblyResult;
 		}
 		else {
 			spdlog::warn("  USD CLod assembly cache save failed.");
@@ -2366,6 +2373,25 @@ void AppendPointInstancerAssemblyCaches(
 	}
 	catch (const std::exception& e) {
 		spdlog::warn("  USD CLod assembly cache build failed: {}", e.what());
+	}
+	return std::nullopt;
+}
+
+void AppendPointInstancerAssemblyCaches(
+	const UsdStageRefPtr& stage,
+	const std::string& sourceIdentifier,
+	UsdTimeCode geomTimeCode,
+	StageExtractionResult& result)
+{
+	std::vector<const MeshPreprocessResult*> preprocessedSubmeshes;
+	preprocessedSubmeshes.reserve(result.submeshes.size());
+	for (const MeshPreprocessResult& submesh : result.submeshes) {
+		preprocessedSubmeshes.push_back(&submesh);
+	}
+	if (auto assembly = BuildPointInstancerAssemblyCache(
+		stage, sourceIdentifier, geomTimeCode, preprocessedSubmeshes)) {
+		result.submeshes.push_back(std::move(*assembly));
+		result.cachesBuilt++;
 	}
 }
 
@@ -2376,6 +2402,40 @@ void AppendWholeAssetAssemblyCaches(
 	StageExtractionResult& result)
 {
 	ZoneScopedN("USDGeometryExtractor::AppendWholeAssetAssemblyCaches");
+	{
+		std::map<std::string, std::vector<const MeshPreprocessResult*>> materialBuckets;
+		std::map<std::string, MaterialDescription> materials;
+		const std::size_t sourceSubmeshCount = result.submeshes.size();
+		for (std::size_t index = 0; index < sourceSubmeshCount; ++index) {
+			const MeshPreprocessResult& submesh = result.submeshes[index];
+			if (!submesh.transientArtifacts) continue;
+			materialBuckets[submesh.materialPath].push_back(&submesh);
+			materials.try_emplace(submesh.materialPath, submesh.cachedMaterial);
+		}
+
+		std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
+		for (const auto& [materialPath, submeshes] : materialBuckets) {
+			const std::string suffix = BuildWholeAssetAssemblyBucketIdentitySuffix(false, 0u, materialPath);
+			auto assembly = BuildPointInstancerAssemblyCache(stage, sourceIdentifier, geomTimeCode, submeshes, suffix);
+			if (!assembly) {
+				spdlog::warn("USD material assembly cache build failed for material '{}'.", materialPath);
+				continue;
+			}
+			manifest.push_back(USDMaterialCache::AssemblyMaterialEntry{
+				.identity = assembly->cacheIdentity,
+				.material = materials.at(materialPath),
+			});
+			result.submeshes.push_back(std::move(*assembly));
+			result.cachesBuilt++;
+		}
+		if (manifest.empty() || !USDMaterialCache::SaveAssemblyMaterialManifest(sourceIdentifier, manifest)) {
+			spdlog::warn("USD assembly material manifest save failed for '{}'.", sourceIdentifier);
+		}
+		else {
+			spdlog::info("USD assembly material manifest saved: source='{}' buckets={}", sourceIdentifier, manifest.size());
+		}
+		return;
+	}
 
 	std::unordered_map<std::string, std::vector<size_t>> resultsBySourcePrim;
 	for (size_t resultIndex = 0; resultIndex < result.submeshes.size(); ++resultIndex) {
@@ -2688,6 +2748,9 @@ StageExtractionResult ExtractAllFromStage(
 				requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
 				workItem.doubleSided || ShouldForceDoubleSidedByName(material, std::nullopt, options),
 				sourceIdentifier, tessellationFactor, options);
+			submesh.materialPath = material ? material.GetPrim().GetPath().GetString() : std::string{};
+			submesh.cachedMaterial = USDMaterialCache::ExtractMaterialDescription(material);
+			submesh.cachedMaterial.forceDoubleSided = submesh.forceDoubleSidedPreview;
 			std::lock_guard lock(resultMutex);
 			result.submeshes.push_back(std::move(submesh));
 		}
@@ -2699,6 +2762,9 @@ StageExtractionResult ExtractAllFromStage(
 					requiredUvSetNames, workItem.skinQ, workItem.skelJointOrderRaw, workItem.skelJointOrderMapped,
 					workItem.doubleSided || ShouldForceDoubleSidedByName(material, subset, options),
 					sourceIdentifier, tessellationFactor, options);
+				submesh.materialPath = material ? material.GetPrim().GetPath().GetString() : std::string{};
+				submesh.cachedMaterial = USDMaterialCache::ExtractMaterialDescription(material);
+				submesh.cachedMaterial.forceDoubleSided = submesh.forceDoubleSidedPreview;
 				std::lock_guard lock(resultMutex);
 				result.submeshes.push_back(std::move(submesh));
 				});

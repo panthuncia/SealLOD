@@ -57,6 +57,7 @@ namespace USDLoader {
 		std::string objectReyesHeightAtlasStorage = "r8_unorm";
 		std::vector<ObjectReyesBakedHeightMaterialEntry> objectReyesBakedHeightMaterials;
 		bool isUsdPackage = false;
+		bool requireCachedAssembly = false;
 	};
 
 	struct RenderablePartPayload {

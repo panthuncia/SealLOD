@@ -20,6 +20,7 @@ set(CLOD_SHARED_SOURCES
     "${BR_SRC}/Import/GlTFGeometryExtractor.cpp"
     "${BR_SRC}/Import/AssimpGeometryExtractor.cpp"
     "${BR_SRC}/Import/USDGeometryExtractor.cpp"
+    "${BR_SRC}/Import/USDMaterialCache.cpp"
     "${BR_SRC}/Import/BRNiflyClient.cpp"
 
     # CLod build & cache infrastructure
@@ -108,6 +109,15 @@ find_package(pxr REQUIRED CONFIG)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
+find_library(
+    CLOD_CACHE_TOOL_TBB12_LIBRARY
+    NAMES tbb12
+    PATHS "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows-static-md/lib"
+    NO_DEFAULT_PATH
+)
+if(NOT CLOD_CACHE_TOOL_TBB12_LIBRARY)
+    message(FATAL_ERROR "CLodCacheTool requires the vcpkg oneTBB tbb12 library used by Embree")
+endif()
 if(COMMAND basicrenderer_use_release_library_for_debug)
     basicrenderer_use_release_library_for_debug(fmt::fmt)
     basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
@@ -122,9 +132,9 @@ target_link_libraries(CLodCacheTool PRIVATE
     nlohmann_json::nlohmann_json
     meshoptimizer
     Boost::container_hash
-    TBB::tbb
     Tracy::TracyClient
     embree
+    "${CLOD_CACHE_TOOL_TBB12_LIBRARY}"
 
     # OpenUSD libs needed by CLodCache / CLodCacheLoader / USDGeometryExtractor
     usd
