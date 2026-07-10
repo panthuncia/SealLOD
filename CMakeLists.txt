@@ -274,6 +274,7 @@ add_subdirectory("BasicRHI")
 add_subdirectory("OpenRenderGraph")
 add_subdirectory("BasicScene")
 add_subdirectory ("BasicRenderer")
+add_subdirectory("Plugins/ProceduralWind")
 
 add_subdirectory("CLodCacheTool")
 if(BASICRENDERER_BUILD_BRNIFLY)

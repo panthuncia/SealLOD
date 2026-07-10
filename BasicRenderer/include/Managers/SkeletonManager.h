@@ -15,6 +15,14 @@ class BufferView;
 
 class SkeletonManager : public IResourceProvider {
 public:
+	struct ActiveInstanceView {
+		Skeleton* skeleton = nullptr;
+		uint32_t instanceSlot = 0xFFFFFFFFu;
+		uint32_t transformOffsetMatrices = 0u;
+		uint32_t inverseSkinOffsetMatrices = 0u;
+		uint32_t boneCount = 0u;
+	};
+
     static std::unique_ptr<SkeletonManager> CreateUnique() {
         return std::unique_ptr<SkeletonManager>(new SkeletonManager());
     }
@@ -32,6 +40,7 @@ public:
     // Upload pose for a specific instance (or call UpdateAllDirtyInstances once per frame).
     void UpdateInstanceTransforms(Skeleton& skinningInstance);
     void UpdateAllDirtyInstances();
+	std::vector<ActiveInstanceView> GetActiveInstanceViews() const;
 
     // IResourceProvider
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;

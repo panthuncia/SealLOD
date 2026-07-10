@@ -232,6 +232,8 @@ namespace USDLoader {
 		std::vector<std::string> boneNames;
 		std::vector<int32_t> parentIndices;
 		std::vector<GfMatrix4d> bindXforms;
+		std::vector<uint32_t> windSimulationGroupIndices;
+		std::string windProfileIdentity;
 		double metersPerUnit = 1.0;
 	};
 
@@ -4748,6 +4750,46 @@ namespace USDLoader {
 		metadata.metersPerUnit = metersPerUnit;
 		metadata.boneNames.reserve(rawJointOrder.size());
 		metadata.bindXforms.reserve(rawJointOrder.size());
+		metadata.windSimulationGroupIndices.assign(rawJointOrder.size(), 0xFFFFFFFFu);
+		if (stage && stage->GetRootLayer()) {
+			metadata.windProfileIdentity = stage->GetRootLayer()->GetIdentifier();
+		}
+		{
+			VtTokenArray windJointNames;
+			VtIntArray windGroups;
+			const bool hasNames = skel.GetPrim().GetAttribute(TfToken("unreal:dynamicWind:jointNames")).Get(&windJointNames);
+			const bool hasGroups = skel.GetPrim().GetAttribute(TfToken("unreal:dynamicWind:jointSimulationGroups")).Get(&windGroups);
+			if ((hasNames || hasGroups) && (!hasNames || !hasGroups || windJointNames.size() != windGroups.size())) {
+				spdlog::warn("Skeleton '{}' has invalid DynamicWind arrays (names={}, groups={}); wind metadata disabled.",
+					skeletonPath, windJointNames.size(), windGroups.size());
+			}
+			else if (hasNames && hasGroups) {
+				std::unordered_map<std::string, uint32_t> groupByName;
+				groupByName.reserve(windJointNames.size());
+				size_t duplicateNames = 0;
+				for (size_t i = 0; i < windJointNames.size(); ++i) {
+					const auto [_, inserted] = groupByName.try_emplace(
+						windJointNames[i].GetString(),
+						windGroups[i] >= 0 ? static_cast<uint32_t>(windGroups[i]) : 0xFFFFFFFFu);
+					duplicateNames += inserted ? 0u : 1u;
+				}
+				for (size_t i = 0; i < rawJointOrder.size(); ++i) {
+					const std::string authored = rawJointOrder[i].GetString();
+					auto found = groupByName.find(authored);
+					if (found == groupByName.end()) {
+						const size_t slash = authored.find_last_of('/');
+						found = groupByName.find(slash == std::string::npos ? authored : authored.substr(slash + 1u));
+					}
+					if (found != groupByName.end()) metadata.windSimulationGroupIndices[i] = found->second;
+				}
+				const size_t matched = std::ranges::count_if(metadata.windSimulationGroupIndices, [](uint32_t group) { return group != 0xFFFFFFFFu; });
+				spdlog::info("Skeleton '{}' DynamicWind metadata: authored={} matched={}.", skeletonPath, windJointNames.size(), matched);
+				if (duplicateNames != 0u || matched != rawJointOrder.size()) {
+					spdlog::warn("Skeleton '{}' DynamicWind mapping had {} duplicate authored names and {} unmatched USD joints.",
+						skeletonPath, duplicateNames, rawJointOrder.size() - matched);
+				}
+			}
+		}
 
 		for (size_t i = 0; i < rawJointOrder.size(); ++i) {
 			boneNames.push_back(rawJointOrder[i].GetString());
@@ -4768,7 +4810,10 @@ namespace USDLoader {
 			std::move(boneNames),
 			std::move(parentIndices),
 			std::move(inverseBindMatrices),
-			std::move(restLocalTransforms));
+			std::move(restLocalTransforms),
+			std::vector<DirectX::XMMATRIX>{},
+			metadata.windSimulationGroupIndices,
+			metadata.windProfileIdentity);
 		loadingCache.skeletonMap[skeletonCacheKey] = skeleton;
 		loadingCache.payloadSkeletonMetadata[skeleton.get()] = std::move(metadata);
 		return skeleton;
@@ -5100,7 +5145,10 @@ namespace USDLoader {
 			data.jointNames,
 			data.parentIndices,
 			std::move(inverseBinds),
-			std::move(restLocals));
+			std::move(restLocals),
+			std::vector<DirectX::XMMATRIX>{},
+			data.windSimulationGroupIndices,
+			data.windProfileIdentity);
 	}
 
 	static std::string BuildAssemblySkeletonCacheKey(const ClusterLODAssemblySkeletonData& data)
@@ -5138,6 +5186,10 @@ namespace USDLoader {
 		for (const DirectX::XMFLOAT4X4& matrix : data.restLocalMatrices) {
 			hashMatrix(matrix);
 		}
+		for (uint32_t group : data.windSimulationGroupIndices) {
+			combine(hash, group);
+		}
+		combine(hash, hashString(data.windProfileIdentity));
 		return "assembly_skeleton#" + std::to_string(hash);
 	}
 
@@ -6025,6 +6077,9 @@ namespace USDLoader {
 
 			std::vector<uint32_t> remap(metadata.boneNames.size(), 0u);
 			const uint32_t baseJoint = static_cast<uint32_t>(expandedAssemblySkeleton.jointNames.size());
+			if (expandedAssemblySkeleton.windProfileIdentity.empty()) {
+				expandedAssemblySkeleton.windProfileIdentity = metadata.windProfileIdentity;
+			}
 			for (uint32_t jointIndex = 0; jointIndex < static_cast<uint32_t>(metadata.boneNames.size()); ++jointIndex) {
 				const GfMatrix4d sourceBind = jointIndex < metadata.bindXforms.size()
 					? metadata.bindXforms[jointIndex]
@@ -6071,6 +6126,10 @@ namespace USDLoader {
 				expandedAssemblySkeleton.inverseBindMatrices.push_back(inverseBind);
 				expandedAssemblySkeleton.restLocalMatrices.push_back(restLocalMatrix);
 				expandedAssemblySkeleton.bindGlobalMatrices.push_back(bindGlobalMatrix);
+				expandedAssemblySkeleton.windSimulationGroupIndices.push_back(
+					jointIndex < metadata.windSimulationGroupIndices.size()
+						? metadata.windSimulationGroupIndices[jointIndex]
+						: 0xFFFFFFFFu);
 				expandedBindGlobals.push_back(expandedBind);
 				remap[jointIndex] = baseJoint + jointIndex;
 			}

@@ -31,7 +31,9 @@ public:
         std::vector<int32_t> parentIndices,
         std::vector<Matrix> inverseBindMatrices,
         std::vector<Components::Transform> restLocalTransforms = {},
-        std::vector<Matrix> rootParentGlobals = {});
+        std::vector<Matrix> rootParentGlobals = {},
+        std::vector<uint32_t> windSimulationGroupIndices = {},
+        std::string windProfileIdentity = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -86,6 +88,9 @@ public:
     std::span<const std::string> GetBoneNames() const;
     std::span<const int32_t> GetParentIndices() const;
     std::span<const Matrix> GetRootParentGlobals() const;
+    std::span<const uint32_t> GetWindSimulationGroupIndices() const;
+    std::string_view GetWindProfileIdentity() const;
+    bool HasWindSimulationGroups() const { return !GetWindSimulationGroupIndices().empty(); }
 
     // Optional hook for SkeletonManager (or draw-data) to store an instance slot/index.
     uint32_t GetSkinningInstanceSlot() const noexcept { return m_skinningInstanceSlot; }
@@ -103,6 +108,8 @@ private:
     std::vector<uint32_t>    m_evalOrder;          // parent-before-children order
     std::vector<Matrix>      m_inverseBindMatrices;
     std::vector<Matrix>      m_rootParentGlobals; // Transforms to apply to root nodes based on external hierarchy
+    std::vector<uint32_t>    m_windSimulationGroupIndices;
+    std::string              m_windProfileIdentity;
 
     // Animation library (base)
 public:

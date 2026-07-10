@@ -12,6 +12,7 @@
     "directx12-agility",
     "flecs",
     "nlohmann-json",
+    "lz4",
     "tree-sitter",
     "assimp",
     "curl",

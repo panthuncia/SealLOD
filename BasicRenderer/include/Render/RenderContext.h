@@ -14,6 +14,7 @@ class ViewManager;
 class LightManager;
 class EnvironmentManager;
 class MaterialManager;
+class SkeletonManager;
 class PixelBuffer;
 
 namespace br::render {
@@ -62,6 +63,7 @@ struct UpdateContext {
 	LightManager* lightManager = nullptr;
 	EnvironmentManager* environmentManager = nullptr;
 	MaterialManager* materialManager = nullptr;
+	SkeletonManager* skeletonManager = nullptr;
 
 	Scene* currentScene = nullptr;
 	Components::Camera primaryCamera;

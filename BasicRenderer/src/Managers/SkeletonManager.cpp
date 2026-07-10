@@ -78,10 +78,10 @@ static uint32_t BytesToMatrixIndex(size_t byteOffset) {
 SkeletonManager::SkeletonManager() {
     m_lifetimeToken = std::make_shared<std::atomic_bool>(true);
     m_inverseBindMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseBindMatricesPacked");
-    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneSkinMatricesPacked");
+    m_boneTransforms = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "BoneSkinMatricesPacked", false, true);
     // TODO: This only exists to project skinned voxel samples back to object-space for voxel sample reconstruction.
     // Maybe we could avoid this if we changed the normal skinning path as well?
-    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked");
+    m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked", false, true);
 
     m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo");
 
@@ -150,6 +150,22 @@ uint32_t SkeletonManager::AllocateInstanceSlot() {
 void SkeletonManager::FreeInstanceSlot(uint32_t slot) {
     if (slot != kInvalidSlot)
         m_freeInstanceSlots.push_back(slot);
+}
+
+std::vector<SkeletonManager::ActiveInstanceView> SkeletonManager::GetActiveInstanceViews() const {
+    std::vector<ActiveInstanceView> result;
+    result.reserve(m_instances.size());
+    for (const auto& [skeleton, record] : m_instances) {
+        result.push_back({
+            const_cast<Skeleton*>(skeleton),
+            record.instanceSlot,
+            record.transformOffsetMatrices,
+            record.inverseSkinOffsetMatrices,
+            record.boneCount
+        });
+    }
+    std::ranges::sort(result, {}, &ActiveInstanceView::instanceSlot);
+    return result;
 }
 
 uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton>& skinningInstance) {

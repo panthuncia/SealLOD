@@ -71,7 +71,9 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::vector<int32_t> parentIndices,
     std::vector<Matrix> inverseBindMatrices,
     std::vector<Components::Transform> restLocalTransforms,
-    std::vector<Matrix> rootParentGlobals)
+    std::vector<Matrix> rootParentGlobals,
+    std::vector<uint32_t> windSimulationGroupIndices,
+    std::string windProfileIdentity)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -103,6 +105,13 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
             m_boneNames.size());
         m_inverseBindMatrices.assign(m_boneNames.size(), DirectX::XMMatrixIdentity());
     }
+    m_windSimulationGroupIndices = std::move(windSimulationGroupIndices);
+    if (!m_windSimulationGroupIndices.empty() && m_windSimulationGroupIndices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: wind simulation group count ({}) != bone name count ({}); disabling wind metadata",
+            m_windSimulationGroupIndices.size(), m_boneNames.size());
+        m_windSimulationGroupIndices.clear();
+    }
+    m_windProfileIdentity = std::move(windProfileIdentity);
     BuildEvalOrder_();
 }
 
@@ -140,6 +149,9 @@ Skeleton::Skeleton(const Skeleton& other)
         m_restLocalTransforms = other.m_restLocalTransforms;
         m_evalOrder = other.m_evalOrder;
         m_inverseBindMatrices = other.m_inverseBindMatrices;
+		m_rootParentGlobals = other.m_rootParentGlobals;
+		m_windSimulationGroupIndices = other.m_windSimulationGroupIndices;
+		m_windProfileIdentity = other.m_windProfileIdentity;
         m_skinningGPUFlags = other.m_skinningGPUFlags;
 
         animations = other.animations;
@@ -191,6 +203,18 @@ std::shared_ptr<Skeleton> Skeleton::GetBaseSkeletonShared() const
         return nullptr;
     }
     return m_baseSkeleton;
+}
+
+std::span<const uint32_t> Skeleton::GetWindSimulationGroupIndices() const
+{
+    if (m_isBaseSkeleton) return m_windSimulationGroupIndices;
+    return m_baseSkeleton ? std::span<const uint32_t>(m_baseSkeleton->m_windSimulationGroupIndices) : std::span<const uint32_t>{};
+}
+
+std::string_view Skeleton::GetWindProfileIdentity() const
+{
+    if (m_isBaseSkeleton) return m_windProfileIdentity;
+    return m_baseSkeleton ? std::string_view(m_baseSkeleton->m_windProfileIdentity) : std::string_view{};
 }
 
 uint32_t Skeleton::GetSkinningGPUFlags() const noexcept
@@ -581,10 +605,10 @@ size_t Skeleton::GetActiveAnimationIndex() const noexcept
 float Skeleton::GetCurrentAnimationConservativeBoundsScale() const noexcept
 {
     if (m_isBaseSkeleton) {
-        return 1.0f;
+        return HasWindSimulationGroups() ? 1.30f : 1.0f;
     }
 
-    return m_currentAnimationConservativeBoundsScale;
+    return std::max(m_currentAnimationConservativeBoundsScale, HasWindSimulationGroups() ? 1.30f : 1.0f);
 }
 
 void Skeleton::UpdateTransforms(float elapsedSeconds, bool force)

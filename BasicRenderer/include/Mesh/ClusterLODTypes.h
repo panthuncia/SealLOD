@@ -115,6 +115,8 @@ struct ClusterLODAssemblySkeletonData
 	std::vector<DirectX::XMFLOAT4X4> inverseBindMatrices;
 	std::vector<DirectX::XMFLOAT4X4> restLocalMatrices;
 	std::vector<DirectX::XMFLOAT4X4> bindGlobalMatrices;
+	std::vector<uint32_t> windSimulationGroupIndices;
+	std::string windProfileIdentity;
 
 	bool Empty() const
 	{
@@ -128,6 +130,8 @@ struct ClusterLODAssemblySkeletonData
 		inverseBindMatrices.clear();
 		restLocalMatrices.clear();
 		bindGlobalMatrices.clear();
+		windSimulationGroupIndices.clear();
+		windProfileIdentity.clear();
 	}
 };
 

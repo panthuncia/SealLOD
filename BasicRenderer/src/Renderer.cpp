@@ -2522,6 +2522,7 @@ void Renderer::Update(float elapsedSeconds) {
     updateData.lightManager = m_pLightManager.get();
     updateData.environmentManager = m_pEnvironmentManager.get();
     updateData.materialManager = m_pMaterialManager.get();
+    updateData.skeletonManager = m_pSkeletonManager.get();
     updateData.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
     updateData.primaryCamera = camera.get<Components::Camera>();
     updateData.hasPrimaryCamera = true;

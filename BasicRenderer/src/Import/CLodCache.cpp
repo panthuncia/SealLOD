@@ -240,6 +240,8 @@ namespace CLodCache {
 			WriteVectorPod(out, prebuiltData.assemblySkeleton.inverseBindMatrices);
 			WriteVectorPod(out, prebuiltData.assemblySkeleton.restLocalMatrices);
 			WriteVectorPod(out, prebuiltData.assemblySkeleton.bindGlobalMatrices);
+			WriteVectorPod(out, prebuiltData.assemblySkeleton.windSimulationGroupIndices);
+			WriteString(out, prebuiltData.assemblySkeleton.windProfileIdentity);
 			WriteVectorPod(out, prebuiltData.partRecords);
 			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
@@ -294,6 +296,8 @@ namespace CLodCache {
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.inverseBindMatrices)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.restLocalMatrices)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.bindGlobalMatrices)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.windSimulationGroupIndices)) return false;
+			if (!ReadString(blob, offset, out.prebuiltData.assemblySkeleton.windProfileIdentity)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.partRecords)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
