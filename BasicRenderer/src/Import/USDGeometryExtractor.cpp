@@ -35,6 +35,7 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec4f.h>
+#include <pxr/base/gf/rotation.h>
 
 #include <DirectXMath.h>
 #include <spdlog/spdlog.h>
@@ -1970,7 +1971,9 @@ MeshPreprocessResult ExtractSubMesh(
 		options);
 }
 
-ClusterLODAssemblyTransform ClusterLODAssemblyTransformFromUsdMatrix(const GfMatrix4d& matrix)
+ClusterLODAssemblyTransform AssemblyTransformFromUsdMatrix(
+	const GfMatrix4d& matrix,
+	double metersPerUnit)
 {
 	auto transformPoint = [&matrix](double x, double y, double z) {
 		return matrix.Transform(GfVec3d(x, y, z));
@@ -1986,18 +1989,146 @@ ClusterLODAssemblyTransform ClusterLODAssemblyTransformFromUsdMatrix(const GfMat
 		static_cast<float>(basisX[0]),
 		static_cast<float>(basisY[0]),
 		static_cast<float>(basisZ[0]),
-		static_cast<float>(origin[0]));
+		static_cast<float>(origin[0] * metersPerUnit));
 	transform.row1 = DirectX::XMFLOAT4(
 		static_cast<float>(basisX[1]),
 		static_cast<float>(basisY[1]),
 		static_cast<float>(basisZ[1]),
-		static_cast<float>(origin[1]));
+		static_cast<float>(origin[1] * metersPerUnit));
 	transform.row2 = DirectX::XMFLOAT4(
 		static_cast<float>(basisX[2]),
 		static_cast<float>(basisY[2]),
 		static_cast<float>(basisZ[2]),
-		static_cast<float>(origin[2]));
+		static_cast<float>(origin[2] * metersPerUnit));
 	return transform;
+}
+
+static GfMatrix4d GetAssemblyStageUpAxisCorrection(const UsdStageRefPtr& stage)
+{
+	const TfToken upAxis = UsdGeomGetStageUpAxis(stage);
+	if (upAxis == UsdGeomTokens->z) {
+		return GfMatrix4d(GfRotation(GfVec3d(1.0, 0.0, 0.0), -90.0), GfVec3d(0.0));
+	}
+	if (upAxis == UsdGeomTokens->x) {
+		return GfMatrix4d(GfRotation(GfVec3d(0.0, 1.0, 0.0), -90.0), GfVec3d(0.0));
+	}
+	return GfMatrix4d(1.0);
+}
+
+std::vector<AssemblyMeshInstance> EnumerateAssemblyMeshInstances(
+	const UsdStageRefPtr& stage,
+	UsdTimeCode geomTimeCode)
+{
+	std::vector<AssemblyMeshInstance> instances;
+	if (!stage) {
+		return instances;
+	}
+
+	std::vector<UsdGeomPointInstancer> pointInstancers;
+	std::vector<SdfPath> prototypeRoots;
+	std::set<std::string> prototypeRootStrings;
+	auto primRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = primRange.begin(); primIt != primRange.end(); ++primIt) {
+		UsdGeomPointInstancer pointInstancer(*primIt);
+		if (!pointInstancer) {
+			continue;
+		}
+		pointInstancers.push_back(pointInstancer);
+		SdfPathVector targets;
+		if (pointInstancer.GetPrototypesRel().GetTargets(&targets)) {
+			for (const SdfPath& target : targets) {
+				if (prototypeRootStrings.insert(target.GetString()).second) {
+					prototypeRoots.push_back(target);
+				}
+			}
+		}
+	}
+
+	UsdGeomXformCache xformCache(geomTimeCode);
+	auto rootRange = UsdPrimRange(stage->GetPseudoRoot());
+	for (auto primIt = rootRange.begin(); primIt != rootRange.end(); ++primIt) {
+		UsdGeomMesh mesh(*primIt);
+		const bool underPrototype = mesh && std::any_of(
+			prototypeRoots.begin(),
+			prototypeRoots.end(),
+			[&](const SdfPath& root) { return mesh.GetPrim().GetPath().HasPrefix(root); });
+		if (!mesh || underPrototype) {
+			continue;
+		}
+		if (UsdGeomImageable imageable(mesh.GetPrim());
+			imageable && imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+			continue;
+		}
+		instances.push_back({ mesh, xformCache.GetLocalToWorldTransform(mesh.GetPrim()) });
+	}
+
+	for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
+		SdfPathVector prototypeTargets;
+		if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
+			continue;
+		}
+		VtIntArray protoIndices;
+		if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
+			spdlog::warn("PointInstancer '{}' has no readable protoIndices for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+		std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
+		if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
+			spdlog::warn("PointInstancer '{}' mask application to protoIndices failed for CLod assembly.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+		VtArray<GfMatrix4d> instanceTransforms;
+		if (!pointInstancer.ComputeInstanceTransformsAtTime(
+			&instanceTransforms,
+			geomTimeCode,
+			geomTimeCode,
+			UsdGeomPointInstancer::IncludeProtoXform,
+			UsdGeomPointInstancer::ApplyMask)) {
+			spdlog::warn("PointInstancer '{}' failed to compute CLod assembly instance transforms.",
+				pointInstancer.GetPrim().GetPath().GetString());
+			continue;
+		}
+
+		const size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
+		for (size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
+			const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
+			if (!prototypeRoot) {
+				continue;
+			}
+			const GfMatrix4d prototypeRootWorldInverse =
+				xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
+			std::vector<std::pair<UsdGeomMesh, GfMatrix4d>> prototypeMeshes;
+			std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
+				if (prim.IsA<UsdGeomImageable>()) {
+					UsdGeomImageable imageable(prim);
+					if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
+						return;
+					}
+				}
+				if (UsdGeomMesh mesh(prim); mesh) {
+					prototypeMeshes.emplace_back(
+						mesh,
+						xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
+				}
+				for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
+					gatherPrototypeMeshes(child);
+				}
+			};
+			gatherPrototypeMeshes(prototypeRoot);
+
+			for (size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
+				if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
+					continue;
+				}
+				for (const auto& [mesh, prototypeLocal] : prototypeMeshes) {
+					instances.push_back({ mesh, prototypeLocal * instanceTransforms[instanceIndex] });
+				}
+			}
+		}
+	}
+	return instances;
 }
 
 bool PathHasAnyPrefix(const SdfPath& path, const std::vector<SdfPath>& prefixes)
@@ -2081,7 +2212,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 
 	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
 	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
-	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=17#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=19#authored_up_axis_baked=1#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
 	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};
@@ -2202,27 +2333,19 @@ std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
 	};
 
 	std::vector<ClusterLODAssemblyInstanceSpec> instances;
-	UsdGeomXformCache xformCache(geomTimeCode);
 	UsdGeomMesh firstRootMesh;
-
-	auto rootPrimRange = UsdPrimRange(stage->GetPseudoRoot());
-	for (auto primIt = rootPrimRange.begin(); primIt != rootPrimRange.end(); ++primIt) {
-		UsdGeomMesh mesh(*primIt);
-		if (!mesh || PathHasAnyPrefix(mesh.GetPrim().GetPath(), prototypeRoots)) {
-			continue;
-		}
-
-		const auto found = resultsBySourcePrim.find(mesh.GetPrim().GetPath().GetString());
+	const double metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
+	const GfMatrix4d upAxisCorrection = GetAssemblyStageUpAxisCorrection(stage);
+	for (const AssemblyMeshInstance& meshInstance : EnumerateAssemblyMeshInstances(stage, geomTimeCode)) {
+		const auto found = resultsBySourcePrim.find(meshInstance.mesh.GetPrim().GetPath().GetString());
 		if (found == resultsBySourcePrim.end()) {
 			continue;
 		}
-
 		if (!firstRootMesh) {
-			firstRootMesh = mesh;
+			firstRootMesh = meshInstance.mesh;
 		}
-
 		const ClusterLODAssemblyTransform transform =
-			ClusterLODAssemblyTransformFromUsdMatrix(xformCache.GetLocalToWorldTransform(mesh.GetPrim()));
+			AssemblyTransformFromUsdMatrix(meshInstance.localToStage * upAxisCorrection, metersPerUnit);
 		for (size_t resultIndex : found->second) {
 			instances.push_back(ClusterLODAssemblyInstanceSpec{
 				.partIndex = addPart(resultIndex),
@@ -2230,92 +2353,6 @@ std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
 				.transform = transform,
 				.flags = 0u,
 			});
-		}
-	}
-
-	for (const UsdGeomPointInstancer& pointInstancer : pointInstancers) {
-		SdfPathVector prototypeTargets;
-		if (!pointInstancer.GetPrototypesRel().GetTargets(&prototypeTargets) || prototypeTargets.empty()) {
-			continue;
-		}
-
-		VtIntArray protoIndices;
-		if (!pointInstancer.GetProtoIndicesAttr().Get(&protoIndices, geomTimeCode)) {
-			spdlog::warn("PointInstancer '{}' has no readable protoIndices for CLod assembly.",
-				pointInstancer.GetPrim().GetPath().GetString());
-			continue;
-		}
-
-		std::vector<bool> mask = pointInstancer.ComputeMaskAtTime(geomTimeCode);
-		if (!mask.empty() && !UsdGeomPointInstancer::ApplyMaskToArray(mask, &protoIndices)) {
-			spdlog::warn("PointInstancer '{}' mask application to protoIndices failed for CLod assembly.",
-				pointInstancer.GetPrim().GetPath().GetString());
-			continue;
-		}
-
-		VtArray<GfMatrix4d> instanceTransforms;
-		if (!pointInstancer.ComputeInstanceTransformsAtTime(
-			&instanceTransforms,
-			geomTimeCode,
-			geomTimeCode,
-			UsdGeomPointInstancer::IncludeProtoXform,
-			UsdGeomPointInstancer::ApplyMask)) {
-			spdlog::warn("PointInstancer '{}' failed to compute CLod assembly instance transforms.",
-				pointInstancer.GetPrim().GetPath().GetString());
-			continue;
-		}
-
-		const size_t emittedCount = std::min(protoIndices.size(), instanceTransforms.size());
-		for (size_t prototypeIndex = 0; prototypeIndex < prototypeTargets.size(); ++prototypeIndex) {
-			const UsdPrim prototypeRoot = stage->GetPrimAtPath(prototypeTargets[prototypeIndex]);
-			if (!prototypeRoot) {
-				continue;
-			}
-
-			const GfMatrix4d prototypeRootWorldInverse = xformCache.GetLocalToWorldTransform(prototypeRoot).GetInverse();
-			std::vector<std::pair<std::vector<size_t>, GfMatrix4d>> prototypeMeshes;
-			std::function<void(const UsdPrim&)> gatherPrototypeMeshes = [&](const UsdPrim& prim) {
-				if (prim.IsA<UsdGeomImageable>()) {
-					UsdGeomImageable imageable(prim);
-					if (imageable.ComputeVisibility(geomTimeCode) == UsdGeomTokens->invisible) {
-						return;
-					}
-				}
-
-				UsdGeomMesh mesh(prim);
-				if (mesh) {
-					const auto found = resultsBySourcePrim.find(mesh.GetPrim().GetPath().GetString());
-					if (found != resultsBySourcePrim.end()) {
-						prototypeMeshes.emplace_back(
-							found->second,
-							xformCache.GetLocalToWorldTransform(mesh.GetPrim()) * prototypeRootWorldInverse);
-					}
-				}
-
-				for (const UsdPrim& child : prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
-					gatherPrototypeMeshes(child);
-				}
-			};
-			gatherPrototypeMeshes(prototypeRoot);
-
-			for (size_t instanceIndex = 0; instanceIndex < emittedCount; ++instanceIndex) {
-				if (protoIndices[instanceIndex] != static_cast<int>(prototypeIndex)) {
-					continue;
-				}
-
-				for (const auto& [resultIndices, prototypeLocal] : prototypeMeshes) {
-					const GfMatrix4d composedTransform = prototypeLocal * instanceTransforms[instanceIndex];
-					const ClusterLODAssemblyTransform transform = ClusterLODAssemblyTransformFromUsdMatrix(composedTransform);
-					for (size_t resultIndex : resultIndices) {
-						instances.push_back(ClusterLODAssemblyInstanceSpec{
-							.partIndex = addPart(resultIndex),
-							.rootNode = 0u,
-							.transform = transform,
-							.flags = 0u,
-						});
-					}
-				}
-			}
 		}
 	}
 
@@ -2344,7 +2381,7 @@ std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
 		}
 		const UsdPrim defaultPrim = stage->GetDefaultPrim();
 		assemblyIdentity.primPath = defaultPrim ? defaultPrim.GetPath().GetString() + "/__CLodAssembly" : "/__CLodAssembly";
-		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=7#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
+		assemblyIdentity.sourceIdentifier += "#usd_point_instancer_clod_assembly=9#authored_up_axis_baked=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
 		assemblyIdentity.sourceIdentifier += identitySuffix;
 
 		ClusterLODPrebuiltData savedPrebuiltData;
@@ -2414,6 +2451,8 @@ void AppendWholeAssetAssemblyCaches(
 		}
 
 		std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
+		std::vector<MeshPreprocessResult> completedAssemblies;
+		completedAssemblies.reserve(materialBuckets.size());
 		for (const auto& [materialPath, submeshes] : materialBuckets) {
 			const std::string suffix = BuildWholeAssetAssemblyBucketIdentitySuffix(false, 0u, materialPath);
 			auto assembly = BuildPointInstancerAssemblyCache(stage, sourceIdentifier, geomTimeCode, submeshes, suffix);
@@ -2425,7 +2464,14 @@ void AppendWholeAssetAssemblyCaches(
 				.identity = assembly->cacheIdentity,
 				.material = materials.at(materialPath),
 			});
-			result.submeshes.push_back(std::move(*assembly));
+			completedAssemblies.push_back(std::move(*assembly));
+		}
+		// materialBuckets contains pointers into result.submeshes. Appending while
+		// building buckets can reallocate that vector and invalidate every pointer
+		// still needed by subsequent assembly builds.
+		result.submeshes.reserve(result.submeshes.size() + completedAssemblies.size());
+		for (MeshPreprocessResult& assembly : completedAssemblies) {
+			result.submeshes.push_back(std::move(assembly));
 			result.cachesBuilt++;
 		}
 		if (manifest.empty() || !USDMaterialCache::SaveAssemblyMaterialManifest(sourceIdentifier, manifest)) {
@@ -2495,6 +2541,7 @@ void AppendWholeAssetAssemblyCaches(
 	std::vector<ClusterLODAssemblyInstanceSpec> instances;
 	UsdGeomXformCache xformCache(geomTimeCode);
 	UsdGeomMesh firstRootMesh;
+	const double metersPerUnit = UsdGeomGetStageMetersPerUnit(stage);
 
 	auto rootPrimRange = UsdPrimRange(stage->GetPseudoRoot());
 	for (auto primIt = rootPrimRange.begin(); primIt != rootPrimRange.end(); ++primIt) {
@@ -2516,7 +2563,7 @@ void AppendWholeAssetAssemblyCaches(
 		}
 
 		const ClusterLODAssemblyTransform transform =
-			ClusterLODAssemblyTransformFromUsdMatrix(xformCache.GetLocalToWorldTransform(mesh.GetPrim()));
+			AssemblyTransformFromUsdMatrix(xformCache.GetLocalToWorldTransform(mesh.GetPrim()), metersPerUnit);
 		for (size_t resultIndex : found->second) {
 			instances.push_back(ClusterLODAssemblyInstanceSpec{
 				.partIndex = addPart(resultIndex),
@@ -2594,7 +2641,7 @@ void AppendWholeAssetAssemblyCaches(
 				}
 				for (const auto& [resultIndices, prototypeLocal] : prototypeMeshes) {
 					const GfMatrix4d composedTransform = prototypeLocal * instanceTransforms[instanceIndex];
-					const ClusterLODAssemblyTransform transform = ClusterLODAssemblyTransformFromUsdMatrix(composedTransform);
+					const ClusterLODAssemblyTransform transform = AssemblyTransformFromUsdMatrix(composedTransform, metersPerUnit);
 					for (size_t resultIndex : resultIndices) {
 						instances.push_back(ClusterLODAssemblyInstanceSpec{
 							.partIndex = addPart(resultIndex),

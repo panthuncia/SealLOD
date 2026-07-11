@@ -1,6 +1,13 @@
 # CLodCacheTool – Offline ClusterLOD cache builder (CLI)
 # Shares the geometry-extraction & CLod-build sources with BasicRenderer
 # but has NO GPU/D3D12 dependencies.
+#
+# TBB dependency note: the prebuilt OpenUSD packages can define TBB::tbb for
+# their bundled TBB runtime, while vcpkg Embree uses oneTBB (whose current
+# Windows import library is named tbb12).  Until OpenUSD and Embree are built
+# against one shared TBB package, do not assume TBB::tbb satisfies both or
+# hard-code a vcpkg triplet.  The explicit Embree-side library lookup below is
+# intentionally derived from vcpkg's active installed root and triplet.
 
 cmake_minimum_required(VERSION 3.16)
 
@@ -109,14 +116,23 @@ find_package(pxr REQUIRED CONFIG)
 if(NOT TARGET TBB::tbb)
     find_package(TBB CONFIG REQUIRED)
 endif()
+
+set(_clod_cache_tool_vcpkg_installed_dir "${VCPKG_INSTALLED_DIR}")
+if(NOT _clod_cache_tool_vcpkg_installed_dir)
+    set(_clod_cache_tool_vcpkg_installed_dir "${_VCPKG_INSTALLED_DIR}")
+endif()
 find_library(
     CLOD_CACHE_TOOL_TBB12_LIBRARY
     NAMES tbb12
-    PATHS "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows-static-md/lib"
+    PATHS "${_clod_cache_tool_vcpkg_installed_dir}/${VCPKG_TARGET_TRIPLET}/lib"
     NO_DEFAULT_PATH
 )
 if(NOT CLOD_CACHE_TOOL_TBB12_LIBRARY)
-    message(FATAL_ERROR "CLodCacheTool requires the vcpkg oneTBB tbb12 library used by Embree")
+    message(FATAL_ERROR
+        "CLodCacheTool requires the vcpkg oneTBB library used by Embree; "
+        "it was not found for triplet '${VCPKG_TARGET_TRIPLET}' under "
+        "'${_clod_cache_tool_vcpkg_installed_dir}'"
+    )
 endif()
 if(COMMAND basicrenderer_use_release_library_for_debug)
     basicrenderer_use_release_library_for_debug(fmt::fmt)

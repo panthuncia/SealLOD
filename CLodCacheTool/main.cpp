@@ -1460,6 +1460,21 @@ int main(int argc, char* argv[]) {
                 roots.push_back(g_assetOverridesConfig.parent_path());
                 roots.push_back(g_assetOverridesConfig.parent_path().parent_path());
                 roots.push_back(fs::current_path());
+				// Match the renderer host's asset-root behavior: when the tool runs
+				// from <mod>/SKSE/Plugins/SARP/Renderer, override assets may live at
+				// the mod root beside SKSE rather than beside the executable.
+				for (fs::path ancestor = fs::current_path(); ancestor.has_parent_path();) {
+					std::string name = ToLower(ancestor.filename().string());
+					if (name == "skse") {
+						roots.push_back(ancestor.parent_path());
+						break;
+					}
+					const fs::path parent = ancestor.parent_path();
+					if (parent == ancestor) {
+						break;
+					}
+					ancestor = parent;
+				}
 
                 std::unordered_set<std::string> addedPaths;
                 for (const std::string& replacementText : replacements) {

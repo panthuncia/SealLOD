@@ -12,11 +12,28 @@
 #include <pxr/usd/usdSkel/cache.h>
 #include <pxr/base/vt/array.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/base/gf/matrix4d.h>
 
 #include "Import/MeshPreprocessData.h"
 #include "Materials/MaterialDescription.h"
 
 namespace USDGeometryExtractor {
+
+struct AssemblyMeshInstance {
+	pxr::UsdGeomMesh mesh;
+	pxr::GfMatrix4d localToStage{ 1.0 };
+};
+
+// Enumerate visible root meshes and expanded PointInstancer prototype meshes
+// in one canonical order and transform space. Both offline and runtime assembly
+// builders consume this to avoid drifting USD traversal/composition behavior.
+std::vector<AssemblyMeshInstance> EnumerateAssemblyMeshInstances(
+	const pxr::UsdStageRefPtr& stage,
+	pxr::UsdTimeCode geomTimeCode);
+
+ClusterLODAssemblyTransform AssemblyTransformFromUsdMatrix(
+	const pxr::GfMatrix4d& matrix,
+	double metersPerUnit);
 
 struct BenchmarkStats {
 	std::uint64_t submeshes = 0;

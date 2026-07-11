@@ -492,7 +492,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
-    auto needles = LoadModel("models/Trees/PineTree.usd");
+    auto needles = LoadModel("models/Trees/spruce/Tree_Norway_Spruce_01_A.usd");
 
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
@@ -501,7 +501,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
-    constexpr int NeedleCloneCount = 100;
+    constexpr int NeedleCloneCount = 0;
     constexpr float NeedleDistributionRadius = 50.0f;
     constexpr float NeedleMinSpacing = 5.0f;
     constexpr float NeedleMinSpacingSq = NeedleMinSpacing * NeedleMinSpacing;
@@ -629,7 +629,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 0.f, 100.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 15.f, 10.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
