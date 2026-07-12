@@ -905,16 +905,10 @@ uint32_t ComputeDefaultStreamingBootstrapTopMip(const TextureDescription& desc, 
 		return 0u;
 	}
 
-	static constexpr uint32_t kBootstrapMaxDimension = 512u;
-	uint32_t width = desc.imageDimensions[0].width;
-	uint32_t height = desc.imageDimensions[0].height;
-	uint32_t topMip = 0u;
-	while (topMip + 1u < totalMipCount && (width > kBootstrapMaxDimension || height > kBootstrapMaxDimension)) {
-		width = (std::max)(1u, width >> 1);
-		height = (std::max)(1u, height >> 1);
-		++topMip;
-	}
-	return topMip;
+	// Start with only the final mip. For ordinary 2D material textures this produces
+	// the smallest resource the API can allocate (normally one 64 KiB allocation),
+	// and all finer residency must be justified by GPU streaming feedback.
+	return totalMipCount - 1u;
 }
 
 std::shared_ptr<TextureSourceData> ClipTextureSourceDataTopMip(
@@ -1005,9 +999,13 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 	}
 
 	auto bytes = std::make_shared<std::vector<uint8_t>>(std::begin(rgba), std::end(rgba));
-	return factory.CreateAlwaysResidentPixelBuffer(
+	auto placeholder = factory.CreateAlwaysResidentPixelBuffer(
 		desc,
 		TextureFactory::TextureInitialData::FromBytes({ bytes }));
+	if (placeholder) {
+		rg::memory::SetResourceUsageHint(*placeholder, "Material textures");
+	}
+	return placeholder;
 }
 
 std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
@@ -1730,6 +1728,12 @@ void TextureAsset::ApplySourceShapeHint(uint32_t fullWidth, uint32_t fullHeight,
 }
 
 void TextureAsset::RefreshStreamingStateFromDescription() {
+	if (m_image && m_meta.processing.isParticipatingMaterialTexture) {
+		rg::memory::SetResourceUsageHint(*m_image, "Material textures");
+		if (!m_meta.filePath.empty()) {
+			rg::memory::SetResourceMemoryIdentifier(*m_image, m_meta.filePath);
+		}
+	}
 	const bool wasEligible = m_streamingState.eligible;
 	UpdateSourceShapeFromDescription(m_desc);
 	const uint32_t descMipCount = CalcMipCountFromDescription(m_desc);
@@ -2937,8 +2941,12 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					completedOnGpu = m_processingHandle->completedOnGpu;
 					conditionedCachePath = m_processingHandle->conditionedCachePath;
 				}
+				const bool preferStreamedProcessingResult =
+					m_streamingState.enabled &&
+					isParticipatingMaterialTexture &&
+					!conditionedCachePath.empty();
 
-				if (uploadedImage && uploadedImage->HasValidBackingResource()) {
+				if (!preferStreamedProcessingResult && uploadedImage && uploadedImage->HasValidBackingResource()) {
 					ZoneScopedN("TextureAsset::EnsureUploaded::PollProcessingHandle::AdoptUploadedImageResult");
 					m_desc = uploadedImage->GetDescription();
 					m_meta.isProcessingCacheArtifact = loadedFromCache;
@@ -2984,6 +2992,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					}
 
 					std::shared_ptr<TextureSourceData> fallbackSourceData = result;
+					if (fallbackSourceData && m_streamingState.enabled) {
+						fallbackSourceData = ClipTextureSourceDataTopMip(fallbackSourceData, desiredResidentTopMip);
+					}
 					if (!fallbackSourceData && !allowBlockingFallback) {
 						requestCpuSourceDataFallbackIfNeeded(
 							desiredResidentTopMip,
@@ -3024,6 +3035,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					m_meta.isProcessingCacheArtifact = loadedFromCache;
 					if (promoteStreamingSourceToProcessedCachePath(conditionedCachePath)) {
 						std::shared_ptr<TextureSourceData> fallbackSourceData = result;
+						if (fallbackSourceData && m_streamingState.enabled) {
+							fallbackSourceData = ClipTextureSourceDataTopMip(fallbackSourceData, desiredResidentTopMip);
+						}
 						if (!fallbackSourceData && !allowBlockingFallback) {
 							requestCpuSourceDataFallbackIfNeeded(
 								desiredResidentTopMip,
@@ -3058,6 +3072,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 
 				if (result) {
 					ZoneScopedN("TextureAsset::EnsureUploaded::PollProcessingHandle::ReadyResultCpuUpload");
+					if (m_streamingState.enabled) {
+						result = ClipTextureSourceDataTopMip(result, desiredResidentTopMip);
+					}
 					m_meta.isProcessingCacheArtifact = loadedFromCache;
 					if (!promoteStreamingSourceToProcessedCachePath(conditionedCachePath)) {
 						promoteStreamingSourceToProcessedCache();

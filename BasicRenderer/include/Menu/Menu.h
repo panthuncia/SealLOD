@@ -2425,6 +2425,12 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             uint64_t zeroSizedRecords = 0;
             uint64_t recordsWithoutType = 0;
             std::unordered_map<std::string, uint64_t> diagnosticCategories;
+            struct ResourceAllocationGroup {
+                uint64_t bytes = 0;
+                uint64_t count = 0;
+                rg::memory::ResourceMemoryRecord representative;
+            };
+            std::unordered_map<std::string, ResourceAllocationGroup> allocationGroups;
             for (const auto& record : diagnosticRecords) {
                 introspectedBytes += record.bytes;
                 zeroSizedRecords += record.bytes == 0 ? 1u : 0u;
@@ -2432,6 +2438,25 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 const std::string category = std::string(MajorCategory(record.resourceType)) + "/" +
                     (record.usage.empty() ? "Unspecified" : record.usage);
                 diagnosticCategories[category] += record.bytes;
+                const std::string groupKey = std::format(
+                    "{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+                    static_cast<uint32_t>(record.resourceType),
+                    record.usage,
+                    record.resourceName,
+                    record.identifier,
+                    record.bytes,
+                    record.width,
+                    record.height,
+                    record.mipLevels,
+                    record.arraySize,
+                    static_cast<uint32_t>(record.format),
+                    record.aliased);
+                auto& group = allocationGroups[groupKey];
+                group.bytes += record.bytes;
+                ++group.count;
+                if (group.count == 1u) {
+                    group.representative = record;
+                }
             }
 
             const auto budget = m_renderGraph->GetStatisticsService()->GetMemoryBudgetStats();
@@ -2458,6 +2483,36 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 categorySummary += std::format("{}={}", category, bytes);
             }
             spdlog::info("Memory widget categories: frame={} {}", memoryAccountingFrame, categorySummary);
+
+            std::vector<ResourceAllocationGroup> sortedAllocationGroups;
+            sortedAllocationGroups.reserve(allocationGroups.size());
+            for (auto& [_, group] : allocationGroups) {
+                sortedAllocationGroups.push_back(std::move(group));
+            }
+            std::sort(sortedAllocationGroups.begin(), sortedAllocationGroups.end(),
+                [](const auto& left, const auto& right) { return left.bytes > right.bytes; });
+            for (size_t rank = 0; rank < std::min<size_t>(sortedAllocationGroups.size(), 32u); ++rank) {
+                const auto& group = sortedAllocationGroups[rank];
+                const auto& record = group.representative;
+                spdlog::info(
+                    "Memory resource group: frame={} rank={} total_bytes={} allocation_bytes={} count={} "
+                    "type={} usage='{}' name='{}' identifier='{}' width={} height={} mips={} array={} format={} aliased={}",
+                    memoryAccountingFrame,
+                    rank,
+                    group.bytes,
+                    record.bytes,
+                    group.count,
+                    static_cast<uint32_t>(record.resourceType),
+                    record.usage,
+                    record.resourceName,
+                    record.identifier,
+                    record.width,
+                    record.height,
+                    record.mipLevels,
+                    record.arraySize,
+                    static_cast<uint32_t>(record.format),
+                    record.aliased);
+            }
         }
     }
 

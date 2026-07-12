@@ -1438,6 +1438,7 @@ void Renderer::CreateGlobalResources() {
         m_blueNoiseTexture = blueNoiseAsset->ImagePtr();
         if (m_blueNoiseTexture) {
             m_blueNoiseTexture->SetName("Blue Noise 2D");
+            rg::memory::SetResourceUsageHint(*m_blueNoiseTexture, "Noise lookup resources");
         }
     }
 

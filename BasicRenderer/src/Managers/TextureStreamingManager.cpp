@@ -761,6 +761,7 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 				sample.directStorageState);
 		}
 	}
+
 }
 
 MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(

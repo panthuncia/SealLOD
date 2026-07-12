@@ -841,7 +841,7 @@ void RegisterGTAOResources(RenderGraph* graph) {
     workingEdgesDesc.imageDimensions.push_back(dims1);
 	workingEdgesDesc.allowAlias = true;
     auto workingEdges = PixelBuffer::CreateSharedUnmaterialized(workingEdgesDesc);
-    rg::memory::SetResourceUsageHint(*workingDepths, "GTAO resources");
+    rg::memory::SetResourceUsageHint(*workingEdges, "GTAO resources");
     workingEdges->SetName("GTAO Working Edges");
 
     TextureDescription workingAOTermDesc;

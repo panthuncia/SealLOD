@@ -267,8 +267,11 @@ namespace {
 	std::vector<std::shared_ptr<TextureAsset>> CollectMaterialTextureAssets(const Material& material) {
 		std::vector<std::shared_ptr<TextureAsset>> textures;
 		std::unordered_set<uint32_t> seenStreamingIds;
+		const auto externallyStreamedHeightAtlas = material.IsObjectReyesAtlasHeightMaterial()
+			? material.GetHeightMapTexture()
+			: nullptr;
 		material.ForEachReferencedTexture([&](const std::shared_ptr<TextureAsset>& texture) {
-			if (!texture) {
+			if (!texture || texture == externallyStreamedHeightAtlas) {
 				return;
 			}
 

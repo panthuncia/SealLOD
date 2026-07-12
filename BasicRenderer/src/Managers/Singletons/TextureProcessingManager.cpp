@@ -1787,6 +1787,11 @@ void TextureProcessingManager::CompleteGpuProcessing(
 	if (writeCacheArtifact && result && !handle->cacheKey.empty()) {
 		conditionedCachePath = TryWriteTextureSourceDataToCache(handle->cacheKey, *result);
 	}
+	if (handle->requestMeta.processing.isParticipatingMaterialTexture && !conditionedCachePath.empty()) {
+		// The full-resolution GPU output was needed to build the conditioned cache,
+		// but material residency must be created from the requested mip window.
+		uploadedImage.reset();
+	}
 
 	{
 		std::scoped_lock lock(handle->mutex);

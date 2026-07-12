@@ -200,6 +200,7 @@ void ViewManager::AttachDepth(uint64_t viewID,
             auto desc = linearDepth->GetDescription();
             auto history = PixelBuffer::CreateShared(desc);
             history->SetName("Last Frame Linear Depth");
+            rg::memory::SetResourceUsageHint(*history, "Depth resources");
             m_lastFrameLinearDepthBySource[sourceID] = history;
             m_lastFrameLinearDepthGroup->AddResource(history);
             v->gpu.lastFrameLinearDepthMap = history;
