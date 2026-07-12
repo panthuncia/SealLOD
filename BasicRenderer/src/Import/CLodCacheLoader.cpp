@@ -1,6 +1,7 @@
 #include "Import/CLodCacheLoader.h"
 
 #include "Import/CLodCache.h"
+#include "Mesh/DefaultCLodSettings.h"
 
 #include <atomic>
 #include <filesystem>
@@ -146,7 +147,8 @@ namespace {
 	{
 		static std::once_flag logOnce;
 		std::call_once(logOnce, [buildHash]() {
-			const ClusterLODBuilderSettings effectiveSettings = ApplyClusterLODBuilderEnvironmentOverrides({});
+			const ClusterLODBuilderSettings effectiveSettings =
+				ApplyClusterLODBuilderEnvironmentOverrides(GetDefaultBuilderSettings());
 			spdlog::info(
 				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
 				buildHash,

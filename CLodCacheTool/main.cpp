@@ -12,6 +12,7 @@
 // so a subsequent renderer launch will hit the cache instead of rebuilding.
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <unordered_set>
@@ -39,6 +41,7 @@
 #include "Import/GlTFGeometryExtractor.h"
 #include "Import/AssimpGeometryExtractor.h"
 #include "Import/USDGeometryExtractor.h"
+#include "Import/USDMaterialCache.h"
 #include "Import/BRNiflyClient.h"
 #include "Utilities/CachePathUtilities.h"
 
@@ -58,6 +61,7 @@ namespace fs = std::filesystem;
 static bool g_reportEnabled = false;
 static fs::path g_reportPath;
 static bool g_reportInitialized = false;
+static std::mutex g_reportMutex;
 static uint32_t g_usdTessellationFactor = 1u;
 static fs::path g_assetOverridesConfig;
 static std::unordered_map<std::string, std::string> g_sourceIdentifierOverrides;
@@ -290,6 +294,7 @@ static void WriteUsdAssemblyReport(
     const fs::path& sourcePath,
     std::string_view label,
     const pxr::UsdStageRefPtr& stage) {
+    std::scoped_lock reportLock(g_reportMutex);
     if (!EnsureClusterLODReportInitialized() || !stage) {
         return;
     }
@@ -460,6 +465,7 @@ static void WriteClusterLODReport(
     const fs::path& sourcePath,
     std::string_view label,
     const MeshPreprocessResult& meshResult) {
+    std::scoped_lock reportLock(g_reportMutex);
     if (!g_reportEnabled || !meshResult.prebuiltData.has_value()) {
         return;
     }
@@ -1191,6 +1197,26 @@ static bool ProcessFile(const fs::path& path) {
         : pathStr;
     auto fmt       = DetectFormat(canonical);
 
+    if (fmt == AssetFormat::USD && sourceOverride != g_sourceIdentifierOverrides.end()) {
+        if (auto manifest = USDMaterialCache::LoadAssemblyMaterialManifest(sourceIdentifier);
+            manifest && !manifest->empty()) {
+            const bool complete = std::ranges::all_of(*manifest, [](const auto& entry) {
+                auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(entry.identity);
+                return prebuilt.has_value() && !prebuilt->assemblyInstances.empty();
+            });
+            if (complete) {
+                spdlog::info(
+                    "[USD] Skipping object override with valid material assembly cache: source='{}' buckets={}",
+                    sourceIdentifier,
+                    manifest->size());
+                return true;
+            }
+            spdlog::info(
+                "[USD] Object override material assembly cache is incomplete; rebuilding source='{}'",
+                sourceIdentifier);
+        }
+    }
+
     spdlog::info("---------------------------------------------------");
     spdlog::info("[{}] Processing: {}", FormatName(fmt), pathStr);
     spdlog::info("  File size: {} bytes", fs::file_size(canonical));
@@ -1520,26 +1546,26 @@ int main(int argc, char* argv[]) {
 
     auto totalT0 = std::chrono::steady_clock::now();
 
-    int successes = 0;
-    int failures  = 0;
+    std::atomic<int> successes{ 0 };
+    std::atomic<int> failures{ 0 };
 
     {
         ZoneScopedN("CLodCacheTool::ProcessFiles");
         TracyPlot("CLOD.Tool.Files", static_cast<int64_t>(files.size()));
-        for (auto& f : files) {
-            if (ProcessFile(f))
-                ++successes;
+        scheduler.ParallelFor("CLodCacheTool::ProcessOverrideAssets", files.size(), [&](std::size_t index) {
+            if (ProcessFile(files[index]))
+                successes.fetch_add(1, std::memory_order_relaxed);
             else
-                ++failures;
+                failures.fetch_add(1, std::memory_order_relaxed);
             FrameMarkNamed("CLodCacheToolFile");
-        }
+        });
     }
 
     auto totalT1 = std::chrono::steady_clock::now();
     auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(totalT1 - totalT0).count();
 
     spdlog::info("=====================================================");
-    spdlog::info("Done.  {} succeeded, {} failed.  Total time: {} ms", successes, failures, totalMs);
+    spdlog::info("Done.  {} succeeded, {} failed.  Total time: {} ms", successes.load(), failures.load(), totalMs);
 
     // Report cache directory contents
     {
@@ -1561,5 +1587,5 @@ int main(int argc, char* argv[]) {
     }
 
     scheduler.Cleanup();
-    return failures > 0 ? 1 : 0;
+    return failures.load() > 0 ? 1 : 0;
 }

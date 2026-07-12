@@ -3145,7 +3145,7 @@ namespace USDLoader {
 
 		RecomputeExactPositionWeldedNormals(vertices, vertexSize, vertexFlags, indices);
 
-		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(first.cacheIdentity.sourceIdentifier);
 		builderSettings.doubleSidedVoxelSourceNormals = false;
 		for (std::size_t index : group) {
 			const MeshPreprocessWorkItem& item = workItems[index];
@@ -3276,7 +3276,7 @@ namespace USDLoader {
 		}
 
 		const std::size_t atlasVertexCount = atlasResult.vertices.size() / static_cast<std::size_t>(vertexSize);
-		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+		ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(first.cacheIdentity.sourceIdentifier);
 		builderSettings.doubleSidedVoxelSourceNormals = false;
 		for (std::size_t index : group) {
 			const MeshPreprocessWorkItem& item = workItems[index];
@@ -6130,7 +6130,7 @@ namespace USDLoader {
 				return false;
 			}
 			try {
-				ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings();
+				ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings(sourceIdentifier);
 				assemblySettings.doubleSidedVoxelSourceNormals =
 					bucket.forceDoubleSided ||
 					(bucket.info != nullptr && bucket.info->forceDoubleSided);

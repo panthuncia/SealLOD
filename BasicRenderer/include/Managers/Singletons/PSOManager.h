@@ -127,6 +127,7 @@ public:
     static PSOManager& GetInstance();
 
     void initialize();
+    void initializeShaderCompiler();
     void Cleanup();
 
     const PipelineState& GetPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
@@ -179,6 +180,7 @@ public:
     std::vector<DxcDefine> GetShaderDefines(UINT psoFlags, MaterialCompileFlags materialFlags);
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
+	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
     void GetPreprocessedBlob(

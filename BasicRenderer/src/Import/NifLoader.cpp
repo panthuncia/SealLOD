@@ -2386,6 +2386,21 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     }
 
     result.submeshes = payload->meshes.size();
+    std::unordered_set<std::uint64_t> materialCompileFlags;
+    const auto collectMaterialFlags = [&materialCompileFlags](const std::shared_ptr<Mesh>& mesh) {
+        if (mesh && mesh->material) {
+            materialCompileFlags.insert(static_cast<std::uint64_t>(mesh->material->Technique().compileFlags));
+        }
+    };
+    for (const auto& mesh : payload->meshes) {
+        collectMaterialFlags(mesh);
+    }
+    for (const auto& part : payload->parts) {
+        for (const auto& mesh : part.meshes) {
+            collectMaterialFlags(mesh);
+        }
+    }
+    result.materialCompileFlags.assign(materialCompileFlags.begin(), materialCompileFlags.end());
     result.success = true;
     return result;
 }

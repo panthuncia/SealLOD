@@ -2121,9 +2121,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     m_shadowPhysicalPagesTexture,
                     m_shadowClipmapInfoBuffer,
                     slabGroup,
-                    true,
-                    m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchCounterBuffer() : nullptr,
-                    m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchDetailsBuffer() : nullptr));
+                    true));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
             softwareRasterPassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
         }

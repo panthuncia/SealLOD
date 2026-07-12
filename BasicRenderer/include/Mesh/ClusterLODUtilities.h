@@ -4,6 +4,12 @@
 #include "Mesh/VoxelGroupBuilder.h"
 
 #include <span>
+#include <string>
+
+bool ValidateClusterLODPageRepresentations(
+	const ClusterLODPrebuiltData& prebuiltData,
+	const std::vector<std::vector<std::byte>>* meshPageBlobs,
+	std::string* outError = nullptr);
 
 ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,

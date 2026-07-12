@@ -445,6 +445,14 @@ shadercache::CacheData BuildLibraryCacheData(const ShaderLibraryInfo& info, cons
 void PSOManager::initialize() {
     createRootSignature();
 
+    initializeShaderCompiler();
+}
+
+void PSOManager::initializeShaderCompiler() {
+    if (pUtils && pCompiler) {
+        return;
+    }
+
     HMODULE dxcompiler = LoadLibrary(L"dxcompiler.dll");
     if (!dxcompiler)
     {
@@ -1920,6 +1928,21 @@ PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materialCom
         L"EvaluateMaterialGroupCS",
         std::move(shaderDefines),
         "VisUtil_EvaluateMaterialGroupPSO");
+}
+
+void PSOManager::PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags)
+{
+    auto shaderDefines = GetShaderDefines(0, materialCompileFlags);
+    shaderDefines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
+    shaderDefines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
+    if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
+        shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
+    }
+
+    ShaderInfoBundle shaderInfo;
+    shaderInfo.computeShader = { L"shaders/VisUtilEvaluate.hlsl", L"EvaluateMaterialGroupCS", L"cs_6_6" };
+    shaderInfo.defines = std::move(shaderDefines);
+    CompileShaders(shaderInfo);
 }
 
 PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,

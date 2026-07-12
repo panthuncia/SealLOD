@@ -69,6 +69,7 @@ struct PreprocessResult {
 	std::uint64_t clodBuildMs = 0;
 	std::uint64_t clodSaveMs = 0;
 	std::uint64_t clodReloadMs = 0;
+	std::vector<std::uint64_t> materialCompileFlags;
 };
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);

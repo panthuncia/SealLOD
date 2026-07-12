@@ -1841,7 +1841,7 @@ MeshPreprocessResult ExtractSubMeshGroup(
 		: br::import::RenderablePrototypeGeometry{};
 
 	// Populate MeshIngestBuilder
-	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings();
+	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier);
 	builderSettings.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	MeshIngestBuilder ingest(vertexSize,
 		(skinningData && *skinningData) ? skinningVertexSize : 0,
@@ -2367,7 +2367,7 @@ std::optional<MeshPreprocessResult> BuildInstancedAssemblyCache(
 	}
 
 	try {
-		ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings();
+		ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings(sourceIdentifier);
 		assemblySettings.doubleSidedVoxelSourceNormals = std::any_of(
 			parts.begin(),
 			parts.end(),

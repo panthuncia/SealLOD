@@ -22,6 +22,7 @@
 #include <span>
 #include <chrono>
 #include <string>
+#include <format>
 
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
@@ -1231,8 +1232,47 @@ namespace
 			ZoneScopedN("ClusterLODUtilities::Build::GroupOutput::BuildMeshletStreams");
 			std::array<unsigned int, MS_MESHLET_SIZE> localVertices{};
 			std::array<unsigned char, MS_MESHLET_SIZE * 3u> localTriangles{};
-			std::vector<unsigned int> localVerticesFallback;
-			std::vector<unsigned char> localTrianglesFallback;
+			auto appendMeshlet = [&](const unsigned int* sourceVertices,
+				const unsigned char* sourceTriangles,
+				uint32_t vertexCount,
+				uint32_t triangleCount,
+				const clodBounds& bounds,
+				int32_t refinedGroup)
+				{
+					assert(vertexCount <= MS_MESHLET_SIZE);
+					assert(triangleCount <= MS_MESHLET_SIZE);
+
+					const size_t meshletVertexStart = output.meshletVertices.size();
+					output.meshletVertices.resize(meshletVertexStart + vertexCount);
+					for (uint32_t localVertex = 0; localVertex < vertexCount; ++localVertex)
+					{
+						output.meshletVertices[meshletVertexStart + localVertex] =
+							getGroupLocalVertexIndex(sourceVertices[localVertex]);
+					}
+
+					meshopt_Meshlet meshlet{};
+					meshlet.vertex_offset = groupMeshletVertexCursor;
+					meshlet.triangle_offset = static_cast<uint32_t>(output.meshletTriangles.size());
+					meshlet.vertex_count = vertexCount;
+					meshlet.triangle_count = triangleCount;
+
+					const size_t triangleIndexCount = static_cast<size_t>(triangleCount) * 3u;
+					const size_t meshletTriangleStart = output.meshletTriangles.size();
+					output.meshletTriangles.resize(meshletTriangleStart + triangleIndexCount);
+					std::memcpy(
+						output.meshletTriangles.data() + meshletTriangleStart,
+						sourceTriangles,
+						triangleIndexCount);
+					groupMeshletVertexCursor += vertexCount;
+
+					BoundingSphere sphere{};
+					sphere.sphere = DirectX::XMFLOAT4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+					output.meshlets.push_back(meshlet);
+					output.meshletBounds.push_back(sphere);
+					meshletBucketTag.push_back(refinedGroup);
+					++localMeshletCursor;
+				};
+
 			for (const ChildBucket& bucket : buckets)
 			{
 				for (uint32_t clusterIndex : bucket.clusterIndices)
@@ -1241,56 +1281,35 @@ namespace
 					const uint32_t triangleCount = cluster.indexCount / 3;
 					const unsigned int* clusterIndices = capturedGroup.flattenedIndices.data() + cluster.indicesOffset;
 
-					unsigned int* localVertexData = localVertices.data();
-					if (cluster.vertexCount > localVertices.size())
+					if (cluster.vertexCount > MS_MESHLET_SIZE || triangleCount > MS_MESHLET_SIZE)
 					{
 						TracyPlot("CLOD.Build.GroupOutput.OversizedClusterVertices", static_cast<int64_t>(cluster.vertexCount));
-						localVerticesFallback.resize(cluster.vertexCount);
-						localVertexData = localVerticesFallback.data();
-					}
-
-					unsigned char* localTriangleData = localTriangles.data();
-					if (cluster.indexCount > localTriangles.size())
-					{
 						TracyPlot("CLOD.Build.GroupOutput.OversizedClusterIndices", static_cast<int64_t>(cluster.indexCount));
-						localTrianglesFallback.resize(cluster.indexCount);
-						localTriangleData = localTrianglesFallback.data();
+						spdlog::error(
+							"ClusterLOD emitted an oversized cluster: sourceGroup={} depth={} cluster={} vertices={} triangles={} limits=({}, {})",
+							sourceGroupLocalIndex,
+							capturedGroup.depth,
+							clusterIndex,
+							cluster.vertexCount,
+							triangleCount,
+							MS_MESHLET_SIZE,
+							MS_MESHLET_SIZE);
+						throw std::runtime_error("ClusterLOD emitted a cluster exceeding the GPU meshlet limits");
 					}
 
 					const size_t uniqueVertexCount = clodLocalIndices(
-						localVertexData,
-						localTriangleData,
+						localVertices.data(),
+						localTriangles.data(),
 						clusterIndices,
 						cluster.indexCount);
-
 					assert(uniqueVertexCount == cluster.vertexCount);
-
-					const size_t meshletVertexStart = output.meshletVertices.size();
-					output.meshletVertices.resize(meshletVertexStart + uniqueVertexCount);
-					for (size_t localVertex = 0; localVertex < uniqueVertexCount; ++localVertex)
-					{
-						output.meshletVertices[meshletVertexStart + localVertex] = getGroupLocalVertexIndex(localVertexData[localVertex]);
-					}
-
-					meshopt_Meshlet meshlet{};
-					meshlet.vertex_offset = groupMeshletVertexCursor;
-					meshlet.triangle_offset = static_cast<uint32_t>(output.meshletTriangles.size());
-					meshlet.vertex_count = static_cast<uint32_t>(uniqueVertexCount);
-					meshlet.triangle_count = triangleCount;
-
-					const size_t meshletTriangleStart = output.meshletTriangles.size();
-					output.meshletTriangles.resize(meshletTriangleStart + cluster.indexCount);
-					std::memcpy(output.meshletTriangles.data() + meshletTriangleStart, localTriangleData, cluster.indexCount);
-					groupMeshletVertexCursor += static_cast<uint32_t>(uniqueVertexCount);
-
-					BoundingSphere sphere{};
-					sphere.sphere = DirectX::XMFLOAT4(cluster.bounds.center[0], cluster.bounds.center[1], cluster.bounds.center[2], cluster.bounds.radius);
-
-					output.meshlets.push_back(meshlet);
-					output.meshletBounds.push_back(sphere);
-					meshletBucketTag.push_back(bucket.refinedGroup);
-
-					++localMeshletCursor;
+					appendMeshlet(
+						localVertices.data(),
+						localTriangles.data(),
+						static_cast<uint32_t>(uniqueVertexCount),
+						triangleCount,
+						cluster.bounds,
+						bucket.refinedGroup);
 				}
 			}
 		}
@@ -7803,6 +7822,19 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 					capturedCluster.vertexCount = static_cast<uint32_t>(cluster.vertex_count);
 					capturedCluster.indicesOffset = static_cast<uint32_t>(capturedGroup.flattenedIndices.size());
 					capturedCluster.indexCount = static_cast<uint32_t>(cluster.index_count);
+					const size_t triangleCount = cluster.index_count / 3u;
+					if (cluster.vertex_count > MS_MESHLET_SIZE || triangleCount > MS_MESHLET_SIZE)
+					{
+						spdlog::error(
+							"ClusterLOD callback received an oversized cluster: groupDepth={} cluster={} vertices={} triangles={} limits=({}, {})",
+							group.depth,
+							clusterIndex,
+							cluster.vertex_count,
+							triangleCount,
+							MS_MESHLET_SIZE,
+							MS_MESHLET_SIZE);
+						throw std::runtime_error("ClusterLOD callback received a cluster exceeding the GPU meshlet limits");
+					}
 					capturedGroup.flattenedIndices.insert(
 						capturedGroup.flattenedIndices.end(),
 						cluster.indices,
@@ -8066,6 +8098,15 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
+	std::string representationError;
+	if (!ValidateClusterLODPageRepresentations(
+		artifacts.prebuiltData,
+		&artifacts.cacheBuildData.meshPageBlobs,
+		&representationError))
+	{
+		spdlog::error("ClusterLOD page-representation validation failed: {}", representationError);
+		throw std::runtime_error("ClusterLOD page-representation validation failed: " + representationError);
+	}
 
 	return artifacts;
 }
@@ -8212,6 +8253,15 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromPayload(
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
+	std::string representationError;
+	if (!ValidateClusterLODPageRepresentations(
+		artifacts.prebuiltData,
+		&artifacts.cacheBuildData.meshPageBlobs,
+		&representationError))
+	{
+		spdlog::error("ClusterLOD voxel page-representation validation failed: {}", representationError);
+		throw std::runtime_error("ClusterLOD voxel page-representation validation failed: " + representationError);
+	}
 
 	return artifacts;
 }
@@ -8654,7 +8704,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	VoxelSourceTriangleBVH assemblyCoverageSourceTriangles;
 	bool assemblyCoverageDoubleSidedTriangles = settings.doubleSidedVoxelSourceNormals;
 	std::vector<uint32_t> groupBases(parts.size(), 0u);
-	std::vector<uint32_t> segmentBases(parts.size(), 0u);
+	std::vector<std::vector<uint32_t>> segmentRemaps(parts.size());
 	std::vector<uint32_t> nodeBases(parts.size(), 0u);
 	std::vector<uint32_t> transformBases(parts.size(), 0u);
 	std::vector<uint32_t> instanceBases(parts.size(), 0u);
@@ -8701,7 +8751,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			assemblyCoverageDoubleSidedTriangles || parts[partIndex].doubleSidedCoverageTriangles;
 
 		groupBases[partIndex] = static_cast<uint32_t>(state.groups.size());
-		segmentBases[partIndex] = static_cast<uint32_t>(state.segments.size());
+		segmentRemaps[partIndex].assign(part.segments.size(), UINT32_MAX);
 		nodeBases[partIndex] = static_cast<uint32_t>(libraryNodes.size());
 		transformBases[partIndex] = static_cast<uint32_t>(assemblyTransforms.size());
 		instanceBases[partIndex] = static_cast<uint32_t>(assemblyInstances.size());
@@ -8771,6 +8821,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 					}
 					segment.pageIndex -= srcGroup.pageMapBase;
 				}
+				segmentRemaps[partIndex][localSegmentIndex] = static_cast<uint32_t>(state.segments.size());
 				state.segments.push_back(segment);
 				if (localSegmentIndex < part.segmentBounds.size())
 				{
@@ -8853,7 +8904,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 				node.range.ownerGroupId += groupBases[partIndex];
 				break;
 			case CLOD_NODE_SEGMENT_LEAF:
-				node.range.indexOrOffset += segmentBases[partIndex];
+				if (node.range.indexOrOffset >= segmentRemaps[partIndex].size() ||
+					segmentRemaps[partIndex][node.range.indexOrOffset] == UINT32_MAX)
+				{
+					throw std::runtime_error("ClusterLOD assembly: segment leaf references an unmapped part segment");
+				}
+				node.range.indexOrOffset = segmentRemaps[partIndex][node.range.indexOrOffset];
 				if (node.range.countMinusOne != 0u)
 				{
 					node.range.countMinusOne += groupBases[partIndex];
@@ -9673,6 +9729,15 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	out.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	out.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	out.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
+	std::string representationError;
+	if (!ValidateClusterLODPageRepresentations(
+		out.prebuiltData,
+		&out.cacheBuildData.meshPageBlobs,
+		&representationError))
+	{
+		spdlog::error("ClusterLOD assembly page-representation validation failed: {}", representationError);
+		throw std::runtime_error("ClusterLOD assembly page-representation validation failed: " + representationError);
+	}
 
 	return out;
 }
@@ -9699,6 +9764,189 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOn
 		"ClusterLOD assembly has no voxel payload sources; preserving {} instance(s) with direct instance-root traversal.",
 		instances.size());
 	return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, false);
+}
+
+bool ValidateClusterLODPageRepresentations(
+	const ClusterLODPrebuiltData& prebuiltData,
+	const std::vector<std::vector<std::byte>>* meshPageBlobs,
+	std::string* outError)
+{
+	auto fail = [&](std::string message) -> bool
+		{
+			if (outError != nullptr)
+			{
+				*outError = std::move(message);
+			}
+			return false;
+		};
+
+	const uint64_t totalPageCount64 =
+		static_cast<uint64_t>(prebuiltData.voxelPageBase) + prebuiltData.voxelPageCount;
+	if (prebuiltData.voxelPageBase != prebuiltData.trianglePageCount)
+	{
+		return fail(std::format(
+			"voxelPageBase {} does not equal trianglePageCount {}",
+			prebuiltData.voxelPageBase,
+			prebuiltData.trianglePageCount));
+	}
+	if (totalPageCount64 > std::numeric_limits<uint32_t>::max())
+	{
+		return fail("mesh page count overflows uint32");
+	}
+	const uint32_t totalPageCount = static_cast<uint32_t>(totalPageCount64);
+	if (meshPageBlobs != nullptr && meshPageBlobs->size() != totalPageCount)
+	{
+		return fail(std::format(
+			"mesh page blob count {} does not match metadata page count {}",
+			meshPageBlobs->size(),
+			totalPageCount));
+	}
+	if (prebuiltData.groupPageReferenceOffsets.size() != prebuiltData.groups.size() + 1ull)
+	{
+		return fail(std::format(
+			"group page reference offset count {} does not equal group count + 1 ({})",
+			prebuiltData.groupPageReferenceOffsets.size(),
+			prebuiltData.groups.size() + 1ull));
+	}
+
+	for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(prebuiltData.groups.size()); ++groupIndex)
+	{
+		const ClusterLODGroup& group = prebuiltData.groups[groupIndex];
+		const bool expectVoxel = (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
+		const uint32_t refBegin = prebuiltData.groupPageReferenceOffsets[groupIndex];
+		const uint32_t refEnd = prebuiltData.groupPageReferenceOffsets[groupIndex + 1u];
+		if (refBegin > refEnd || refEnd > prebuiltData.groupPageReferences.size())
+		{
+			return fail(std::format(
+				"group {} has invalid page reference range [{}, {}) of {}",
+				groupIndex, refBegin, refEnd, prebuiltData.groupPageReferences.size()));
+		}
+		if (refEnd - refBegin != group.pageCount)
+		{
+			return fail(std::format(
+				"group {} pageCount {} does not match reference count {}",
+				groupIndex, group.pageCount, refEnd - refBegin));
+		}
+
+		for (uint32_t refIndex = refBegin; refIndex < refEnd; ++refIndex)
+		{
+			const uint32_t meshPageIndex = prebuiltData.groupPageReferences[refIndex];
+			if (meshPageIndex >= totalPageCount)
+			{
+				return fail(std::format(
+					"group {} references mesh page {} outside page count {}",
+					groupIndex, meshPageIndex, totalPageCount));
+			}
+			const bool referencedPageIsVoxel =
+				meshPageIndex >= prebuiltData.voxelPageBase &&
+				meshPageIndex < prebuiltData.voxelPageBase + prebuiltData.voxelPageCount;
+			if (referencedPageIsVoxel != expectVoxel)
+			{
+				return fail(std::format(
+					"group {} flags=0x{:08x} expects {} pages but reference {} points to {} mesh page {}",
+					groupIndex,
+					group.flags,
+					expectVoxel ? "voxel" : "triangle",
+					refIndex - refBegin,
+					referencedPageIsVoxel ? "voxel" : "triangle",
+					meshPageIndex));
+			}
+
+			if (meshPageBlobs != nullptr)
+			{
+				const std::vector<std::byte>& blob = (*meshPageBlobs)[meshPageIndex];
+				uint32_t firstWord = 0u;
+				if (blob.size() >= sizeof(uint32_t))
+				{
+					std::memcpy(&firstWord, blob.data(), sizeof(uint32_t));
+				}
+				const bool blobIsVoxel = firstWord == CLOD_VOXEL_PAGE_MAGIC;
+				if (blob.empty() || blobIsVoxel != expectVoxel)
+				{
+					return fail(std::format(
+						"group {} flags=0x{:08x} references mesh page {} with size {} and firstWord=0x{:08x}",
+						groupIndex, group.flags, meshPageIndex, blob.size(), firstWord));
+				}
+			}
+		}
+
+		const uint32_t segmentEnd = std::min<uint32_t>(
+			group.firstSegment + group.segmentCount,
+			static_cast<uint32_t>(prebuiltData.segments.size()));
+		if (segmentEnd != group.firstSegment + group.segmentCount)
+		{
+			return fail(std::format("group {} segment range is out of bounds", groupIndex));
+		}
+		for (uint32_t segmentIndex = group.firstSegment; segmentIndex < segmentEnd; ++segmentIndex)
+		{
+			const ClusterLODGroupSegment& segment = prebuiltData.segments[segmentIndex];
+			if (segment.meshletCount == 0u)
+			{
+				continue;
+			}
+			if (segment.pageIndex < group.pageMapBase ||
+				segment.pageIndex >= group.pageMapBase + group.pageCount)
+			{
+				return fail(std::format(
+					"group {} segment {} page-map index {} is outside [{}, {})",
+					groupIndex,
+					segmentIndex,
+					segment.pageIndex,
+					group.pageMapBase,
+					group.pageMapBase + group.pageCount));
+			}
+		}
+	}
+
+	for (uint32_t nodeIndex = 0; nodeIndex < static_cast<uint32_t>(prebuiltData.nodes.size()); ++nodeIndex)
+	{
+		const ClusterLODNode& node = prebuiltData.nodes[nodeIndex];
+		if (node.range.isGroup != CLOD_NODE_VOXEL_LEAF && node.range.isGroup != CLOD_NODE_SEGMENT_LEAF)
+		{
+			continue;
+		}
+		if (node.range.ownerGroupId >= prebuiltData.groups.size())
+		{
+			return fail(std::format(
+				"node {} owns group {} outside group count {}",
+				nodeIndex, node.range.ownerGroupId, prebuiltData.groups.size()));
+		}
+		const bool groupIsVoxel =
+			(prebuiltData.groups[node.range.ownerGroupId].flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
+		const bool nodeIsVoxel = node.range.isGroup == CLOD_NODE_VOXEL_LEAF;
+		if (groupIsVoxel != nodeIsVoxel)
+		{
+			return fail(std::format(
+				"node {} type {} disagrees with owner group {} flags=0x{:08x}",
+				nodeIndex,
+				node.range.isGroup,
+				node.range.ownerGroupId,
+				prebuiltData.groups[node.range.ownerGroupId].flags));
+		}
+		if (node.range.isGroup == CLOD_NODE_SEGMENT_LEAF)
+		{
+			const ClusterLODGroup& ownerGroup = prebuiltData.groups[node.range.ownerGroupId];
+			const uint64_t ownerSegmentEnd =
+				static_cast<uint64_t>(ownerGroup.firstSegment) + ownerGroup.segmentCount;
+			if (node.range.indexOrOffset < ownerGroup.firstSegment ||
+				node.range.indexOrOffset >= ownerSegmentEnd)
+			{
+				return fail(std::format(
+					"segment leaf node {} references segment {} outside owner group {} range [{}, {})",
+					nodeIndex,
+					node.range.indexOrOffset,
+					node.range.ownerGroupId,
+					ownerGroup.firstSegment,
+					ownerSegmentEnd));
+			}
+		}
+	}
+
+	if (outError != nullptr)
+	{
+		outError->clear();
+	}
+	return true;
 }
 
 ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
@@ -9967,6 +10215,15 @@ ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	artifacts.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	artifacts.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
+	std::string representationError;
+	if (!ValidateClusterLODPageRepresentations(
+		artifacts.prebuiltData,
+		&artifacts.cacheBuildData.meshPageBlobs,
+		&representationError))
+	{
+		spdlog::error("ClusterLOD voxel-only page-representation validation failed: {}", representationError);
+		throw std::runtime_error("ClusterLOD voxel-only page-representation validation failed: " + representationError);
+	}
 
 	return artifacts;
 }

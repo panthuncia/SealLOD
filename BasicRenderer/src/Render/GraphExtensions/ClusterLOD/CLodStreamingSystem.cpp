@@ -6005,7 +6005,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         const uint32_t detailCount =
                             std::min<uint32_t>(sourceGroupMismatchCount, CLodSourceGroupMismatchDetailCapacity);
                         spdlog::error(
-                            "CLod raster validation telemetry: count={} details_captured={}",
+                            "CLod source group mismatch telemetry: count={} details_captured={}",
                             sourceGroupMismatchCount,
                             detailCount);
 
@@ -6016,33 +6016,6 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                             const auto* details = static_cast<const CLodSourceGroupMismatchDetail*>(mapped);
                             for (uint32_t i = 0; i < detailCount; ++i) {
                                 const CLodSourceGroupMismatchDetail& detail = details[i];
-                                if (detail.expectedGroupLocalIndex == 0xFFFFFFFEu) {
-                                    spdlog::error(
-                                        "CLod SW object-space bounds violation[{}]: metadata={} groupsBase={} groupLocal={} groupGlobal={} parentLocal={} meshlet={} vertex={} assemblyTransform={} position=({:.9g},{:.9g},{:.9g}) boundsCenter=({:.9g},{:.9g},{:.9g}) boundsRadius={:.9g} distance={:.9g} page={}:{} unsortedCluster={} instance={} view={}",
-                                        i,
-                                        detail.clodMeshMetadataIndex,
-                                        detail.groupsBase,
-                                        detail.foundGroupLocalIndex,
-                                        detail.expectedGroupGlobalIndex,
-                                        std::bit_cast<int32_t>(detail.foundGroupGlobalIndex),
-                                        detail.expectedSegmentGlobalIndex,
-                                        detail.expectedSegmentPageIndex,
-                                        detail.expectedSegmentFirstMeshlet,
-                                        std::bit_cast<float>(detail.expectedSegmentMeshletCount),
-                                        std::bit_cast<float>(detail.expectedSegmentPageSlabDescriptorIndex),
-                                        std::bit_cast<float>(detail.expectedSegmentPageSlabByteOffset),
-                                        std::bit_cast<float>(detail.pageLocalMeshletIndex),
-                                        std::bit_cast<float>(detail.pageSlabDescriptorIndex),
-                                        std::bit_cast<float>(detail.pageSlabByteOffset),
-                                        std::bit_cast<float>(detail.visibleClusterIndex),
-                                        std::bit_cast<float>(detail.pad0),
-                                        detail.bucketMeshletIndex,
-                                        detail.bucketCount,
-                                        detail.unsortedClusterIndex,
-                                        detail.instanceId,
-                                        detail.viewId);
-                                    continue;
-                                }
                                 spdlog::error(
                                     "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
                                     i,
