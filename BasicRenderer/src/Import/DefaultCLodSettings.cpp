@@ -151,7 +151,7 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     settings.simplifyTangentWeight = 0.01f;
     settings.simplifyTangentSignWeight = 0.5f;
     settings.enableVoxelFallback = true;
-    settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::MeshOnly;
+    settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
     settings.voxelGridBaseResolution = 32u;
     settings.voxelMinResolution = 0u;
     settings.voxelRaysPerCell = 8u;

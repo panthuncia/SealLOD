@@ -1005,8 +1005,11 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
             CopyCommonComponents(dst, renderable.stableID, renderable.name, renderable.matrix);
             entityState.lastMatrix = renderable.matrix.matrix;
             if (renderable.transformChanged || isNew || meshChanged) {
+                // This is a fresh transform update, not the convergence upload
+                // scheduled by the renderer after the preceding update.
+                dst.remove<Components::RenderTransformNeedsConvergence>();
                 dst.add<Components::RenderTransformUpdated>();
-            } else {
+            } else if (!dst.has<Components::RenderTransformNeedsConvergence>()) {
                 dst.remove<Components::RenderTransformUpdated>();
             }
 

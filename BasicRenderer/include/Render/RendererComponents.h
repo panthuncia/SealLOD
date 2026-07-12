@@ -108,4 +108,8 @@ namespace Components {
     /// Consumed by RunRenderResourceSyncStage to limit GPU buffer writes.
     struct RenderTransformUpdated {};
 
+    /// Keeps a renderable in transform synchronization for one frame after a
+    /// transform change so prevModel can converge to model.
+    struct RenderTransformNeedsConvergence {};
+
 } // namespace Components

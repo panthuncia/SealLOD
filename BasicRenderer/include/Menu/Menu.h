@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <queue>
 #include <unordered_map>
 
@@ -2405,6 +2406,60 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         g_memWidget.Draw(&open, &snap, &fgSnap);
 		ImGui::End();
 	}
+
+    if (m_renderGraph) {
+        static const bool logMemoryAccounting = [] {
+            char* value = nullptr;
+            size_t valueLength = 0;
+            const bool result = _dupenv_s(&value, &valueLength, "SARP_MEMORY_INTROSPECTION_LOG") == 0 &&
+                value != nullptr && valueLength > 1 && value[0] != '0';
+            std::free(value);
+            return result;
+        }();
+        static uint64_t memoryAccountingFrame = 0;
+        ++memoryAccountingFrame;
+        if (logMemoryAccounting && (memoryAccountingFrame == 1 || memoryAccountingFrame % 120 == 0)) {
+            std::vector<rg::memory::ResourceMemoryRecord> diagnosticRecords;
+            m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(diagnosticRecords);
+            uint64_t introspectedBytes = 0;
+            uint64_t zeroSizedRecords = 0;
+            uint64_t recordsWithoutType = 0;
+            std::unordered_map<std::string, uint64_t> diagnosticCategories;
+            for (const auto& record : diagnosticRecords) {
+                introspectedBytes += record.bytes;
+                zeroSizedRecords += record.bytes == 0 ? 1u : 0u;
+                recordsWithoutType += record.resourceType == rhi::ResourceType::Unknown ? 1u : 0u;
+                const std::string category = std::string(MajorCategory(record.resourceType)) + "/" +
+                    (record.usage.empty() ? "Unspecified" : record.usage);
+                diagnosticCategories[category] += record.bytes;
+            }
+
+            const auto budget = m_renderGraph->GetStatisticsService()->GetMemoryBudgetStats();
+            spdlog::info(
+                "Memory widget accounting: frame={} dxgi_usage={} introspected={} dxgi_minus_introspected={} "
+                "records={} zero_sized_records={} unknown_type_records={}",
+                memoryAccountingFrame,
+                budget.usageBytes,
+                introspectedBytes,
+                budget.usageBytes > introspectedBytes ? budget.usageBytes - introspectedBytes : 0,
+                diagnosticRecords.size(),
+                zeroSizedRecords,
+                recordsWithoutType);
+
+            std::vector<std::pair<std::string, uint64_t>> sortedDiagnosticCategories(
+                diagnosticCategories.begin(), diagnosticCategories.end());
+            std::sort(sortedDiagnosticCategories.begin(), sortedDiagnosticCategories.end(),
+                [](const auto& left, const auto& right) { return left.second > right.second; });
+            std::string categorySummary;
+            for (const auto& [category, bytes] : sortedDiagnosticCategories) {
+                if (!categorySummary.empty()) {
+                    categorySummary += "; ";
+                }
+                categorySummary += std::format("{}={}", category, bytes);
+            }
+            spdlog::info("Memory widget categories: frame={} {}", memoryAccountingFrame, categorySummary);
+        }
+    }
 
     if (showMaterialTextureStreaming) {
         ImGui::Begin("Material Texture Streaming", &showMaterialTextureStreaming);

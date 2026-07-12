@@ -493,11 +493,13 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
                     entity = world.entity();
                 }
 
-                TrackedEntityToken deferredToken;
-                deferredToken.deferredState = deferredState;
-
-                if (!deferredToken.Resolve(world, entity.id(), pendingOps, destroyRequested)) {
-                    deferredToken.MarkDestroyed();
+                if (!TrackedEntityToken::ResolveDeferredState(
+                    deferredState,
+                    world,
+                    entity.id(),
+                    pendingOps,
+                    destroyRequested)) {
+                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                     return;
                 }
 
@@ -507,7 +509,7 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
 
                 if (destroyRequested && entity.is_alive()) {
                     entity.destruct();
-                    deferredToken.MarkDestroyed();
+                    TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                 }
             });
             return std::move(token);
@@ -2587,9 +2589,19 @@ void Renderer::Update(float elapsedSeconds) {
 
     // Clear transform-update tags only after render-graph update so passes such as
     // virtual shadow invalidation can still consume same-frame movement signals.
+    // Renderables remain dirty for one additional frame. That second upload copies
+    // the current model into prevModel, preventing a one-frame transform change
+    // from producing motion vectors indefinitely while the object is static.
     world.defer_begin();
     m_renderTransformUpdatedCleanupQuery.each([](flecs::entity e) {
-        e.remove<Components::RenderTransformUpdated>();
+        if (!e.has<Components::RenderableObject>()) {
+            e.remove<Components::RenderTransformUpdated>();
+        } else if (e.has<Components::RenderTransformNeedsConvergence>()) {
+            e.remove<Components::RenderTransformNeedsConvergence>();
+            e.remove<Components::RenderTransformUpdated>();
+        } else {
+            e.add<Components::RenderTransformNeedsConvergence>();
+        }
     });
     world.defer_end();
 
