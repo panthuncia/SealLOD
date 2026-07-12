@@ -27,7 +27,9 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
     std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
-    bool runWhenComputeSWRasterEnabledOnly)
+    bool runWhenComputeSWRasterEnabledOnly,
+    std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer,
+    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
     , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
@@ -38,6 +40,8 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
+    , m_sourceGroupMismatchCounterBuffer(std::move(sourceGroupMismatchCounterBuffer))
+    , m_sourceGroupMismatchDetailsBuffer(std::move(sourceGroupMismatchDetailsBuffer))
     , m_outputKind(outputKind)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly) {
     rhi::IndirectArg args[] = {
@@ -98,6 +102,12 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
     }
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    if (m_sourceGroupMismatchCounterBuffer) {
+        builder->WithUnorderedAccess(m_sourceGroupMismatchCounterBuffer);
+    }
+    if (m_sourceGroupMismatchDetailsBuffer) {
+        builder->WithUnorderedAccess(m_sourceGroupMismatchDetailsBuffer);
+    }
 }
 
 void ClusterSoftwareRasterizationPass::Setup() {
@@ -184,6 +194,14 @@ PassReturn ClusterSoftwareRasterizationPass::Execute(PassExecutionContext& execu
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_compactedVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
+    misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    if (m_sourceGroupMismatchCounterBuffer && m_sourceGroupMismatchDetailsBuffer) {
+        misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX] =
+            m_sourceGroupMismatchCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX] =
+            m_sourceGroupMismatchDetailsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    }
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;

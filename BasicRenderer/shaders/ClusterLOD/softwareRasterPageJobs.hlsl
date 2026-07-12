@@ -69,7 +69,10 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer compactedVisibleClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
+    const uint assemblyTransformIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -79,7 +82,11 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
@@ -135,6 +142,7 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
 #if defined(PSO_SKINNED)
         SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
         skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
         localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
 #endif
 
@@ -346,7 +354,10 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint wrappedPageY = rec.wrappedPageY;
     const uint clipmapLayer = rec.clipmapLayer;
     ByteAddressBuffer compactedVisibleClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
+    const uint assemblyTransformIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -387,7 +398,7 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     float4 modelViewZ;
     bool reverseWinding = false;
     {
-        const PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+        const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
         const CullingCameraInfo cam = cullingCameras[viewID];
         reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u;
         modelViewProjection = mul(objData.model, cam.viewProjection);
@@ -395,6 +406,10 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     }
 
     const ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
     const float visWidth = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
     const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
     const float screenScaleX = 0.5f * visWidth;
@@ -428,6 +443,7 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
             pageSlabByteOffset,
             pageSlabDescriptorIndex,
             skinning);
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
         localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(skinningInstanceSlot, skinning)).xyz;
 #endif
 

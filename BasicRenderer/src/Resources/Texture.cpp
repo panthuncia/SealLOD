@@ -2644,7 +2644,11 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 
 	std::shared_ptr<TextureSourceData> sourceData;
 	bool reloadFailedThisFrame = false;
-	if (m_reloadHandle && m_reloadHandle->targetTopMip != desiredResidentTopMip) {
+	// Processing needs the complete source mip chain regardless of the current streaming
+	// residency target. Comparing its mip-0 job with desiredResidentTopMip discarded the
+	// handle on every advance and queued unbounded duplicate background decodes.
+	const uint32_t expectedReloadTopMip = shouldProcessTexture ? 0u : desiredResidentTopMip;
+	if (m_reloadHandle && m_reloadHandle->targetTopMip != expectedReloadTopMip) {
 		ZoneScopedN("TextureAsset::EnsureUploaded::ResetStaleReloadHandle");
 		m_reloadHandle.reset();
 	}

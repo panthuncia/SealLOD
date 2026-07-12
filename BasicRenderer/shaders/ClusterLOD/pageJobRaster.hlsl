@@ -68,6 +68,9 @@ void WG_PageJobBuild(
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
+    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -101,7 +104,11 @@ void WG_PageJobBuild(
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
@@ -130,6 +137,7 @@ void WG_PageJobBuild(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
             localPos = ApplySkinningToPosition(meshInst.skinningInstanceSlot, skinning, localPos);
         }
         float4 clipPos = mul(float4(localPos, 1.0f), modelViewProjection);
@@ -335,6 +343,9 @@ void WG_PageJobRasterPage(
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
+    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
     const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
@@ -352,7 +363,11 @@ void WG_PageJobRasterPage(
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    PerObjectBuffer objData = LoadInstanceTransformForDraw(instanceID);
+    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -382,6 +397,7 @@ void WG_PageJobRasterPage(
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u) {
             SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
             localPos = ApplySkinningToPosition(meshInst.skinningInstanceSlot, skinning, localPos);
         }
         float4 localPos4 = float4(localPos, 1.0f);

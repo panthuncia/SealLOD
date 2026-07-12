@@ -929,7 +929,13 @@ SkinningInfluences DecodePackedWeights(uint meshletLocalVertex, MeshletResolveDa
     return skinning;
 }
 
-void ApplyClodSkinningToFrame(uint meshletLocalVertex, MeshletResolveData d, inout float3 positionOS, inout float3 normalOS, inout float4 tangentOS)
+void ApplyClodSkinningToFrame(
+    uint meshletLocalVertex,
+    MeshletResolveData d,
+    uint assemblyTransformIndex,
+    inout float3 positionOS,
+    inout float3 normalOS,
+    inout float4 tangentOS)
 {
     if ((d.meshInfo.y & VERTEX_SKINNED) == 0u)
     {
@@ -938,16 +944,28 @@ void ApplyClodSkinningToFrame(uint meshletLocalVertex, MeshletResolveData d, ino
 
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, d);
     skinning = DecodePackedWeights(meshletLocalVertex, d, skinning);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(d.objAndMesh.x);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    skinning = ResolveAssemblySkinningInfluences(
+        skinning,
+        metadataBuffer[offsets.clodMeshMetadataIndex],
+        assemblyTransformIndex);
     float4x4 skinMatrix = BuildSkinMatrix(d.skinningInstanceSlot, skinning);
     positionOS = mul(float4(positionOS, 1.0f), skinMatrix).xyz;
     normalOS = mul(normalOS, (float3x3)skinMatrix);
     tangentOS.xyz = mul(tangentOS.xyz, (float3x3)skinMatrix);
 }
 
-void ApplyClodSkinning(uint meshletLocalVertex, MeshletResolveData d, inout float3 positionOS, inout float3 normalOS)
+void ApplyClodSkinning(
+    uint meshletLocalVertex,
+    MeshletResolveData d,
+    uint assemblyTransformIndex,
+    inout float3 positionOS,
+    inout float3 normalOS)
 {
     float4 unusedTangent = float4(1.0f, 0.0f, 0.0f, 0.0f);
-    ApplyClodSkinningToFrame(meshletLocalVertex, d, positionOS, normalOS, unusedTangent);
+    ApplyClodSkinningToFrame(meshletLocalVertex, d, assemblyTransformIndex, positionOS, normalOS, unusedTangent);
 }
 
 MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
@@ -1815,9 +1833,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 #endif
 #if defined(PSO_CLOD_SKINNING)
-    ApplyClodSkinningToFrame(triIdx.x, md, p0, n0, t0);
-    ApplyClodSkinningToFrame(triIdx.y, md, p1, n1, t1);
-    ApplyClodSkinningToFrame(triIdx.z, md, p2, n2, t2);
+    ApplyClodSkinningToFrame(triIdx.x, md, assemblyTransformIndex, p0, n0, t0);
+    ApplyClodSkinningToFrame(triIdx.y, md, assemblyTransformIndex, p1, n1, t1);
+    ApplyClodSkinningToFrame(triIdx.z, md, assemblyTransformIndex, p2, n2, t2);
 #endif
 
     PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, assemblyTransformIndex);

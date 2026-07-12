@@ -5827,42 +5827,38 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     completed,
                     decodeTarget);
             }
-            uint32_t waitTimeouts = 0u;
             // Decode already-completed readbacks instead of waiting for the newest submitted fence.
-            // If nothing is complete yet, wait only for the next unprocessed value so feedback stays
-            // low-latency while the copy queue is backlogged.
-            while (!readbackReady && !m_streamingWorkerQuit.load(std::memory_order_relaxed)) {
-                if (m_streamingServiceRequested.load(std::memory_order_acquire)) {
-                    break;
-                }
-
+            // If nothing is complete yet, block on the next unprocessed value. An unsignaled
+            // readback fence is a GPU/submission failure and should remain visible as a hard stall.
+            if (!readbackReady) {
                 const uint64_t waitTarget = lastProcessed + 1u;
-                auto result = m_streamingReadbackFenceHandle.HostWait(waitTarget, 10);
-                if (result != rhi::Result::WaitTimeout) {
+                const auto result = m_streamingReadbackFenceHandle.HostWait(waitTarget, UINT32_MAX);
+                if (result == rhi::Result::Ok) {
                     completed = m_streamingReadbackFenceHandle.GetCompletedValue();
-                    decodeTarget = std::min(std::max(completed, waitTarget), submittedTarget);
+                    decodeTarget = std::min(completed, submittedTarget);
                     readbackReady = decodeTarget > lastProcessed;
-                    if (SarpClodImportDebugLoggingEnabled() && waitTimeouts != 0u) {
+                    if (!readbackReady) {
+                        spdlog::error(
+                            "CLod StreamingWorker readback fence wait returned before completion: submittedTarget={} waitTarget={} completed={}",
+                            submittedTarget,
+                            waitTarget,
+                            completed);
+                    }
+                    else if (SarpClodImportDebugLoggingEnabled()) {
                         spdlog::info(
-                            "SARPDBG StreamingWorker readback-ready submittedTarget={} waitTarget={} completed={} decodeTarget={} waitTimeouts={}",
+                            "SARPDBG StreamingWorker readback-ready submittedTarget={} waitTarget={} completed={} decodeTarget={}",
                             submittedTarget,
                             waitTarget,
                             completed,
-                            decodeTarget,
-                            waitTimeouts);
+                            decodeTarget);
                     }
-                    break;
                 }
-                ++waitTimeouts;
-                if (m_streamingServiceRequested.load(std::memory_order_acquire)) {
-                    break;
-                }
-                if (waitTimeouts == 5u || waitTimeouts == 30u || (waitTimeouts % 100u) == 0u) {
-                    spdlog::warn(
-                        "CLod StreamingWorker readback fence wait timed out: submittedTarget={} waitTarget={} waitTimeouts={} completed={}",
+                else {
+                    spdlog::error(
+                        "CLod StreamingWorker readback fence wait failed: submittedTarget={} waitTarget={} result={} completed={}",
                         submittedTarget,
                         waitTarget,
-                        waitTimeouts,
+                        rhi::ResultName(result),
                         m_streamingReadbackFenceHandle.GetCompletedValue());
                 }
             }
@@ -6009,7 +6005,7 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         const uint32_t detailCount =
                             std::min<uint32_t>(sourceGroupMismatchCount, CLodSourceGroupMismatchDetailCapacity);
                         spdlog::error(
-                            "CLod source group mismatch telemetry: count={} details_captured={}",
+                            "CLod raster validation telemetry: count={} details_captured={}",
                             sourceGroupMismatchCount,
                             detailCount);
 
@@ -6020,6 +6016,33 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                             const auto* details = static_cast<const CLodSourceGroupMismatchDetail*>(mapped);
                             for (uint32_t i = 0; i < detailCount; ++i) {
                                 const CLodSourceGroupMismatchDetail& detail = details[i];
+                                if (detail.expectedGroupLocalIndex == 0xFFFFFFFEu) {
+                                    spdlog::error(
+                                        "CLod SW object-space bounds violation[{}]: metadata={} groupsBase={} groupLocal={} groupGlobal={} parentLocal={} meshlet={} vertex={} assemblyTransform={} position=({:.9g},{:.9g},{:.9g}) boundsCenter=({:.9g},{:.9g},{:.9g}) boundsRadius={:.9g} distance={:.9g} page={}:{} unsortedCluster={} instance={} view={}",
+                                        i,
+                                        detail.clodMeshMetadataIndex,
+                                        detail.groupsBase,
+                                        detail.foundGroupLocalIndex,
+                                        detail.expectedGroupGlobalIndex,
+                                        std::bit_cast<int32_t>(detail.foundGroupGlobalIndex),
+                                        detail.expectedSegmentGlobalIndex,
+                                        detail.expectedSegmentPageIndex,
+                                        detail.expectedSegmentFirstMeshlet,
+                                        std::bit_cast<float>(detail.expectedSegmentMeshletCount),
+                                        std::bit_cast<float>(detail.expectedSegmentPageSlabDescriptorIndex),
+                                        std::bit_cast<float>(detail.expectedSegmentPageSlabByteOffset),
+                                        std::bit_cast<float>(detail.pageLocalMeshletIndex),
+                                        std::bit_cast<float>(detail.pageSlabDescriptorIndex),
+                                        std::bit_cast<float>(detail.pageSlabByteOffset),
+                                        std::bit_cast<float>(detail.visibleClusterIndex),
+                                        std::bit_cast<float>(detail.pad0),
+                                        detail.bucketMeshletIndex,
+                                        detail.bucketCount,
+                                        detail.unsortedClusterIndex,
+                                        detail.instanceId,
+                                        detail.viewId);
+                                    continue;
+                                }
                                 spdlog::error(
                                     "CLod source group mismatch detail[{}]: expectedLocal={} foundLocal={} expectedGlobal={} foundGlobal={} metadata={} groupsBase={} expectedSegment={} expectedPage={} expectedMeshlets=[{}, {}) expectedMap={}:{} actualPageLocalMeshlet={} actualMap={}:{} visibleCluster={} unsortedCluster={} instance={} view={} bucketMeshlet={} bucketCount={}",
                                     i,
@@ -6084,6 +6107,11 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         m_decodedUsedGroupsBatch.push_back(g);
                     }
                 }
+
+                const uint32_t decodedNonResidentUsedGroups = static_cast<uint32_t>(std::count_if(
+                    decodedUsedGroups.begin(),
+                    decodedUsedGroups.end(),
+                    [this](uint32_t groupIndex) { return !IsGroupResident(groupIndex); }));
                 if (!decodedRequests.empty() || !decodedUsedGroups.empty()) {
                     RequestStreamingFrameWork();
                 }
@@ -6108,7 +6136,9 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     static uint32_t s_consecutiveZeroRequestReadbackBatches = 0u;
                     static uint32_t s_consecutiveZeroUsedGroupReadbackBatches = 0u;
                     static uint64_t s_lastZeroRequestFeedbackLogMs = 0u;
-                    if (totalRequestCount == 0u) {
+                    const bool missingRequestsForVisibleGroups =
+                        totalRequestCount == 0u && decodedNonResidentUsedGroups != 0u;
+                    if (missingRequestsForVisibleGroups) {
                         ++s_consecutiveZeroRequestReadbackBatches;
                     }
                     else {
@@ -6137,10 +6167,10 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         s_consecutiveZeroUsedGroupReadbackBatches = 0u;
                     }
 
-                    if (totalRequestCount == 0u && decodeNowMs >= s_lastZeroRequestFeedbackLogMs + 1000u) {
+                    if (missingRequestsForVisibleGroups && decodeNowMs >= s_lastZeroRequestFeedbackLogMs + 1000u) {
                         s_lastZeroRequestFeedbackLogMs = decodeNowMs;
                         spdlog::warn(
-                            "CLod streaming feedback zero requests: zeroRequestBatches={} zeroUsedGroupBatches={} decodeTarget={} submittedFence={} completedFence={} slots={} rawUsedGroups={} decodedUsedGroups={} activeScan={} sortedFeedback={}",
+                            "CLod streaming feedback missing requests: zeroRequestBatches={} zeroUsedGroupBatches={} decodeTarget={} submittedFence={} completedFence={} slots={} rawUsedGroups={} decodedUsedGroups={} nonResidentUsedGroups={} activeScan={} sortedFeedback={}",
                             s_consecutiveZeroRequestReadbackBatches,
                             s_consecutiveZeroUsedGroupReadbackBatches,
                             decodeTarget,
@@ -6149,12 +6179,13 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                             completedSlotCount,
                             totalUsedGroupsCount,
                             static_cast<uint32_t>(decodedUsedGroups.size()),
+                            decodedNonResidentUsedGroups,
                             m_streamingActiveGroupScanCount,
                             sortedFeedback ? 1 : 0);
                     }
 
                     static uint32_t s_consecutiveZeroRequestReadbacksWithVisibleGroups = 0u;
-                    if (totalRequestCount == 0u && totalUsedGroupsCount != 0u) {
+                    if (missingRequestsForVisibleGroups) {
                         ++s_consecutiveZeroRequestReadbacksWithVisibleGroups;
                     }
                     else {
@@ -6165,12 +6196,13 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         (s_consecutiveZeroRequestReadbacksWithVisibleGroups > 60u &&
                             s_consecutiveZeroRequestReadbacksWithVisibleGroups % 300u == 0u)) {
                         spdlog::warn(
-                            "CLod streaming feedback produced no load requests for {} completed readback batch(es) while visible groups were reported; target={} slots={} rawUsedGroups={} decodedUsedGroups={} activeScan={} sortedFeedback={}",
+                            "CLod streaming feedback produced no load requests for {} completed readback batch(es) while non-resident visible groups were reported; target={} slots={} rawUsedGroups={} decodedUsedGroups={} nonResidentUsedGroups={} activeScan={} sortedFeedback={}",
                             s_consecutiveZeroRequestReadbacksWithVisibleGroups,
                             decodeTarget,
                             completedSlotCount,
                             totalUsedGroupsCount,
                             static_cast<uint32_t>(decodedUsedGroups.size()),
+                            decodedNonResidentUsedGroups,
                             m_streamingActiveGroupScanCount,
                             sortedFeedback ? 1 : 0);
                     }

@@ -101,7 +101,14 @@ bool ReadMaterial(Reader& in, MaterialDescription& value) {
 }
 
 std::filesystem::path ManifestPath(const std::string& sourceIdentifier) {
-	return CLodCache::GetCacheFilePathForSource(std::wstring(kManifestFileName), sourceIdentifier);
+	std::string canonicalSourceIdentifier = sourceIdentifier;
+	std::replace(canonicalSourceIdentifier.begin(), canonicalSourceIdentifier.end(), '/', '\\');
+	return CLodCache::GetCacheFilePathForSource(std::wstring(kManifestFileName), canonicalSourceIdentifier);
+}
+
+std::string CanonicalSourceIdentifier(std::string sourceIdentifier) {
+	std::replace(sourceIdentifier.begin(), sourceIdentifier.end(), '/', '\\');
+	return sourceIdentifier;
 }
 
 pxr::UsdShadeShader ResolveShader(const pxr::UsdShadeConnectableAPI& source, const pxr::TfToken& output, unsigned depth = 0) {
@@ -186,9 +193,10 @@ MaterialDescription ExtractMaterialDescription(const pxr::UsdShadeMaterial& mate
 
 bool SaveAssemblyMaterialManifest(const std::string& sourceIdentifier, const std::vector<AssemblyMaterialEntry>& entries) {
 	const auto path = ManifestPath(sourceIdentifier);
+	const std::string canonicalSourceIdentifier = CanonicalSourceIdentifier(sourceIdentifier);
 	std::error_code ec; std::filesystem::create_directories(path.parent_path(), ec);
 	const auto temp = path.string() + ".tmp";
-	Writer out(temp); out.Pod(kMagic); out.Pod(kManifestVersion); out.String(sourceIdentifier);
+	Writer out(temp); out.Pod(kMagic); out.Pod(kManifestVersion); out.String(canonicalSourceIdentifier);
 	const std::uint64_t count = entries.size(); out.Pod(count);
 	for (const auto& entry : entries) {
 		spdlog::info(
@@ -215,7 +223,8 @@ void RemoveAssemblyMaterialManifest(const std::string& sourceIdentifier) {
 std::optional<std::vector<AssemblyMaterialEntry>> LoadAssemblyMaterialManifest(const std::string& sourceIdentifier) {
 	Reader in(ManifestPath(sourceIdentifier)); if (!in) return std::nullopt;
 	std::uint32_t magic = 0, version = 0; std::string storedSource; std::uint64_t count = 0;
-	if (!in.Pod(magic) || !in.Pod(version) || magic != kMagic || version != kManifestVersion || !in.String(storedSource) || storedSource != sourceIdentifier || !in.Pod(count) || count > 4096) return std::nullopt;
+	if (!in.Pod(magic) || !in.Pod(version) || magic != kMagic || version != kManifestVersion || !in.String(storedSource) ||
+		CanonicalSourceIdentifier(std::move(storedSource)) != CanonicalSourceIdentifier(sourceIdentifier) || !in.Pod(count) || count > 4096) return std::nullopt;
 	std::vector<AssemblyMaterialEntry> entries(static_cast<std::size_t>(count));
 	for (auto& entry : entries) {
 		if (!in.String(entry.identity.sourceIdentifier) || !in.String(entry.identity.primPath) || !in.String(entry.identity.subsetName) ||

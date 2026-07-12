@@ -96,6 +96,98 @@ groupshared float2  gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float   gs_linearDepth[SW_RASTER_MAX_VERTS];
 groupshared float   gs_invClipW[SW_RASTER_MAX_VERTS];
 groupshared float2  gs_texcoord[SW_RASTER_MAX_VERTS];
+groupshared uint    gs_boundsViolationRecorded;
+
+static const uint CLOD_SW_BOUNDS_DETAIL_CAPACITY = 1024u;
+static const uint CLOD_SW_BOUNDS_DETAIL_MARKER = 0xFFFFFFFEu;
+
+struct CLodSwBoundsViolationDetail
+{
+    uint expectedGroupLocalIndex;
+    uint foundGroupLocalIndex;
+    uint expectedGroupGlobalIndex;
+    uint foundGroupGlobalIndex;
+    uint clodMeshMetadataIndex;
+    uint groupsBase;
+    uint expectedSegmentGlobalIndex;
+    uint expectedSegmentPageIndex;
+    uint expectedSegmentFirstMeshlet;
+    uint expectedSegmentMeshletCount;
+    uint expectedSegmentPageSlabDescriptorIndex;
+    uint expectedSegmentPageSlabByteOffset;
+    uint pageLocalMeshletIndex;
+    uint pageSlabDescriptorIndex;
+    uint pageSlabByteOffset;
+    uint visibleClusterIndex;
+    uint unsortedClusterIndex;
+    uint instanceId;
+    uint viewId;
+    uint bucketMeshletIndex;
+    uint bucketCount;
+    uint pad0;
+};
+
+void SWRecordBoundsViolation(
+    uint groupLocalIndex,
+    int parentGroupLocalIndex,
+    uint meshMetadataIndex,
+    CLodMeshMetadata metadata,
+    uint vertexIndex,
+    uint assemblyTransformIndex,
+    float3 objectPosition,
+    float3 objectBoundsCenter,
+    float objectBoundsRadius,
+    float distanceFromCenter,
+    uint pageLocalMeshletIndex,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint unsortedClusterIndex,
+    uint instanceId,
+    uint viewId)
+{
+    if (CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX == 0xFFFFFFFFu ||
+        CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+    {
+        return;
+    }
+
+    RWStructuredBuffer<uint> counter =
+        ResourceDescriptorHeap[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX];
+    uint detailIndex = 0u;
+    InterlockedAdd(counter[0], 1u, detailIndex);
+    if (detailIndex >= CLOD_SW_BOUNDS_DETAIL_CAPACITY)
+    {
+        return;
+    }
+
+    CLodSwBoundsViolationDetail detail = (CLodSwBoundsViolationDetail)0;
+    detail.expectedGroupLocalIndex = CLOD_SW_BOUNDS_DETAIL_MARKER;
+    detail.foundGroupLocalIndex = groupLocalIndex;
+    detail.expectedGroupGlobalIndex = metadata.groupsBase + groupLocalIndex;
+    detail.foundGroupGlobalIndex = asuint(parentGroupLocalIndex);
+    detail.clodMeshMetadataIndex = meshMetadataIndex;
+    detail.groupsBase = metadata.groupsBase;
+    detail.expectedSegmentGlobalIndex = pageLocalMeshletIndex;
+    detail.expectedSegmentPageIndex = vertexIndex;
+    detail.expectedSegmentFirstMeshlet = assemblyTransformIndex;
+    detail.expectedSegmentMeshletCount = asuint(objectPosition.x);
+    detail.expectedSegmentPageSlabDescriptorIndex = asuint(objectPosition.y);
+    detail.expectedSegmentPageSlabByteOffset = asuint(objectPosition.z);
+    detail.pageLocalMeshletIndex = asuint(objectBoundsCenter.x);
+    detail.pageSlabDescriptorIndex = asuint(objectBoundsCenter.y);
+    detail.pageSlabByteOffset = asuint(objectBoundsCenter.z);
+    detail.visibleClusterIndex = asuint(objectBoundsRadius);
+    detail.unsortedClusterIndex = unsortedClusterIndex;
+    detail.instanceId = instanceId;
+    detail.viewId = viewId;
+    detail.bucketMeshletIndex = pageSlabDescriptorIndex;
+    detail.bucketCount = pageSlabByteOffset;
+    detail.pad0 = asuint(distanceFromCenter);
+
+    RWStructuredBuffer<CLodSwBoundsViolationDetail> details =
+        ResourceDescriptorHeap[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX];
+    details[detailIndex] = detail;
+}
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
@@ -320,6 +412,41 @@ void SWRasterCluster(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const uint materialDataIndex = perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex;
 
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+
+    const uint groupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup group = groups[metadata.groupsBase + groupLocalIndex];
+
+    row_major matrix assemblyLocalToObject = float4x4(
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f);
+    if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+        assemblyLocalToObject = CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]);
+    }
+    const float3 groupBoundsCenterOS =
+        mul(float4(group.bounds.centerAndRadius.xyz, 1.0f), assemblyLocalToObject).xyz;
+    const float assemblyScale = max(
+        length(assemblyLocalToObject[0].xyz),
+        max(length(assemblyLocalToObject[1].xyz), length(assemblyLocalToObject[2].xyz)));
+    const float groupBoundsRadiusOS = group.bounds.centerAndRadius.w * assemblyScale;
+    const float groupBoundsTolerance = max(1.0e-3f, groupBoundsRadiusOS * 0.01f);
+
+    if (GI == 0u)
+    {
+        gs_boundsViolationRecorded = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
@@ -350,15 +477,47 @@ void SWRasterCluster(
 #if defined(PSO_SKINNED)
         SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
         skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
         localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
 #else
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u)
         {
             SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
             localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
         }
 #endif
+
+        const float3 objectPos = mul(float4(localPos, 1.0f), assemblyLocalToObject).xyz;
+        const float distanceFromGroupCenter = length(objectPos - groupBoundsCenterOS);
+        if (!all(isfinite(objectPos)) ||
+            !isfinite(distanceFromGroupCenter) ||
+            distanceFromGroupCenter > groupBoundsRadiusOS + groupBoundsTolerance)
+        {
+            uint previouslyRecorded = 0u;
+            InterlockedCompareExchange(gs_boundsViolationRecorded, 0u, 1u, previouslyRecorded);
+            if (previouslyRecorded == 0u)
+            {
+                SWRecordBoundsViolation(
+                    groupLocalIndex,
+                    group.parentGroupId,
+                    offsets.clodMeshMetadataIndex,
+                    metadata,
+                    v,
+                    assemblyTransformIndex,
+                    objectPos,
+                    groupBoundsCenterOS,
+                    groupBoundsRadiusOS,
+                    distanceFromGroupCenter,
+                    localMeshletIndex,
+                    pageSlabDescriptorIndex,
+                    pageSlabByteOffset,
+                    unsortedClusterIndex,
+                    instanceID,
+                    viewID);
+            }
+        }
 
         float4 localPos4 = float4(localPos, 1.0f);
         float4 clipPos  = mul(localPos4, modelViewProjection);
@@ -401,13 +560,6 @@ void SWRasterCluster(
     const bool assemblyVoxelInheritanceDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE;
     const bool assemblyPartsDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
     const bool debugRasterMode = swRasterDebugMode || assemblyVoxelInheritanceDebugMode || assemblyPartsDebugMode;
-    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
-    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    StructuredBuffer<ClusterLODGroup> groups =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
-    const ClusterLODGroup group = groups[metadata.groupsBase + CLodVisibleClusterGroupID(packedCluster)];
     float3 assemblyPartDebugColor = float3(0.08f, 0.10f, 0.12f);
     if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
     {
