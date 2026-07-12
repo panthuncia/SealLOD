@@ -235,6 +235,7 @@ namespace USDLoader {
 		std::vector<GfMatrix4d> bindXforms;
 		std::vector<uint32_t> windSimulationGroupIndices;
 		std::string windProfileIdentity;
+		DynamicWindMetadata dynamicWindMetadata;
 		double metersPerUnit = 1.0;
 	};
 
@@ -3636,7 +3637,8 @@ namespace USDLoader {
 					UsdSkelBindingAPI bindAPI(mesh.GetPrim());
 					UsdSkelSkeleton skel = bindAPI.GetInheritedSkeleton();
 					if (skel) {
-						preprocessSkelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+						if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+							preprocessSkelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 						auto skelQuery = preprocessSkelCache.GetSkelQuery(skel);
 						skelJointOrderRaw = skelQuery.GetJointOrder();
 
@@ -4355,6 +4357,12 @@ namespace USDLoader {
 		}
 
 		for (const UsdPrim& prim : UsdPrimRange(stage->GetPseudoRoot())) {
+			// On a PointInstancer this primvar is one joint token per instance, not
+			// a flattened parent/child edge list. Treating adjacent instance entries
+			// as topology pairs corrupts an otherwise valid skeleton hierarchy.
+			if (prim.IsA<UsdGeomPointInstancer>()) {
+				continue;
+			}
 			const UsdAttribute bindJointsAttr = prim.GetAttribute(TfToken("primvars:unreal:naniteAssembly:bindJoints"));
 			if (!bindJointsAttr) {
 				continue;
@@ -4527,6 +4535,21 @@ namespace USDLoader {
 		const size_t rootChildrenBefore = CountUsdSkeletonChildrenOf(parentIndices, primaryRoot);
 		const std::vector<int32_t> authoredParentIndices = parentIndices;
 		const UsdSkeletonTopologyValidation authoredValidation = ValidateUsdSkeletonTopology(jointOrder, parentIndices);
+		const bool authoredTopologyValid =
+			authoredValidation.duplicateJointNames == 0u &&
+			authoredValidation.missingAuthoredParents == 0u &&
+			authoredValidation.parentMismatches == 0u &&
+			authoredValidation.invalidParentIndices == 0u &&
+			authoredValidation.selfParents == 0u &&
+			authoredValidation.forwardParents == 0u &&
+			authoredValidation.cycles == 0u;
+		if (authoredTopologyValid) {
+			spdlog::info(
+				"USD assembly skeleton topology '{}': authored hierarchy is valid; preserving all {} parent links.",
+				skeletonPath,
+				jointCount - CountUsdSkeletonRoots(parentIndices));
+			return true;
+		}
 
 		enum class SanitizedParentReason
 		{
@@ -4752,10 +4775,79 @@ namespace USDLoader {
 		metadata.boneNames.reserve(rawJointOrder.size());
 		metadata.bindXforms.reserve(rawJointOrder.size());
 		metadata.windSimulationGroupIndices.assign(rawJointOrder.size(), 0xFFFFFFFFu);
+		metadata.dynamicWindMetadata.bones.resize(rawJointOrder.size());
 		if (stage && stage->GetRootLayer()) {
 			metadata.windProfileIdentity = stage->GetRootLayer()->GetIdentifier();
 		}
 		{
+			bool loadedDynamicWindJson = false;
+			const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim());
+			std::string dynamicWindJson;
+			if (skelRoot && skelRoot.GetPrim().GetAttribute(TfToken("unreal:dynamicWind:data")).Get(&dynamicWindJson) && !dynamicWindJson.empty()) {
+				try {
+					const json root = json::parse(dynamicWindJson);
+					auto& wind = metadata.dynamicWindMetadata;
+					wind.enabled = root.value("bIsEnabled", false);
+					wind.groundCover = root.value("bIsGroundCover", false);
+					wind.gustAttenuation = root.value("gustAttenuation", 0.0f);
+					if (const auto it = root.find("simulationGroups"); it != root.end() && it->is_array()) {
+						for (const auto& entry : *it) {
+							DynamicWindSimulationGroupData group;
+							if (entry.value("bUseDualInfluence", false)) group.flags |= DynamicWindMetadata::GroupFlagDualInfluence;
+							if (entry.value("bIsTrunkGroup", false)) group.flags |= DynamicWindMetadata::GroupFlagTrunk;
+							group.influence = entry.value("influence", 1.0f);
+							group.minInfluence = entry.value("minInfluence", 0.0f);
+							group.maxInfluence = entry.value("maxInfluence", 0.0f);
+							group.shiftTop = entry.value("shiftTop", 0.0f);
+							wind.groups.push_back(group);
+						}
+					}
+					if (const auto it = root.find("simulationGroupBones"); it != root.end() && it->is_array()) {
+						for (const auto& entry : *it) {
+							const int group = entry.value("simulationGroupIndex", -1);
+							if (const auto bones = entry.find("boneIndices"); bones != entry.end() && bones->is_array()) {
+								for (const auto& bone : *bones) {
+									const auto index = bone.get<std::size_t>();
+									if (index < metadata.windSimulationGroupIndices.size())
+										metadata.windSimulationGroupIndices[index] = group >= 0 ? static_cast<uint32_t>(group) : 0xFFFFFFFFu;
+								}
+							}
+						}
+					}
+					if (const auto it = root.find("boneChains"); it != root.end() && it->is_object()) {
+						for (auto chain = it->begin(); chain != it->end(); ++chain) {
+							const auto origin = static_cast<std::size_t>(std::stoull(chain.key()));
+							if (origin < wind.bones.size()) {
+								wind.bones[origin].chainOriginBoneIndex = static_cast<uint32_t>(origin);
+								wind.bones[origin].chainBoneCount = chain.value().value("numBones", 0u);
+								wind.bones[origin].chainLength = chain.value().value("chainLength", 0.0f);
+							}
+						}
+					}
+					if (const auto it = root.find("extraBonesData"); it != root.end() && it->is_object()) {
+						for (auto bone = it->begin(); bone != it->end(); ++bone) {
+							const auto index = static_cast<std::size_t>(std::stoull(bone.key()));
+							if (index < wind.bones.size()) {
+								wind.bones[index].chainOriginBoneIndex = bone.value().value("boneChainOriginBoneIndex", 0xFFFFFFFFu);
+								wind.bones[index].indexInBoneChain = bone.value().value("indexInBoneChain", 0u);
+							}
+						}
+					}
+					for (auto& bone : wind.bones) {
+						if (bone.chainOriginBoneIndex < wind.bones.size() && bone.chainOriginBoneIndex != 0xFFFFFFFFu) {
+							const auto& origin = wind.bones[bone.chainOriginBoneIndex];
+							bone.chainBoneCount = origin.chainBoneCount;
+							bone.chainLength = origin.chainLength;
+						}
+					}
+					loadedDynamicWindJson = true;
+					const size_t matched = std::ranges::count_if(metadata.windSimulationGroupIndices, [](uint32_t group) { return group != 0xFFFFFFFFu; });
+					spdlog::info("Skeleton '{}' DynamicWind JSON metadata: groups={} matched={} chains={}.", skeletonPath, wind.groups.size(), matched, root.value("boneChains", json::object()).size());
+				}
+				catch (const std::exception& e) {
+					spdlog::warn("Skeleton '{}' has invalid DynamicWind JSON: {}", skeletonPath, e.what());
+				}
+			}
 			VtTokenArray windJointNames;
 			VtIntArray windGroups;
 			const bool hasNames = skel.GetPrim().GetAttribute(TfToken("unreal:dynamicWind:jointNames")).Get(&windJointNames);
@@ -4764,7 +4856,7 @@ namespace USDLoader {
 				spdlog::warn("Skeleton '{}' has invalid DynamicWind arrays (names={}, groups={}); wind metadata disabled.",
 					skeletonPath, windJointNames.size(), windGroups.size());
 			}
-			else if (hasNames && hasGroups) {
+			else if (!loadedDynamicWindJson && hasNames && hasGroups) {
 				std::unordered_map<std::string, uint32_t> groupByName;
 				groupByName.reserve(windJointNames.size());
 				size_t duplicateNames = 0;
@@ -4814,7 +4906,8 @@ namespace USDLoader {
 			std::move(restLocalTransforms),
 			std::vector<DirectX::XMMATRIX>{},
 			metadata.windSimulationGroupIndices,
-			metadata.windProfileIdentity);
+			metadata.windProfileIdentity,
+			metadata.dynamicWindMetadata);
 		loadingCache.skeletonMap[skeletonCacheKey] = skeleton;
 		loadingCache.payloadSkeletonMetadata[skeleton.get()] = std::move(metadata);
 		return skeleton;
@@ -5149,7 +5242,8 @@ namespace USDLoader {
 			std::move(restLocals),
 			std::vector<DirectX::XMMATRIX>{},
 			data.windSimulationGroupIndices,
-			data.windProfileIdentity);
+			data.windProfileIdentity,
+			data.dynamicWindMetadata);
 	}
 
 	static std::string BuildAssemblySkeletonCacheKey(const ClusterLODAssemblySkeletonData& data)
@@ -5191,6 +5285,15 @@ namespace USDLoader {
 			combine(hash, group);
 		}
 		combine(hash, hashString(data.windProfileIdentity));
+		combine(hash, data.dynamicWindMetadata.enabled ? 1u : 0u);
+		combine(hash, data.dynamicWindMetadata.groundCover ? 1u : 0u);
+		auto hashPod = [&hash, &combine](const auto& value) {
+			const auto* bytes = reinterpret_cast<const unsigned char*>(std::addressof(value));
+			for (std::size_t i = 0; i < sizeof(value); ++i) combine(hash, bytes[i]);
+		};
+		hashPod(data.dynamicWindMetadata.gustAttenuation);
+		for (const auto& group : data.dynamicWindMetadata.groups) hashPod(group);
+		for (const auto& bone : data.dynamicWindMetadata.bones) hashPod(bone);
 		return "assembly_skeleton#" + std::to_string(hash);
 	}
 
@@ -5365,7 +5468,8 @@ namespace USDLoader {
 			return std::nullopt;
 		}
 
-		skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+		if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+			skelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 		UsdSkelSkeletonQuery skelQuery = skelCache.GetSkelQuery(skel);
 		if (!skelQuery) {
 			if (fallbackReason) {
@@ -5517,7 +5621,10 @@ namespace USDLoader {
 				metadata.parentIndices,
 				std::move(inverseBindMatrices),
 				std::move(restLocalTransforms),
-				std::move(rootParentGlobals));
+				std::move(rootParentGlobals),
+				metadata.windSimulationGroupIndices,
+				metadata.windProfileIdentity,
+				metadata.dynamicWindMetadata);
 			if (bucket.skeleton) {
 				for (const auto& animation : bucket.skeleton->animations) {
 					if (animation) {
@@ -5730,6 +5837,7 @@ namespace USDLoader {
 			std::vector<MeshUvSetData> representativeUvSets;
 			std::string staticTextureOverrideSourceName;
 			std::vector<GfMatrix4d> instanceTransforms;
+			std::vector<std::string> instanceBindJoints;
 			bool forceDoubleSided = false;
 		};
 
@@ -5741,7 +5849,7 @@ namespace USDLoader {
 			buildBuckets.push_back(BuildBucket{ .info = &bucket });
 		}
 
-		auto addResultInstance = [&](BuildBucket& bucket, const MeshPreprocessResult& result, const GfMatrix4d& transform) -> bool {
+		auto addResultInstance = [&](BuildBucket& bucket, const MeshPreprocessResult& result, const GfMatrix4d& transform, std::string_view bindJoint) -> bool {
 			if (!result.transientArtifacts) {
 				spdlog::warn("USD whole-asset CLod assembly missing retained CLod artifacts for '{}'.", result.sourcePrimPath);
 				return false;
@@ -5768,10 +5876,11 @@ namespace USDLoader {
 				.flags = 0u,
 			});
 			bucket.instanceTransforms.push_back(transform);
+			bucket.instanceBindJoints.emplace_back(bindJoint);
 			return true;
 		};
 
-		auto addMeshInstances = [&](const UsdGeomMesh& mesh, const GfMatrix4d& transform) -> bool {
+		auto addMeshInstances = [&](const UsdGeomMesh& mesh, const GfMatrix4d& transform, std::string_view bindJoint) -> bool {
 			std::string ignoredReason;
 			UsdSkelCache localSkelCache;
 			std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash> ignoredSkeletons;
@@ -5803,7 +5912,7 @@ namespace USDLoader {
 						? mesh.GetPrim().GetName().GetString()
 						: subset.staticTextureOverrideSourceName;
 				}
-				if (!addResultInstance(bucket, subset.result, transform)) {
+				if (!addResultInstance(bucket, subset.result, transform, bindJoint)) {
 					return false;
 				}
 			}
@@ -5814,7 +5923,7 @@ namespace USDLoader {
 			USDGeometryExtractor::EnumerateAssemblyMeshInstances(stage, geomTimeCode)) {
 			const GfMatrix4d correctedTransform =
 				meshInstance.localToStage * GfMatrix4d(stageContext.upRot, GfVec3d(0.0));
-			if (!addMeshInstances(meshInstance.mesh, correctedTransform)) {
+			if (!addMeshInstances(meshInstance.mesh, correctedTransform, meshInstance.assemblyBindJoint)) {
 				return false;
 			}
 		}
@@ -5822,15 +5931,31 @@ namespace USDLoader {
 		ClusterLODAssemblySkeletonData expandedAssemblySkeleton;
 		std::vector<GfMatrix4d> expandedBindGlobals;
 		std::unordered_map<std::uint64_t, std::vector<uint32_t>> remapByInstanceKey;
-		auto buildInstanceKey = [](const PayloadSkeletonBuildMetadata& metadata, const GfMatrix4d& transform) {
+		std::unordered_map<std::string, uint32_t> expandedJointByAuthoredName;
+		UsdGeomXformCache skeletonXformCache(geomTimeCode);
+		auto skeletonInstanceTransform = [&](const PayloadSkeletonBuildMetadata& metadata, const GfMatrix4d& meshInstanceTransform) {
+			const UsdPrim skeletonPrim = stage->GetPrimAtPath(SdfPath(metadata.skeletonPath));
+			const UsdSkelRoot skeletonRoot = skeletonPrim ? UsdSkelRoot::Find(skeletonPrim) : UsdSkelRoot();
+			const UsdPrim defaultPrim = stage->GetDefaultPrim();
+			if (skeletonRoot && defaultPrim && skeletonRoot.GetPrim() == defaultPrim) {
+				// A skeleton authored on the assembly root is already a complete, assembly-space
+				// hierarchy. Every part inherits it, but that does not make it a part-local
+				// skeleton that should be transformed and duplicated for every mesh instance.
+				return skeletonXformCache.GetLocalToWorldTransform(skeletonRoot.GetPrim()) *
+					GfMatrix4d(stageContext.upRot, GfVec3d(0.0));
+			}
+			return meshInstanceTransform;
+		};
+		auto buildInstanceKey = [](const PayloadSkeletonBuildMetadata& metadata, const GfMatrix4d& transform, std::string_view bindJoint) {
 			std::uint64_t hash = StableHashString64(metadata.skeletonPath);
 			for (const std::string& name : metadata.boneNames) {
 				StableHashCombine64(hash, StableHashString64(name));
 			}
 			StableHashMatrix64(hash, transform);
+			StableHashCombine64(hash, StableHashString64(std::string(bindJoint)));
 			return hash;
 		};
-		auto appendOrReuseSkeletonInstance = [&](const std::shared_ptr<Skeleton>& sourceSkeleton, const GfMatrix4d& transform) -> std::vector<uint32_t> {
+		auto appendOrReuseSkeletonInstance = [&](const std::shared_ptr<Skeleton>& sourceSkeleton, const GfMatrix4d& transform, std::string_view bindJoint) -> std::vector<uint32_t> {
 			if (!sourceSkeleton) {
 				return {};
 			}
@@ -5839,15 +5964,17 @@ namespace USDLoader {
 				return {};
 			}
 			const PayloadSkeletonBuildMetadata& metadata = metadataIt->second;
-			const std::uint64_t instanceKey = buildInstanceKey(metadata, transform);
+			const std::uint64_t instanceKey = buildInstanceKey(metadata, transform, bindJoint);
 			if (auto existing = remapByInstanceKey.find(instanceKey); existing != remapByInstanceKey.end()) {
 				return existing->second;
 			}
 
 			std::vector<uint32_t> remap(metadata.boneNames.size(), 0u);
 			const uint32_t baseJoint = static_cast<uint32_t>(expandedAssemblySkeleton.jointNames.size());
-			if (expandedAssemblySkeleton.windProfileIdentity.empty()) {
+			if (baseJoint == 0u) {
 				expandedAssemblySkeleton.windProfileIdentity = metadata.windProfileIdentity;
+				expandedAssemblySkeleton.dynamicWindMetadata = metadata.dynamicWindMetadata;
+				expandedAssemblySkeleton.dynamicWindMetadata.bones.clear();
 			}
 			for (uint32_t jointIndex = 0; jointIndex < static_cast<uint32_t>(metadata.boneNames.size()); ++jointIndex) {
 				const GfMatrix4d sourceBind = jointIndex < metadata.bindXforms.size()
@@ -5862,7 +5989,19 @@ namespace USDLoader {
 				}
 				else {
 					parentIndex = -1;
-					if (!expandedBindGlobals.empty()) {
+					if (!bindJoint.empty()) {
+						if (const auto authoredParent = expandedJointByAuthoredName.find(std::string(bindJoint));
+							authoredParent != expandedJointByAuthoredName.end()) {
+							parentIndex = static_cast<int32_t>(authoredParent->second);
+						}
+						else {
+							spdlog::warn(
+								"USD assembly skeleton instance '{}' references missing bind joint '{}'; leaving root detached.",
+								metadata.skeletonPath,
+								bindJoint);
+						}
+					}
+					else if (!expandedBindGlobals.empty()) {
 						const GfVec3d rootTranslation = expandedBind.ExtractTranslation();
 						double bestDistanceSquared = std::numeric_limits<double>::infinity();
 						int32_t bestParent = -1;
@@ -5885,6 +6024,10 @@ namespace USDLoader {
 
 				expandedAssemblySkeleton.jointNames.push_back(
 					metadata.skeletonPath + "[" + std::to_string(remapByInstanceKey.size()) + "]/" + metadata.boneNames[jointIndex]);
+				expandedJointByAuthoredName.try_emplace(metadata.boneNames[jointIndex], baseJoint + jointIndex);
+				expandedJointByAuthoredName.try_emplace(
+					std::string(UsdJointLeafName(metadata.boneNames[jointIndex])),
+					baseJoint + jointIndex);
 				expandedAssemblySkeleton.parentIndices.push_back(parentIndex);
 				DirectX::XMFLOAT4X4 inverseBind{};
 				DirectX::XMFLOAT4X4 restLocalMatrix{};
@@ -5899,6 +6042,15 @@ namespace USDLoader {
 					jointIndex < metadata.windSimulationGroupIndices.size()
 						? metadata.windSimulationGroupIndices[jointIndex]
 						: 0xFFFFFFFFu);
+				DynamicWindBoneData windBone;
+				if (jointIndex < metadata.dynamicWindMetadata.bones.size()) {
+					windBone = metadata.dynamicWindMetadata.bones[jointIndex];
+					if (windBone.chainOriginBoneIndex != 0xFFFFFFFFu &&
+						windBone.chainOriginBoneIndex < metadata.boneNames.size()) {
+						windBone.chainOriginBoneIndex += baseJoint;
+					}
+				}
+				expandedAssemblySkeleton.dynamicWindMetadata.bones.push_back(windBone);
 				expandedBindGlobals.push_back(expandedBind);
 				remap[jointIndex] = baseJoint + jointIndex;
 			}
@@ -5951,7 +6103,12 @@ namespace USDLoader {
 			workItem.bucket->instances[workItem.instanceIndex].boneRemapIndices =
 				appendOrReuseSkeletonInstance(
 					workItem.bucket->info->skeleton,
-					workItem.bucket->instanceTransforms[workItem.instanceIndex]);
+					skeletonInstanceTransform(
+						loadingCache.payloadSkeletonMetadata.at(workItem.bucket->info->skeleton.get()),
+						workItem.bucket->instanceTransforms[workItem.instanceIndex]),
+					workItem.instanceIndex < workItem.bucket->instanceBindJoints.size()
+						? std::string_view(workItem.bucket->instanceBindJoints[workItem.instanceIndex])
+						: std::string_view{});
 		}
 
 		if (!expandedAssemblySkeleton.Empty()) {
@@ -5977,27 +6134,12 @@ namespace USDLoader {
 				assemblySettings.doubleSidedVoxelSourceNormals =
 					bucket.forceDoubleSided ||
 					(bucket.info != nullptr && bucket.info->forceDoubleSided);
-				ClusterLODPrebuildArtifacts assemblyArtifacts;
-				try {
-					assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
+				ClusterLODPrebuildArtifacts assemblyArtifacts =
+					BuildClusterLODAssemblyArtifactsPreservingTriangleOnly(
 						bucket.parts,
 						bucket.instances,
 						assemblySettings,
 						8u);
-				}
-				catch (const std::runtime_error& e) {
-					if (std::string_view(e.what()).find("child assembly groups have no voxel payload sources") == std::string_view::npos) {
-						throw;
-					}
-					spdlog::warn(
-						"USD whole-asset CLod assembly bucket has no voxel payload sources; retrying with direct instance-root traversal.");
-					assemblyArtifacts = BuildClusterLODAssemblyArtifacts(
-						bucket.parts,
-						bucket.instances,
-						assemblySettings,
-						8u,
-						false);
-				}
 
 				if (bucket.info != nullptr && bucket.info->key.skinned && !expandedAssemblySkeleton.Empty()) {
 					assemblyArtifacts.prebuiltData.assemblySkeleton = expandedAssemblySkeleton;
@@ -6145,7 +6287,8 @@ namespace USDLoader {
 		if (bindingAPI) {
 			UsdSkelSkeleton skel;
 			if (bindingAPI.GetSkeleton(&skel)) {
-				skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+				if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+					skelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 				auto skelQuery = skelCache.GetSkelQuery(skel);
 				skelJointOrderRaw = skelQuery.GetJointOrder();
 
@@ -6232,7 +6375,8 @@ namespace USDLoader {
 			UsdSkelSkeleton skel;
 			if (bindingAPI.GetSkeleton(&skel)) {
 				spdlog::info("Found skeleton on prim: {}", prim.GetName().GetString());
-				skelCache.Populate(UsdSkelRoot(skel.GetPrim()), UsdPrimDefaultPredicate);
+				if (const UsdSkelRoot skelRoot = UsdSkelRoot::Find(skel.GetPrim()))
+					skelCache.Populate(skelRoot, UsdPrimDefaultPredicate);
 				auto skelQuery = skelCache.GetSkelQuery(skel);
 
 				skelJointOrderRaw = skelQuery.GetJointOrder();

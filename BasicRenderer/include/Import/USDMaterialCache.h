@@ -11,7 +11,7 @@
 
 namespace USDMaterialCache {
 
-inline constexpr std::uint32_t kManifestVersion = 1;
+inline constexpr std::uint32_t kManifestVersion = 2;
 
 struct AssemblyMaterialEntry {
 	CLodCacheLoader::MeshCacheIdentity identity;
@@ -25,6 +25,8 @@ MaterialDescription ExtractMaterialDescription(const pxr::UsdShadeMaterial& mate
 bool SaveAssemblyMaterialManifest(
 	const std::string& sourceIdentifier,
 	const std::vector<AssemblyMaterialEntry>& entries);
+
+void RemoveAssemblyMaterialManifest(const std::string& sourceIdentifier);
 
 std::optional<std::vector<AssemblyMaterialEntry>> LoadAssemblyMaterialManifest(
 	const std::string& sourceIdentifier);

@@ -242,6 +242,11 @@ namespace CLodCache {
 			WriteVectorPod(out, prebuiltData.assemblySkeleton.bindGlobalMatrices);
 			WriteVectorPod(out, prebuiltData.assemblySkeleton.windSimulationGroupIndices);
 			WriteString(out, prebuiltData.assemblySkeleton.windProfileIdentity);
+			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.enabled);
+			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.groundCover);
+			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.gustAttenuation);
+			WriteVectorPod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.groups);
+			WriteVectorPod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.bones);
 			WriteVectorPod(out, prebuiltData.partRecords);
 			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
@@ -298,6 +303,11 @@ namespace CLodCache {
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.bindGlobalMatrices)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.windSimulationGroupIndices)) return false;
 			if (!ReadString(blob, offset, out.prebuiltData.assemblySkeleton.windProfileIdentity)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.enabled)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.groundCover)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.gustAttenuation)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.groups)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.bones)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.partRecords)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;

@@ -9677,6 +9677,30 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	return out;
 }
 
+ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOnly(
+	std::span<const ClusterLODAssemblyPart> parts,
+	std::span<const ClusterLODAssemblyInstanceSpec> instances,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t preferredNodeWidth)
+{
+	try
+	{
+		return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, true);
+	}
+	catch (const std::runtime_error& e)
+	{
+		if (std::string_view(e.what()).find("child assembly groups have no voxel payload sources") == std::string_view::npos)
+		{
+			throw;
+		}
+	}
+
+	spdlog::warn(
+		"ClusterLOD assembly has no voxel payload sources; preserving {} instance(s) with direct instance-root traversal.",
+		instances.size());
+	return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, false);
+}
+
 ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,
 	unsigned int vertexSize,

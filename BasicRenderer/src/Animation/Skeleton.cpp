@@ -73,7 +73,8 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::vector<Components::Transform> restLocalTransforms,
     std::vector<Matrix> rootParentGlobals,
     std::vector<uint32_t> windSimulationGroupIndices,
-    std::string windProfileIdentity)
+    std::string windProfileIdentity,
+    DynamicWindMetadata dynamicWindMetadata)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -112,6 +113,7 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
         m_windSimulationGroupIndices.clear();
     }
     m_windProfileIdentity = std::move(windProfileIdentity);
+    m_dynamicWindMetadata = std::move(dynamicWindMetadata);
     BuildEvalOrder_();
 }
 
@@ -152,6 +154,7 @@ Skeleton::Skeleton(const Skeleton& other)
 		m_rootParentGlobals = other.m_rootParentGlobals;
 		m_windSimulationGroupIndices = other.m_windSimulationGroupIndices;
 		m_windProfileIdentity = other.m_windProfileIdentity;
+		m_dynamicWindMetadata = other.m_dynamicWindMetadata;
         m_skinningGPUFlags = other.m_skinningGPUFlags;
 
         animations = other.animations;
@@ -215,6 +218,13 @@ std::string_view Skeleton::GetWindProfileIdentity() const
 {
     if (m_isBaseSkeleton) return m_windProfileIdentity;
     return m_baseSkeleton ? std::string_view(m_baseSkeleton->m_windProfileIdentity) : std::string_view{};
+}
+
+const DynamicWindMetadata& Skeleton::GetDynamicWindMetadata() const
+{
+    if (m_isBaseSkeleton) return m_dynamicWindMetadata;
+    static const DynamicWindMetadata empty;
+    return m_baseSkeleton ? m_baseSkeleton->m_dynamicWindMetadata : empty;
 }
 
 uint32_t Skeleton::GetSkinningGPUFlags() const noexcept

@@ -13,6 +13,7 @@
 
 #include "Animation/Animation.h"
 #include "Animation/AnimationController.h"
+#include "Animation/DynamicWindMetadata.h"
 #include "Scene/Components.h"
 
 // Skeleton has two modes:
@@ -33,7 +34,8 @@ public:
         std::vector<Components::Transform> restLocalTransforms = {},
         std::vector<Matrix> rootParentGlobals = {},
         std::vector<uint32_t> windSimulationGroupIndices = {},
-        std::string windProfileIdentity = {});
+        std::string windProfileIdentity = {},
+        DynamicWindMetadata dynamicWindMetadata = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -90,6 +92,7 @@ public:
     std::span<const Matrix> GetRootParentGlobals() const;
     std::span<const uint32_t> GetWindSimulationGroupIndices() const;
     std::string_view GetWindProfileIdentity() const;
+    const DynamicWindMetadata& GetDynamicWindMetadata() const;
     bool HasWindSimulationGroups() const { return !GetWindSimulationGroupIndices().empty(); }
 
     // Optional hook for SkeletonManager (or draw-data) to store an instance slot/index.
@@ -110,6 +113,7 @@ private:
     std::vector<Matrix>      m_rootParentGlobals; // Transforms to apply to root nodes based on external hierarchy
     std::vector<uint32_t>    m_windSimulationGroupIndices;
     std::string              m_windProfileIdentity;
+    DynamicWindMetadata      m_dynamicWindMetadata;
 
     // Animation library (base)
 public:

@@ -62,3 +62,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	const ClusterLODBuilderSettings& settings,
 	uint32_t preferredNodeWidth = 8u,
 	bool synthesizeVoxelParents = true);
+
+// Builds the preferred voxel-parent assembly when possible, while preserving
+// triangle-only parts through direct instance-root traversal when none of the
+// child hierarchies provides a usable voxel source.
+ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOnly(
+	std::span<const ClusterLODAssemblyPart> parts,
+	std::span<const ClusterLODAssemblyInstanceSpec> instances,
+	const ClusterLODBuilderSettings& settings,
+	uint32_t preferredNodeWidth = 8u);

@@ -22,6 +22,9 @@ namespace USDGeometryExtractor {
 struct AssemblyMeshInstance {
 	pxr::UsdGeomMesh mesh;
 	pxr::GfMatrix4d localToStage{ 1.0 };
+	// Authored Nanite assembly joint for this PointInstancer element. Empty for
+	// ordinary meshes and assets which do not provide assembly binding metadata.
+	std::string assemblyBindJoint;
 };
 
 // Enumerate visible root meshes and expanded PointInstancer prototype meshes
@@ -125,7 +128,7 @@ StageExtractionResult ExtractAllFromStage(
 // PointInstancers in a stage. The supplied submeshes must retain their
 // transient CLod artifacts. This lets runtime importers reuse preprocessing
 // they have already performed instead of expanding PointInstancers on CPU.
-std::optional<MeshPreprocessResult> BuildPointInstancerAssemblyCache(
+std::optional<MeshPreprocessResult> BuildInstancedAssemblyCache(
 	const pxr::UsdStageRefPtr& stage,
 	const std::string& sourceIdentifier,
 	pxr::UsdTimeCode geomTimeCode,

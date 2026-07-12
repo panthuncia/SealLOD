@@ -492,7 +492,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
-    auto needles = LoadModel("models/Trees/spruce/Tree_Norway_Spruce_01_A.usd");
+    auto needles = LoadModel("models/Trees/Tree_Baltic_Pine_01_A.usd");
 
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 

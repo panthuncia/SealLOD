@@ -109,6 +109,7 @@ struct WindSharedResources {
             if (!instance.skeleton || !instance.skeleton->HasWindSimulationGroups()) continue;
             const auto groups = instance.skeleton->GetWindSimulationGroupIndices();
             const auto parents = instance.skeleton->GetParentIndices();
+            const auto& authoredWind = instance.skeleton->GetDynamicWindMetadata();
             const auto profile = runtime->ResolveProfile(instance.skeleton->GetWindProfileIdentity());
             const auto firstEntry = static_cast<std::uint32_t>(next.size());
             for (std::uint32_t joint = 0u; joint < instance.boneCount; ++joint) {
@@ -128,6 +129,20 @@ struct WindSharedResources {
                     entry.torsionRatio = found->torsionRatio;
                     entry.frequencyScale = found->frequencyScale;
                     entry.maximumAngle = found->maximumAngleRadians;
+                }
+                if (authoredWind.enabled && entry.simulationGroup < authoredWind.groups.size()) {
+                    const auto& authoredGroup = authoredWind.groups[entry.simulationGroup];
+                    entry.influence = authoredGroup.influence;
+                    if ((authoredGroup.flags & DynamicWindMetadata::GroupFlagDualInfluence) != 0u &&
+                        joint < authoredWind.bones.size()) {
+                        const auto& bone = authoredWind.bones[joint];
+                        const float denominator = static_cast<float>(bone.chainBoneCount > 1u ? bone.chainBoneCount - 1u : 1u);
+                        const float chainT = std::clamp(
+                            static_cast<float>(bone.indexInBoneChain) / denominator + authoredGroup.shiftTop,
+                            0.0f,
+                            1.0f);
+                        entry.influence = std::lerp(authoredGroup.minInfluence, authoredGroup.maxInfluence, chainT);
+                    }
                 }
                 entry.frequencies = profile.harmonicFrequenciesHz;
                 entry.weights = profile.harmonicWeights;

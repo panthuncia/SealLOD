@@ -23,6 +23,7 @@
 #include "Mesh/ClusterLODShaderTypes.h"
 #include "Mesh/VertexFlags.h"
 #include "Import/MeshData.h"
+#include "Animation/DynamicWindMetadata.h"
 
 // Forward declarations for GPU-side types only needed by MeshIngestBuilder::Build()
 class Material;
@@ -117,6 +118,7 @@ struct ClusterLODAssemblySkeletonData
 	std::vector<DirectX::XMFLOAT4X4> bindGlobalMatrices;
 	std::vector<uint32_t> windSimulationGroupIndices;
 	std::string windProfileIdentity;
+	DynamicWindMetadata dynamicWindMetadata;
 
 	bool Empty() const
 	{
@@ -132,6 +134,7 @@ struct ClusterLODAssemblySkeletonData
 		bindGlobalMatrices.clear();
 		windSimulationGroupIndices.clear();
 		windProfileIdentity.clear();
+		dynamicWindMetadata = {};
 	}
 };
 

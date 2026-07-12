@@ -207,6 +207,11 @@ bool SaveAssemblyMaterialManifest(const std::string& sourceIdentifier, const std
 	return !ec;
 }
 
+void RemoveAssemblyMaterialManifest(const std::string& sourceIdentifier) {
+	std::error_code ec;
+	std::filesystem::remove(ManifestPath(sourceIdentifier), ec);
+}
+
 std::optional<std::vector<AssemblyMaterialEntry>> LoadAssemblyMaterialManifest(const std::string& sourceIdentifier) {
 	Reader in(ManifestPath(sourceIdentifier)); if (!in) return std::nullopt;
 	std::uint32_t magic = 0, version = 0; std::string storedSource; std::uint64_t count = 0;
