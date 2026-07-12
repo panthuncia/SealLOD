@@ -2461,7 +2461,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 
             const auto budget = m_renderGraph->GetStatisticsService()->GetMemoryBudgetStats();
             spdlog::info(
-                "Memory widget accounting: frame={} dxgi_usage={} introspected={} dxgi_minus_introspected={} "
+                "Memory diagnostics summary: frame={} dxgi_usage={} introspected={} dxgi_minus_introspected={} "
                 "records={} zero_sized_records={} unknown_type_records={}",
                 memoryAccountingFrame,
                 budget.usageBytes,
@@ -2482,7 +2482,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 }
                 categorySummary += std::format("{}={}", category, bytes);
             }
-            spdlog::info("Memory widget categories: frame={} {}", memoryAccountingFrame, categorySummary);
+            spdlog::info("Memory diagnostics categories: frame={} {}", memoryAccountingFrame, categorySummary);
 
             std::vector<ResourceAllocationGroup> sortedAllocationGroups;
             sortedAllocationGroups.reserve(allocationGroups.size());
@@ -2495,7 +2495,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 const auto& group = sortedAllocationGroups[rank];
                 const auto& record = group.representative;
                 spdlog::info(
-                    "Memory resource group: frame={} rank={} total_bytes={} allocation_bytes={} count={} "
+                    "Memory diagnostics resource_group: frame={} rank={} total_bytes={} allocation_bytes={} count={} "
                     "type={} usage='{}' name='{}' identifier='{}' width={} height={} mips={} array={} format={} aliased={}",
                     memoryAccountingFrame,
                     rank,
