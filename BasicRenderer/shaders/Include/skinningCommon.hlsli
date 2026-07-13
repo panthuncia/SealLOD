@@ -20,7 +20,9 @@ uint ResolveProceduralWindSkinningSlot(uint drawRecordIndex, uint sourceSlot)
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::SkinningInstanceInfo)];
     SkinningInstanceGPUInfo source = infos[sourceSlot];
     if ((source.flags & 2u) == 0u) return sourceSlot;
-    uint transientSlot = 65536u + drawRecordIndex;
+    StructuredBuffer<InstanceDrawRecordBuffer> drawRecords =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::InstanceDrawRecordBuffer)];
+    const uint transientSlot = 65536u + drawRecords[drawRecordIndex].instanceTransformIndex;
     return infos[transientSlot].boneCount != 0u ? transientSlot : 0xFFFFFFFFu;
 }
 

@@ -115,6 +115,9 @@ public:
 	struct StaticMeshTemplateRegistration {
 		uint32_t meshTemplateIndex = 0;
 		uint32_t clodOffsetIndex = 0;
+		uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
+		BoundingSphere skinnedAssemblyBounds{};
+		float skinnedBoundsScale = 1.0f;
 		bool valid = false;
 		bool pendingResources = false;
 	};

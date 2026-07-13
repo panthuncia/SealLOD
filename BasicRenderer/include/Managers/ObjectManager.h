@@ -49,6 +49,9 @@ public:
 		std::shared_ptr<Mesh> mesh;
 		std::shared_ptr<Material> material;
 		std::vector<DrawWorkloadKey> workloadKeys;
+		std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
+		BoundingSphere skinnedAssemblyBounds{};
+		float skinnedBoundsScale = 1.0f;
 	};
 
 	struct StaticGroupBuildInfo {
@@ -61,6 +64,9 @@ public:
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
 		std::vector<DrawWorkloadKey> workloadKeys;
+		std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
+		BoundingSphere skinnedAssemblyBounds{};
+		float skinnedBoundsScale = 1.0f;
 	};
 
 	struct PreparedStaticGroupInfo {
@@ -168,6 +174,9 @@ public:
 			std::size_t scopeTransformOrdinal = 0;
 			std::uint32_t meshTemplateIndex = 0;
 			std::uint32_t clodOffsetIndex = 0;
+			std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
+			BoundingSphere skinnedAssemblyBounds{};
+			float skinnedBoundsScale = 1.0f;
 			std::vector<DrawWorkloadKey> workloadKeys;
 		};
 
@@ -272,16 +281,22 @@ public:
 		std::vector<BufferRetireRange> bufferRanges;
 		std::vector<Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
 		std::vector<std::uint32_t> drawRecordIndices;
+		std::vector<std::uint32_t> skinnedAssemblyPlacementIndices;
 		std::size_t drawInfoCount = 0;
 	};
 
 	struct MaterializedStaticImportTransaction {
+		struct PendingSkinnedAssemblyPlacement {
+			std::size_t groupIndex = 0;
+			SkinnedAssemblyPlacementGPU placement{};
+		};
 		StaticImportReservation reservation;
 		std::vector<PerObjectCB> perObjectRows;
 		std::vector<DirectX::XMFLOAT4X4> normalRows;
 		std::vector<InstanceDrawRecordCB> drawRecordRows;
 		std::vector<Components::ObjectDrawInfo> drawInfos;
 		std::vector<StaticObjectRemovalPayload> removalPayloads;
+		std::vector<PendingSkinnedAssemblyPlacement> skinnedAssemblyPlacements;
 		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
 		std::unordered_map<DrawWorkloadKey, std::uint32_t, DrawWorkloadKey::Hasher> activeDrawSetSpans;
 		std::uint64_t materializeUs = 0;
@@ -401,9 +416,16 @@ public:
 			? m_instanceDrawRecordBuffers->GetBufferSize() / sizeof(InstanceDrawRecordCB)
 			: 0u;
 	}
+	std::uint64_t GetResidentInstanceTransformCount() const {
+		return m_perInstanceTransformBuffers
+			? m_perInstanceTransformBuffers->GetBufferSize() / sizeof(PerInstanceTransformCB)
+			: 0u;
+	}
 	std::span<const std::uint32_t> GetDrawRecordVisibilityGenerations() const {
 		return m_drawRecordVisibilityGenerations;
 	}
+	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>>& GetSkinnedAssemblyPlacements() { return m_skinnedAssemblyPlacements; }
+	std::shared_ptr<SortedUnsignedIntBuffer>& GetActiveSkinnedAssemblyPlacements() { return m_activeSkinnedAssemblyPlacements; }
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -425,6 +447,7 @@ public:
 	Stats GetStats() const;
 
 private:
+	void PublishSkinnedAssemblyPlacements(MaterializedStaticImportTransaction& transaction);
 	ObjectManager();
 
 	struct DeferredBufferRangeRetire {
@@ -486,6 +509,9 @@ private:
 	std::shared_ptr<DynamicBuffer> m_normalMatrixBuffer; // Normal matrices for each object
 	std::unordered_map<DrawWorkloadKey, std::shared_ptr<SortedUnsignedIntBuffer>, DrawWorkloadKey::Hasher> m_activeDrawSetIndices; // Indices into m_drawSetCommandsBuffer for active objects per workload
 	std::vector<std::uint32_t> m_drawRecordVisibilityGenerations;
+	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> m_skinnedAssemblyPlacements;
+	std::shared_ptr<SortedUnsignedIntBuffer> m_activeSkinnedAssemblyPlacements;
+	std::vector<SkinnedAssemblyPlacementGPU> m_skinnedAssemblyPlacementCPU;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	std::uint64_t m_nextStaticImportTransactionID = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object

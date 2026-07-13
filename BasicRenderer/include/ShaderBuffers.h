@@ -653,6 +653,16 @@ constexpr uint32_t kSkinningInstanceFlagRowVectorSkinMatrix = 1u << 0;
 constexpr uint32_t kSkinningInstanceFlagProceduralWindType = 1u << 1;
 constexpr uint32_t kProceduralWindTransientSlotBase = 65536u;
 
+struct SkinnedAssemblyPlacementGPU {
+    uint32_t instanceTransformIndex = 0;
+    uint32_t skinningTypeSlot = 0xFFFFFFFFu;
+    uint32_t stableSceneID = 0;
+    uint32_t generation = 0;
+    DirectX::XMFLOAT4 localBoundingSphere{};
+    float boundsScale = 1.0f;
+    uint32_t pad[3]{};
+};
+
 struct MeshInstanceClodOffsets
 {
     uint clodMeshMetadataIndex;

@@ -82,6 +82,7 @@ namespace Components {
         std::vector<ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
         std::vector<uint32_t> perMeshInstanceBufferIndices;
         std::vector<uint32_t> instanceDrawRecordIndices;
+        std::vector<uint32_t> skinnedAssemblyPlacementIndices;
         std::shared_ptr<BufferView> perObjectCBView;
         uint32_t perObjectCBIndex;
         std::shared_ptr<BufferView> normalMatrixView;

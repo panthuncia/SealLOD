@@ -78,6 +78,8 @@
     "PerMeshInstanceBuffer": {},
     "PerInstanceTransformBuffer": {},
     "InstanceDrawRecordBuffer": {},
+    "SkinnedAssemblyPlacements": {},
+    "ActiveSkinnedAssemblyPlacements": {},
     "NormalMatrixBuffer": {},
     "SkeletonResources": {
       "BoneTransforms": {},

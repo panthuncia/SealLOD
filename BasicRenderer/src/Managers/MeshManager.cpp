@@ -1121,6 +1121,9 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 
 			registrations[requestIndex].meshTemplateIndex = meshTemplateIndex;
 			registrations[requestIndex].clodOffsetIndex = clodOffsetIndex;
+			registrations[requestIndex].skinnedAssemblyTypeSlot = perMeshInstanceRows[rowIndex].skinningInstanceSlot;
+			registrations[requestIndex].skinnedAssemblyBounds = perMeshInstanceRows[rowIndex].boundingSphere;
+			registrations[requestIndex].skinnedBoundsScale = perMeshInstanceRows[rowIndex].skinnedBoundsScale;
 			registrations[requestIndex].valid = true;
 
 			if (request.mesh) {

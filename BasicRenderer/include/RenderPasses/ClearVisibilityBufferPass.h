@@ -97,11 +97,16 @@ public:
 		clearResource(m_HDRColorTarget); // TODO: Only needed because of non-zero initialized memory issue- make a clear manager instead?
 		clearDepth(m_depthTexture); // same
 		if (m_linearDepthTexture) {
+			auto derivedMipClear = m_linearDepthTexture->GetClearColor();
+			derivedMipClear.rgba[0] = 0.0f;
+			derivedMipClear.rgba[1] = 0.0f;
+			derivedMipClear.rgba[2] = 0.0f;
+			derivedMipClear.rgba[3] = 0.0f;
 			for (unsigned int slice = 0; slice < m_linearDepthTexture->GetNumRTVSlices(); ++slice) {
 				for (unsigned int mip = 0; mip < m_linearDepthTexture->GetNumRTVMipLevels(); ++mip) {
 					commandList.ClearRenderTargetView(
 						m_linearDepthTexture->GetRTVInfo(mip, slice).slot,
-						m_linearDepthTexture->GetClearColor());
+						mip == 0 ? m_linearDepthTexture->GetClearColor() : derivedMipClear);
 				}
 			}
 		}

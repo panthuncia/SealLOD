@@ -20,11 +20,30 @@
 #include <chrono>
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <span>
+#include <meshoptimizer.h>
 #include <spdlog/spdlog.h>
 
 namespace {
+
+BoundingSphere FitBoundingSpheres(std::span<const BoundingSphere> spheres)
+{
+	BoundingSphere result{};
+	if (spheres.empty()) return result;
+	const meshopt_Bounds fitted = meshopt_computeSphereBounds(
+		&spheres.front().sphere.x,
+		spheres.size(),
+		sizeof(BoundingSphere),
+		&spheres.front().sphere.w,
+		sizeof(BoundingSphere));
+	result.sphere = DirectX::XMFLOAT4(
+		fitted.center[0], fitted.center[1], fitted.center[2],
+		fitted.radius * (1.0f + 1.0e-5f));
+	return result;
+}
 
 bool SarpClodImportDebugLoggingEnabled()
 {
@@ -175,6 +194,9 @@ void PrepareStaticGroupsBulkPlanInPlace(
 			auto& preparedTemplate = prepared.meshTemplates.emplace_back();
 			preparedTemplate.meshTemplateIndex = meshTemplate.meshTemplateIndex;
 			preparedTemplate.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+			preparedTemplate.skinnedAssemblyTypeSlot = meshTemplate.skinnedAssemblyTypeSlot;
+			preparedTemplate.skinnedAssemblyBounds = meshTemplate.skinnedAssemblyBounds;
+			preparedTemplate.skinnedBoundsScale = meshTemplate.skinnedBoundsScale;
 			preparedTemplate.workloadKeys = ResolveStaticTemplateWorkloadKeys(meshTemplate);
 		}
 		prepared.perObjectCBs.reserve(group.instanceTransforms.size());
@@ -221,6 +243,8 @@ ObjectManager::ObjectManager() {
 	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
 	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
 	m_drawRecordVisibilityGenerationSidecar = DynamicStructuredBuffer<std::uint32_t>::CreateShared(10000, "drawRecordVisibilityGenerationSidecar<uint>");
+	m_skinnedAssemblyPlacements = DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>::CreateShared(1024, "skinnedAssemblyPlacements");
+	m_activeSkinnedAssemblyPlacements = SortedUnsignedIntBuffer::CreateActiveDrawSetShared(1024, "activeSkinnedAssemblyPlacements");
 	m_masterIndirectCommandsBuffer = DynamicBuffer::CreateShared(sizeof(DispatchMeshIndirectCommand), 10000, "masterIndirectCommandsBuffer<IndirectCommand>");
 
 	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
@@ -236,6 +260,8 @@ ObjectManager::ObjectManager() {
 	m_resources[Builtin::PerObjectBuffer] = m_perObjectBuffers;
 	m_resources[Builtin::PerInstanceTransformBuffer] = m_perInstanceTransformBuffers;
 	m_resources[Builtin::InstanceDrawRecordBuffer] = m_instanceDrawRecordBuffers;
+	m_resources[Builtin::SkinnedAssemblyPlacements] = m_skinnedAssemblyPlacements;
+	m_resources[Builtin::ActiveSkinnedAssemblyPlacements] = m_activeSkinnedAssemblyPlacements;
 	m_resources[Builtin::NormalMatrixBuffer] = m_normalMatrixBuffer;
 	m_resources[Builtin::IndirectCommandBuffers::Master] = m_masterIndirectCommandsBuffer;
 
@@ -1654,6 +1680,41 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			drawInfo.perMeshInstanceBufferIndices.push_back(meshTemplate.meshTemplateIndex);
 		}
 
+		struct TypeBounds {
+			std::uint32_t slot;
+			std::vector<BoundingSphere> components;
+			BoundingSphere bounds;
+			float scale;
+		};
+		std::vector<TypeBounds> skinnedTypes;
+		for (const auto& meshTemplate : group.meshTemplates) {
+			if (meshTemplate.skinnedAssemblyTypeSlot == 0xFFFFFFFFu) continue;
+			auto found = std::ranges::find(skinnedTypes, meshTemplate.skinnedAssemblyTypeSlot, &TypeBounds::slot);
+			if (found == skinnedTypes.end()) {
+				skinnedTypes.push_back({ meshTemplate.skinnedAssemblyTypeSlot,
+					{ meshTemplate.skinnedAssemblyBounds }, meshTemplate.skinnedAssemblyBounds, meshTemplate.skinnedBoundsScale });
+			} else {
+				found->components.push_back(meshTemplate.skinnedAssemblyBounds);
+				found->scale = (std::max)(found->scale, meshTemplate.skinnedBoundsScale);
+			}
+		}
+		for (auto& type : skinnedTypes) type.bounds = FitBoundingSpheres(type.components);
+		for (const auto& type : skinnedTypes) {
+			for (std::uint32_t transformIndex = 0; transformIndex < transformCount; ++transformIndex) {
+				MaterializedStaticImportTransaction::PendingSkinnedAssemblyPlacement pending{};
+				pending.groupIndex = groupIndex;
+				pending.placement.instanceTransformIndex = static_cast<std::uint32_t>(
+					instanceTransformRange.offset / sizeof(PerInstanceTransformCB)) + transformIndex;
+				pending.placement.skinningTypeSlot = type.slot;
+				const std::uint64_t stable = group.stableGroupID;
+				pending.placement.stableSceneID = static_cast<std::uint32_t>(
+					(stable ^ (stable >> 32u)) * 747796405u + transformIndex * 2891336453u + type.slot * 277803737u);
+				pending.placement.localBoundingSphere = type.bounds.sphere;
+				pending.placement.boundsScale = type.scale;
+				transaction.skinnedAssemblyPlacements.push_back(pending);
+			}
+		}
+
 		{
 			ZoneScopedN("ObjectManager::MaterializeStaticImportTransaction::SetupDrawRecordRows");
 			std::size_t localDrawRecordOrdinal = 0;
@@ -1713,6 +1774,29 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 	return transaction;
 }
 
+void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTransaction& transaction) {
+	if (transaction.skinnedAssemblyPlacements.empty()) return;
+	std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> activeEntries;
+	activeEntries.reserve(transaction.skinnedAssemblyPlacements.size());
+	for (auto& pending : transaction.skinnedAssemblyPlacements) {
+		pending.placement.generation = 1u;
+		const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
+		m_skinnedAssemblyPlacementCPU.push_back(pending.placement);
+		if (pending.groupIndex < transaction.drawInfos.size()) {
+			transaction.drawInfos[pending.groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
+		}
+		if (pending.groupIndex < transaction.removalPayloads.size()) {
+			transaction.removalPayloads[pending.groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
+		}
+		activeEntries.push_back({ placementIndex, pending.placement.generation });
+	}
+	m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+	m_activeSkinnedAssemblyPlacements->AppendActiveEntries(activeEntries);
+	m_activeSkinnedAssemblyPlacements->SetLiveSize(m_activeSkinnedAssemblyPlacements->LiveSize() + activeEntries.size());
+	spdlog::info("Skinned assembly placements: published={} total={} activeEntries={}.",
+		activeEntries.size(), m_skinnedAssemblyPlacementCPU.size(), m_activeSkinnedAssemblyPlacements->Size());
+}
+
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
 	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
@@ -1758,6 +1842,7 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	}
 
 	AssignStaticImportTransactionGenerations(transaction);
+	PublishSkinnedAssemblyPlacements(transaction);
 
 	if (transaction.reservation.visibilityDirtyStart < transaction.reservation.visibilityDirtyEnd) {
 		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations");
@@ -1909,6 +1994,10 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	}
 
 	AssignStaticImportTransactionGenerations(transactions);
+	for (auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		PublishSkinnedAssemblyPlacements(*transactionPtr);
+	}
 
 	std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
 	std::size_t visibilityDirtyEnd = 0;
@@ -2117,6 +2206,9 @@ ObjectManager::StaticImportPacket ObjectManager::BuildStaticImportPacket(StaticI
 				record.scopeTransformOrdinal = transformOrdinal;
 				record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
 				record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
+				record.skinnedAssemblyTypeSlot = meshTemplate.skinnedAssemblyTypeSlot;
+				record.skinnedAssemblyBounds = meshTemplate.skinnedAssemblyBounds;
+				record.skinnedBoundsScale = meshTemplate.skinnedBoundsScale;
 				if (meshTemplateIndex < group.workloadKeysByMeshTemplate.size()) {
 					record.workloadKeys = group.workloadKeysByMeshTemplate[meshTemplateIndex];
 				}
@@ -2320,6 +2412,67 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 	}
 	m_stats.staticDirectPageUploadUs += static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - pageUploadBegin).count());
+
+	// Publish exactly one skinned-assembly placement for each transform/type pair.
+	// Material/subset draw records deliberately do not participate in this list.
+	{
+		std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> activePlacements;
+		for (std::size_t groupIndex = 0; groupIndex < drawInfos.size() && groupIndex < packet.transformRanges.size(); ++groupIndex) {
+			struct TypeBounds {
+				std::uint32_t slot;
+				std::vector<BoundingSphere> components;
+				BoundingSphere bounds;
+				float scale;
+			};
+			std::vector<TypeBounds> types;
+			for (const auto& scope : packet.scopes) {
+				for (const auto& record : scope.drawRecords) {
+					if (record.groupIndex != groupIndex || record.skinnedAssemblyTypeSlot == 0xFFFFFFFFu) continue;
+					auto found = std::ranges::find(types, record.skinnedAssemblyTypeSlot, &TypeBounds::slot);
+					if (found == types.end()) {
+						types.push_back({ record.skinnedAssemblyTypeSlot,
+							{ record.skinnedAssemblyBounds }, record.skinnedAssemblyBounds, record.skinnedBoundsScale });
+					} else {
+						found->components.push_back(record.skinnedAssemblyBounds);
+						found->scale = (std::max)(found->scale, record.skinnedBoundsScale);
+					}
+				}
+			}
+			for (auto& type : types) type.bounds = FitBoundingSpheres(type.components);
+			if (types.empty() || groupIndex >= instanceTransformRanges.size() || !instanceTransformRanges[groupIndex].IsValid()) continue;
+			const auto transformCount = packet.transformRanges[groupIndex].count;
+			const auto transformBase = static_cast<std::uint32_t>(instanceTransformRanges[groupIndex].offset / sizeof(PerInstanceTransformCB));
+			std::uint64_t stableGroupID = groupIndex;
+			for (const auto& scope : packet.scopes) {
+				if (std::ranges::find(scope.groupIndices, groupIndex) != scope.groupIndices.end()) {
+					stableGroupID = scope.id;
+					break;
+				}
+			}
+			for (const auto& type : types) {
+				for (std::uint32_t local = 0; local < transformCount; ++local) {
+					SkinnedAssemblyPlacementGPU placement{};
+					placement.instanceTransformIndex = transformBase + local;
+					placement.skinningTypeSlot = type.slot;
+					const std::uint64_t stable = stableGroupID;
+					placement.stableSceneID = static_cast<std::uint32_t>((stable ^ (stable >> 32u)) * 747796405u + local * 2891336453u + type.slot * 277803737u);
+					placement.generation = 1u;
+					placement.localBoundingSphere = type.bounds.sphere;
+					placement.boundsScale = type.scale;
+					const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
+					m_skinnedAssemblyPlacementCPU.push_back(placement);
+					drawInfos[groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
+					activePlacements.push_back({ placementIndex, placement.generation });
+				}
+			}
+		}
+		if (!activePlacements.empty()) {
+			m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+			m_activeSkinnedAssemblyPlacements->AppendActiveEntries(activePlacements);
+			m_activeSkinnedAssemblyPlacements->SetLiveSize(m_activeSkinnedAssemblyPlacements->LiveSize() + activePlacements.size());
+			spdlog::info("Skinned assembly placements: published={} total={} activeEntries={}.", activePlacements.size(), m_skinnedAssemblyPlacementCPU.size(), m_activeSkinnedAssemblyPlacements->Size());
+		}
+	}
 
 	const auto drawRecordUploadBegin = std::chrono::steady_clock::now();
 	{
@@ -2653,6 +2806,10 @@ ObjectManager::StaticObjectRemovalPayload ObjectManager::BuildStaticObjectRemova
 				drawInfo.drawInfo.indices.begin(),
 				drawInfo.drawInfo.indices.end());
 		}
+		payload.skinnedAssemblyPlacementIndices.insert(
+			payload.skinnedAssemblyPlacementIndices.end(),
+			drawInfo.skinnedAssemblyPlacementIndices.begin(),
+			drawInfo.skinnedAssemblyPlacementIndices.end());
 	}
 
 	return payload;
@@ -2717,9 +2874,11 @@ void ObjectManager::RemoveStaticObjectsBulk(
 	std::size_t totalBufferRanges = 0;
 	std::size_t skippedInstanceDrawRecordRanges = 0;
 	std::size_t totalDrawRecordIndices = 0;
+	std::size_t totalSkinnedAssemblyPlacements = 0;
 	for (const auto& payload : payloads) {
 		totalBufferRanges += payload.bufferRanges.size();
 		totalDrawRecordIndices += payload.drawRecordIndices.size();
+		totalSkinnedAssemblyPlacements += payload.skinnedAssemblyPlacementIndices.size();
 	}
 	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.Payloads", static_cast<int64_t>(payloads.size()));
 	TracyPlot("ObjectManager.RemoveStaticObjectsBulk.BufferRanges", static_cast<int64_t>(totalBufferRanges));
@@ -2820,6 +2979,38 @@ void ObjectManager::RemoveStaticObjectsBulk(
 		ZoneScopedN("ObjectManager::RemoveStaticObjectsBulk::TombstoneDrawRecordsBatch");
 		ZoneValue(tombstoneDrawRecordIndices.size());
 		TombstoneDrawRecords(tombstoneDrawRecordIndices);
+	}
+
+	if (totalSkinnedAssemblyPlacements != 0u) {
+		std::size_t invalidated = 0u;
+		for (const auto& payload : payloads) {
+			for (const auto placementIndex : payload.skinnedAssemblyPlacementIndices) {
+				if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;
+				auto& placement = m_skinnedAssemblyPlacementCPU[placementIndex];
+				++placement.generation;
+				if (placement.generation == 0u) ++placement.generation;
+				++invalidated;
+			}
+		}
+		if (invalidated != 0u) {
+			m_skinnedAssemblyPlacements->ReplaceData(m_skinnedAssemblyPlacementCPU);
+			const auto currentLive = m_activeSkinnedAssemblyPlacements->LiveSize();
+			m_activeSkinnedAssemblyPlacements->SetLiveSize(currentLive > invalidated ? currentLive - invalidated : 0u);
+			m_activeSkinnedAssemblyPlacements->AddActiveTombstoneEstimate(invalidated);
+			const auto stale = m_activeSkinnedAssemblyPlacements->ActiveTombstoneEstimate();
+			const auto span = m_activeSkinnedAssemblyPlacements->Size();
+			if (stale >= 256u && stale * 3u >= span) {
+				auto entries = m_activeSkinnedAssemblyPlacements->SnapshotActiveEntries();
+				std::erase_if(entries, [this](const SortedUnsignedIntBuffer::ActiveDrawSetEntry& entry) {
+					return entry.drawRecordIndex >= m_skinnedAssemblyPlacementCPU.size() ||
+						m_skinnedAssemblyPlacementCPU[entry.drawRecordIndex].generation != entry.generation;
+				});
+				m_activeSkinnedAssemblyPlacements->AssignActiveSnapshot(std::move(entries));
+			}
+			spdlog::info("Skinned assembly placements: invalidated={} live={} activeEntries={} staleEstimate={}.",
+				invalidated, m_activeSkinnedAssemblyPlacements->LiveSize(),
+				m_activeSkinnedAssemblyPlacements->Size(), m_activeSkinnedAssemblyPlacements->ActiveTombstoneEstimate());
+		}
 	}
 
 	m_stats.bulkRemovePageDeallocUs += pageDeallocUs;

@@ -614,11 +614,8 @@ size_t Skeleton::GetActiveAnimationIndex() const noexcept
 
 float Skeleton::GetCurrentAnimationConservativeBoundsScale() const noexcept
 {
-    if (m_isBaseSkeleton) {
-        return HasWindSimulationGroups() ? 1.30f : 1.0f;
-    }
-
-    return std::max(m_currentAnimationConservativeBoundsScale, HasWindSimulationGroups() ? 1.30f : 1.0f);
+    if (HasWindSimulationGroups()) return 1.0f;
+    return m_isBaseSkeleton ? 1.0f : m_currentAnimationConservativeBoundsScale;
 }
 
 void Skeleton::UpdateTransforms(float elapsedSeconds, bool force)
