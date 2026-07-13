@@ -6037,7 +6037,7 @@ namespace
 				if (preserveQualityOverCellBudget)
 				{
 					acceptedBudgetOverflowForQuality = true;
-					spdlog::warn(
+					spdlog::debug(
 						"ClusterLOD voxel build preserving quality over cell budget: group={} depth={} attempt={} reason={} voxel_width={} acceptance_error={} payload_cells={} voxel_budget={} packed_cubes={} cube_budget={} cells_fit={} cubes_fit={}",
 						groupIndex,
 						group.depth,
@@ -9742,7 +9742,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOn
 		}
 	}
 
-	spdlog::warn(
+	spdlog::debug(
 		"ClusterLOD assembly has no voxel payload sources; preserving {} instance(s) with direct instance-root traversal.",
 		instances.size());
 	return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, false);

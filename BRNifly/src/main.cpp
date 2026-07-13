@@ -544,15 +544,21 @@ std::vector<std::string> SplitLines(const std::string& text)
     return lines;
 }
 
-std::string MakeUniqueName(const std::string& baseName, std::set<std::string>& usedNames)
+SdfPath MakeUniquePrimPath(
+    const UsdStageRefPtr& stage,
+    const SdfPath& parentPath,
+    const std::string& baseName)
 {
-    std::string name = SanitizePrimName(baseName);
-    std::string candidate = name;
-    int suffix = 1;
-    while (!usedNames.insert(candidate).second) {
-        candidate = name + "_" + std::to_string(suffix++);
+    const std::string name = SanitizePrimName(baseName);
+    for (std::uint32_t suffix = 0;; ++suffix) {
+        const std::string candidateName = suffix == 0
+            ? name
+            : name + "_" + std::to_string(suffix);
+        const SdfPath candidate = parentPath.AppendChild(TfToken(candidateName));
+        if (!stage->GetPrimAtPath(candidate)) {
+            return candidate;
+        }
     }
-    return candidate;
 }
 
 std::vector<std::string> ServiceList()
@@ -1301,7 +1307,22 @@ void ApplyTransform(const UsdPrim& prim, const TransformBuf& transform)
     if (!xformable) {
         return;
     }
-    xformable.AddTransformOp().Set(ToUsdMatrix(transform));
+    const GfMatrix4d matrix = ToUsdMatrix(transform);
+	// GetOrderedXformOps can omit an already-authored property while a prim is
+	// being retyped. Probe the canonical attribute first so AddTransformOp never
+	// attempts to recreate it.
+	if (UsdAttribute transformAttribute = prim.GetAttribute(TfToken("xformOp:transform"))) {
+		transformAttribute.Set(matrix);
+		return;
+	}
+    bool resetsXformStack = false;
+    for (const UsdGeomXformOp& op : xformable.GetOrderedXformOps(&resetsXformStack)) {
+        if (op.GetOpType() == UsdGeomXformOp::TypeTransform && !op.IsInverseOp()) {
+            op.Set(matrix);
+            return;
+        }
+    }
+    xformable.AddTransformOp().Set(matrix);
 }
 
 json TransformJson(const TransformBuf& transform)
@@ -2189,7 +2210,6 @@ std::optional<std::string> ConvertShapesToUsd(
         }
     }
 
-    std::set<std::string> usedNodePrimNames;
     std::function<SdfPath(int)> ensureNodePath = [&](int blockId) -> SdfPath {
         auto it = nodeIndexByBlockId.find(blockId);
         if (it == nodeIndexByBlockId.end()) {
@@ -2200,8 +2220,10 @@ std::optional<std::string> ConvertShapesToUsd(
             return node.path;
         }
         const SdfPath parentPath = node.parentBlockId >= 0 ? ensureNodePath(node.parentBlockId) : SdfPath("/BRNifly");
-        const std::string primName = MakeUniqueName(node.name.empty() ? "Node_" + std::to_string(node.blockId) : node.name, usedNodePrimNames);
-        node.path = parentPath.AppendChild(TfToken(primName));
+        node.path = MakeUniquePrimPath(
+            stage,
+            parentPath,
+            node.name.empty() ? "Node_" + std::to_string(node.blockId) : node.name);
         UsdGeomXform nodePrim = UsdGeomXform::Define(stage, node.path);
         nodePrim.GetPrim().SetCustomDataByKey(TfToken("brnifly:blockId"), VtValue(node.blockId));
         if (!node.blockName.empty()) {
@@ -2257,12 +2279,13 @@ std::optional<std::string> ConvertShapesToUsd(
     };
 
     size_t emittedMeshes = 0;
-    std::set<std::string> usedShapePrimNames;
     for (size_t shapeIndex = 0; shapeIndex < shapes.size(); ++shapeIndex) {
         const ShapeData& shape = shapes[shapeIndex];
-        const std::string primName = MakeUniqueName(shape.name.empty() ? "Shape_" + std::to_string(shapeIndex) : shape.name, usedShapePrimNames);
         const SdfPath parentPath = shape.parentBlockId >= 0 ? ensureNodePath(shape.parentBlockId) : SdfPath("/BRNifly");
-        const SdfPath meshPath = parentPath.AppendChild(TfToken(primName));
+        const SdfPath meshPath = MakeUniquePrimPath(
+            stage,
+            parentPath,
+            shape.name.empty() ? "Shape_" + std::to_string(shapeIndex) : shape.name);
         UsdGeomMesh mesh = UsdGeomMesh::Define(stage, meshPath);
         if (!mesh) {
             AddDiagnostic(diagnostics, "warning", "Failed to define USD mesh for shape '" + shape.name + "'.");
@@ -2389,11 +2412,12 @@ std::optional<std::string> ConvertShapesToUsd(
     if (!collisionProxies.empty()) {
         const SdfPath collisionRoot("/BRNifly/Collision");
         UsdGeomXform::Define(stage, collisionRoot);
-        std::set<std::string> usedCollisionNames;
         for (size_t proxyIndex = 0; proxyIndex < collisionProxies.size(); ++proxyIndex) {
             const CollisionProxyData& proxy = collisionProxies[proxyIndex];
-            const std::string name = MakeUniqueName(proxy.name.empty() ? "Collision_" + std::to_string(proxyIndex) : proxy.name, usedCollisionNames);
-            const SdfPath proxyPath = collisionRoot.AppendChild(TfToken(name));
+            const SdfPath proxyPath = MakeUniquePrimPath(
+                stage,
+                collisionRoot,
+                proxy.name.empty() ? "Collision_" + std::to_string(proxyIndex) : proxy.name);
             VtArray<GfVec3f> points;
             points.reserve(proxy.positions.size() / 3u);
             for (size_t i = 0; i + 2 < proxy.positions.size(); i += 3) {

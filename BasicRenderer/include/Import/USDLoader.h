@@ -3,7 +3,9 @@
 #include <memory>
 #include <optional>
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +30,10 @@ namespace USDLoader {
 		bool loadMaterialTextures = true;
 		std::uint32_t nifTessellationFactor = 1;
 		std::vector<std::string> additionalTextureSearchRoots;
+		// Optional VFS/archive resolver used by headless importers. The returned
+		// path must name a materialized filesystem file for the duration of the
+		// import. Loose-file and ordinary USD resolution remain the first choice.
+		std::function<std::optional<std::string>(std::string_view)> resolveResourcePath;
 	};
 
 	struct InMemoryStageOptions {

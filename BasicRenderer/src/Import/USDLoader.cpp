@@ -78,6 +78,7 @@
 #include "Mesh/MeshInstance.h"
 #include "Mesh/ClusterLODUtilities.h"
 #include "Animation/Skeleton.h"
+#include "Import/SkeletonArtifactCache.h"
 #include "Scene/Components.h"
 #include "Animation/AnimationController.h"
 #include "Managers/Singletons/SettingsManager.h"
@@ -256,6 +257,7 @@ namespace USDLoader {
 		std::unordered_map<std::string, std::shared_ptr<TextureAsset>> textureCache;
 		std::unordered_set<std::string> unresolvedTextureCache;
 		std::vector<std::string> textureSearchRoots;
+		std::function<std::optional<std::string>(std::string_view)> resolveResourcePath;
 		//std::unordered_map<std::string, std::shared_ptr<UsdSkelSkeleton>> unprocessedSkeletons;
 		std::unordered_map<std::string, UsdPrim> primsWithSkeletons;
 		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonMap;
@@ -275,6 +277,7 @@ namespace USDLoader {
 			textureCache.clear();
 			unresolvedTextureCache.clear();
 			textureSearchRoots.clear();
+			resolveResourcePath = {};
 			primsWithSkeletons.clear();
 			skeletonMap.clear();
 			payloadSkeletonMetadata.clear();
@@ -1065,7 +1068,35 @@ namespace USDLoader {
 			}
 		}
 
+		if (loadingCache.resolveResourcePath) {
+			if (auto resolved = loadingCache.resolveResourcePath(normalizedRelative); resolved && !resolved->empty()) {
+				const std::filesystem::path candidate(*resolved);
+				ec.clear();
+				if (std::filesystem::is_regular_file(candidate, ec)) {
+					auto canonical = std::filesystem::weakly_canonical(candidate, ec);
+					return ec ? candidate : canonical;
+				}
+			}
+		}
+
 		return std::nullopt;
+	}
+
+	void LogUnresolvedTextureOnce(const std::string& logicalPath)
+	{
+		static std::mutex mutex;
+		static std::unordered_set<std::string> paths;
+		std::string key = logicalPath;
+		std::transform(key.begin(), key.end(), key.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		std::lock_guard lock(mutex);
+		if (paths.insert(std::move(key)).second) {
+			spdlog::warn("USDLoader: unable to resolve texture '{}'", logicalPath);
+		}
+		else {
+			spdlog::debug("USDLoader: texture remains unresolved '{}'", logicalPath);
+		}
 	}
 
 	void DisableModelSpaceNormalMap(MaterialDescription& result);
@@ -1533,7 +1564,7 @@ namespace USDLoader {
 		}
 		if (resolvedPath.empty()) {
 			loadingCache.unresolvedTextureCache.insert(cacheKey);
-			spdlog::warn("USDLoader: unable to resolve texture '{}'", logicalPath);
+			LogUnresolvedTextureOnce(logicalPath);
 			return nullptr;
 		}
 
@@ -1554,6 +1585,10 @@ namespace USDLoader {
 				spdlog::debug("USDLoader: texture processing cache hit for '{}' -> '{}'", resolvedPath, ws2s(cachePath));
 			}
 		}
+		else if (std::error_code ec; std::filesystem::is_regular_file(resolvedPath, ec)) {
+			TextureFileMeta deferredMeta = cacheProbeMeta;
+			tex = LoadTextureFromFileDeferred(s2ws(resolvedPath), nullptr, preferSRGB, std::addressof(deferredMeta));
+		}
 		else if (std::shared_ptr<ArAsset> arAsset = resolver.OpenAsset(resolved)) {
 			try {
 				tex = LoadTextureFromMemory(
@@ -1564,7 +1599,7 @@ namespace USDLoader {
 					preferSRGB);
 			}
 			catch (const std::exception& ex) {
-				spdlog::warn(
+				spdlog::debug(
 					"USDLoader: unable to decode texture '{}' from resolver asset memory ({}); falling back to deferred file load '{}'",
 					logicalPath,
 					ex.what(),
@@ -1678,7 +1713,7 @@ namespace USDLoader {
 			std::string swizzle = src.sourceName.GetString();
 			TextureAndConstant* textureBinding = FindTextureBinding(result, name);
 			if (textureBinding == nullptr) {
-				spdlog::warn("Unknown texture input: {}", name.GetString());
+				spdlog::debug("Unknown texture input: {}", name.GetString());
 				return;
 			}
 
@@ -2011,7 +2046,7 @@ namespace USDLoader {
 					}
 				}
 				else {
-					spdlog::warn(
+					spdlog::debug(
 						"Unknown input '{}' with no connections in {}",
 						name.GetString(),
 						isOpenPBRSurface ? "OpenPBR surface" : "UsdPreviewSurface");
@@ -5219,100 +5254,6 @@ namespace USDLoader {
 		}
 	}
 
-	static std::shared_ptr<Skeleton> BuildSkeletonFromAssemblySkeletonData(const ClusterLODAssemblySkeletonData& data)
-	{
-		if (data.Empty()) {
-			return nullptr;
-		}
-		LogAssemblySkeletonTopologyDiagnostics(data, "runtime");
-		std::vector<DirectX::XMMATRIX> inverseBinds;
-		std::vector<Components::Transform> restLocals;
-		inverseBinds.reserve(data.inverseBindMatrices.size());
-		restLocals.reserve(data.restLocalMatrices.size());
-		for (const DirectX::XMFLOAT4X4& matrix : data.inverseBindMatrices) {
-			inverseBinds.push_back(DirectX::XMLoadFloat4x4(&matrix));
-		}
-		for (const DirectX::XMFLOAT4X4& matrix : data.restLocalMatrices) {
-			restLocals.push_back(ComponentsTransformFromDirectXMatrix(DirectX::XMLoadFloat4x4(&matrix)));
-		}
-		return std::make_shared<Skeleton>(
-			data.jointNames,
-			data.parentIndices,
-			std::move(inverseBinds),
-			std::move(restLocals),
-			std::vector<DirectX::XMMATRIX>{},
-			data.windSimulationGroupIndices,
-			data.windProfileIdentity,
-			data.dynamicWindMetadata);
-	}
-
-	static std::string BuildAssemblySkeletonCacheKey(const ClusterLODAssemblySkeletonData& data)
-	{
-		auto hashString = [](const std::string& value) {
-			std::uint64_t hash = 1469598103934665603ull;
-			for (const unsigned char c : value) {
-				hash ^= static_cast<std::uint64_t>(c);
-				hash *= 1099511628211ull;
-			}
-			return hash;
-		};
-		auto combine = [](std::uint64_t& seed, std::uint64_t value) {
-			seed ^= value + 0x9E3779B97F4A7C15ull + (seed << 6u) + (seed >> 2u);
-		};
-		std::uint64_t hash = hashString("assembly_skeleton");
-		combine(hash, static_cast<std::uint64_t>(data.jointNames.size()));
-		for (const std::string& name : data.jointNames) {
-			combine(hash, hashString(name));
-		}
-		for (int32_t parent : data.parentIndices) {
-			combine(hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(parent)));
-		}
-		auto hashMatrix = [&hash, &combine](const DirectX::XMFLOAT4X4& matrix) {
-			const float* values = &matrix._11;
-			for (uint32_t i = 0; i < 16u; ++i) {
-				std::uint32_t bits = 0u;
-				std::memcpy(&bits, values + i, sizeof(bits));
-				combine(hash, bits);
-			}
-		};
-		for (const DirectX::XMFLOAT4X4& matrix : data.inverseBindMatrices) {
-			hashMatrix(matrix);
-		}
-		for (const DirectX::XMFLOAT4X4& matrix : data.restLocalMatrices) {
-			hashMatrix(matrix);
-		}
-		for (uint32_t group : data.windSimulationGroupIndices) {
-			combine(hash, group);
-		}
-		combine(hash, hashString(data.windProfileIdentity));
-		combine(hash, data.dynamicWindMetadata.enabled ? 1u : 0u);
-		combine(hash, data.dynamicWindMetadata.groundCover ? 1u : 0u);
-		auto hashPod = [&hash, &combine](const auto& value) {
-			const auto* bytes = reinterpret_cast<const unsigned char*>(std::addressof(value));
-			for (std::size_t i = 0; i < sizeof(value); ++i) combine(hash, bytes[i]);
-		};
-		hashPod(data.dynamicWindMetadata.gustAttenuation);
-		for (const auto& group : data.dynamicWindMetadata.groups) hashPod(group);
-		for (const auto& bone : data.dynamicWindMetadata.bones) hashPod(bone);
-		return "assembly_skeleton#" + std::to_string(hash);
-	}
-
-	static std::shared_ptr<Skeleton> GetOrBuildAssemblySkeleton(const ClusterLODAssemblySkeletonData& data)
-	{
-		if (data.Empty()) {
-			return nullptr;
-		}
-		const std::string key = BuildAssemblySkeletonCacheKey(data);
-		if (auto it = loadingCache.skeletonMap.find(key); it != loadingCache.skeletonMap.end()) {
-			return it->second;
-		}
-		auto skeleton = BuildSkeletonFromAssemblySkeletonData(data);
-		if (skeleton) {
-			loadingCache.skeletonMap[key] = skeleton;
-		}
-		return skeleton;
-	}
-
 	static std::uint64_t StableHashString64(const std::string& value)
 	{
 		std::uint64_t hash = 1469598103934665603ull;
@@ -5652,6 +5593,7 @@ namespace USDLoader {
 		UsdSkelCache& skelCache,
 		double metersPerUnit,
 		UsdTimeCode geomTimeCode,
+		const InMemoryStageOptions& stageOptions,
 		const ImportSettings& importSettings,
 		std::string* fallbackReason = nullptr)
 	{
@@ -5661,6 +5603,13 @@ namespace USDLoader {
 
 		auto addMeshToBucket = [&](const UsdGeomMesh& mesh, const UsdShadeMaterial& material, const std::optional<UsdGeomSubset>& subset, const GfMatrix4d& transform) -> bool {
 			if (!mesh) {
+				return true;
+			}
+			if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(
+				BuildGeometryExtractOptions(mesh, material, stageOptions))) {
+				spdlog::debug(
+					"USD whole-asset CLod discovery omitting temporary BRNifly overlay '{}'.",
+					mesh.GetPrim().GetPath().GetString());
 				return true;
 			}
 			std::string localReason;
@@ -5747,16 +5696,18 @@ namespace USDLoader {
 
 	static std::shared_ptr<Mesh> BuildMeshFromAssetAssemblyPrebuilt(
 		std::optional<ClusterLODPrebuiltData>&& prebuilt,
-		const std::shared_ptr<Material>& material,
-		const std::shared_ptr<Skeleton>& skeleton)
+		const std::shared_ptr<Material>& material)
 	{
 		if (!prebuilt) {
 			return nullptr;
 		}
 		MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
-		std::shared_ptr<Skeleton> baseSkeleton = GetOrBuildAssemblySkeleton(prebuilt->assemblySkeleton);
-		if (!baseSkeleton) {
-			baseSkeleton = skeleton;
+		std::string artifactError;
+		std::shared_ptr<Skeleton> baseSkeleton = SkeletonArtifactCache::ResolveSkeleton(prebuilt->assemblySkeletonArtifact, &artifactError);
+		if (!prebuilt->assemblySkeletonArtifact.Empty() && !baseSkeleton) {
+			spdlog::warn("USD CLod skeleton artifact {} could not be resolved: {}",
+				prebuilt->assemblySkeletonArtifact.id.ToString(), artifactError);
+			return nullptr;
 		}
 		auto mesh = ingest.Build(material ? material : Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
 		if (mesh && baseSkeleton) {
@@ -5805,7 +5756,7 @@ namespace USDLoader {
 				bucket.firstMesh.GetPrim(),
 				nullptr,
 				bucket.staticTextureOverrideSourceName);
-			auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material, bucket.skeleton);
+			auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material);
 			if (!mesh) {
 				meshes.clear();
 				return false;
@@ -5851,7 +5802,7 @@ namespace USDLoader {
 
 		auto addResultInstance = [&](BuildBucket& bucket, const MeshPreprocessResult& result, const GfMatrix4d& transform, std::string_view bindJoint) -> bool {
 			if (!result.transientArtifacts) {
-				spdlog::warn("USD whole-asset CLod assembly missing retained CLod artifacts for '{}'.", result.sourcePrimPath);
+				spdlog::debug("USD whole-asset CLod assembly missing retained CLod artifacts for '{}'.", result.sourcePrimPath);
 				return false;
 			}
 			uint32_t partIndex = 0u;
@@ -5886,7 +5837,16 @@ namespace USDLoader {
 			std::unordered_map<AssetAssemblyBucketKey, std::shared_ptr<Skeleton>, AssetAssemblyBucketKeyHash> ignoredSkeletons;
 			const auto recordIt = loadingCache.preprocessedMeshCache.find(mesh.GetPrim().GetPath().GetString());
 			if (recordIt == loadingCache.preprocessedMeshCache.end()) {
-				spdlog::warn("USD whole-asset CLod assembly missing preprocessed mesh '{}'.", mesh.GetPrim().GetPath().GetString());
+				const std::string meshPath = mesh.GetPrim().GetPath().GetString();
+				if (const auto skipped = loadingCache.skippedPreprocessedMeshReasons.find(meshPath);
+					skipped != loadingCache.skippedPreprocessedMeshReasons.end()) {
+					spdlog::debug(
+						"USD whole-asset CLod assembly omitting intentionally skipped mesh '{}': {}.",
+						meshPath,
+						skipped->second);
+					return true;
+				}
+				spdlog::warn("USD whole-asset CLod assembly unexpectedly missing preprocessed mesh '{}'.", meshPath);
 				return false;
 			}
 			for (const PreprocessedMeshSubset& subset : recordIt->second.subsets) {
@@ -6120,6 +6080,16 @@ namespace USDLoader {
 				skeletonAppendWork.size());
 			LogAssemblySkeletonTopologyDiagnostics(expandedAssemblySkeleton, "build");
 		}
+		SkeletonArtifactReference expandedSkeletonArtifact;
+		if (!expandedAssemblySkeleton.Empty()) {
+			std::string artifactError;
+			auto savedArtifact = SkeletonArtifactCache::Save(expandedAssemblySkeleton, &artifactError);
+			if (!savedArtifact) {
+				spdlog::error("USD CLod assembly skeleton artifact save failed: {}", artifactError);
+				return false;
+			}
+			expandedSkeletonArtifact = *savedArtifact;
+		}
 
 		for (BuildBucket& bucket : buildBuckets) {
 			if (bucket.parts.empty() || bucket.instances.empty()) {
@@ -6141,8 +6111,8 @@ namespace USDLoader {
 						assemblySettings,
 						8u);
 
-				if (bucket.info != nullptr && bucket.info->key.skinned && !expandedAssemblySkeleton.Empty()) {
-					assemblyArtifacts.prebuiltData.assemblySkeleton = expandedAssemblySkeleton;
+				if (bucket.info != nullptr && bucket.info->key.skinned && !expandedSkeletonArtifact.Empty()) {
+					assemblyArtifacts.prebuiltData.assemblySkeletonArtifact = expandedSkeletonArtifact;
 				}
 
 				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);
@@ -6186,7 +6156,7 @@ namespace USDLoader {
 							? bucket.info->staticTextureOverrideSourceName
 							: bucket.staticTextureOverrideSourceName);
 				}
-				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuiltData), material, bucket.info->skeleton);
+				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuiltData), material);
 				if (mesh) {
 					meshes.push_back(std::move(mesh));
 				}
@@ -6864,6 +6834,7 @@ namespace USDLoader {
 
 		const auto stageContext = MakeStageImportContext(stage, options);
 		loadingCache.textureSearchRoots = options.textureSearchRoots;
+		loadingCache.resolveResourcePath = importSettings.resolveResourcePath;
 		if (!stageContext.directory.empty() &&
 			std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), stageContext.directory) == loadingCache.textureSearchRoots.end()) {
 			loadingCache.textureSearchRoots.push_back(stageContext.directory);
@@ -6877,6 +6848,7 @@ namespace USDLoader {
 			skelCache,
 			stageContext.metersPerUnit,
 			geomTimeCode,
+			options,
 			importSettings,
 			&assetAssemblyFallbackReason);
 
@@ -6904,7 +6876,7 @@ namespace USDLoader {
 		}
 
 		if (!assetAssemblyBuckets.empty()) {
-			spdlog::warn(
+			spdlog::debug(
 				"USD whole-asset CLod assembly cache miss for {} bucket(s); falling back to expanded CPU-side instancing.",
 				assetAssemblyBuckets.size());
 		}
@@ -6912,13 +6884,13 @@ namespace USDLoader {
 		{
 			ZoneScopedN("USDLoader::LoadModelFromStage::BuildOrFallback");
 			if (!assetAssemblyFallbackReason.empty()) {
-				spdlog::warn("USD whole-asset CLod assembly fallback: {}", assetAssemblyFallbackReason);
+				spdlog::debug("USD whole-asset CLod assembly fallback: {}", assetAssemblyFallbackReason);
 			}
 			else if (!assetAssemblyBuckets.empty()) {
-				spdlog::warn("USD whole-asset CLod assembly fallback: full assembly cache was missing.");
+				spdlog::debug("USD whole-asset CLod assembly fallback: full assembly cache was missing.");
 			}
 			else {
-				spdlog::warn("USD whole-asset CLod assembly fallback: cache/build path did not produce renderables.");
+				spdlog::debug("USD whole-asset CLod assembly fallback: cache/build path did not produce renderables.");
 			}
 			PreprocessAllMeshes(
 				stage,
@@ -6977,6 +6949,7 @@ namespace USDLoader {
 
 		const auto stageContext = MakeStageImportContext(stage, options);
 		loadingCache.textureSearchRoots = options.textureSearchRoots;
+		loadingCache.resolveResourcePath = importSettings.resolveResourcePath;
 		if (!stageContext.directory.empty() &&
 			std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), stageContext.directory) == loadingCache.textureSearchRoots.end()) {
 			loadingCache.textureSearchRoots.push_back(stageContext.directory);
@@ -6993,10 +6966,61 @@ namespace USDLoader {
 			assemblySkelCache,
 			stageContext.metersPerUnit,
 			assemblyTimeCode,
+			options,
 			importSettings,
 			&assemblyFallbackReason);
 		if (!assemblyBuckets.empty()) {
+			auto makeAssemblyPayload = [&](std::vector<std::shared_ptr<Mesh>> assemblyMeshes,
+				std::string_view source) -> std::optional<ImportedAssetPayload> {
+				ImportedAssetPayload payload;
+				RenderablePartPayload part;
+				part.localMatrix = DirectX::XMMatrixIdentity();
+				part.name = "__CLodAssetAssembly";
+				std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
+				manifest.reserve(assemblyMeshes.size());
+				for (size_t i = 0; i < assemblyMeshes.size(); ++i) {
+					auto& mesh = assemblyMeshes[i];
+					if (!mesh) continue;
+					payload.meshes.push_back(mesh);
+					part.meshes.push_back(mesh);
+					if (i < assemblyBuckets.size()) {
+						if (auto identity = BuildAssetAssemblyIdentity(
+							stage, options.sourceIdentifier, assemblyTimeCode, assemblyBuckets[i])) {
+							const auto material = mesh->material ? mesh->material : Material::GetDefaultMaterial();
+							manifest.push_back(USDMaterialCache::AssemblyMaterialEntry{
+								.identity = std::move(*identity),
+								.material = material->ToCacheDescription(),
+							});
+						}
+					}
+				}
+				if (payload.meshes.empty()) {
+					return std::nullopt;
+				}
+				payload.parts.push_back(std::move(part));
+				if (manifest.size() == payload.meshes.size()) {
+					USDMaterialCache::SaveAssemblyMaterialManifest(options.sourceIdentifier, manifest);
+				}
+				spdlog::info(
+					"USD payload whole-asset CLod assembly {}: source='{}' buckets={} renderables={}.",
+					source, options.sourceIdentifier, assemblyBuckets.size(), payload.meshes.size());
+				loadingCache.Clear();
+				return payload;
+			};
+
 			std::vector<std::shared_ptr<Mesh>> assemblyMeshes;
+			if (TryLoadAssetAssemblyMeshes(
+				stage,
+				stageContext,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				assemblyTimeCode,
+				assemblyBuckets,
+				assemblyMeshes)) {
+				return makeAssemblyPayload(std::move(assemblyMeshes), "loaded from cache");
+			}
+
 			PreprocessAllMeshes(
 				stage,
 				stageContext.metersPerUnit,
@@ -7015,38 +7039,9 @@ namespace USDLoader {
 				assemblyTimeCode,
 				assemblyBuckets,
 				assemblyMeshes)) {
-				ImportedAssetPayload payload;
-				RenderablePartPayload part;
-				part.localMatrix = DirectX::XMMatrixIdentity();
-				part.name = "__CLodAssetAssembly";
-				std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
-				manifest.reserve(assemblyMeshes.size());
-				for (size_t i = 0; i < assemblyMeshes.size(); ++i) {
-					auto& mesh = assemblyMeshes[i];
-					if (!mesh) continue;
-					payload.meshes.push_back(mesh);
-					part.meshes.push_back(mesh);
-					if (i < assemblyBuckets.size()) {
-						if (auto identity = BuildAssetAssemblyIdentity(
-							stage, options.sourceIdentifier, assemblyTimeCode, assemblyBuckets[i])) {
-							manifest.push_back(USDMaterialCache::AssemblyMaterialEntry{
-								.identity = std::move(*identity),
-								.material = mesh->material->ToCacheDescription(),
-							});
-						}
-					}
-				}
-				payload.parts.push_back(std::move(part));
-				if (manifest.size() == payload.meshes.size()) {
-					USDMaterialCache::SaveAssemblyMaterialManifest(options.sourceIdentifier, manifest);
-				}
-				spdlog::info(
-					"USD payload whole-asset CLod assembly built: source='{}' buckets={} renderables={}.",
-					options.sourceIdentifier, assemblyBuckets.size(), payload.meshes.size());
-				loadingCache.Clear();
-				return payload;
+				return makeAssemblyPayload(std::move(assemblyMeshes), "built");
 			}
-			spdlog::warn(
+			spdlog::debug(
 				"USD payload whole-asset assembly build failed for '{}': {}",
 				options.sourceIdentifier,
 				assemblyFallbackReason.empty() ? "builder produced no renderables" : assemblyFallbackReason);
@@ -7144,6 +7139,7 @@ namespace USDLoader {
 			if (!manifest || manifest->empty()) return std::nullopt;
 
 			loadingCache.textureSearchRoots = options.textureSearchRoots;
+			loadingCache.resolveResourcePath = importSettings.resolveResourcePath;
 			if (!options.sourceDirectory.empty() &&
 				std::find(loadingCache.textureSearchRoots.begin(), loadingCache.textureSearchRoots.end(), options.sourceDirectory) == loadingCache.textureSearchRoots.end()) {
 				loadingCache.textureSearchRoots.push_back(options.sourceDirectory);
@@ -7161,17 +7157,16 @@ namespace USDLoader {
 				}
 				LoadSourcePathTextures(entry.material, {}, importSettings.loadMaterialTextures);
 				auto material = Material::CreateShared(entry.material);
-				const auto cachedJointCount = prebuilt->assemblySkeleton.jointNames.size();
-				const auto cachedWindGroupCount = prebuilt->assemblySkeleton.windSimulationGroupIndices.size();
-				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material, nullptr);
+				const auto cachedJointCount = prebuilt->assemblySkeletonArtifact.jointCount;
+				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material);
 				if (!mesh) {
 					loadingCache.Clear();
 					return std::nullopt;
 				}
 				if (cachedJointCount != 0u) {
 					spdlog::info(
-						"USD cached material assembly skeleton restored: source='{}' material='{}' joints={} windGroups={} hasBaseSkin={} windEnabled={}.",
-						options.sourceIdentifier, entry.material.name, cachedJointCount, cachedWindGroupCount,
+						"USD cached material assembly skeleton restored: source='{}' material='{}' joints={} hasBaseSkin={} windEnabled={}.",
+						options.sourceIdentifier, entry.material.name, cachedJointCount,
 						mesh->HasBaseSkin(), mesh->HasBaseSkin() && mesh->GetBaseSkin()->HasWindSimulationGroups());
 				}
 				payload.meshes.push_back(mesh);

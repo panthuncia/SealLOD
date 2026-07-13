@@ -23,8 +23,11 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <unordered_map>
+#include <vector>
 
 namespace br::wind {
 namespace {
@@ -34,6 +37,7 @@ constexpr std::uint32_t kMaxInstancesPerType = 4096u;
 constexpr std::uint32_t kTransientBoneCapacity = 262144u;
 constexpr std::uint32_t kLatePhaseBit = 0x80000000u;
 constexpr std::uint32_t kDepthDescriptorMask = 0x7fffffffu;
+constexpr std::uint32_t kWindBoneFlagTrunk = 1u << 0u;
 
 bool ForceWindSkeletonDebugEnabled()
 {
@@ -47,6 +51,7 @@ struct WindBoneGPU {
     std::uint32_t parentEntry = kInvalidSimulationGroup;
     std::uint32_t simulationGroup = kInvalidSimulationGroup;
     std::uint32_t phaseSeed = 0u;
+    std::uint32_t flags = 0u;
     float influence = 0.0f;
     float meanBend = 0.0f;
     float parallelAmplitude = 0.0f;
@@ -54,10 +59,16 @@ struct WindBoneGPU {
     float torsionRatio = 0.0f;
     float frequencyScale = 1.0f;
     float maximumAngle = 0.0f;
+    float gustAttenuation = 0.0f;
+    std::array<float, 2> pad0{};
     std::array<float, 3> frequencies{};
-    float pad0 = 0.0f;
-    std::array<float, 3> weights{};
     float pad1 = 0.0f;
+    std::array<float, 3> weights{};
+    float pad2 = 0.0f;
+    std::array<float, 3> branchAxis{ 0.0f, 0.0f, 1.0f };
+    float pad3 = 0.0f;
+    std::array<float, 3> branchTangent{ 1.0f, 0.0f, 0.0f };
+    float pad4 = 0.0f;
 };
 
 struct WindRootConstants {
@@ -123,7 +134,7 @@ struct WindTransientConstants {
     float strength, gustStrength;
 };
 
-static_assert(sizeof(WindBoneGPU) == 80u);
+static_assert(sizeof(WindBoneGPU) == 128u);
 static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
@@ -201,14 +212,30 @@ struct WindSharedResources {
         std::vector<WindBoneGPU> next;
         std::vector<WindTypeGPU> types;
         std::uint32_t registeredTypes = 0u;
+        std::uint64_t boneLayoutRevision = runtime->ProfileRevision();
+        for (const auto& instance : update->skeletonManager->GetActiveInstanceViews()) {
+            if (!instance.skeleton || !instance.skeleton->HasWindSimulationGroups()) continue;
+            boneLayoutRevision ^= reinterpret_cast<std::uintptr_t>(instance.skeleton) + 0x9e3779b97f4a7c15ull +
+                (boneLayoutRevision << 6u) + (boneLayoutRevision >> 2u);
+            boneLayoutRevision ^= (static_cast<std::uint64_t>(instance.instanceSlot) << 32u) | instance.boneCount;
+        }
+        const bool rebuildBoneEntries = boneLayoutRevision != lastBoneLayoutRevision;
+        if (rebuildBoneEntries) firstBoneByTypeSlot.clear();
         for (const auto& instance : update->skeletonManager->GetActiveInstanceViews()) {
             if (!instance.skeleton || !instance.skeleton->HasWindSimulationGroups()) continue;
             if (types.size() <= instance.instanceSlot) types.resize(instance.instanceSlot + 1u);
             const auto groups = instance.skeleton->GetWindSimulationGroupIndices();
             const auto parents = instance.skeleton->GetParentIndices();
             const auto& authoredWind = instance.skeleton->GetDynamicWindMetadata();
-            const auto profile = runtime->ResolveProfile(instance.skeleton->GetWindProfileIdentity());
-            const auto firstEntry = static_cast<std::uint32_t>(next.size());
+            const auto profile = rebuildBoneEntries ? runtime->ResolveProfile(instance.skeleton->GetWindProfileIdentity()) : WindProfileSet{};
+            const auto windBoneInvariants = instance.skeleton->GetWindBoneInvariants();
+            const auto firstEntry = rebuildBoneEntries
+                ? static_cast<std::uint32_t>(next.size())
+                : (instance.instanceSlot < firstBoneByTypeSlot.size() ? firstBoneByTypeSlot[instance.instanceSlot] : 0u);
+            if (rebuildBoneEntries) {
+                if (firstBoneByTypeSlot.size() <= instance.instanceSlot) firstBoneByTypeSlot.resize(instance.instanceSlot + 1u);
+                firstBoneByTypeSlot[instance.instanceSlot] = firstEntry;
+            }
             auto& type = types[instance.instanceSlot];
             ++registeredTypes;
             type.firstBone = firstEntry;
@@ -220,16 +247,18 @@ struct WindSharedResources {
             type.transformCount = transformCount;
             type.deferredEntriesDescriptor = deferredEntries->GetUAVShaderVisibleInfo(0).slot.index;
             type.processedTypeCountsDescriptor = processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
-            for (std::uint32_t joint = 0u; joint < instance.boneCount; ++joint) {
+            if (rebuildBoneEntries) for (std::uint32_t joint = 0u; joint < instance.boneCount; ++joint) {
                 WindBoneGPU entry{};
                 entry.skinningSlot = instance.instanceSlot;
                 entry.jointIndex = joint;
-                entry.phaseSeed = instance.instanceSlot * 747796405u + joint * 2891336453u + 277803737u;
+                entry.phaseSeed = instance.instanceSlot * 747796405u +
+                    (joint < windBoneInvariants.size() ? windBoneInvariants[joint].phaseSeed : joint * 2891336453u + 277803737u);
                 entry.simulationGroup = joint < groups.size() ? groups[joint] : kInvalidSimulationGroup;
                 if (joint < parents.size() && parents[joint] >= 0)
                     entry.parentEntry = firstEntry + static_cast<std::uint32_t>(parents[joint]);
                 const auto found = std::ranges::find(profile.groups, entry.simulationGroup, &WindSimulationGroupProfile::id);
                 if (found != profile.groups.end()) {
+                    if (found->isTrunk) entry.flags |= kWindBoneFlagTrunk;
                     entry.influence = found->influence;
                     entry.meanBend = found->meanBendRadians;
                     entry.parallelAmplitude = found->parallelAmplitudeRadians;
@@ -240,6 +269,8 @@ struct WindSharedResources {
                 }
                 if (authoredWind.enabled && entry.simulationGroup < authoredWind.groups.size()) {
                     const auto& authoredGroup = authoredWind.groups[entry.simulationGroup];
+                    if ((authoredGroup.flags & DynamicWindMetadata::GroupFlagTrunk) != 0u)
+                        entry.flags |= kWindBoneFlagTrunk;
                     entry.influence = authoredGroup.influence;
                     if ((authoredGroup.flags & DynamicWindMetadata::GroupFlagDualInfluence) != 0u &&
                         joint < authoredWind.bones.size()) {
@@ -252,17 +283,27 @@ struct WindSharedResources {
                         entry.influence = std::lerp(authoredGroup.minInfluence, authoredGroup.maxInfluence, chainT);
                     }
                 }
+                entry.gustAttenuation = std::clamp(authoredWind.gustAttenuation, 0.0f, 1.0f);
                 entry.frequencies = profile.harmonicFrequenciesHz;
                 entry.weights = profile.harmonicWeights;
+                if (joint < windBoneInvariants.size()) {
+                    const auto& invariant = windBoneInvariants[joint];
+                    entry.flags |= invariant.flags;
+                    entry.branchAxis = { invariant.branchAxis.x, invariant.branchAxis.y, invariant.branchAxis.z };
+                    entry.branchTangent = { invariant.branchTangent.x, invariant.branchTangent.y, invariant.branchTangent.z };
+                }
                 next.push_back(entry);
             }
         }
-        const auto requestedBoneCount = static_cast<std::uint32_t>(next.size());
-        boneEntries->ReplaceData(std::move(next));
+        const auto requestedBoneCount = rebuildBoneEntries ? static_cast<std::uint32_t>(next.size()) : static_cast<std::uint32_t>(boneEntries->Size());
+        if (rebuildBoneEntries) {
+            boneEntries->ReplaceData(std::move(next));
+            lastBoneLayoutRevision = boneLayoutRevision;
+        }
         windTypes->ReplaceData(std::move(types));
         typeCount = windTypes->Size();
+		registeredTypeCount = registeredTypes;
         if (registeredTypes != 0u) {
-			registeredTypeCount = registeredTypes;
             transientRegion = update->skeletonManager->ReserveTransientWindRegion(kTransientBoneCapacity);
             update->skeletonManager->EnsureTransientWindInstanceSlots(transformCount);
             residentPlacementCount = activeSkinnedPlacements
@@ -298,6 +339,8 @@ struct WindSharedResources {
 	rg::runtime::IReadbackService* readbackService = nullptr;
     std::array<std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>, 2> fieldSlices;
     std::shared_ptr<DynamicStructuredBuffer<WindBoneGPU>> boneEntries;
+    std::vector<std::uint32_t> firstBoneByTypeSlot;
+    std::uint64_t lastBoneLayoutRevision = 0u;
     std::shared_ptr<DynamicStructuredBuffer<WindTypeGPU>> windTypes;
     std::shared_ptr<DynamicStructuredBuffer<WindActiveInstanceGPU>> activeInstances;
     std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> typeCounters;

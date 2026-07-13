@@ -74,7 +74,9 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::vector<Matrix> rootParentGlobals,
     std::vector<uint32_t> windSimulationGroupIndices,
     std::string windProfileIdentity,
-    DynamicWindMetadata dynamicWindMetadata)
+    DynamicWindMetadata dynamicWindMetadata,
+    std::vector<uint32_t> evaluationOrder,
+    std::vector<SkeletonWindBoneInvariant> windBoneInvariants)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -114,7 +116,9 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     }
     m_windProfileIdentity = std::move(windProfileIdentity);
     m_dynamicWindMetadata = std::move(dynamicWindMetadata);
-    BuildEvalOrder_();
+    m_windBoneInvariants = std::move(windBoneInvariants);
+    if (evaluationOrder.size() == m_boneNames.size()) m_evalOrder = std::move(evaluationOrder);
+    else BuildEvalOrder_();
 }
 
 Skeleton::Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton)
@@ -155,6 +159,7 @@ Skeleton::Skeleton(const Skeleton& other)
 		m_windSimulationGroupIndices = other.m_windSimulationGroupIndices;
 		m_windProfileIdentity = other.m_windProfileIdentity;
 		m_dynamicWindMetadata = other.m_dynamicWindMetadata;
+		m_windBoneInvariants = other.m_windBoneInvariants;
         m_skinningGPUFlags = other.m_skinningGPUFlags;
 
         animations = other.animations;
@@ -225,6 +230,12 @@ const DynamicWindMetadata& Skeleton::GetDynamicWindMetadata() const
     if (m_isBaseSkeleton) return m_dynamicWindMetadata;
     static const DynamicWindMetadata empty;
     return m_baseSkeleton ? m_baseSkeleton->m_dynamicWindMetadata : empty;
+}
+
+std::span<const SkeletonWindBoneInvariant> Skeleton::GetWindBoneInvariants() const
+{
+    auto base = GetBaseSkeletonShared();
+    return base ? std::span<const SkeletonWindBoneInvariant>(base->m_windBoneInvariants) : std::span<const SkeletonWindBoneInvariant>{};
 }
 
 uint32_t Skeleton::GetSkinningGPUFlags() const noexcept

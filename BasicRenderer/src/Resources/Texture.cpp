@@ -1120,6 +1120,91 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromDDSFilePath(const std::str
 	return result;
 }
 
+std::shared_ptr<TextureSourceData> BuildSourceDataFromWICFilePath(const std::string& path, bool preferSRGB, const std::string& reason) {
+	ZoneScopedN("TextureAsset::BuildSourceDataFromWICFilePath");
+	ZoneText(path.data(), path.size());
+	if (!reason.empty()) {
+		ZoneText(reason.data(), reason.size());
+	}
+	LogSourceDataBuildAttribution("wic", path, reason);
+
+	DirectX::ScratchImage image;
+	DirectX::TexMetadata metadata{};
+	const std::wstring widePath = std::filesystem::path(path).wstring();
+	const auto flags = DirectX::WIC_FLAGS_FORCE_RGB |
+		(preferSRGB ? DirectX::WIC_FLAGS_FORCE_SRGB : DirectX::WIC_FLAGS_FORCE_LINEAR);
+	HRESULT hr = E_FAIL;
+	std::string mapError;
+	if (auto mapped = MappedFileView::Open(widePath, &mapError)) {
+		ZoneScopedN("TextureAsset::BuildSourceDataFromWICFilePath::LoadFromMappedMemory");
+		hr = DirectX::LoadFromWICMemory(
+			static_cast<const uint8_t*>(mapped->Data()),
+			mapped->Size(),
+			flags,
+			&metadata,
+			image);
+	}
+	else {
+		WarnOnce(
+			"texture-wic-mmap|" + path + "|" + mapError,
+			"TextureAsset: memory-mapped WIC read failed for '" + path + "' because " + mapError + "; falling back to DirectXTex file load");
+		ZoneScopedN("TextureAsset::BuildSourceDataFromWICFilePath::LoadFromWICFile");
+		hr = DirectX::LoadFromWICFile(widePath.c_str(), flags, &metadata, image);
+	}
+	if (FAILED(hr)) {
+		throw std::runtime_error("Failed to load WIC image from file path: " + path);
+	}
+
+	auto result = std::make_shared<TextureSourceData>();
+	result->desc.format = rhi::helpers::ToRHI(preferSRGB ? DirectX::MakeSRGB(metadata.format) : DirectX::MakeLinear(metadata.format));
+	result->desc.channels = static_cast<unsigned short>(rhi::helpers::FormatChannelCount(result->desc.format));
+	result->desc.isCubemap = metadata.IsCubemap();
+	result->desc.isArray = metadata.arraySize > 1 && !result->desc.isCubemap;
+	result->desc.arraySize = result->desc.isCubemap
+		? static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize / size_t(6)))
+		: static_cast<uint32_t>((std::max)(size_t(1), metadata.arraySize));
+
+	result->desc.imageDimensions.reserve(image.GetImageCount());
+	result->subresources.reserve(image.GetImageCount());
+	const DirectX::Image* images = image.GetImages();
+	if (!images || image.GetImageCount() == 0) {
+		throw std::runtime_error("WIC file did not produce any images: " + path);
+	}
+
+	for (size_t imageIndex = 0; imageIndex < image.GetImageCount(); ++imageIndex) {
+		const DirectX::Image& src = images[imageIndex];
+		ImageDimensions dims{};
+		dims.width = static_cast<uint32_t>(src.width);
+		dims.height = static_cast<uint32_t>(src.height);
+		dims.rowPitch = src.rowPitch;
+		dims.slicePitch = src.slicePitch;
+		result->desc.imageDimensions.push_back(dims);
+
+		const auto* first = reinterpret_cast<const uint8_t*>(src.pixels);
+		result->subresources.push_back(std::make_shared<std::vector<uint8_t>>(first, first + src.slicePitch));
+	}
+
+	result->isBlockCompressed = rhi::helpers::IsBlockCompressed(result->desc.format);
+	result->hasFullMipChain = metadata.mipLevels == CalcFullMipCount(
+		result->desc.imageDimensions[0].width,
+		result->desc.imageDimensions[0].height);
+	return result;
+}
+
+std::shared_ptr<TextureSourceData> BuildSourceDataFromTextureFilePath(
+	const std::string& path,
+	bool preferSRGB,
+	const std::string& reason)
+{
+	if (IsConditionedCacheFilePath(path)) {
+		return BuildSourceDataFromConditionedCacheFilePath(path, reason);
+	}
+	if (IsDDSFilePath(path)) {
+		return BuildSourceDataFromDDSFilePath(path, preferSRGB, reason);
+	}
+	return BuildSourceDataFromWICFilePath(path, preferSRGB, reason);
+}
+
 std::shared_ptr<TextureReloadJobHandle> RequestReloadSourceDataAsync(
 	std::string filePath,
 	bool preferSRGB,
@@ -1139,9 +1224,7 @@ std::shared_ptr<TextureReloadJobHandle> RequestReloadSourceDataAsync(
 		}
 		handle->state.store(TextureReloadJobState::BuildingSourceData, std::memory_order_release);
 		try {
-			auto sourceData = IsConditionedCacheFilePath(filePath)
-				? BuildSourceDataFromConditionedCacheFilePath(filePath, reason)
-				: BuildSourceDataFromDDSFilePath(filePath, preferSRGB, reason);
+			auto sourceData = BuildSourceDataFromTextureFilePath(filePath, preferSRGB, reason);
 			const uint32_t fullMipCount = CalcMipCountFromDescription(sourceData->desc);
 			const uint32_t clippedTopMip = (streamingEnabled && fullMipCount > 1u)
 				? (std::min)(targetTopMip, fullMipCount - 1u)
@@ -1692,9 +1775,7 @@ std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromFilePath(
 	bool preferSRGB,
 	const std::string& reason)
 {
-	return IsConditionedCacheFilePath(path)
-		? BuildSourceDataFromConditionedCacheFilePath(path, reason)
-		: BuildSourceDataFromDDSFilePath(path, preferSRGB, reason);
+	return BuildSourceDataFromTextureFilePath(path, preferSRGB, reason);
 }
 
 uint32_t TextureAsset::NextStreamingTextureID() {
@@ -1823,9 +1904,7 @@ std::shared_ptr<TextureSourceData> TextureAsset::BuildSourceData(const char* rea
 	if (std::holds_alternative<std::string>(m_initialStorage)) {
 		const auto& path = std::get<std::string>(m_initialStorage);
 		const std::string buildReason = reason != nullptr ? reason : "TextureAsset::BuildSourceData";
-		auto sourceData = IsConditionedCacheFilePath(path)
-			? BuildSourceDataFromConditionedCacheFilePath(path, buildReason)
-			: BuildSourceDataFromDDSFilePath(path, m_meta.preferSRGB, buildReason);
+		auto sourceData = BuildSourceDataFromTextureFilePath(path, m_meta.preferSRGB, buildReason);
 		UpdateSourceShapeFromDescription(sourceData->desc, CalcMipCountFromDescription(sourceData->desc));
 		if (!m_streamingState.enabled) {
 			return sourceData;
@@ -1897,9 +1976,7 @@ std::shared_ptr<TextureSourceData> TextureAsset::BuildSourceData(const char* rea
 std::shared_ptr<TextureSourceData> TextureAsset::BuildProcessingSourceData(const char* reason) {
 	if (!m_initialDataString.empty()) {
 		const std::string buildReason = reason != nullptr ? reason : "TextureAsset::BuildProcessingSourceData";
-		auto sourceData = IsConditionedCacheFilePath(m_initialDataString)
-			? BuildSourceDataFromConditionedCacheFilePath(m_initialDataString, buildReason)
-			: BuildSourceDataFromDDSFilePath(m_initialDataString, m_meta.preferSRGB, buildReason);
+		auto sourceData = BuildSourceDataFromTextureFilePath(m_initialDataString, m_meta.preferSRGB, buildReason);
 		UpdateSourceShapeFromDescription(sourceData->desc, CalcMipCountFromDescription(sourceData->desc));
 		return sourceData;
 	}
@@ -2665,7 +2742,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				m_meta.preferSRGB,
 				0u,
 				false,
-				"QueueProcessingSourceReload::OriginalDdsForProcessing");
+				"QueueProcessingSourceReload::OriginalFileForProcessing");
 		}
 	}
 	if (!m_reloadHandle && !shouldProcessTexture && !useConditionedCacheResidency && std::holds_alternative<std::string>(m_initialStorage)) {
@@ -2677,7 +2754,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				m_meta.preferSRGB,
 				desiredResidentTopMip,
 				m_streamingState.enabled,
-				"QueueNonProcessingSourceReload::DdsCpuReload");
+				"QueueNonProcessingSourceReload::FileCpuReload");
 		}
 	}
 	if (m_reloadHandle) {

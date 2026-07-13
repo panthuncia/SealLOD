@@ -24,6 +24,7 @@
 #include "Mesh/VertexFlags.h"
 #include "Import/MeshData.h"
 #include "Animation/DynamicWindMetadata.h"
+#include "Animation/SkeletonArtifact.h"
 
 // Forward declarations for GPU-side types only needed by MeshIngestBuilder::Build()
 class Material;
@@ -226,7 +227,7 @@ struct ClusterLODPrebuiltData
 	std::vector<ClusterLODAssemblyInstance> assemblyInstances;
 	std::vector<ClusterLODAssemblyBoneRemap> assemblyBoneRemaps;
 	std::vector<uint32_t> assemblyBoneRemapIndices;
-	ClusterLODAssemblySkeletonData assemblySkeleton;
+	SkeletonArtifactReference assemblySkeletonArtifact;
 	std::vector<ClusterLODPartRecord> partRecords;
 	uint32_t rootPartIndex = 0;
 	uint32_t maxDepth = 0;

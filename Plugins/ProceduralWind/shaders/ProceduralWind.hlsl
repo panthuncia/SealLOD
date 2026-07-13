@@ -27,6 +27,7 @@
 
 static const uint WindInvalidIndex = 0xFFFFFFFFu;
 static const uint WindRowVectorSkinMatrix = 1u;
+static const uint WindBoneFlagTrunk = 1u;
 
 struct WindBoneGPU
 {
@@ -35,6 +36,7 @@ struct WindBoneGPU
     uint parentEntry;
     uint simulationGroup;
     uint phaseSeed;
+    uint flags;
     float influence;
     float meanBend;
     float parallelAmplitude;
@@ -42,10 +44,16 @@ struct WindBoneGPU
     float torsionRatio;
     float frequencyScale;
     float maximumAngle;
+    float gustAttenuation;
+    float2 pad0;
     float3 frequencies;
-    float pad0;
-    float3 weights;
     float pad1;
+    float3 weights;
+    float pad2;
+    float3 branchAxis;
+    float pad3;
+    float3 branchTangent;
+    float pad4;
 };
 
 typedef row_major float4x4 WindMatrix;
@@ -534,6 +542,39 @@ float3 SampleTransientLevel0(float3 position)
     float4 va=lerp(a0,a1,f.y),vz=lerp(z0,z1,f.y); return min(va.w,vz.w)<0.5f?fallback:lerp(va.xyz,vz.xyz,WT_FIELD_LERP);
 }
 
+float3 WindSafeNormalize(float3 value, float3 fallback)
+{
+    const float lengthSquared = dot(value, value);
+    return lengthSquared > 1.0e-10f ? value * rsqrt(lengthSquared) : fallback;
+}
+
+float3 WindWorldToObjectDirection(float3 directionWS, WindMatrix model)
+{
+    const float3 objectXAxisWS = WindSafeNormalize(model[0].xyz, float3(1.0f, 0.0f, 0.0f));
+    const float3 objectYAxisWS = WindSafeNormalize(model[1].xyz, float3(0.0f, 1.0f, 0.0f));
+    const float3 objectZAxisWS = WindSafeNormalize(model[2].xyz, float3(0.0f, 0.0f, 1.0f));
+    return WindSafeNormalize(
+        float3(dot(directionWS, objectXAxisWS), dot(directionWS, objectYAxisWS), dot(directionWS, objectZAxisWS)),
+        float3(1.0f, 0.0f, 0.0f));
+}
+
+float WindInstanceHarmonics(WindBoneGPU bone, uint stableSceneId, uint channel)
+{
+    float value = 0.0f;
+    const uint channelSeed = channel * 0x9e3779b9u;
+    [unroll] for (uint i = 0u; i < 3u; ++i) {
+        const uint phaseSeed = stableSceneId ^ bone.phaseSeed ^ channelSeed ^ (i * 0x85ebca6bu);
+        value += bone.weights[i] * sin(
+            6.28318530718f * bone.frequencies[i] * bone.frequencyScale * WT_TIME + WindPhase(phaseSeed));
+    }
+    return value;
+}
+
+WindMatrix WindRotationAroundPivot(float3 pivot, float3 axis, float angle)
+{
+    return mul(mul(WindTranslation(-pivot), WindRotation(axis, angle)), WindTranslation(pivot));
+}
+
 [numthreads(64,1,1)]
 void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 {
@@ -555,18 +596,58 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     float3 sampled=SampleTransientLevel0(rootWS);
     float2 rawWind = length(sampled.xy) > 1e-5 ? sampled.xy : float2(WT_WIND_X, WT_WIND_Y);
     float rawWindLength = length(rawWind);
-    float2 wind = rawWindLength > 1e-5 ? rawWind / rawWindLength : float2(1.0f, 0.0f);
+    float3 windWS = float3(rawWindLength > 1e-5 ? rawWind / rawWindLength : float2(1.0f, 0.0f), 0.0f);
+    float3 windOS = WindWorldToObjectDirection(windWS, objectData.model);
     float response=clamp(length(sampled),0,4);
     uint ancestor=type.firstBone+tid.x;
     [loop] for(uint depth=0;depth<128 && ancestor!=WindInvalidIndex;++depth){
         WindBoneGPU driver=bones[ancestor]; WindMatrix dib=invBinds[source.invBindOffsetMatrices+driver.jointIndex]; if((source.flags&WindRowVectorSkinMatrix)==0u) dib=transpose(dib); WindMatrix bind=WindInverse(dib); float3 pivot=bind[3].xyz;
-        float harmonic=0; [unroll] for(uint i=0;i<3;++i) harmonic+=driver.weights[i]*sin(6.2831853*driver.frequencies[i]*driver.frequencyScale*WT_TIME+WindPhase(inst.stableSceneId+driver.jointIndex*2891336453u+i*1013u));
-        float gust=1+WT_GUST*(0.5+0.5*sin(WT_TIME*0.71+WindPhase(inst.stableSceneId^0x9e3779b9u))); float parallel=driver.meanBend+driver.parallelAmplitude*harmonic; float perpendicular=driver.parallelAmplitude*driver.perpendicularRatio*sin(harmonic+1.5707963);
-        float angle=clamp(length(float2(parallel,perpendicular))*driver.influence*WT_STRENGTH*response*gust,0,driver.maximumAngle);
-        float3 rawAxis=float3(-wind.y,wind.x,1e-5)*parallel+float3(wind.x,wind.y,0)*perpendicular;
-        float rawAxisLength=length(rawAxis);
-        float3 axis=rawAxisLength>1e-6?rawAxis/rawAxisLength:float3(-wind.y,wind.x,0);
-        pose=mul(pose,mul(mul(WindTranslation(-pivot),WindRotation(axis,angle)),WindTranslation(pivot))); ancestor=driver.parentEntry;
+        if (driver.simulationGroup != WindInvalidIndex && driver.maximumAngle > 0.0f && driver.influence > 0.0f) {
+            const float3 branchAxis = WindSafeNormalize(driver.branchAxis, float3(0.0f, 0.0f, 1.0f));
+            const float3 branchTangent = WindSafeNormalize(driver.branchTangent, float3(1.0f, 0.0f, 0.0f));
+            const float3 acrossBranch = WindSafeNormalize(
+                windOS - branchAxis * dot(windOS, branchAxis),
+                WindSafeNormalize(cross(branchTangent, branchAxis), float3(1.0f, 0.0f, 0.0f)));
+            const float3 dragAxis = WindSafeNormalize(cross(branchAxis, acrossBranch), branchTangent);
+
+            const float phase = WindPhase(inst.stableSceneId ^ driver.phaseSeed ^ 0x68bc21ebu);
+            const float gustNoise =
+                0.70f * sin(WT_TIME * 0.71f + phase) +
+                0.30f * sin(WT_TIME * 1.93f + phase * 1.37f);
+            const float gust = max(0.0f, 1.0f + WT_GUST * (1.0f - saturate(driver.gustAttenuation)) * gustNoise);
+            const float forcing = driver.influence * WT_STRENGTH * response * gust;
+
+            float drag = driver.meanBend + driver.parallelAmplitude * WindInstanceHarmonics(driver, inst.stableSceneId, 0u);
+            float lateral = driver.parallelAmplitude * driver.perpendicularRatio * WindInstanceHarmonics(driver, inst.stableSceneId, 1u);
+            float torsion = driver.parallelAmplitude * driver.torsionRatio * WindInstanceHarmonics(driver, inst.stableSceneId, 2u);
+            float3 lateralAxis = acrossBranch;
+
+            if ((driver.flags & WindBoneFlagTrunk) == 0u) {
+                // GPU Gems models branches as wing-like segments. Upwind-facing branches
+                // are suppressed, lee-side branches sway more freely, and branches across
+                // the flow receive the strongest lift/twist contribution.
+                const float facingWind = clamp(dot(branchAxis, windOS), -1.0f, 1.0f);
+                const float windward = saturate(-facingWind);
+                const float leeSide = saturate(facingWind);
+                const float acrossFlow = 1.0f - abs(facingWind);
+                drag *= lerp(1.0f, 0.35f, windward) * lerp(1.0f, 1.25f, leeSide);
+                lateral *= 0.25f + 0.75f * acrossFlow;
+                torsion *= 0.25f + 0.75f * acrossFlow;
+                lateralAxis = branchTangent;
+            }
+
+            float2 bendAngles = float2(drag, lateral) * forcing;
+            const float bendMagnitude = length(bendAngles);
+            if (bendMagnitude > driver.maximumAngle)
+                bendAngles *= driver.maximumAngle / bendMagnitude;
+            torsion = clamp(torsion * forcing, -driver.maximumAngle, driver.maximumAngle);
+
+            WindMatrix angularMotion = WindRotationAroundPivot(pivot, dragAxis, bendAngles.x);
+            angularMotion = mul(angularMotion, WindRotationAroundPivot(pivot, lateralAxis, bendAngles.y));
+            angularMotion = mul(angularMotion, WindRotationAroundPivot(pivot, branchAxis, torsion));
+            pose = mul(pose, angularMotion);
+        }
+        ancestor=driver.parentEntry;
     }
     WindMatrix result=mul(pose,targetInv); RWStructuredBuffer<WindMatrix> forward=ResourceDescriptorHeap[WT_FORWARD],inverse=ResourceDescriptorHeap[WT_INVERSE]; forward[inst.transformOffsetMatrices+tid.x]=result; inverse[inst.inverseSkinOffsetMatrices+tid.x]=WindInverse(result);
     RWStructuredBuffer<uint> diagnostics=ResourceDescriptorHeap[types[0].diagnosticsDescriptor];

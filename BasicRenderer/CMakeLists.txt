@@ -104,6 +104,7 @@ endif()
 find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(flecs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
 find_package(assimp CONFIG REQUIRED)
@@ -266,6 +267,7 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
     ARCHIVE_OUTPUT_NAME ${BASICRENDERER_DEMO_TARGET}
 )
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
+add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -348,6 +350,7 @@ if (CMAKE_VERSION VERSION_GREATER 3.14)
   set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 23)
   set_property(TARGET ${BASICRENDERER_DEMO_TARGET} PROPERTY CXX_STANDARD 23)
   set_property(TARGET ShaderPreprocessTests PROPERTY CXX_STANDARD 23)
+  set_property(TARGET SkeletonArtifactCacheTests PROPERTY CXX_STANDARD 23)
 endif()
 
 # br_generate_header(
@@ -1068,6 +1071,8 @@ endif()
 target_link_libraries(${PROJECT_NAME} 
 PRIVATE 
     dxgi.lib 
+    bcrypt.lib
+    lz4::lz4
     xatlas
     geometry-central
     spdlog::spdlog_header_only 
@@ -1299,5 +1304,11 @@ PRIVATE
     "${BASICRENDERER_SOURCE_ROOT}/hlsl_parser.lib"
 )
 
+target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
+if(MSVC)
+    target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
+endif()
+
 enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
+add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)

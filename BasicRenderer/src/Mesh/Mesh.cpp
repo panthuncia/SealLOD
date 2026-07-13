@@ -758,11 +758,6 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodAssemblyBoneRemapIndices.empty()) {
 		out.assemblyBoneRemapIndices = m_clodAssemblyBoneRemapIndices;
 	}
-	if (!m_prebuiltClusterLOD.has_value() || !m_prebuiltClusterLOD->assemblySkeleton.Empty()) {
-		out.assemblySkeleton = m_prebuiltClusterLOD.has_value()
-			? m_prebuiltClusterLOD->assemblySkeleton
-			: ClusterLODAssemblySkeletonData{};
-	}
 	if (!m_clodPartRecords.empty()) {
 		out.partRecords = m_clodPartRecords;
 	}

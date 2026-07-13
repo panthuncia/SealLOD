@@ -25,6 +25,7 @@ public:
     void SetProfileSearchRoots(std::vector<std::filesystem::path> roots);
     void ReloadProfiles();
     WindProfileSet ResolveProfile(std::string_view modelIdentity) const;
+    std::uint64_t ProfileRevision() const;
     ResidentWindPair SnapshotResidentPair() const;
     WindState SnapshotWindState() const;
     Float3 SampleWindSkyrim(float x, float y) const;
@@ -43,6 +44,7 @@ private:
     std::vector<std::filesystem::path> m_profileRoots;
     mutable std::unordered_map<std::string, WindProfileSet> m_profiles;
     std::uint64_t m_revision = 0u;
+    std::uint64_t m_profileRevision = 1u;
 };
 
 std::shared_ptr<ProceduralWindRuntime> GetProceduralWindRuntime();

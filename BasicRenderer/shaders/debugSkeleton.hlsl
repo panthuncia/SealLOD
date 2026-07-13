@@ -1,4 +1,5 @@
 #include "include/cbuffers.hlsli"
+#include "include/debugPayload.hlsli"
 #include "include/structs.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 
@@ -79,9 +80,12 @@ struct WindDebugType {
     uint deferredEntriesDescriptor, processedTypeCountsDescriptor;
 };
 struct WindDebugBone {
-    uint skinningSlot, jointIndex, parentEntry, simulationGroup, phaseSeed;
-    float influence, meanBend, parallelAmplitude, perpendicularRatio, torsionRatio, frequencyScale, maximumAngle;
-    float3 frequencies; float pad0; float3 weights; float pad1;
+    uint skinningSlot, jointIndex, parentEntry, simulationGroup;
+    uint phaseSeed, flags; float influence, meanBend;
+    float parallelAmplitude, perpendicularRatio, torsionRatio, frequencyScale;
+    float maximumAngle, gustAttenuation; float2 pad0;
+    float3 frequencies; float pad1; float3 weights; float pad2;
+    float3 branchAxis; float pad3; float3 branchTangent; float pad4;
 };
 struct WindDebugActiveInstance { uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices; };
 typedef row_major float4x4 WindDebugMatrix;
@@ -218,6 +222,14 @@ float3 WindDebugJointPosition(
     return mul(skin, WindDebugInverse(invBind))[3].xyz;
 }
 
+float4 WindDebugSimulationGroupColor(uint simulationGroup)
+{
+    if (simulationGroup == 0xFFFFFFFFu)
+        return float4(0.55f, 0.55f, 0.55f, 1.0f);
+
+    return float4(max(HashToColor(simulationGroup + 17u), 0.18f.xxx), 1.0f);
+}
+
 [outputtopology("line")]
 [numthreads(64, 1, 1)]
 void MSWindMain(
@@ -263,7 +275,7 @@ void MSWindMain(
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[kWindPerFrame];
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[kWindCameras];
     const Camera camera = cameras[perFrame.mainCameraIndex];
-    const float4 color = float4(1.0f, 0.2f + 0.6f * frac(kWindTypeId * 0.37f), 0.1f, 1.0f);
+    const float4 color = WindDebugSimulationGroupColor(bone.simulationGroup);
     const uint vertexBase = outputIndex * 2u;
     SkeletonLineVertex startVertex;
     SkeletonLineVertex endVertex;

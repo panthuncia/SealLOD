@@ -171,33 +171,6 @@ namespace CLodCache {
 			return true;
 		}
 
-		void WriteStringVector(std::vector<std::byte>& out, const std::vector<std::string>& values)
-		{
-			const uint64_t count = static_cast<uint64_t>(values.size());
-			WritePod(out, count);
-			for (const std::string& value : values) {
-				WriteString(out, value);
-			}
-		}
-
-		bool ReadStringVector(const std::vector<std::byte>& in, size_t& offset, std::vector<std::string>& values)
-		{
-			uint64_t count = 0;
-			if (!ReadPod(in, offset, count)) {
-				return false;
-			}
-			if (count > (std::numeric_limits<size_t>::max)()) {
-				return false;
-			}
-			values.resize(static_cast<size_t>(count));
-			for (std::string& value : values) {
-				if (!ReadString(in, offset, value)) {
-					return false;
-				}
-			}
-			return true;
-		}
-
 		std::vector<std::byte> SerializeMetadata(
 			uint64_t buildConfigHash,
 			const ClusterLODPrebuiltData& prebuiltData,
@@ -236,18 +209,9 @@ namespace CLodCache {
 			WriteVectorPod(out, prebuiltData.assemblyInstances);
 			WriteVectorPod(out, prebuiltData.assemblyBoneRemaps);
 			WriteVectorPod(out, prebuiltData.assemblyBoneRemapIndices);
-			WriteStringVector(out, prebuiltData.assemblySkeleton.jointNames);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.parentIndices);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.inverseBindMatrices);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.restLocalMatrices);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.bindGlobalMatrices);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.windSimulationGroupIndices);
-			WriteString(out, prebuiltData.assemblySkeleton.windProfileIdentity);
-			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.enabled);
-			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.groundCover);
-			WritePod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.gustAttenuation);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.groups);
-			WriteVectorPod(out, prebuiltData.assemblySkeleton.dynamicWindMetadata.bones);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.id.digest);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.schemaVersion);
+			WritePod(out, prebuiltData.assemblySkeletonArtifact.jointCount);
 			WriteVectorPod(out, prebuiltData.partRecords);
 			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
@@ -297,18 +261,9 @@ namespace CLodCache {
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyInstances)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyBoneRemaps)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyBoneRemapIndices)) return false;
-			if (!ReadStringVector(blob, offset, out.prebuiltData.assemblySkeleton.jointNames)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.parentIndices)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.inverseBindMatrices)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.restLocalMatrices)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.bindGlobalMatrices)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.windSimulationGroupIndices)) return false;
-			if (!ReadString(blob, offset, out.prebuiltData.assemblySkeleton.windProfileIdentity)) return false;
-			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.enabled)) return false;
-			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.groundCover)) return false;
-			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.gustAttenuation)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.groups)) return false;
-			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblySkeleton.dynamicWindMetadata.bones)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.id.digest)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.schemaVersion)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.assemblySkeletonArtifact.jointCount)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.partRecords)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
@@ -471,6 +426,7 @@ namespace CLodCache {
 			boost::hash_combine(hashSeed, key.primPath);
 			boost::hash_combine(hashSeed, key.subsetName);
 			boost::hash_combine(hashSeed, buildConfigHash);
+			boost::hash_combine(hashSeed, kSchemaVersion);
 
 			std::stringstream ss;
 			ss << "clod_" << std::hex << hashSeed << extension;

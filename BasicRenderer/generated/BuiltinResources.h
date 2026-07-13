@@ -5,6 +5,7 @@
 
 struct Builtin {
   inline static constexpr std::string_view ActiveDrawSetIndices = "Builtin::ActiveDrawSetIndices";
+  inline static constexpr std::string_view ActiveSkinnedAssemblyPlacements = "Builtin::ActiveSkinnedAssemblyPlacements";
   inline static constexpr std::string_view BRDFLUT = "Builtin::BRDFLUT";
   inline static constexpr std::string_view Backbuffer = "Builtin::Backbuffer";
   struct CLod {
@@ -72,8 +73,6 @@ struct Builtin {
     inline static constexpr std::string_view Primary = "Builtin::IndirectCommandBuffers::Primary";
   };
   inline static constexpr std::string_view InstanceDrawRecordBuffer = "Builtin::InstanceDrawRecordBuffer";
-  inline static constexpr std::string_view SkinnedAssemblyPlacements = "Builtin::SkinnedAssemblyPlacements";
-  inline static constexpr std::string_view ActiveSkinnedAssemblyPlacements = "Builtin::ActiveSkinnedAssemblyPlacements";
   inline static constexpr std::string_view LastFrameLinearDepthMaps = "Builtin::LastFrameLinearDepthMaps";
   struct Light {
     inline static constexpr std::string_view ActiveLightIndices = "Builtin::Light::ActiveLightIndices";
@@ -147,6 +146,7 @@ struct Builtin {
     inline static constexpr std::string_view InverseSkinMatrices = "Builtin::SkeletonResources::InverseSkinMatrices";
     inline static constexpr std::string_view SkinningInstanceInfo = "Builtin::SkeletonResources::SkinningInstanceInfo";
   };
+  inline static constexpr std::string_view SkinnedAssemblyPlacements = "Builtin::SkinnedAssemblyPlacements";
   struct Terrain {
     inline static constexpr std::string_view LayerRefs = "Builtin::Terrain::LayerRefs";
     inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";

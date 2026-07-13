@@ -1266,6 +1266,11 @@ namespace
 
 	DirectX::XMFLOAT2 SelectRepresentativeUv(const CellCoverageSample& sample)
 	{
+		// TODO: This treats the samples as one continuous UV distribution. With disconnected atlas
+		// islands, a low-weight sample between two dominant modes can be selected merely because it
+		// is closest to the global mean. Associate coverage triangles with stable UV charts, select
+		// the dominant chart by accumulated coverage, then choose a representative near that chart's
+		// weighted mean (and consider retaining a second mode when one UV cannot represent the cell).
 		if (sample.uvWeight <= 0.0f)
 		{
 			return DirectX::XMFLOAT2(0.0f, 0.0f);

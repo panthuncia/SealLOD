@@ -33,6 +33,7 @@
 
 #include "Import/BRNiflyClient.h"
 #include "Import/CLodCache.h"
+#include "Import/SkeletonArtifactCache.h"
 #include "Import/USDGeometryExtractor.h"
 #include "Animation/Skeleton.h"
 #include "Managers/Singletons/TextureProcessingManager.h"
@@ -686,7 +687,18 @@ fs::path AssetManifestPath()
     return AssetPathIndexRoot() / "manifest.tsv";
 }
 
-constexpr std::uint32_t kPayloadCacheVersion = 42u;
+// Payloads retain the CLod assembly references created by USDLoader.  Bump this
+// whenever that ownership/serialization contract changes so preprocessing
+// cannot hide a stale inline-skeleton assembly behind an otherwise valid NIF
+// payload cache.
+constexpr std::uint32_t kPayloadCacheVersion = 46u;
+
+enum class CachedSkeletonStorage : std::uint8_t
+{
+    None,
+    SharedArtifact,
+    Inline
+};
 
 struct AssetCacheIndex {
     std::mutex mutex;
@@ -1795,6 +1807,11 @@ void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
     writer.PodVector(data.lodLevelRoots);
     writer.PodVector(data.assemblyTransforms);
     writer.PodVector(data.assemblyInstances);
+    writer.PodVector(data.assemblyBoneRemaps);
+    writer.PodVector(data.assemblyBoneRemapIndices);
+    writer.Pod(data.assemblySkeletonArtifact.id.digest);
+    writer.Pod(data.assemblySkeletonArtifact.schemaVersion);
+    writer.Pod(data.assemblySkeletonArtifact.jointCount);
     writer.PodVector(data.partRecords);
     writer.Pod(data.rootPartIndex);
     writer.Pod(data.maxDepth);
@@ -1825,6 +1842,11 @@ bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
         reader.PodVector(data.lodLevelRoots) &&
         reader.PodVector(data.assemblyTransforms) &&
         reader.PodVector(data.assemblyInstances) &&
+        reader.PodVector(data.assemblyBoneRemaps) &&
+        reader.PodVector(data.assemblyBoneRemapIndices) &&
+        reader.Pod(data.assemblySkeletonArtifact.id.digest) &&
+        reader.Pod(data.assemblySkeletonArtifact.schemaVersion) &&
+        reader.Pod(data.assemblySkeletonArtifact.jointCount) &&
         reader.PodVector(data.partRecords) &&
         reader.Pod(data.rootPartIndex) &&
         reader.Pod(data.maxDepth) &&
@@ -1845,8 +1867,8 @@ bool WritePayloadCache(
     TracyPlot("SARP.Import.NifMeta.Write.PartCount", static_cast<int64_t>(payload.parts.size()));
 
     if (payload.meshes.empty() || payload.parts.empty()) {
-        spdlog::warn(
-            "nif_asset_payload_cache: refusing to cache empty renderable payload for '{}'",
+		spdlog::debug(
+			"nif_asset_payload_cache: refusing to cache empty renderable payload for '{}'",
             normalizedCacheKey);
         return false;
     }
@@ -1892,10 +1914,11 @@ bool WritePayloadCache(
             materialHash = ComputeMaterialHash(*mesh->material);
         }
         WriteMaterialDescription(writer, mesh->material->ToCacheDescription());
+        const ClusterLODPrebuiltData prebuiltData = mesh->GetClusterLODPrebuiltData();
         {
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
             writer.Pod(materialHash);
-            WritePrebuilt(writer, mesh->GetClusterLODPrebuiltData());
+            WritePrebuilt(writer, prebuiltData);
             WriteObjectReyesAtlasBakeData(writer, mesh->GetObjectReyesAtlasBakeData());
         }
         const auto& meshCB = mesh->GetPerMeshCBData();
@@ -1912,9 +1935,11 @@ bool WritePayloadCache(
             for (const auto& matrix : inverseBinds) {
                 WriteMatrix(writer, matrix);
             }
-            std::uint8_t hasSkeleton = mesh->HasBaseSkin() ? 1u : 0u;
-            writer.Pod(hasSkeleton);
-            if (hasSkeleton) {
+            const CachedSkeletonStorage skeletonStorage = !prebuiltData.assemblySkeletonArtifact.Empty()
+                ? CachedSkeletonStorage::SharedArtifact
+                : (mesh->HasBaseSkin() ? CachedSkeletonStorage::Inline : CachedSkeletonStorage::None);
+            writer.Pod(skeletonStorage);
+            if (skeletonStorage == CachedSkeletonStorage::Inline) {
                 const auto skeleton = mesh->GetBaseSkin();
                 const auto boneNames = skeleton->GetBoneNames();
                 const auto parents = skeleton->GetParentIndices();
@@ -2010,6 +2035,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
             }
         }
         ZoneText(desc.name.data(), desc.name.size());
+        const SkeletonArtifactReference skeletonArtifact = prebuilt.assemblySkeletonArtifact;
         std::uint32_t vertexFlags = 0;
         std::uint32_t vertexByteSize = 0;
         std::uint32_t skinningVertexByteSize = 0;
@@ -2072,11 +2098,25 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
             }
         }
         mesh->SetSkinInverseBindMatrices(std::move(inverseBinds));
-        std::uint8_t hasSkeleton = 0;
-        if (!reader.Pod(hasSkeleton)) {
+        CachedSkeletonStorage skeletonStorage = CachedSkeletonStorage::None;
+        if (!reader.Pod(skeletonStorage) || skeletonStorage > CachedSkeletonStorage::Inline) {
             return std::nullopt;
         }
-        if (hasSkeleton != 0u) {
+        if (skeletonStorage == CachedSkeletonStorage::SharedArtifact) {
+            if (skeletonArtifact.Empty()) {
+                return std::nullopt;
+            }
+            std::string artifactError;
+            auto baseSkeleton = SkeletonArtifactCache::ResolveSkeleton(skeletonArtifact, &artifactError);
+            if (!baseSkeleton) {
+                spdlog::warn(
+                    "nif_asset_payload_cache: skeleton artifact {} could not be resolved for '{}': {}",
+                    skeletonArtifact.id.ToString(), normalizedCacheKey, artifactError);
+                return std::nullopt;
+            }
+            mesh->SetBaseSkin(std::move(baseSkeleton));
+        }
+        else if (skeletonStorage == CachedSkeletonStorage::Inline) {
             std::uint64_t boneCount = 0;
             if (!reader.Pod(boneCount) || boneCount > 100000u) {
                 return std::nullopt;

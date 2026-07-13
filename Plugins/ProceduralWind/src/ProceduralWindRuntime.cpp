@@ -51,8 +51,9 @@ bool ProceduralWindRuntime::LoadRequiredPairLocked(std::string* error)
     m_resident.valid = true; m_resident.revision = ++m_revision; return true;
 }
 
-void ProceduralWindRuntime::SetProfileSearchRoots(std::vector<std::filesystem::path> roots) { std::lock_guard lock(m_mutex); m_profileRoots = std::move(roots); m_profiles.clear(); }
-void ProceduralWindRuntime::ReloadProfiles() { std::lock_guard lock(m_mutex); m_profiles.clear(); }
+void ProceduralWindRuntime::SetProfileSearchRoots(std::vector<std::filesystem::path> roots) { std::lock_guard lock(m_mutex); m_profileRoots = std::move(roots); m_profiles.clear(); ++m_profileRevision; }
+void ProceduralWindRuntime::ReloadProfiles() { std::lock_guard lock(m_mutex); m_profiles.clear(); ++m_profileRevision; }
+std::uint64_t ProceduralWindRuntime::ProfileRevision() const { std::lock_guard lock(m_mutex); return m_profileRevision; }
 
 WindProfileSet ProceduralWindRuntime::ResolveProfile(std::string_view modelIdentity) const
 {
