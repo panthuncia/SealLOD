@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/instanceDrawRecordHelpers.hlsli"
 
 #define WIND_BONE_ENTRIES UintRootConstant0
 #define WIND_SCRATCH_FORWARD UintRootConstant1
@@ -216,4 +217,161 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     WindMatrix resultInverse = WindInverse(result);
     forwardSkin[forwardIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? result : transpose(result);
     inverseSkin[inverseIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? resultInverse : transpose(resultInverse);
+}
+
+// Frame-transient, per-draw-record wind skeleton path.
+#define WT_TYPES UintRootConstant0
+#define WT_BONES UintRootConstant1
+#define WT_ACTIVE UintRootConstant2
+#define WT_TYPE_COUNTERS UintRootConstant3
+#define WT_COUNTERS UintRootConstant4
+#define WT_GENERATIONS UintRootConstant5
+#define WT_COMMANDS UintRootConstant6
+#define WT_SKIN_INFO UintRootConstant7
+#define WT_FORWARD UintRootConstant8
+#define WT_INVERSE UintRootConstant9
+#define WT_INVERSE_BIND UintRootConstant10
+#define WT_DRAW_COUNT UintRootConstant11
+#define WT_TYPE_COUNT UintRootConstant12
+#define WT_TRANSFORM_BASE UintRootConstant13
+#define WT_INVERSE_BASE UintRootConstant14
+#define WT_MATRIX_CAPACITY UintRootConstant15
+#define WT_CAMERA_INDEX UintRootConstant16
+#define WT_BUCKET_CAPACITY UintRootConstant17
+#define WT_FIELD0 UintRootConstant18
+#define WT_FIELD1 UintRootConstant19
+#define WT_FIELD_DIMS UintRootConstant20
+#define WT_FIELD_CELL asfloat(UintRootConstant21)
+#define WT_FIELD_X asfloat(UintRootConstant22)
+#define WT_FIELD_Y asfloat(UintRootConstant23)
+#define WT_FIELD_LERP asfloat(UintRootConstant24)
+#define WT_TIME asfloat(UintRootConstant25)
+#define WT_WIND_X asfloat(UintRootConstant26)
+#define WT_WIND_Y asfloat(UintRootConstant27)
+#define WT_STRENGTH asfloat(UintRootConstant28)
+#define WT_GUST asfloat(UintRootConstant29)
+
+static const uint WindTransientSlotBase = 65536u;
+static const uint WindTypeFlag = 2u;
+
+struct WindTypeGPU { uint firstBone, boneCount, sourceSkinningSlot, bucketBase; uint bucketCapacity; uint3 pad; };
+struct WindActiveInstanceGPU { uint drawRecordIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices; };
+struct WindIndirectCommandGPU { uint typeId, pad0, pad1; uint3 dispatch; };
+
+[numthreads(64,1,1)]
+void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
+{
+    RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
+    RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
+    if (tid.x < WT_DRAW_COUNT) infos[WindTransientSlotBase + tid.x] = (SkinningInstanceGPUInfo)0;
+    if (tid.x < WT_TYPE_COUNT) typeCounters[tid.x] = 0u;
+    if (tid.x < 8u) counters[tid.x] = 0u;
+}
+
+float WindMaxAxisScale(row_major float4x4 m)
+{
+    return max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+}
+
+[numthreads(64,1,1)]
+void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
+{
+    uint drawIndex = tid.x;
+    if (drawIndex >= WT_DRAW_COUNT) return;
+    StructuredBuffer<uint> generations = ResourceDescriptorHeap[WT_GENERATIONS];
+    if (generations[drawIndex] == 0u) return;
+    InstanceDrawRecordBuffer record = LoadInstanceDrawRecord(drawIndex);
+    PerMeshInstanceBuffer mesh = LoadMeshTemplateForDrawRecord(record);
+    if (mesh.skinningInstanceSlot == WindInvalidIndex) return;
+    RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
+    SkinningInstanceGPUInfo source = infos[mesh.skinningInstanceSlot];
+    if ((source.flags & WindTypeFlag) == 0u || source.pad0 >= WT_TYPE_COUNT) return;
+    StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
+    WindTypeGPU type = types[source.pad0];
+    if (type.boneCount == 0u) return;
+
+    PerObjectBuffer objectData = LoadInstanceTransformForDrawRecord(record);
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    Camera camera = cameras[WT_CAMERA_INDEX];
+    float3 centerWS = mul(float4(mesh.boundingSphere.sphere.xyz, 1.0f), objectData.model).xyz;
+    float radiusWS = mesh.boundingSphere.sphere.w * mesh.skinnedBoundsScale * WindMaxAxisScale(objectData.model);
+    float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
+    [unroll] for (uint p=0u; p<6u; ++p) if (dot(camera.clippingPlanes[p].plane.xyz, centerVS) + camera.clippingPlanes[p].plane.w < -radiusWS) return;
+    if (distance(centerWS, camera.positionWorldSpace.xyz) > 32768.0f + radiusWS) return;
+
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
+    uint boneOffset; InterlockedAdd(counters[0], type.boneCount, boneOffset);
+    if (boneOffset + type.boneCount > WT_MATRIX_CAPACITY) { InterlockedAdd(counters[2], 1u); return; }
+    RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
+    uint localIndex; InterlockedAdd(typeCounters[source.pad0], 1u, localIndex);
+    if (localIndex >= type.bucketCapacity) { InterlockedAdd(counters[3], 1u); return; }
+
+    WindActiveInstanceGPU active;
+    active.drawRecordIndex = drawIndex;
+    active.stableSceneId = drawIndex * 747796405u + generations[drawIndex] * 2891336453u;
+    active.transformOffsetMatrices = WT_TRANSFORM_BASE + boneOffset;
+    active.inverseSkinOffsetMatrices = WT_INVERSE_BASE + boneOffset;
+    RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
+    activeInstances[type.bucketBase + localIndex] = active;
+    SkinningInstanceGPUInfo transientInfo = source;
+    transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
+    transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
+    transientInfo.boneCount = type.boneCount;
+    infos[WindTransientSlotBase + drawIndex] = transientInfo;
+    InterlockedAdd(counters[4], 1u);
+}
+
+[numthreads(64,1,1)]
+void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
+{
+    uint typeId = tid.x; if (typeId >= WT_TYPE_COUNT) return;
+    StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
+    StructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
+    WindTypeGPU type = types[typeId]; uint count = min(typeCounters[typeId], type.bucketCapacity);
+    if (type.boneCount == 0u || count == 0u) return;
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
+    uint commandIndex; InterlockedAdd(counters[1], 1u, commandIndex);
+    RWStructuredBuffer<WindIndirectCommandGPU> commands = ResourceDescriptorHeap[WT_COMMANDS];
+    WindIndirectCommandGPU command; command.typeId=typeId; command.pad0=command.pad1=0u;
+    command.dispatch=uint3((type.boneCount+63u)/64u,count,1u); commands[commandIndex]=command;
+}
+
+float3 SampleTransientLevel0(float3 position)
+{
+    float3 fallback=float3(WT_WIND_X,WT_WIND_Y,0);
+    if (WT_FIELD_CELL<=0 || WT_FIELD_DIMS==0u) return fallback;
+    uint w=WT_FIELD_DIMS&0xffffu,h=WT_FIELD_DIMS>>16u;
+    float2 grid=(position.xy-float2(WT_FIELD_X,WT_FIELD_Y))/WT_FIELD_CELL-0.5f;
+    if(any(grid<0)||grid.x>=w-1||grid.y>=h-1) return fallback;
+    uint2 b=(uint2)floor(grid); float2 f=frac(grid);
+    StructuredBuffer<uint> a=ResourceDescriptorHeap[WT_FIELD0],z=ResourceDescriptorHeap[WT_FIELD1];
+    float4 a0=lerp(LoadWindCell(a,b.y*w+b.x),LoadWindCell(a,b.y*w+b.x+1),f.x),a1=lerp(LoadWindCell(a,(b.y+1)*w+b.x),LoadWindCell(a,(b.y+1)*w+b.x+1),f.x);
+    float4 z0=lerp(LoadWindCell(z,b.y*w+b.x),LoadWindCell(z,b.y*w+b.x+1),f.x),z1=lerp(LoadWindCell(z,(b.y+1)*w+b.x),LoadWindCell(z,(b.y+1)*w+b.x+1),f.x);
+    float4 va=lerp(a0,a1,f.y),vz=lerp(z0,z1,f.y); return min(va.w,vz.w)<0.5f?fallback:lerp(va.xyz,vz.xyz,WT_FIELD_LERP);
+}
+
+[numthreads(64,1,1)]
+void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
+{
+    uint typeId=IndirectCommandSignatureRootConstant0;
+    StructuredBuffer<WindTypeGPU> types=ResourceDescriptorHeap[WT_TYPES]; WindTypeGPU type=types[typeId];
+    if(tid.x>=type.boneCount) return;
+    StructuredBuffer<WindActiveInstanceGPU> instances=ResourceDescriptorHeap[WT_ACTIVE]; WindActiveInstanceGPU inst=instances[type.bucketBase+tid.y];
+    StructuredBuffer<WindBoneGPU> bones=ResourceDescriptorHeap[WT_BONES]; WindBoneGPU target=bones[type.firstBone+tid.x];
+    StructuredBuffer<WindMatrix> invBinds=ResourceDescriptorHeap[WT_INVERSE_BIND];
+    StructuredBuffer<SkinningInstanceGPUInfo> infos=ResourceDescriptorHeap[WT_SKIN_INFO]; SkinningInstanceGPUInfo source=infos[type.sourceSkinningSlot];
+    WindMatrix targetInv=invBinds[source.invBindOffsetMatrices+tid.x]; if((source.flags&WindRowVectorSkinMatrix)==0u) targetInv=transpose(targetInv);
+    WindMatrix pose=WindInverse(targetInv);
+    PerObjectBuffer objectData=LoadInstanceTransformForDraw(inst.drawRecordIndex); float3 rootWS=objectData.model[3].xyz;
+    float3 sampled=SampleTransientLevel0(rootWS); float2 wind=normalize(length(sampled.xy)>1e-5?sampled.xy:float2(WT_WIND_X,WT_WIND_Y)); float response=clamp(length(sampled),0,4);
+    uint ancestor=type.firstBone+tid.x;
+    [loop] for(uint depth=0;depth<128 && ancestor!=WindInvalidIndex;++depth){
+        WindBoneGPU driver=bones[ancestor]; WindMatrix dib=invBinds[source.invBindOffsetMatrices+driver.jointIndex]; if((source.flags&WindRowVectorSkinMatrix)==0u) dib=transpose(dib); WindMatrix bind=WindInverse(dib); float3 pivot=bind[3].xyz;
+        float harmonic=0; [unroll] for(uint i=0;i<3;++i) harmonic+=driver.weights[i]*sin(6.2831853*driver.frequencies[i]*driver.frequencyScale*WT_TIME+WindPhase(inst.stableSceneId+driver.jointIndex*2891336453u+i*1013u));
+        float gust=1+WT_GUST*(0.5+0.5*sin(WT_TIME*0.71+WindPhase(inst.stableSceneId^0x9e3779b9u))); float parallel=driver.meanBend+driver.parallelAmplitude*harmonic; float perpendicular=driver.parallelAmplitude*driver.perpendicularRatio*sin(harmonic+1.5707963);
+        float angle=clamp(length(float2(parallel,perpendicular))*driver.influence*WT_STRENGTH*response*gust,0,driver.maximumAngle); float3 axis=normalize(float3(-wind.y,wind.x,1e-5)*parallel+float3(wind.x,wind.y,0)*perpendicular);
+        pose=mul(pose,mul(mul(WindTranslation(-pivot),WindRotation(axis,angle)),WindTranslation(pivot))); ancestor=driver.parentEntry;
+    }
+    WindMatrix result=mul(pose,targetInv); RWStructuredBuffer<WindMatrix> forward=ResourceDescriptorHeap[WT_FORWARD],inverse=ResourceDescriptorHeap[WT_INVERSE]; forward[inst.transformOffsetMatrices+tid.x]=result; inverse[inst.inverseSkinOffsetMatrices+tid.x]=WindInverse(result);
 }

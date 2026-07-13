@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <DirectXMath.h>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -83,7 +84,7 @@ SkeletonManager::SkeletonManager() {
     // Maybe we could avoid this if we changed the normal skinning path as well?
     m_inverseSkinMatrices = DynamicBuffer::CreateShared(sizeof(DirectX::XMMATRIX), 1, "InverseSkinMatricesPacked", false, true);
 
-    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo");
+    m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo", true);
 
     rg::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
     rg::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");
@@ -168,6 +169,32 @@ std::vector<SkeletonManager::ActiveInstanceView> SkeletonManager::GetActiveInsta
     return result;
 }
 
+SkeletonManager::TransientWindRegion SkeletonManager::ReserveTransientWindRegion(uint32_t matrixCapacity) {
+	if (m_transientWindRegion.valid || matrixCapacity == 0u) {
+		return m_transientWindRegion;
+	}
+	const size_t bytes = static_cast<size_t>(matrixCapacity) * sizeof(DirectX::XMMATRIX);
+	m_transientWindTransformsView = m_boneTransforms->Allocate(bytes, sizeof(DirectX::XMMATRIX));
+	m_transientWindInverseSkinView = m_inverseSkinMatrices->Allocate(bytes, sizeof(DirectX::XMMATRIX));
+	if (!m_transientWindTransformsView || !m_transientWindInverseSkinView) {
+		m_transientWindTransformsView.reset();
+		m_transientWindInverseSkinView.reset();
+		return {};
+	}
+	m_transientWindRegion.transformBaseMatrices = BytesToMatrixIndex(m_transientWindTransformsView->GetOffset());
+	m_transientWindRegion.inverseSkinBaseMatrices = BytesToMatrixIndex(m_transientWindInverseSkinView->GetOffset());
+	m_transientWindRegion.capacityMatrices = matrixCapacity;
+	m_transientWindRegion.valid = true;
+	return m_transientWindRegion;
+}
+
+void SkeletonManager::EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) {
+	const uint64_t required = static_cast<uint64_t>(kProceduralWindTransientSlotBase) + drawRecordCapacity;
+	if (required <= std::numeric_limits<uint32_t>::max()) {
+		m_instanceInfo->EnsureSize(static_cast<uint32_t>(required));
+	}
+}
+
 uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton>& skinningInstance) {
     // Expect: skinningInstance is NOT a base skeleton.
     // It should reference a base skeleton (see "Skeleton type changes" section below).
@@ -203,6 +230,15 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
     info.boneCount = rec.boneCount;
     info.flags = baseShared->GetSkinningGPUFlags();
+	if (baseShared->HasWindSimulationGroups()) {
+		info.flags |= kSkinningInstanceFlagProceduralWindType;
+		info.pad0 = rec.instanceSlot; // Wind type IDs are stable persistent assembly slots.
+		spdlog::info(
+			"SkeletonManager: registered procedural-wind assembly type slot={} bones={} profile='{}'",
+			rec.instanceSlot,
+			rec.boneCount,
+			baseShared->GetWindProfileIdentity());
+	}
 
     m_instanceInfo->UpdateAt(rec.instanceSlot, info);
 

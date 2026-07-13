@@ -129,7 +129,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
     const PerObjectBuffer instanceTransform =
         LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
     const row_major matrix objectModelMatrix = instanceTransform.model;
@@ -233,7 +233,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
     const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+    PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
+    instanceData.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(rec.instanceIndex, instanceData.skinningInstanceSlot);
     const PerObjectBuffer instanceTransform =
         LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =

@@ -2,11 +2,13 @@
 
 #include <functional>
 #include <unordered_set>
+#include <vector>
 
 #include "Materials/Material.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Mesh/Mesh.h"
 #include "Render/TerrainRvtTelemetry.h"
+#include "Render/ShaderVariantRequestService.h"
 #include "../generated/BuiltinRenderPasses.h"
 
 inline bool IsAlphaBlendTechnique(const TechniqueDescriptor& technique) {
@@ -42,6 +44,48 @@ inline MaterialCompileFlags ComposeRuntimeReyesMaterialEvalCompileFlags(const Me
     auto compileFlags = ComposeRuntimeMaterialEvalCompileFlags(mesh, material);
     compileFlags |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
     return compileFlags;
+}
+
+struct MaterialEvalVariantOptions {
+    bool includeColorOnly = true;
+    bool includeReyes = true;
+    bool includeVoxel = false;
+    bool includeSkinning = false;
+};
+
+// Keep offline shader warming in lockstep with the variants assembled by the
+// live CLod workload path. The input is the material technique key before
+// renderer-added evaluation dimensions are applied.
+inline std::vector<MaterialCompileFlags> ExpandMaterialEvalVariants(
+    MaterialCompileFlags materialFlags,
+    const MaterialEvalVariantOptions& options = {}) {
+    constexpr std::uint64_t dimensions =
+        static_cast<std::uint64_t>(MaterialCompileVoxel) |
+        static_cast<std::uint64_t>(MaterialCompileClodReyesPatch) |
+        static_cast<std::uint64_t>(MaterialCompileClodSkinning) |
+        static_cast<std::uint64_t>(MaterialCompileMaterialEvalColorOnly);
+    const auto base = static_cast<std::uint64_t>(materialFlags) & ~dimensions;
+    std::vector<MaterialCompileFlags> result;
+    result.reserve(16);
+    const unsigned colorCount = options.includeColorOnly ? 2u : 1u;
+    const unsigned reyesCount = options.includeReyes ? 2u : 1u;
+    const unsigned voxelCount = options.includeVoxel ? 2u : 1u;
+    const unsigned skinCount = options.includeSkinning ? 2u : 1u;
+    for (unsigned color = 0; color < colorCount; ++color) {
+        for (unsigned reyes = 0; reyes < reyesCount; ++reyes) {
+            for (unsigned voxel = 0; voxel < voxelCount; ++voxel) {
+                for (unsigned skin = 0; skin < skinCount; ++skin) {
+                    std::uint64_t flags = base;
+                    if (color) flags |= MaterialCompileMaterialEvalColorOnly;
+                    if (reyes) flags |= MaterialCompileClodReyesPatch;
+                    if (voxel) flags |= MaterialCompileVoxel;
+                    if (skin) flags |= MaterialCompileClodSkinning;
+                    result.push_back(GetMaterialEvaluationShaderKey(static_cast<MaterialCompileFlags>(flags)));
+                }
+            }
+        }
+    }
+    return result;
 }
 
 template<class F>

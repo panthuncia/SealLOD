@@ -19,9 +19,13 @@
 
 struct TransparencyPick { bool isTransparent = false; bool masked = false; };
 
+inline bool HasMaterialTextureBinding(const TextureAndConstant& binding) {
+    return binding.texture != nullptr || !binding.sourcePath.empty();
+}
+
 inline TransparencyPick PickTransparency(const MaterialDescription& d) {
     TransparencyPick t{};
-    const bool hasOpacityTex = (d.opacity.texture != nullptr);
+    const bool hasOpacityTex = HasMaterialTextureBinding(d.opacity);
     const bool explicitBlend = (d.blendState == BlendState::BLEND_STATE_BLEND);
     const bool alphaFactor = (d.opacity.factor.Get() < 1.0f);
 
@@ -30,7 +34,7 @@ inline TransparencyPick PickTransparency(const MaterialDescription& d) {
 
     // Heuristic: prefer masked if alphaCutoff provided and we have an alpha-carrying tex
     const bool cutoff = (d.alphaCutoff > 0.0f);
-    const bool hasAlphaCandidate = hasOpacityTex || (d.baseColor.texture != nullptr);
+    const bool hasAlphaCandidate = hasOpacityTex || HasMaterialTextureBinding(d.baseColor);
     t.masked = ((!explicitBlend) && cutoff && hasAlphaCandidate) || d.blendState == BlendState::BLEND_STATE_MASK;
     return t;
 }
@@ -79,29 +83,29 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
 		tech.compileFlags |= MaterialCompileFlags::MaterialCompileDoubleSided;
 		tech.rasterFlags |= MaterialRasterFlags::MaterialRasterFlagsDoubleSided;
 	}
-	if (d.baseColor.texture) {
+	if (HasMaterialTextureBinding(d.baseColor)) {
 		tech.compileFlags |= MaterialCompileFlags::MaterialCompileBaseColorTexture;
 	}
-	if (d.normal.texture) {
+	if (HasMaterialTextureBinding(d.normal)) {
 		tech.compileFlags |= MaterialCompileFlags::MaterialCompileNormalMap;
 	}
-	if (d.aoMap.texture) {
+	if (HasMaterialTextureBinding(d.aoMap)) {
 		tech.compileFlags |= MaterialCompileFlags::MaterialCompileAOTexture;
 	}
-    if (d.metallic.texture) {
+    if (HasMaterialTextureBinding(d.metallic)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileMetallicTexture;
     }
-    if (d.roughness.texture) {
+    if (HasMaterialTextureBinding(d.roughness)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileRoughnessTexture;
 	}
-	if (d.emissive.texture) {
+	if (HasMaterialTextureBinding(d.emissive)) {
 		tech.compileFlags |= MaterialCompileFlags::MaterialCompileEmissiveTexture;
 	}
-    if (d.opacity.texture) {
+    if (HasMaterialTextureBinding(d.opacity)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpacityTexture;
     }
-	if (HasMaterialHeightBinding(d) || (d.heightMapFromBaseColorAlpha && d.baseColor.texture)) {
-        if (d.heightMapFromBaseColorAlpha && d.baseColor.texture) {
+	if (HasMaterialHeightBinding(d) || (d.heightMapFromBaseColorAlpha && HasMaterialTextureBinding(d.baseColor))) {
+		if (d.heightMapFromBaseColorAlpha && HasMaterialTextureBinding(d.baseColor)) {
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha;
         }
         if (SupportsObjectReyesGeometricDisplacement(d)) {
@@ -112,40 +116,40 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileParallax;
         }
 	}
-    if (d.openPBRTextures.coatColor.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.coatColor)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRCoatColorTexture;
     }
-    if (d.openPBRTextures.coatWeight.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.coatWeight)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRCoatWeightTexture;
     }
-    if (d.openPBRTextures.coatRoughness.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.coatRoughness)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRCoatRoughnessTexture;
     }
-    if (d.openPBRTextures.fuzzColor.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.fuzzColor)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRFuzzColorTexture;
     }
-    if (d.openPBRTextures.fuzzWeight.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.fuzzWeight)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRFuzzWeightTexture;
     }
-    if (d.openPBRTextures.fuzzRoughness.texture) {
+    if (HasMaterialTextureBinding(d.openPBRTextures.fuzzRoughness)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRFuzzRoughnessTexture;
     }
     if (IsMaterialTextureStreamingEnabledSetting() &&
-        (d.baseColor.texture ||
-         d.normal.texture ||
-         d.aoMap.texture ||
-         d.heightMap.texture ||
-         (d.heightMapFromBaseColorAlpha && d.baseColor.texture) ||
-         d.metallic.texture ||
-         d.roughness.texture ||
-         d.emissive.texture ||
-         d.opacity.texture ||
-         d.openPBRTextures.coatColor.texture ||
-         d.openPBRTextures.coatWeight.texture ||
-         d.openPBRTextures.coatRoughness.texture ||
-         d.openPBRTextures.fuzzColor.texture ||
-         d.openPBRTextures.fuzzWeight.texture ||
-         d.openPBRTextures.fuzzRoughness.texture)) {
+        (HasMaterialTextureBinding(d.baseColor) ||
+         HasMaterialTextureBinding(d.normal) ||
+         HasMaterialTextureBinding(d.aoMap) ||
+         HasMaterialTextureBinding(d.heightMap) ||
+         (d.heightMapFromBaseColorAlpha && HasMaterialTextureBinding(d.baseColor)) ||
+         HasMaterialTextureBinding(d.metallic) ||
+         HasMaterialTextureBinding(d.roughness) ||
+         HasMaterialTextureBinding(d.emissive) ||
+         HasMaterialTextureBinding(d.opacity) ||
+         HasMaterialTextureBinding(d.openPBRTextures.coatColor) ||
+         HasMaterialTextureBinding(d.openPBRTextures.coatWeight) ||
+         HasMaterialTextureBinding(d.openPBRTextures.coatRoughness) ||
+         HasMaterialTextureBinding(d.openPBRTextures.fuzzColor) ||
+         HasMaterialTextureBinding(d.openPBRTextures.fuzzWeight) ||
+         HasMaterialTextureBinding(d.openPBRTextures.fuzzRoughness))) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileTextureStreaming;
     }
     if (d.forceVoxelMaterial) {

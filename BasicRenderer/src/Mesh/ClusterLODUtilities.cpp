@@ -32,7 +32,7 @@
 #include "Mesh/VertexFlags.h"
 #include "Mesh/SGGX.h"
 #include "Mesh/VoxelGroupBuilder.h"
-#include "Utilities/mikktspace.h"
+#include <meshoptimizer.h>
 
 #include "../shaders/Common/defines.h"
 
@@ -797,81 +797,7 @@ namespace
 		return DirectX::XMFLOAT3(tangent.x * invTangentLen, tangent.y * invTangentLen, tangent.z * invTangentLen);
 	}
 
-	struct MikkTangentBuildData
-	{
-		const std::vector<std::byte>* vertices = nullptr;
-		size_t vertexStrideBytes = 0;
-		const std::vector<uint32_t>* indices = nullptr;
-		size_t positionByteOffset = 0;
-		size_t normalByteOffset = 0;
-		size_t texcoordByteOffset = 0;
-		std::vector<DirectX::XMFLOAT3> accumulatedTangents;
-		std::vector<float> accumulatedSigns;
-		std::vector<uint32_t> accumulatedContributions;
-	};
-
-	int MikkGetNumFaces(const SMikkTSpaceContext* context)
-	{
-		const MikkTangentBuildData* data = static_cast<const MikkTangentBuildData*>(context->m_pUserData);
-		return static_cast<int>(data->indices->size() / 3ull);
-	}
-
-	int MikkGetNumVerticesOfFace(const SMikkTSpaceContext*, const int)
-	{
-		return 3;
-	}
-
-	void MikkGetPosition(const SMikkTSpaceContext* context, float positionOut[], const int face, const int vertexInFace)
-	{
-		const MikkTangentBuildData* data = static_cast<const MikkTangentBuildData*>(context->m_pUserData);
-		const size_t index = static_cast<size_t>(face) * 3ull + static_cast<size_t>(vertexInFace);
-		const uint32_t vertexIndex = (*data->indices)[index];
-		const DirectX::XMFLOAT3 position = ReadVertexFloat3(*data->vertices, data->vertexStrideBytes, vertexIndex, data->positionByteOffset);
-		positionOut[0] = position.x;
-		positionOut[1] = position.y;
-		positionOut[2] = position.z;
-	}
-
-	void MikkGetNormal(const SMikkTSpaceContext* context, float normalOut[], const int face, const int vertexInFace)
-	{
-		const MikkTangentBuildData* data = static_cast<const MikkTangentBuildData*>(context->m_pUserData);
-		const size_t index = static_cast<size_t>(face) * 3ull + static_cast<size_t>(vertexInFace);
-		const uint32_t vertexIndex = (*data->indices)[index];
-		const DirectX::XMFLOAT3 normal = ReadVertexFloat3(*data->vertices, data->vertexStrideBytes, vertexIndex, data->normalByteOffset);
-		normalOut[0] = normal.x;
-		normalOut[1] = normal.y;
-		normalOut[2] = normal.z;
-	}
-
-	void MikkGetTexCoord(const SMikkTSpaceContext* context, float texcoordOut[], const int face, const int vertexInFace)
-	{
-		const MikkTangentBuildData* data = static_cast<const MikkTangentBuildData*>(context->m_pUserData);
-		const size_t index = static_cast<size_t>(face) * 3ull + static_cast<size_t>(vertexInFace);
-		const uint32_t vertexIndex = (*data->indices)[index];
-		const DirectX::XMFLOAT2 texcoord = ReadVertexFloat2(*data->vertices, data->vertexStrideBytes, vertexIndex, data->texcoordByteOffset);
-		texcoordOut[0] = texcoord.x;
-		texcoordOut[1] = texcoord.y;
-	}
-
-	void MikkSetTSpaceBasic(const SMikkTSpaceContext* context, const float tangent[], const float sign, const int face, const int vertexInFace)
-	{
-		MikkTangentBuildData* data = static_cast<MikkTangentBuildData*>(context->m_pUserData);
-		const size_t index = static_cast<size_t>(face) * 3ull + static_cast<size_t>(vertexInFace);
-		const uint32_t vertexIndex = (*data->indices)[index];
-		if (vertexIndex >= data->accumulatedTangents.size())
-		{
-			return;
-		}
-
-		DirectX::XMFLOAT3& accumulatedTangent = data->accumulatedTangents[vertexIndex];
-		accumulatedTangent.x += tangent[0];
-		accumulatedTangent.y += tangent[1];
-		accumulatedTangent.z += tangent[2];
-		data->accumulatedSigns[vertexIndex] += sign;
-		data->accumulatedContributions[vertexIndex] += 1u;
-	}
-
-	bool GenerateMikkTangents(
+	bool GenerateMeshoptTangents(
 		const std::vector<std::byte>& vertices,
 		size_t vertexStrideBytes,
 		const std::vector<uint32_t>& indices,
@@ -900,41 +826,37 @@ namespace
 			}
 		}
 
-		MikkTangentBuildData buildData{};
-		buildData.vertices = &vertices;
-		buildData.vertexStrideBytes = vertexStrideBytes;
-		buildData.indices = &indices;
-		buildData.positionByteOffset = PositionByteOffset;
-		buildData.normalByteOffset = NormalByteOffset;
-		buildData.texcoordByteOffset = TexcoordByteOffset;
-		buildData.accumulatedTangents.assign(vertexCount, DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f));
-		buildData.accumulatedSigns.assign(vertexCount, 0.0f);
-		buildData.accumulatedContributions.assign(vertexCount, 0u);
+		std::vector<float> cornerTangents(indices.size() * 4ull);
+		const std::byte* vertexData = vertices.data();
+		meshopt_generateTangents(
+			cornerTangents.data(),
+			indices.data(), indices.size(),
+			reinterpret_cast<const float*>(vertexData + PositionByteOffset), vertexCount, vertexStrideBytes,
+			reinterpret_cast<const float*>(vertexData + NormalByteOffset), vertexStrideBytes,
+			reinterpret_cast<const float*>(vertexData + TexcoordByteOffset), vertexStrideBytes,
+			0);
 
-		SMikkTSpaceInterface mikkInterface{};
-		mikkInterface.m_getNumFaces = &MikkGetNumFaces;
-		mikkInterface.m_getNumVerticesOfFace = &MikkGetNumVerticesOfFace;
-		mikkInterface.m_getPosition = &MikkGetPosition;
-		mikkInterface.m_getNormal = &MikkGetNormal;
-		mikkInterface.m_getTexCoord = &MikkGetTexCoord;
-		mikkInterface.m_setTSpaceBasic = &MikkSetTSpaceBasic;
-
-		SMikkTSpaceContext mikkContext{};
-		mikkContext.m_pInterface = &mikkInterface;
-		mikkContext.m_pUserData = &buildData;
-
-		if (genTangSpaceDefault(&mikkContext) == 0)
+		std::vector<DirectX::XMFLOAT3> accumulatedTangents(vertexCount, DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f));
+		std::vector<float> accumulatedSigns(vertexCount, 0.0f);
+		std::vector<uint32_t> accumulatedContributions(vertexCount, 0u);
+		for (size_t cornerIndex = 0; cornerIndex < indices.size(); ++cornerIndex)
 		{
-			return false;
+			const uint32_t vertexIndex = indices[cornerIndex];
+			DirectX::XMFLOAT3& accumulated = accumulatedTangents[vertexIndex];
+			accumulated.x += cornerTangents[cornerIndex * 4ull + 0ull];
+			accumulated.y += cornerTangents[cornerIndex * 4ull + 1ull];
+			accumulated.z += cornerTangents[cornerIndex * 4ull + 2ull];
+			accumulatedSigns[vertexIndex] += cornerTangents[cornerIndex * 4ull + 3ull];
+			accumulatedContributions[vertexIndex] += 1u;
 		}
 
 		outTangents.resize(vertexCount);
 		for (size_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex)
 		{
-			DirectX::XMFLOAT3 tangent = buildData.accumulatedTangents[vertexIndex];
+			DirectX::XMFLOAT3 tangent = accumulatedTangents[vertexIndex];
 			const float tangentLenSq = tangent.x * tangent.x + tangent.y * tangent.y + tangent.z * tangent.z;
 
-			if (buildData.accumulatedContributions[vertexIndex] == 0u || tangentLenSq <= 1e-20f ||
+			if (accumulatedContributions[vertexIndex] == 0u || tangentLenSq <= 1e-20f ||
 				!std::isfinite(tangent.x) || !std::isfinite(tangent.y) || !std::isfinite(tangent.z))
 			{
 				const DirectX::XMFLOAT3 normal = ReadVertexFloat3(vertices, vertexStrideBytes, static_cast<uint32_t>(vertexIndex), NormalByteOffset);
@@ -948,11 +870,82 @@ namespace
 				tangent.z *= invLen;
 			}
 
-			const float sign = buildData.accumulatedSigns[vertexIndex] < 0.0f ? -1.0f : 1.0f;
+			const float sign = accumulatedSigns[vertexIndex] < 0.0f ? -1.0f : 1.0f;
 			outTangents[vertexIndex] = DirectX::XMFLOAT4(tangent.x, tangent.y, tangent.z, sign);
 		}
 
 		return true;
+	}
+
+	std::vector<unsigned char> BuildExteriorEdgePriorityFlags(
+		const std::vector<std::byte>& vertices,
+		size_t vertexStrideBytes,
+		const std::vector<uint32_t>& indices)
+	{
+		ZoneScopedN("ClusterLODUtilities::BuildExteriorEdgePriorityFlags");
+		const size_t vertexCount = vertexStrideBytes == 0 ? 0 : vertices.size() / vertexStrideBytes;
+		if (vertexCount == 0 || indices.empty() || (indices.size() % 3u) != 0u)
+			return {};
+
+		std::vector<unsigned int> positionRemap(vertexCount);
+		meshopt_generatePositionRemap(
+			positionRemap.data(), reinterpret_cast<const float*>(vertices.data()), vertexCount, vertexStrideBytes);
+
+		std::vector<uint64_t> edges;
+		edges.reserve(indices.size());
+		auto appendEdge = [&](uint32_t sourceA, uint32_t sourceB)
+		{
+			if (sourceA >= vertexCount || sourceB >= vertexCount)
+				return;
+			const uint32_t a = positionRemap[sourceA];
+			const uint32_t b = positionRemap[sourceB];
+			if (a == b)
+				return;
+			const uint32_t lo = std::min(a, b);
+			const uint32_t hi = std::max(a, b);
+			edges.push_back((static_cast<uint64_t>(lo) << 32u) | hi);
+		};
+
+		for (size_t triangle = 0; triangle < indices.size(); triangle += 3u)
+		{
+			appendEdge(indices[triangle + 0u], indices[triangle + 1u]);
+			appendEdge(indices[triangle + 1u], indices[triangle + 2u]);
+			appendEdge(indices[triangle + 2u], indices[triangle + 0u]);
+		}
+
+		std::sort(edges.begin(), edges.end());
+		std::vector<unsigned char> canonicalBoundary(vertexCount, 0u);
+		size_t exteriorEdgeCount = 0;
+		for (size_t begin = 0; begin < edges.size();)
+		{
+			size_t end = begin + 1u;
+			while (end < edges.size() && edges[end] == edges[begin])
+				++end;
+			if (end - begin == 1u)
+			{
+				canonicalBoundary[static_cast<uint32_t>(edges[begin] >> 32u)] = 1u;
+				canonicalBoundary[static_cast<uint32_t>(edges[begin])] = 1u;
+				++exteriorEdgeCount;
+			}
+			begin = end;
+		}
+
+		std::vector<unsigned char> flags(vertexCount, 0u);
+		size_t priorityVertexCount = 0;
+		for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+		{
+			if (canonicalBoundary[positionRemap[vertex]] != 0u)
+			{
+				flags[vertex] = meshopt_SimplifyVertex_Priority;
+				++priorityVertexCount;
+			}
+		}
+
+		TracyPlot("CLOD.Coverage.ExteriorEdges", static_cast<int64_t>(exteriorEdgeCount));
+		TracyPlot("CLOD.Coverage.PriorityVertices", static_cast<int64_t>(priorityVertexCount));
+		spdlog::debug("ClusterLOD coverage preservation: exterior_edges={} priority_vertices={} vertices={} triangles={}",
+			exteriorEdgeCount, priorityVertexCount, vertexCount, indices.size() / 3u);
+		return flags;
 	}
 
 	struct VertexPositionKey
@@ -5534,7 +5527,7 @@ namespace
 		const ClusterLODBuilderSettings& settings)
 	{
 		ZoneScopedN("ClusterLODUtilities::BuildVoxelFallbackCandidates");
-		const bool enabled = settings.enableVoxelFallback && settings.voxelFallbackMode != ClusterLODVoxelFallbackMode::MeshOnly;
+		const bool enabled = settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::Voxel;
 		if (!enabled || state.groups.empty())
 		{
 			return;
@@ -5545,8 +5538,6 @@ namespace
 		state.voxelCarryPayloads.assign(state.groups.size(), {});
 
 		VoxelFallbackBuildStats stats{};
-		const bool forceAllVoxels = settings.voxelFallbackMode == ClusterLODVoxelFallbackMode::VoxelOnly;
-		const bool autoMode = settings.voxelFallbackMode == ClusterLODVoxelFallbackMode::Auto;
 		const uint32_t originalGroupCount = static_cast<uint32_t>(state.groups.size());
 		TracyPlot("CLOD.VoxelFallback.InputGroups", static_cast<int64_t>(originalGroupCount));
 		std::vector<VoxelFallbackGroupBuildInput> groupInputs(originalGroupCount);
@@ -6160,7 +6151,7 @@ namespace
 
 			const float triangleError = group.bounds.error;
 			const bool terminalErrorSentinel = triangleError >= std::numeric_limits<float>::max() * 0.5f;
-			const bool replaceGroupWithVoxels = forceAllVoxels || forceReplaceGroupWithVoxels || group.terminalSegmentCount == 0u;
+			const bool replaceGroupWithVoxels = forceReplaceGroupWithVoxels || group.terminalSegmentCount == 0u;
 			group.representationError = packedVoxelRepresentationError;
 			if (replaceGroupWithVoxels)
 			{
@@ -6223,78 +6214,70 @@ namespace
 		std::vector<uint8_t> replaceVoxelGroupMask(originalGroupCount, 0u);
 		std::vector<uint8_t> buildVoxelGroupMask(originalGroupCount, 0u);
 		std::vector<uint8_t> seedVoxelGroupMask(originalGroupCount, 0u);
-		if (forceAllVoxels)
+		for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 		{
-			std::fill(replaceVoxelGroupMask.begin(), replaceVoxelGroupMask.end(), 1u);
-			std::fill(buildVoxelGroupMask.begin(), buildVoxelGroupMask.end(), 1u);
+			if (groupInputs[groupIndex].autoWouldFitBudget)
+			{
+				replaceVoxelGroupMask[groupIndex] = 1u;
+				seedVoxelGroupMask[groupIndex] = 1u;
+			}
 		}
-		else if (autoMode)
+
+		bool propagatedAny = true;
+		while (propagatedAny)
 		{
+			propagatedAny = false;
 			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 			{
-				if (groupInputs[groupIndex].autoWouldFitBudget)
+				if (replaceVoxelGroupMask[groupIndex] != 0u)
+				{
+					continue;
+				}
+
+				const ClusterLODGroup& group = state.groups[groupIndex];
+				bool hasVoxelRefinedChild = false;
+				for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+				{
+					const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
+					if (segment.refinedGroup < 0)
+					{
+						continue;
+					}
+
+					const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
+					if (childGroupIndex < replaceVoxelGroupMask.size() && replaceVoxelGroupMask[childGroupIndex] != 0u)
+					{
+						hasVoxelRefinedChild = true;
+						break;
+					}
+				}
+
+				if (hasVoxelRefinedChild)
 				{
 					replaceVoxelGroupMask[groupIndex] = 1u;
-					seedVoxelGroupMask[groupIndex] = 1u;
+					propagatedAny = true;
 				}
 			}
+		}
 
-			bool propagatedAny = true;
-			while (propagatedAny)
+		buildVoxelGroupMask = replaceVoxelGroupMask;
+		propagatedAny = true;
+		while (propagatedAny)
+		{
+			propagatedAny = false;
+			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 			{
-				propagatedAny = false;
-				for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+				if (buildVoxelGroupMask[groupIndex] == 0u)
 				{
-					if (replaceVoxelGroupMask[groupIndex] != 0u)
-					{
-						continue;
-					}
+					continue;
+				}
 
-					const ClusterLODGroup& group = state.groups[groupIndex];
-					bool hasVoxelRefinedChild = false;
-					for (uint32_t segmentOffset = 0; segmentOffset < group.segmentCount; ++segmentOffset)
+				for (uint32_t childGroupIndex : CollectUniqueRefinedChildren(state, groupIndex))
+				{
+					if (childGroupIndex < buildVoxelGroupMask.size() && buildVoxelGroupMask[childGroupIndex] == 0u)
 					{
-						const ClusterLODGroupSegment& segment = state.segments[group.firstSegment + segmentOffset];
-						if (segment.refinedGroup < 0)
-						{
-							continue;
-						}
-
-						const uint32_t childGroupIndex = static_cast<uint32_t>(segment.refinedGroup);
-						if (childGroupIndex < replaceVoxelGroupMask.size() && replaceVoxelGroupMask[childGroupIndex] != 0u)
-						{
-							hasVoxelRefinedChild = true;
-							break;
-						}
-					}
-
-					if (hasVoxelRefinedChild)
-					{
-						replaceVoxelGroupMask[groupIndex] = 1u;
+						buildVoxelGroupMask[childGroupIndex] = 1u;
 						propagatedAny = true;
-					}
-				}
-			}
-
-			buildVoxelGroupMask = replaceVoxelGroupMask;
-			propagatedAny = true;
-			while (propagatedAny)
-			{
-				propagatedAny = false;
-				for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
-				{
-					if (buildVoxelGroupMask[groupIndex] == 0u)
-					{
-						continue;
-					}
-
-					for (uint32_t childGroupIndex : CollectUniqueRefinedChildren(state, groupIndex))
-					{
-						if (childGroupIndex < buildVoxelGroupMask.size() && buildVoxelGroupMask[childGroupIndex] == 0u)
-						{
-							buildVoxelGroupMask[childGroupIndex] = 1u;
-							propagatedAny = true;
-						}
 					}
 				}
 			}
@@ -6435,16 +6418,15 @@ namespace
 
 				const bool inheritedVoxelPath = hasMarkedVoxelRefinedChild(groupIndex);
 				const bool seedVoxelPath = seedVoxelGroupMask[groupIndex] != 0u;
-				const bool requireBudgetFit = seedVoxelPath && !inheritedVoxelPath && !forceAllVoxels;
-				const bool requireQualityFit = !forceAllVoxels && seedVoxelPath && !inheritedVoxelPath;
-				const bool builtVoxelGroup = buildVoxelGroup(groupIndex, buildVoxelGroupMask, requireBudgetFit, requireQualityFit, inheritedVoxelPath || forceAllVoxels);
+				const bool requireBudgetFit = seedVoxelPath && !inheritedVoxelPath;
+				const bool requireQualityFit = seedVoxelPath && !inheritedVoxelPath;
+				const bool builtVoxelGroup = buildVoxelGroup(groupIndex, buildVoxelGroupMask, requireBudgetFit, requireQualityFit, inheritedVoxelPath);
 				if (!builtVoxelGroup)
 				{
 					throw std::runtime_error(
 						std::string("ClusterLOD voxel fallback: mandatory voxel build failed for group ") +
 						std::to_string(groupIndex) +
 						" depth=" + std::to_string(std::max(group.depth, 0)) +
-						" forced=" + std::to_string(forceAllVoxels ? 1 : 0) +
 						" seed=" + std::to_string(seedVoxelPath ? 1 : 0) +
 						" inherited=" + std::to_string(inheritedVoxelPath ? 1 : 0) +
 						" require_budget=" + std::to_string(requireBudgetFit ? 1 : 0) +
@@ -6453,11 +6435,7 @@ namespace
 
 				if (builtVoxelGroup)
 				{
-					if (forceAllVoxels)
-					{
-						stats.forcedGroups++;
-					}
-					else if (inheritedVoxelPath)
+					if (inheritedVoxelPath)
 					{
 						stats.propagatedGroups++;
 					}
@@ -6719,8 +6697,7 @@ namespace
 			{
 				minChildError = -1.0f;
 			}
-			else if (autoMode &&
-				std::isfinite(group.representationError) &&
+			else if (std::isfinite(group.representationError) &&
 				group.representationError > 0.0f &&
 				std::isfinite(group.bounds.error) &&
 				!IsTerminalErrorSentinel(group.bounds.error) &&
@@ -7663,10 +7640,10 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		hasNormalStreamInSource &&
 		hasTexcoordStreamInSource)
 	{
-		ZoneScopedN("ClusterLODUtilities::Build::GenerateMikkTangents");
-		if (!GenerateMikkTangents(vertices, vertexStrideBytes, indices, tangentAttributeStream))
+		ZoneScopedN("ClusterLODUtilities::Build::GenerateMeshoptTangents");
+		if (!GenerateMeshoptTangents(vertices, vertexStrideBytes, indices, tangentAttributeStream))
 		{
-			spdlog::warn("ClusterLOD: failed to generate MikkTSpace tangents; continuing without tangent simplification attributes");
+			spdlog::warn("ClusterLOD: failed to generate meshoptimizer tangents; continuing without tangent simplification attributes");
 			tangentAttributeStream.clear();
 		}
 	}
@@ -7717,6 +7694,11 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	}
 
 	clodMesh mesh{};
+	std::vector<unsigned char> coveragePriorityFlags;
+	if (settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::PrioritizeEdges)
+	{
+		coveragePriorityFlags = BuildExteriorEdgePriorityFlags(vertices, vertexStrideBytes, indices);
+	}
 	mesh.indices = idx;
 	mesh.index_count = indices.size();
 	mesh.vertex_count = globalVertexCount;
@@ -7725,7 +7707,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 
 	mesh.vertex_attributes = simplifyAttributeStream.empty() ? nullptr : simplifyAttributeStream.data();
 	mesh.vertex_attributes_stride = simplifyAttributeStream.empty() ? 0 : sizeof(float) * simplifyAttributeCount;
-	mesh.vertex_lock = nullptr;
+	mesh.vertex_lock = coveragePriorityFlags.empty() ? nullptr : coveragePriorityFlags.data();
 	mesh.attribute_weights = simplifyAttributeWeights.empty() ? nullptr : simplifyAttributeWeights.data();
 	mesh.attribute_count = simplifyAttributeStream.empty() ? 0 : simplifyAttributeCount;
 	mesh.attribute_protect_mask = simplifyAttributeStream.empty() ? 0 : simplifyProtectMask;

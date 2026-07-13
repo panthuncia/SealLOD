@@ -789,6 +789,8 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed group position bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed group normal stream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(8));  // page-header-authoritative native float3 position stream + tangent-frame stream
+		boost::hash_combine(seed, static_cast<uint32_t>(1));  // meshoptimizer tangent generation replaces MikkTSpace
+		boost::hash_combine(seed, static_cast<uint32_t>(1));  // coverage preservation mode + exterior-edge priority flags
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // compressed meshlet vertex index bitstream enabled
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // mesh quantization heuristic version
 		boost::hash_combine(seed, static_cast<uint32_t>(2));  // UV quantization heuristic version; atlas height UVs use absolute quantization
@@ -799,7 +801,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // voxel coverage/SGGX estimator version
 		boost::hash_combine(seed, GetCLodBuilderSettingsOverrideConfigHash());
-		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MODE");
+		hashEnvironmentString("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_RAYS");

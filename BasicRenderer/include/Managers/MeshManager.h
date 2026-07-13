@@ -22,6 +22,8 @@
 #include "Interfaces/IResourceProvider.h"
 
 class Mesh;
+class Skeleton;
+class SkeletonManager;
 class MeshInstance;
 class Material;
 class DynamicBuffer;
@@ -118,6 +120,7 @@ public:
 	};
 
 	void AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes, bool useMeshletReorderedVertices);
+	void SetSkeletonManager(SkeletonManager* manager) { m_skeletonManager = manager; }
 	std::vector<StaticMeshTemplateRegistration> AddStaticMeshTemplatesBulk(const std::vector<StaticMeshTemplateRequest>& requests);
 	void PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests);
 	uint32_t GetCLodMaxTraversalDepth() const { return m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire); }
@@ -360,6 +363,8 @@ private:
 	std::unordered_map<uint32_t, CLodStreamingInstanceState> m_clodStreamingStateByInstanceIndex;
 	std::unordered_map<const MeshInstance*, uint32_t> m_clodStreamingInstanceIndexByPtr;
 	std::unordered_map<const Mesh*, std::shared_ptr<CLodSharedStreamingState>> m_clodSharedStreamingStateByMesh;
+	SkeletonManager* m_skeletonManager = nullptr;
+	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> m_windTypeSkeletons;
 	std::vector<CLodSharedStreamingRange> m_clodSharedStreamingRanges;
 	bool m_clodSharedStreamingRangesDirty = true;
 	mutable std::mutex m_clodStreamingDomainEventsMutex;

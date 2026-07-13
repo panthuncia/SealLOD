@@ -269,11 +269,11 @@ struct ClusterLODVoxelGridOverride
 
 // Builder settings
 
-enum class ClusterLODVoxelFallbackMode : uint8_t
+enum class ClusterLODCoveragePreservationMode : uint8_t
 {
-	Auto,
-	MeshOnly,
-	VoxelOnly,
+	None,
+	PrioritizeEdges,
+	Voxel,
 };
 
 struct ClusterLODBuilderSettings
@@ -289,8 +289,7 @@ struct ClusterLODBuilderSettings
 	float simplifyTangentWeight = 0.01f;
 	float simplifyTangentSignWeight = 0.5f;
 
-	bool enableVoxelFallback = true;
-	ClusterLODVoxelFallbackMode voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+	ClusterLODCoveragePreservationMode coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
 	uint32_t voxelGridBaseResolution = 32u;
 	uint32_t voxelMinResolution = 0u;
 	uint32_t voxelRaysPerCell = 64u;
@@ -324,23 +323,20 @@ inline std::string GetClusterLODEnvironmentVariable(const char* name)
 
 inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(ClusterLODBuilderSettings settings)
 {
-	const std::string modeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_MODE");
+	const std::string modeString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 	if (!modeString.empty())
 	{
-		if (modeString == "mesh" || modeString == "mesh-only")
+		if (modeString == "none")
 		{
-			settings.enableVoxelFallback = false;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::MeshOnly;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::None;
 		}
-		else if (modeString == "auto")
+		else if (modeString == "prioritizeEdges" || modeString == "prioritize-edges")
 		{
-			settings.enableVoxelFallback = true;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
 		}
-		else if (modeString == "voxel" || modeString == "voxel-only")
+		else if (modeString == "voxel")
 		{
-			settings.enableVoxelFallback = true;
-			settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::VoxelOnly;
+			settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::Voxel;
 		}
 	}
 

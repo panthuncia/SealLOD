@@ -401,6 +401,9 @@ public:
 			? m_instanceDrawRecordBuffers->GetBufferSize() / sizeof(InstanceDrawRecordCB)
 			: 0u;
 	}
+	std::span<const std::uint32_t> GetDrawRecordVisibilityGenerations() const {
+		return m_drawRecordVisibilityGenerations;
+	}
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;

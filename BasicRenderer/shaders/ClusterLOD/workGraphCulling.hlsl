@@ -2417,7 +2417,7 @@ void WG_ObjectCull(
 
     if (entryVisible) {
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
@@ -2558,7 +2558,7 @@ void WG_TraverseNodes(
         const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
         const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
@@ -3017,7 +3017,7 @@ void WG_LeafNodes(
         const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
         const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
@@ -3291,9 +3291,9 @@ void ClusterCullBody(
         pageSlabOff = b.pageSlabByteOffset;
 
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(b.instanceIndex);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(b.instanceIndex);
         instanceTransform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, b.assemblyTransformIndex);
-        skinningInstanceSlot = instanceData.skinningInstanceSlot;
+        skinningInstanceSlot = ResolveProceduralWindSkinningSlot(b.instanceIndex, instanceData.skinningInstanceSlot);
         objectModelMatrix = instanceTransform.model;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(b.instanceIndex);

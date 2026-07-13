@@ -60,7 +60,13 @@ std::shared_ptr<Sampler> Sampler::GetDefaultSampler() {
 		samplerDesc.reduction = rhi::ReductionMode::Standard;
 		samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
 
-		m_defaultSampler = Sampler::CreateSampler(samplerDesc);
+		// Headless import/preprocess tools still need material texture metadata,
+		// but have no active GPU descriptor service. Keep the sampler description
+		// CPU-only; GetDescriptorIndex() will materialize it lazily if the asset is
+		// subsequently used by a renderer with an active descriptor service.
+		m_defaultSampler = CanCreateDescriptorSamplers()
+			? Sampler::CreateSampler(samplerDesc)
+			: Sampler::CreateCpuOnlySampler(samplerDesc);
 	}
 	return m_defaultSampler;
 }

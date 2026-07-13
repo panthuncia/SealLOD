@@ -11,7 +11,7 @@
 
 namespace USDMaterialCache {
 
-inline constexpr std::uint32_t kManifestVersion = 2;
+inline constexpr std::uint32_t kManifestVersion = 3;
 
 struct AssemblyMaterialEntry {
 	CLodCacheLoader::MeshCacheIdentity identity;

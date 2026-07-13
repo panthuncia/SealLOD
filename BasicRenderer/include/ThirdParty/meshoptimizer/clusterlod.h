@@ -50,7 +50,7 @@ struct clodConfig
 	// amplify the error of clusters that go through sloppy simplification to account for appearance degradation
 	float simplify_error_factor_sloppy;
 
-	// experimental: limit error by edge length, aiming to remove subpixel triangles even if the attribute error is high
+	// limit error by edge length, aiming to remove subpixel triangles even if the attribute error is high
 	float simplify_error_edge_limit;
 
 	// use permissive simplification instead of regular simplification (make sure to use attribute_protect_mask if this is set!)
@@ -68,6 +68,7 @@ struct clodConfig
 
 	// should clodCluster::indices be optimized for locality; helps with rasterization performance and ray tracing performance in fast-build modes
 	bool optimize_clusters;
+	int optimize_clusters_level;
 };
 
 struct clodMesh
@@ -156,6 +157,21 @@ struct clodBuildParallelConfig
 	clodIteration iteration_callback;
 };
 
+// when using BVH to determine cluster visibility, traverse the tree into nodes while bounds is over error threshold; for leaves,
+// group clusters should be rendered if cluster.refined is -1 *or* clodGroup::simplified for groups[cluster.refined].simplified is at or under error threshold
+struct clodNode
+{
+	// BVH node bounds, reflecting worst case error for all groups in the subtree
+	clodBounds bounds;
+
+	// leaf node: index of the group this node represents (or -1 for internal nodes)
+	int group;
+
+	// internal node: children are at nodes[child_offset..child_offset+child_count)
+	unsigned int child_offset;
+	unsigned int child_count;
+};
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -179,6 +195,17 @@ void clodBuild_iterationTask(void* iteration_context, size_t task_index, unsigne
 // fills triangles[] and vertices[] such that vertices[triangles[i]] == indices[i]
 // returns number of unique vertices (which will be equal to clodCluster::vertex_count)
 size_t clodLocalIndices(unsigned int* vertices, unsigned char* triangles, const unsigned int* indices, size_t index_count);
+
+// upper bound on the number of nodes clodBuildHierarchy can produce
+// level_count is the number of levels in the group DAG (max(clodGroup::depth) + 1)
+size_t clodBuildHierarchyBound(size_t group_count, size_t node_width, size_t level_count);
+
+// build a spatial hierarchy over the groups produced by clodBuild for accelerating cluster visibility
+// level_count is the number of levels in the group DAG (max(clodGroup::depth) + 1)
+// the result is a forest with one tree per DAG level:
+// - nodes 0..level_count-1 are the roots of per-level trees, each covering groups with clodGroup::depth == level
+// - remaining nodes are the tree nodes; each internal node has up to node_width children, and each leaf node refers to a single group
+size_t clodBuildHierarchy(clodNode* nodes, const clodGroup* groups, size_t group_count, size_t node_width, size_t level_count);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -284,13 +311,9 @@ static clodBounds boundsCompute(const clodMesh& mesh, const std::vector<unsigned
 	return result;
 }
 
-static clodBounds boundsMerge(const std::vector<Cluster>& clusters, const std::vector<int>& group)
+static clodBounds boundsMerge(const clodBounds* bounds, size_t count, size_t stride)
 {
-	std::vector<clodBounds> bounds(group.size());
-	for (size_t j = 0; j < group.size(); ++j)
-		bounds[j] = clusters[group[j]].bounds;
-
-	meshopt_Bounds merged = meshopt_computeSphereBounds(&bounds[0].center[0], bounds.size(), sizeof(clodBounds), &bounds[0].radius, sizeof(clodBounds));
+	meshopt_Bounds merged = meshopt_computeSphereBounds(&bounds[0].center[0], count, stride, &bounds[0].radius, stride);
 
 	clodBounds result = {};
 	result.center[0] = merged.center[0];
@@ -300,10 +323,19 @@ static clodBounds boundsMerge(const std::vector<Cluster>& clusters, const std::v
 
 	// merged bounds error must be conservative wrt cluster errors
 	result.error = 0.f;
-	for (size_t j = 0; j < group.size(); ++j)
-		result.error = std::max(result.error, clusters[group[j]].bounds.error);
+	for (size_t j = 0; j < count; ++j)
+		result.error = std::max(result.error, reinterpret_cast<const clodBounds*>(reinterpret_cast<const char*>(bounds) + j * stride)->error);
 
 	return result;
+}
+
+static clodBounds mergeGroups(const std::vector<Cluster>& clusters, const std::vector<int>& group)
+{
+	std::vector<clodBounds> bounds(group.size());
+	for (size_t j = 0; j < group.size(); ++j)
+		bounds[j] = clusters[group[j]].bounds;
+
+	return boundsMerge(bounds.data(), bounds.size(), sizeof(clodBounds));
 }
 
 static std::vector<Cluster> clusterize(const clodConfig& config, const clodMesh& mesh, const unsigned int* indices, size_t index_count)
@@ -346,7 +378,7 @@ static std::vector<Cluster> clusterize(const clodConfig& config, const clodMesh&
 			const meshopt_Meshlet& meshlet = meshlets[i];
 
 			if (config.optimize_clusters)
-				meshopt_optimizeMeshlet(&meshlet_vertices[meshlet.vertex_offset], &meshlet_triangles[meshlet.triangle_offset], meshlet.triangle_count, meshlet.vertex_count);
+				meshopt_optimizeMeshletLevel(&meshlet_vertices[meshlet.vertex_offset], meshlet.vertex_count, &meshlet_triangles[meshlet.triangle_offset], meshlet.triangle_count, config.optimize_clusters_level);
 
 			clusters[i].vertices = meshlet.vertex_count;
 
@@ -610,7 +642,11 @@ static void simplifyFallback(std::vector<unsigned int>& lod, const clodMesh& mes
 		subset[i].z = mesh.vertex_positions[v * positions_stride + 2];
 		subset[i].id = v;
 
-		subset_locks[i] = locks[v];
+		// Sloppy simplification has no priority concept; promote priority vertices to locks so
+		// coverage preservation isn't discarded when the regular simplifier gets stuck.
+		subset_locks[i] = (locks[v] & meshopt_SimplifyVertex_Priority)
+			? static_cast<unsigned char>(locks[v] | meshopt_SimplifyVertex_Lock)
+			: locks[v];
 		lod[i] = unsigned(i);
 	}
 
@@ -756,7 +792,7 @@ static void runIterationTask(IterationContext& context, size_t task_index, unsig
 
 	{
 		ZoneScopedN("clusterlod::runIterationTask::MergeBounds");
-		taskResult.bounds = boundsMerge(clusters, group);
+		taskResult.bounds = mergeGroups(clusters, group);
 	}
 
 	float error = 0.f;
@@ -778,6 +814,16 @@ static void runIterationTask(IterationContext& context, size_t task_index, unsig
 	taskResult.simplified = std::move(simplified);
 	taskResult.threadIndex = thread_index;
 	taskResult.computed = true;
+}
+
+static clodNode mergeNodes(const clodNode* nodes, size_t offset, size_t count)
+{
+	clodNode result = {};
+	result.bounds = boundsMerge(&nodes[offset].bounds, count, sizeof(clodNode));
+	result.group = -1;
+	result.child_offset = unsigned(offset);
+	result.child_count = unsigned(count);
+	return result;
 }
 
 } // namespace clod
@@ -804,6 +850,7 @@ clodConfig clodDefaultConfig(size_t max_triangles)
 	config.cluster_split_factor = 2.0f;
 
 	config.optimize_clusters = true;
+	config.optimize_clusters_level = 1;
 
 	config.simplify_ratio = 0.5f;
 	config.simplify_threshold = 0.85f;
@@ -1053,55 +1100,69 @@ void clodBuild_iterationTask(void* iteration_context, size_t task_index, unsigne
 
 size_t clodLocalIndices(unsigned int* vertices, unsigned char* triangles, const unsigned int* indices, size_t index_count)
 {
-	size_t unique = 0;
+	return meshopt_extractMeshletIndices(vertices, triangles, indices, index_count);
+}
 
-	// direct mapped cache for fast lookups based on low index bits; inspired by vk_lod_clusters from NVIDIA
-	short cache[1024];
-	memset(cache, -1, sizeof(cache));
+size_t clodBuildHierarchyBound(size_t group_count, size_t node_width, size_t level_count)
+{
+	// count nodes for each tree depth; we pad by level_count at each iteration to account for unknown level distribution in the forest
+	size_t total = level_count;
+	for (size_t frontier = group_count; frontier > 1; frontier = (frontier + node_width - 1) / node_width)
+		total += frontier + level_count;
 
-	for (size_t i = 0; i < index_count; ++i)
+	return total;
+}
+
+size_t clodBuildHierarchy(clodNode* nodes, const clodGroup* groups, size_t group_count, size_t node_width, size_t level_count)
+{
+	using namespace clod;
+
+	// reserve space for per-level roots
+	size_t offset = level_count;
+
+	std::vector<clodNode> row(group_count);
+	std::vector<unsigned int> order(group_count);
+
+	for (size_t level = 0; level < level_count; ++level)
 	{
-		unsigned int v = indices[i];
-		unsigned int key = v & (sizeof(cache) / sizeof(cache[0]) - 1);
-		short c = cache[key];
-
-		// fast path: vertex has been seen before
-		if (c >= 0 && vertices[c] == v)
-		{
-			triangles[i] = (unsigned char)c;
-			continue;
-		}
-
-		// fast path: vertex has never been seen before
-		if (c < 0)
-		{
-			cache[key] = short(unique);
-			triangles[i] = (unsigned char)unique;
-			vertices[unique++] = v;
-			continue;
-		}
-
-		// slow path: hash collision with a different vertex, so we need to look through all vertices
-		int pos = -1;
-		for (size_t j = 0; j < unique; ++j)
-			if (vertices[j] == v)
+		// start each tree hierarchy from the groups of that level as leaves
+		row.clear();
+		for (size_t i = 0; i < group_count; ++i)
+			if (groups[i].depth == int(level))
 			{
-				pos = int(j);
-				break;
+				clodNode node = {};
+				node.bounds = groups[i].simplified;
+				node.group = int(i);
+				row.push_back(node);
 			}
 
-		if (pos < 0)
+		// build the tree going up one level at a time, using spatial grouping of centers as a proxy for locality
+		while (row.size() > 1)
 		{
-			pos = int(unique);
-			vertices[unique++] = v;
+			size_t count = row.size();
+			meshopt_spatialClusterPoints(order.data(), row[0].bounds.center, count, sizeof(clodNode), node_width);
+
+			for (size_t i = 0; i < count; ++i)
+				nodes[offset + i] = row[order[i]];
+
+			row.clear();
+			for (size_t i = 0; i < count; i += node_width)
+			{
+				// spatialClusterPoints guarantees that each cluster except for last one is full
+				size_t children = std::min(node_width, count - i);
+				row.push_back(mergeNodes(nodes, offset + i, children));
+			}
+
+			offset += count;
 		}
 
-		cache[key] = short(pos);
-		triangles[i] = (unsigned char)pos;
+		// the root of the current level goes into the fixed section at the beginning
+		assert(row.size() == 1);
+		nodes[level] = row[0];
 	}
 
-	assert(unique <= 256);
-	return unique;
+	assert(offset <= clodBuildHierarchyBound(group_count, node_width, level_count));
+	return offset;
 }
 #endif
 

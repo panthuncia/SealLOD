@@ -96,20 +96,16 @@ namespace
     void ApplySettings(const nlohmann::json& object, ClusterLODBuilderSettings& settings)
     {
         if (!object.is_object()) throw std::runtime_error("override 'settings' must be an object");
-        if (const auto it = object.find("voxelFallbackMode"); it != object.end()) {
+        if (const auto it = object.find("coveragePreservationMode"); it != object.end()) {
             std::string mode = it->get<std::string>();
-            std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (mode == "mesh" || mode == "mesh-only") {
-                settings.enableVoxelFallback = false;
-                settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::MeshOnly;
-            } else if (mode == "auto") {
-                settings.enableVoxelFallback = true;
-                settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
-            } else if (mode == "voxel" || mode == "voxel-only") {
-                settings.enableVoxelFallback = true;
-                settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::VoxelOnly;
+            if (mode == "none") {
+                settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::None;
+            } else if (mode == "prioritizeEdges") {
+                settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
+            } else if (mode == "voxel") {
+                settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::Voxel;
             } else {
-                throw std::runtime_error("voxelFallbackMode must be mesh-only, auto, or voxel-only");
+                throw std::runtime_error("coveragePreservationMode must be none, prioritizeEdges, or voxel");
             }
         }
         ReadSetting(object, "disableSloppyFallback", settings.disableSloppyFallback);
@@ -122,7 +118,6 @@ namespace
         ReadSetting(object, "normalAttributeWeight", settings.normalAttributeWeight);
         ReadSetting(object, "simplifyTangentWeight", settings.simplifyTangentWeight);
         ReadSetting(object, "simplifyTangentSignWeight", settings.simplifyTangentSignWeight);
-        ReadSetting(object, "enableVoxelFallback", settings.enableVoxelFallback);
         ReadSetting(object, "voxelGridBaseResolution", settings.voxelGridBaseResolution);
         ReadSetting(object, "voxelMinResolution", settings.voxelMinResolution);
         ReadSetting(object, "voxelRaysPerCell", settings.voxelRaysPerCell);
@@ -150,8 +145,7 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     settings.normalAttributeWeight = 1.0f;
     settings.simplifyTangentWeight = 0.01f;
     settings.simplifyTangentSignWeight = 0.5f;
-    settings.enableVoxelFallback = true;
-    settings.voxelFallbackMode = ClusterLODVoxelFallbackMode::Auto;
+    settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
     settings.voxelGridBaseResolution = 32u;
     settings.voxelMinResolution = 0u;
     settings.voxelRaysPerCell = 8u;
@@ -178,11 +172,11 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     }
     settings = ApplyClusterLODBuilderEnvironmentOverrides(std::move(settings));
     if (matchedOverride) {
-        const char* mode = settings.voxelFallbackMode == ClusterLODVoxelFallbackMode::MeshOnly ? "mesh-only" :
-            settings.voxelFallbackMode == ClusterLODVoxelFallbackMode::VoxelOnly ? "voxel-only" : "auto";
+        const char* mode = settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::None ? "none" :
+            settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::Voxel ? "voxel" : "prioritizeEdges";
         spdlog::info(
-            "SARP CLod builder override applied: object='{}' voxel_enabled={} voxel_mode='{}' grid={} rays={} scale={}",
-            assetIdentifier, settings.enableVoxelFallback, mode, settings.voxelGridBaseResolution,
+            "SARP CLod builder override applied: object='{}' coverage_preservation_mode='{}' grid={} rays={} scale={}",
+            assetIdentifier, mode, settings.voxelGridBaseResolution,
             settings.voxelRaysPerCell, settings.voxelFallbackScalingFactor);
     }
     return settings;

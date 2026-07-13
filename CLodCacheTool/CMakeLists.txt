@@ -43,7 +43,6 @@ set(CLOD_SHARED_SOURCES
 
     # Utilities
     "${BR_SRC}/Utilities/CachePathUtilities.cpp"
-    "${BR_SRC}/Utilities/mikktspace.cpp"
 
     # Singletons needed by the pipeline
     "${BR_SRC}/Managers/Singletons/TaskSchedulerManager.cpp"
@@ -140,7 +139,7 @@ if(COMMAND basicrenderer_use_release_library_for_debug)
     basicrenderer_use_release_library_for_debug(Tracy::TracyClient)
 endif()
 
-# meshoptimizer is added via ThirdParty/meshoptimizer
+# meshoptimizer is added via ThirdParty/meshoptimizer1.2
 
 # Link libraries
 target_link_libraries(CLodCacheTool PRIVATE

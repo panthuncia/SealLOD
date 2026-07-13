@@ -650,6 +650,8 @@ struct SkinningInstanceGPUInfo {
 };
 
 constexpr uint32_t kSkinningInstanceFlagRowVectorSkinMatrix = 1u << 0;
+constexpr uint32_t kSkinningInstanceFlagProceduralWindType = 1u << 1;
+constexpr uint32_t kProceduralWindTransientSlotBase = 65536u;
 
 struct MeshInstanceClodOffsets
 {

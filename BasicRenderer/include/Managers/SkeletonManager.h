@@ -15,6 +15,12 @@ class BufferView;
 
 class SkeletonManager : public IResourceProvider {
 public:
+	struct TransientWindRegion {
+		uint32_t transformBaseMatrices = 0;
+		uint32_t inverseSkinBaseMatrices = 0;
+		uint32_t capacityMatrices = 0;
+		bool valid = false;
+	};
 	struct ActiveInstanceView {
 		Skeleton* skeleton = nullptr;
 		uint32_t instanceSlot = 0xFFFFFFFFu;
@@ -41,6 +47,8 @@ public:
     void UpdateInstanceTransforms(Skeleton& skinningInstance);
     void UpdateAllDirtyInstances();
 	std::vector<ActiveInstanceView> GetActiveInstanceViews() const;
+	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity);
+	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity);
 
     // IResourceProvider
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -80,7 +88,10 @@ private:
     std::shared_ptr<DynamicBuffer> m_inverseBindMatrices;  // float4x4[]
     std::shared_ptr<DynamicBuffer> m_boneTransforms;       // float4x4[]
     std::shared_ptr<DynamicBuffer> m_inverseSkinMatrices;  // float4x4[]
-    std::shared_ptr<DynamicStructuredBuffer<SkinningInstanceGPUInfo>> m_instanceInfo; // slot -> offsets/count
+	std::shared_ptr<DynamicStructuredBuffer<SkinningInstanceGPUInfo>> m_instanceInfo; // slot -> offsets/count
+	std::unique_ptr<BufferView> m_transientWindTransformsView;
+	std::unique_ptr<BufferView> m_transientWindInverseSkinView;
+	TransientWindRegion m_transientWindRegion{};
 
     // Resource provider map
     std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;

@@ -1125,7 +1125,7 @@ static bool TryConsumeOption(const std::string& arg) {
 
     constexpr const char* reportPrefix = "--clod-report=";
     constexpr const char* tessellationPrefix = "--usd-tessellation-factor=";
-    constexpr const char* modePrefix = "--clod-voxel-mode=";
+    constexpr const char* modePrefix = "--clod-coverage-preservation-mode=";
     constexpr const char* gridPrefix = "--clod-voxel-grid=";
     constexpr const char* minResPrefix = "--clod-voxel-min-res=";
     constexpr const char* raysPrefix = "--clod-voxel-rays=";
@@ -1171,7 +1171,7 @@ static bool TryConsumeOption(const std::string& arg) {
         return true;
     }
 
-    return consumeValue(modePrefix, "BASICRENDERER_CLOD_VOXEL_MODE") ||
+    return consumeValue(modePrefix, "BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE") ||
         consumeValue(gridPrefix, "BASICRENDERER_CLOD_VOXEL_GRID") ||
         consumeValue(minResPrefix, "BASICRENDERER_CLOD_VOXEL_MIN_RES") ||
         consumeValue(raysPrefix, "BASICRENDERER_CLOD_VOXEL_RAYS") ||
@@ -1243,7 +1243,11 @@ static bool ProcessFile(const fs::path& path) {
             // each child already has a disk cache.
             extractOptions.skipCachedClusterLODMeshBuilds = false;
             extractOptions.buildPointInstancerAssemblyCaches = false;
-            extractOptions.buildWholeAssetAssemblyCaches = true;
+            // The material-bucket whole-asset builder in USDLoader owns this
+            // format because it also expands UsdSkel and DynamicWind metadata.
+            // The geometry-only extractor cannot safely publish a manifest for
+            // skinned assets.
+            extractOptions.buildWholeAssetAssemblyCaches = false;
             extractOptions.importSkinningAsRigidBindPose = true;
             USDGeometryExtractor::StageExtractionResult result;
             {
@@ -1398,7 +1402,7 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         spdlog::error("No arguments provided.");
-            std::cerr << "Usage: CLodCacheTool [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-voxel-mode=mesh|auto|voxel] <file1|dir1> [file2|dir2 ...]\n";
+            std::cerr << "Usage: CLodCacheTool [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-coverage-preservation-mode=none|prioritizeEdges|voxel] <file1|dir1> [file2|dir2 ...]\n";
         return 1;
     }
 

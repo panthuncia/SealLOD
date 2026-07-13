@@ -13,6 +13,17 @@ bool IsValidSkinningInstanceSlot(uint skinningInstanceSlot)
     return skinningInstanceSlot != 0xFFFFFFFFu;
 }
 
+uint ResolveProceduralWindSkinningSlot(uint drawRecordIndex, uint sourceSlot)
+{
+    if (!IsValidSkinningInstanceSlot(sourceSlot)) return sourceSlot;
+    StructuredBuffer<SkinningInstanceGPUInfo> infos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::SkinningInstanceInfo)];
+    SkinningInstanceGPUInfo source = infos[sourceSlot];
+    if ((source.flags & 2u) == 0u) return sourceSlot;
+    uint transientSlot = 65536u + drawRecordIndex;
+    return infos[transientSlot].boneCount != 0u ? transientSlot : 0xFFFFFFFFu;
+}
+
 uint ResolveAssemblyBoneIndex(
     uint localJointId,
     CLodMeshMetadata metadata,

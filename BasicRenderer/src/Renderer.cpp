@@ -668,6 +668,7 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
 	m_pViewManager->SetIndirectCommandBufferManager(m_pIndirectCommandBufferManager.get()); // View manager needs to make indirect command buffers
     m_pMeshManager->SetViewManager(m_pViewManager.get());
 	m_pSkeletonManager = SkeletonManager::CreateUnique();
+	m_pMeshManager->SetSkeletonManager(m_pSkeletonManager.get());
     m_pTextureFactory = TextureFactory::CreateUnique();
     m_clodRayTracingSystem = std::make_unique<br::render::CLodRayTracingSystem>();
     if (currentRenderGraph) {

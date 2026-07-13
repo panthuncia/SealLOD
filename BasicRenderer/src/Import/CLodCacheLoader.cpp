@@ -23,16 +23,16 @@ namespace CLodCacheLoader {
 namespace {
 	constexpr const char* kFullMeshSubsetSentinel = "__clod_full_mesh__";
 
-	const char* ToVoxelFallbackModeString(ClusterLODVoxelFallbackMode mode)
+	const char* ToCoveragePreservationModeString(ClusterLODCoveragePreservationMode mode)
 	{
 		switch (mode)
 		{
-		case ClusterLODVoxelFallbackMode::Auto:
-			return "auto";
-		case ClusterLODVoxelFallbackMode::MeshOnly:
-			return "mesh-only";
-		case ClusterLODVoxelFallbackMode::VoxelOnly:
-			return "voxel-only";
+		case ClusterLODCoveragePreservationMode::None:
+			return "none";
+		case ClusterLODCoveragePreservationMode::PrioritizeEdges:
+			return "prioritizeEdges";
+		case ClusterLODCoveragePreservationMode::Voxel:
+			return "voxel";
 		default:
 			return "unknown";
 		}
@@ -150,19 +150,18 @@ namespace {
 			const ClusterLODBuilderSettings effectiveSettings =
 				ApplyClusterLODBuilderEnvironmentOverrides(GetDefaultBuilderSettings());
 			spdlog::info(
-				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} voxel_enabled={} voxel_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
+				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} coverage_preservation_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
 				buildHash,
 				!effectiveSettings.disableSloppyFallback,
 				effectiveSettings.sloppyFallbackErrorFactor,
-				effectiveSettings.enableVoxelFallback,
-				ToVoxelFallbackModeString(effectiveSettings.voxelFallbackMode),
+				ToCoveragePreservationModeString(effectiveSettings.coveragePreservationMode),
 				effectiveSettings.voxelGridBaseResolution,
 				effectiveSettings.voxelRaysPerCell,
 				effectiveSettings.voxelFallbackScalingFactor,
 				effectiveSettings.voxelFallbackOpacityThreshold,
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_MODE"),
+				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_GRID"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_RAYS"),
 				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SCALE"),

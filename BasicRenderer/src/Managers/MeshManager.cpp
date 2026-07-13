@@ -9,6 +9,7 @@
 #include "Resources/ResourceGroup.h"
 #include "Resources/Buffers/BufferView.h"
 #include "Mesh/MeshInstance.h"
+#include "Managers/SkeletonManager.h"
 #include "Resources/Buffers/DynamicBuffer.h"
 #include "Resources/Buffers/PagePool.h"
 #include "Managers/ViewManager.h"
@@ -1026,6 +1027,31 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 			row.boundingSphere = request.mesh->GetPerMeshCBData().boundingSphere;
 			row.skinningInstanceSlot = 0xFFFFFFFFu;
 			row.skinnedBoundsScale = 1.0f;
+			if ((request.mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u &&
+				(!request.mesh->HasBaseSkin() || !request.mesh->GetBaseSkin()->HasWindSimulationGroups())) {
+				static std::atomic_uint32_t loggedMissingWindSkin{ 0u };
+				if (loggedMissingWindSkin.fetch_add(1u, std::memory_order_relaxed) < 16u) {
+					spdlog::info("MeshManager: skinned static template hasBaseSkin={} windGroups={}.",
+						request.mesh->HasBaseSkin(),
+						request.mesh->HasBaseSkin() && request.mesh->GetBaseSkin()->HasWindSimulationGroups());
+				}
+			}
+			if (m_skeletonManager && request.mesh->HasBaseSkin() &&
+				request.mesh->GetBaseSkin()->HasWindSimulationGroups()) {
+				const auto& base = request.mesh->GetBaseSkin();
+				auto [it, inserted] = m_windTypeSkeletons.try_emplace(base.get());
+				if (inserted || !it->second) {
+					it->second = base->CopySkeleton();
+					m_skeletonManager->AcquireSkinningInstance(it->second);
+				}
+				row.skinningInstanceSlot = it->second->GetSkinningInstanceSlot();
+				row.skinnedBoundsScale = it->second->GetCurrentAnimationConservativeBoundsScale();
+				if (inserted) {
+					spdlog::info(
+						"MeshManager: registered static procedural-wind template type slot={} bones={}.",
+						row.skinningInstanceSlot, it->second->GetBoneCount());
+				}
+			}
 			row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
 
 			std::shared_ptr<CLodSharedStreamingState> sharedState;

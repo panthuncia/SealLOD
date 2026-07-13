@@ -1116,7 +1116,9 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
     setup.meshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
-    setup.meshInstanceBuffer = LoadMeshTemplateForDrawRecord(drawRecord);
+    setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
+    setup.meshInstanceBuffer.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+        drawRecordIndex, setup.meshInstanceBuffer.skinningInstanceSlot);
     setup.viewID = CLodVisibleClusterViewID(packedCluster);
     setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
     setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);

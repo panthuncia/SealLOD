@@ -6982,6 +6982,76 @@ namespace USDLoader {
 			loadingCache.textureSearchRoots.push_back(stageContext.directory);
 		}
 
+		// Payload imports are the path used by SARP asset overrides.  Keep them on
+		// the same whole-asset assembly path as scene imports so skinned assembly
+		// caches retain their expanded skeleton and DynamicWind metadata.
+		const UsdTimeCode assemblyTimeCode = GetUsdGeometrySampleTime(stage);
+		UsdSkelCache assemblySkelCache;
+		std::string assemblyFallbackReason;
+		auto assemblyBuckets = DiscoverAssetAssemblyBuckets(
+			stage,
+			assemblySkelCache,
+			stageContext.metersPerUnit,
+			assemblyTimeCode,
+			importSettings,
+			&assemblyFallbackReason);
+		if (!assemblyBuckets.empty()) {
+			std::vector<std::shared_ptr<Mesh>> assemblyMeshes;
+			PreprocessAllMeshes(
+				stage,
+				stageContext.metersPerUnit,
+				stageContext.directory,
+				stageContext.isUSDZ,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				true);
+			if (BuildAssetAssemblyMeshesFromPreprocessedData(
+				stage,
+				stageContext,
+				importSettings,
+				options,
+				options.sourceIdentifier,
+				assemblyTimeCode,
+				assemblyBuckets,
+				assemblyMeshes)) {
+				ImportedAssetPayload payload;
+				RenderablePartPayload part;
+				part.localMatrix = DirectX::XMMatrixIdentity();
+				part.name = "__CLodAssetAssembly";
+				std::vector<USDMaterialCache::AssemblyMaterialEntry> manifest;
+				manifest.reserve(assemblyMeshes.size());
+				for (size_t i = 0; i < assemblyMeshes.size(); ++i) {
+					auto& mesh = assemblyMeshes[i];
+					if (!mesh) continue;
+					payload.meshes.push_back(mesh);
+					part.meshes.push_back(mesh);
+					if (i < assemblyBuckets.size()) {
+						if (auto identity = BuildAssetAssemblyIdentity(
+							stage, options.sourceIdentifier, assemblyTimeCode, assemblyBuckets[i])) {
+							manifest.push_back(USDMaterialCache::AssemblyMaterialEntry{
+								.identity = std::move(*identity),
+								.material = mesh->material->ToCacheDescription(),
+							});
+						}
+					}
+				}
+				payload.parts.push_back(std::move(part));
+				if (manifest.size() == payload.meshes.size()) {
+					USDMaterialCache::SaveAssemblyMaterialManifest(options.sourceIdentifier, manifest);
+				}
+				spdlog::info(
+					"USD payload whole-asset CLod assembly built: source='{}' buckets={} renderables={}.",
+					options.sourceIdentifier, assemblyBuckets.size(), payload.meshes.size());
+				loadingCache.Clear();
+				return payload;
+			}
+			spdlog::warn(
+				"USD payload whole-asset assembly build failed for '{}': {}",
+				options.sourceIdentifier,
+				assemblyFallbackReason.empty() ? "builder produced no renderables" : assemblyFallbackReason);
+		}
+
 		try {
 			UsdSkelCache skelCache;
 
@@ -7091,11 +7161,18 @@ namespace USDLoader {
 				}
 				LoadSourcePathTextures(entry.material, {}, importSettings.loadMaterialTextures);
 				auto material = Material::CreateShared(entry.material);
-				MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
-				auto mesh = ingest.Build(material, std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
+				const auto cachedJointCount = prebuilt->assemblySkeleton.jointNames.size();
+				const auto cachedWindGroupCount = prebuilt->assemblySkeleton.windSimulationGroupIndices.size();
+				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuilt), material, nullptr);
 				if (!mesh) {
 					loadingCache.Clear();
 					return std::nullopt;
+				}
+				if (cachedJointCount != 0u) {
+					spdlog::info(
+						"USD cached material assembly skeleton restored: source='{}' material='{}' joints={} windGroups={} hasBaseSkin={} windEnabled={}.",
+						options.sourceIdentifier, entry.material.name, cachedJointCount, cachedWindGroupCount,
+						mesh->HasBaseSkin(), mesh->HasBaseSkin() && mesh->GetBaseSkin()->HasWindSimulationGroups());
 				}
 				payload.meshes.push_back(mesh);
 				part.meshes.push_back(std::move(mesh));

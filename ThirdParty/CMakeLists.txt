@@ -1,6 +1,6 @@
 add_subdirectory("Streamline")
 add_subdirectory("pix")
-add_subdirectory("meshoptimizer")
+add_subdirectory("meshoptimizer1.2")
 
 if(WIN32 AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/NVPerf/include/nvperf_host.h")
     add_library(NVPerf::Host UNKNOWN IMPORTED GLOBAL)
