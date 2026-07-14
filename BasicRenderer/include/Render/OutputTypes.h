@@ -70,6 +70,8 @@ enum OutputType {
 	CLOD_ASSEMBLY_VOXEL_INHERITANCE = 66,
 	CLOD_ASSEMBLY_PARTS = 67,
 	SKELETONS = 68,
+	SKELETON_BOUNDING_SPHERES = 69,
+	VOXEL_UV_DENSITY = 70,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -142,4 +144,6 @@ inline std::vector<std::string> OutputTypeNames = {
 	"CLod assembly voxel inheritance",
 	"CLod assembly parts",
 	"Skeletons",
+	"Skeleton Bounding Spheres",
+	"Voxel UV Density",
 };

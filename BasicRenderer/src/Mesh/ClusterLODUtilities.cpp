@@ -232,6 +232,7 @@ namespace
 			metadata.aabbMaxAndError.y,
 			metadata.aabbMaxAndError.z);
 		outPayload.voxelWidth = metadata.aabbMinAndVoxelWidth.w;
+		outPayload.uvDensity = metadata.uvDensity;
 		outPayload.activeCells.clear();
 		outPayload.activeCells.reserve(activeCellCount);
 
@@ -4457,6 +4458,7 @@ namespace
 			aabbMin.y + voxelWidth * static_cast<float>(resolution),
 			aabbMin.z + voxelWidth * static_cast<float>(resolution));
 		result.voxelWidth = voxelWidth;
+		result.uvDensity = sourcePayload.uvDensity;
 
 		struct DownsampleCellAccum
 		{

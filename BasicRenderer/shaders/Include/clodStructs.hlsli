@@ -263,8 +263,7 @@ struct CLodVoxelClusterRecord
     float4 bounds;
     float4 aabbMinAndVoxelWidth;
     uint resolution;
-    uint reserved0;
-    uint reserved1;
+    float2 uvDensity;
     uint reserved2;
 };
 
@@ -398,8 +397,7 @@ CLodVoxelClusterRecord CLodLoadVoxelClusterFromPage(uint slabDescriptorIndex, ui
     cluster.bounds = asfloat(d1);
     cluster.aabbMinAndVoxelWidth = asfloat(d2);
     cluster.resolution = d3.x;
-    cluster.reserved0 = d3.y;
-    cluster.reserved1 = d3.z;
+    cluster.uvDensity = asfloat(d3.yz);
     cluster.reserved2 = d3.w;
     return cluster;
 }
@@ -496,7 +494,7 @@ CLodVoxelAttributeSample CLodLoadVoxelAttributeSampleFromPage(GroupPageMapEntry 
     const uint addr = pageEntry.slabByteOffset + pageHeader.attributeSamplesOffset + attributeIndex * attributeStride;
     sample.sggxAxisAndSigmas = asfloat(slab.Load4(addr));
     sample.opacity = asfloat(slab.Load(addr + 16u));
-    sample.uv = attributeStride >= 28u ? asfloat(slab.Load2(addr + 20u)) : float2(0.0f, 0.0f);
+    sample.uv = asfloat(slab.Load2(addr + 20u));
     return sample;
 }
 

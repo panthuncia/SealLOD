@@ -460,12 +460,6 @@ float Sample2DGrad(Texture2D<float> tex, SamplerState samp, float2 uv, float2 dU
     return tex.SampleGrad(samp, uv, dUVdx, dUVdy);
 }
 
-uint ComputeTextureMipCountFromDimensions(uint width, uint height)
-{
-    const uint maxDimension = max(width, height);
-    return maxDimension > 0u ? (1u + firstbithigh(maxDimension)) : 1u;
-}
-
 float ComputeMaterialSelectedMipLod(float2 texelDdx, float2 texelDdy)
 {
     const float maxFootprintSq = max(dot(texelDdx, texelDdx), dot(texelDdy, texelDdy));
@@ -557,11 +551,12 @@ void RecordMaterialSelectedMipDebug(
     bool hasStreamingInfo,
     uint width,
     uint height,
+	uint resourceMipCount,
     float2 dUVdx,
     float2 dUVdy)
 {
     uint residentTopMip = 0u;
-    uint totalMipCount = ComputeTextureMipCountFromDimensions(width, height);
+	uint totalMipCount = max(resourceMipCount, 1u);
     float2 texelScale = float2((float)width, (float)height);
     if (hasStreamingInfo)
     {
@@ -591,8 +586,9 @@ float4 SampleResidentMaterialTexture2DGrad(
     {
         uint width;
         uint height;
-        tex.GetDimensions(width, height);
-        RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, dUVdx, dUVdy);
+		uint mipCount;
+		tex.GetDimensions(0u, width, height, mipCount);
+		RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, mipCount, dUVdx, dUVdy);
     }
 
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
@@ -609,7 +605,8 @@ float4 SampleStreamingMaterialTexture2DGrad(
 {
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
 
     const bool hasStreamingInfo = streamingTextureID != 0u;
     TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
@@ -624,7 +621,7 @@ float4 SampleStreamingMaterialTexture2DGrad(
 
     if (ShouldTrackMaterialSelectedMipDebug())
     {
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, dUVdx, dUVdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, dUVdx, dUVdy);
     }
 
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
@@ -692,8 +689,9 @@ float SampleResidentMaterialTexture2DGrad(
     {
         uint width;
         uint height;
-        tex.GetDimensions(width, height);
-        RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, dUVdx, dUVdy);
+		uint mipCount;
+		tex.GetDimensions(0u, width, height, mipCount);
+		RecordMaterialSelectedMipDebug(feedback, (TextureStreamingGPUInfo)0, false, width, height, mipCount, dUVdx, dUVdy);
     }
 
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
@@ -710,7 +708,8 @@ float SampleStreamingMaterialTexture2DGrad(
 {
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
 
     const bool hasStreamingInfo = streamingTextureID != 0u;
     TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
@@ -725,7 +724,7 @@ float SampleStreamingMaterialTexture2DGrad(
 
     if (ShouldTrackMaterialSelectedMipDebug())
     {
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, dUVdx, dUVdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, dUVdx, dUVdy);
     }
 
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
@@ -785,7 +784,8 @@ float ObjectReyesSampleAtlasHeightSmooth(Texture2D<float4> tex, SamplerState sam
 {
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
     const float2 texel = float2(1.0f, 1.0f) / max(float2((float)width, (float)height), float2(1.0f, 1.0f));
     uv = saturate(uv);
 
@@ -951,7 +951,8 @@ void RecordObjectSurfaceTriplanarTextureAccess(
 
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+    uint mipCount;
+    tex.GetDimensions(0u, width, height, mipCount);
 
     TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
     if (hasStreamingInfo)
@@ -975,9 +976,9 @@ void RecordObjectSurfaceTriplanarTextureAccess(
 
     if (trackMipDebug)
     {
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, xDdx, xDdy);
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, yDdx, yDdy);
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, zDdx, zDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, xDdx, xDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, yDdx, yDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, zDdx, zDdy);
     }
 }
 
@@ -1001,7 +1002,8 @@ void RecordObjectSurfaceTriplanarTextureAccess(
 
     uint width;
     uint height;
-    tex.GetDimensions(width, height);
+	uint mipCount;
+	tex.GetDimensions(0u, width, height, mipCount);
 
     TextureStreamingGPUInfo streamingInfo = (TextureStreamingGPUInfo)0;
     if (hasStreamingInfo)
@@ -1025,9 +1027,9 @@ void RecordObjectSurfaceTriplanarTextureAccess(
 
     if (trackMipDebug)
     {
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, xDdx, xDdy);
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, yDdx, yDdy);
-        RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, zDdx, zDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, xDdx, xDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, yDdx, yDdy);
+		RecordMaterialSelectedMipDebug(feedback, streamingInfo, hasStreamingInfo, width, height, mipCount, zDdx, zDdy);
     }
 }
 

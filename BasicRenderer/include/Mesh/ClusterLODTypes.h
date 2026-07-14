@@ -159,6 +159,7 @@ struct VoxelGroupPayload
 	DirectX::XMFLOAT3 aabbMin{};
 	DirectX::XMFLOAT3 aabbMax{};
 	float voxelWidth = 0.0f;
+	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
 	std::vector<VoxelCell> activeCells;
 };
 
@@ -172,8 +173,7 @@ struct VoxelGroupPackedMetadata
 	uint32_t cubeCount = 0;
 	uint32_t resolution = 0;
 	uint32_t flags = 0;
-	uint32_t reserved0 = 0;
-	uint32_t reserved1 = 0;
+	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
 };
 
 struct VoxelGroupMapping

@@ -680,7 +680,8 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
     TextureInitialData initialData,
     std::string_view debugName,
     bool preserveAlphaCoverage,
-    bool forceSrgbMipEncoding)
+    bool forceSrgbMipEncoding,
+    uint32_t maxMipLevels)
     const {
     if (initialData.Empty()) {
         throw std::runtime_error("CreateAlwaysResidentPixelBuffer: initialData is empty. Use PixelBuffer::CreateShared for data-less textures.");
@@ -707,7 +708,10 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
         // Build full imageDimensions for *all* subresources so UploadTextureData can compute pitches safely.
         const uint32_t faces = desc.isCubemap ? 6u : 1u;
         const uint32_t slices = faces * uint32_t(desc.arraySize);
-        const uint32_t mipLevels = CalcMipCount(baseW, baseH);
+        const uint32_t fullMipLevels = CalcMipCount(baseW, baseH);
+        const uint32_t mipLevels = maxMipLevels == 0u
+            ? fullMipLevels
+            : (std::min)(fullMipLevels, maxMipLevels);
 
         desc.imageDimensions.resize(size_t(slices) * mipLevels);
         for (uint32_t s = 0; s < slices; ++s) {
@@ -818,10 +822,16 @@ bool TextureFactory::SubmitBC7CompressionJob(
         TextureInitialData::FromBytes(preparedSourceData->subresources),
         jobName.empty() ? std::string_view("Texture[BC7Working]") : std::string_view(jobName),
         preserveAlphaCoverage,
-        requestMeta.preferSRGB);
+        requestMeta.preferSRGB,
+        requestMeta.processing.maxMipLevels);
 
+    const uint32_t fullGeneratedMipLevels = CalcMipCount(
+        preparedSourceData->desc.imageDimensions[0].width,
+        preparedSourceData->desc.imageDimensions[0].height);
     const uint32_t generatedMipLevels = workingDesc.generateMipMaps
-        ? CalcMipCount(preparedSourceData->desc.imageDimensions[0].width, preparedSourceData->desc.imageDimensions[0].height)
+        ? (requestMeta.processing.maxMipLevels == 0u
+            ? fullGeneratedMipLevels
+            : (std::min)(fullGeneratedMipLevels, requestMeta.processing.maxMipLevels))
         : preparedMipLevels;
     if (workingTexture->GetMipLevels() != generatedMipLevels) {
         spdlog::error(
@@ -832,11 +842,14 @@ bool TextureFactory::SubmitBC7CompressionJob(
         return false;
     }
 
-    const uint32_t compressedMipLevels = preserveAlphaCoverage && requestMeta.processing.requestMipChain
+    const uint32_t requestedCompressedMipLevels = preserveAlphaCoverage && requestMeta.processing.requestMipChain
         ? CalcAlphaCoverageExportMipCount(
             preparedSourceData->desc.imageDimensions[0].width,
             preparedSourceData->desc.imageDimensions[0].height)
         : generatedMipLevels;
+    const uint32_t compressedMipLevels = requestMeta.processing.maxMipLevels == 0u
+        ? requestedCompressedMipLevels
+        : (std::min)(requestedCompressedMipLevels, requestMeta.processing.maxMipLevels);
 
     TextureSourceData compressionLayoutSource = *preparedSourceData;
     if (compressionLayoutSource.desc.imageDimensions.size() != compressedMipLevels) {

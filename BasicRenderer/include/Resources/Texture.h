@@ -70,6 +70,8 @@ struct TextureProcessingSettings {
     bool preferSRGB = false;
     bool preservePackedChannels = false;
     NormalMapConvention normalConvention = NormalMapConvention::DirectX;
+	// Zero retains the complete chain. A value N retains mip indices [0, N).
+	uint32_t maxMipLevels = 0;
     std::string sourceIdentity;
 };
 
@@ -292,6 +294,9 @@ public:
     std::shared_ptr<PixelBuffer> ImagePtr() const { return m_image; }
 
     Sampler& SamplerState() const { return *m_sampler; }
+	void SetSampler(std::shared_ptr<Sampler> sampler) {
+		m_sampler = sampler ? std::move(sampler) : Sampler::GetDefaultSampler();
+	}
     UINT SamplerDescriptorIndex() const { return m_sampler->GetDescriptorIndex(); }
 
     const TextureFileMeta& Meta() const { return m_meta; }

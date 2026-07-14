@@ -69,8 +69,6 @@ float4 PSMain(SkeletonLineVertex input) : SV_Target
 
 float4 PSWindMain(SkeletonLineVertex input) : SV_Target
 {
-    RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[UintRootConstant8];
-    InterlockedAdd(diagnostics[18], 1u);
     return input.color;
 }
 
@@ -98,7 +96,6 @@ static const uint kWindInverseBind = UintRootConstant4;
 static const uint kWindSkinInfo = UintRootConstant5;
 static const uint kWindPerFrame = UintRootConstant6;
 static const uint kWindCameras = UintRootConstant7;
-static const uint kWindDiagnostics = UintRootConstant8;
 static const uint kWindTypeId = IndirectCommandSignatureRootConstant0;
 static const uint kInvalidWindBone = 0xffffffffu;
 
@@ -225,9 +222,16 @@ float3 WindDebugJointPosition(
 float4 WindDebugSimulationGroupColor(uint simulationGroup)
 {
     if (simulationGroup == 0xFFFFFFFFu)
-        return float4(0.55f, 0.55f, 0.55f, 1.0f);
+        return float4(0.32f, 0.34f, 0.38f, 1.0f);
 
-    return float4(max(HashToColor(simulationGroup + 17u), 0.18f.xxx), 1.0f);
+    // Golden-ratio hue stepping keeps adjacent and arbitrary group IDs distinct.
+    // Fixed high saturation avoids the pale low-contrast colors produced by
+    // hashing the three RGB channels independently.
+    const float hue = frac((float(simulationGroup) + 1.0f) * 0.61803398875f);
+    const float3 hueRgb = saturate(
+        abs(frac(hue + float3(0.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f - 3.0f) - 1.0f);
+    const float3 color = 0.95f * lerp(1.0f.xxx, hueRgb, 0.88f);
+    return float4(color, 1.0f);
 }
 
 [outputtopology("line")]
@@ -243,11 +247,6 @@ void MSWindMain(
     const uint boneIndex = groupID.x * 64u + groupThreadID;
     const uint groupBoneBase = groupID.x * 64u;
     const uint groupBoneCount = groupBoneBase < type.boneCount ? min(64u, type.boneCount - groupBoneBase) : 0u;
-    RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[kWindDiagnostics];
-    if (groupThreadID == 0u) {
-        InterlockedAdd(diagnostics[14], 1u);
-        InterlockedAdd(diagnostics[15], groupBoneCount);
-    }
     SetMeshOutputCounts(groupBoneCount * 2u, groupBoneCount);
     if (boneIndex >= type.boneCount) return;
 
@@ -286,19 +285,4 @@ void MSWindMain(
     outputVertices[vertexBase] = startVertex;
     outputVertices[vertexBase + 1u] = endVertex;
     outputLines[outputIndex] = uint2(vertexBase, vertexBase + 1u);
-    const bool finiteClip = all(isfinite(startVertex.position)) && all(isfinite(endVertex.position));
-    if (emit && finiteClip && startVertex.position.w > 0.0f && endVertex.position.w > 0.0f) {
-        InterlockedAdd(diagnostics[16], 1u);
-        const bool startOnScreen = abs(startVertex.position.x) <= startVertex.position.w && abs(startVertex.position.y) <= startVertex.position.w;
-        const bool endOnScreen = abs(endVertex.position.x) <= endVertex.position.w && abs(endVertex.position.y) <= endVertex.position.w;
-        if (startOnScreen || endOnScreen) InterlockedAdd(diagnostics[17], 1u);
-        if (groupID.x == 0u && groupID.y == 0u && groupThreadID == 1u) {
-            diagnostics[19] = asuint(start.x); diagnostics[20] = asuint(start.y);
-            diagnostics[21] = asuint(end.x); diagnostics[22] = asuint(end.y); diagnostics[23] = asuint(end.z);
-            diagnostics[24] = asuint(startVertex.position.x); diagnostics[25] = asuint(startVertex.position.y);
-            diagnostics[26] = asuint(startVertex.position.z); diagnostics[27] = asuint(startVertex.position.w);
-            diagnostics[28] = asuint(endVertex.position.x); diagnostics[29] = asuint(endVertex.position.y);
-            diagnostics[30] = asuint(endVertex.position.z); diagnostics[31] = asuint(endVertex.position.w);
-        }
-    }
 }

@@ -190,8 +190,7 @@ struct CLodVoxelClusterRecord
 	DirectX::XMFLOAT4 bounds = {};
 	DirectX::XMFLOAT4 aabbMinAndVoxelWidth = {}; // xyz=min, w=voxel width
 	uint32_t resolution = 0;
-	uint32_t reserved0 = 0;
-	uint32_t reserved1 = 0;
+	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
 	uint32_t reserved2 = 0;
 };
 static_assert(sizeof(CLodVoxelClusterRecord) == 64, "CLodVoxelClusterRecord must be 64 bytes");

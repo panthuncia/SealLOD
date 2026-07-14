@@ -2584,7 +2584,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				sourceDataToUpload->desc,
 				TextureFactory::TextureInitialData::FromBytes(sourceDataToUpload->subresources),
 				m_name,
-				ShouldPreserveAlphaCoverage(m_meta, sourceDataToUpload->desc));
+				ShouldPreserveAlphaCoverage(m_meta, sourceDataToUpload->desc),
+				false,
+				m_meta.processing.maxMipLevels);
 		}
 		if (!m_image || !m_image->HasValidBackingResource()) {
 			return false;
@@ -2918,7 +2920,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						sourceData->desc,
 						TextureFactory::TextureInitialData::FromBytes(sourceData->subresources),
 						m_name,
-						ShouldPreserveAlphaCoverage(m_meta, sourceData->desc));
+						ShouldPreserveAlphaCoverage(m_meta, sourceData->desc),
+						false,
+						m_meta.processing.maxMipLevels);
 				}
 				m_hasUploadedFinalImage = true;
 				m_hasUploadedPlaceholder = false;
@@ -3214,7 +3218,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 							fallbackSourceData->desc,
 							TextureFactory::TextureInitialData::FromBytes(fallbackSourceData->subresources),
 							m_name,
-							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc));
+							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
+							false,
+							m_meta.processing.maxMipLevels);
 						RefreshStreamingStateFromDescription();
 						SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
 						SetPendingTopMip(desiredResidentTopMip);
@@ -3256,7 +3262,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						fallbackSourceData->desc,
 						TextureFactory::TextureInitialData::FromBytes(fallbackSourceData->subresources),
 						m_name,
-						ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc));
+						ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
+						false,
+						m_meta.processing.maxMipLevels);
 				}
 				RefreshStreamingStateFromDescription();
 				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
@@ -3359,7 +3367,9 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				immediateSourceData->desc,
 				TextureFactory::TextureInitialData::FromBytes(immediateSourceData->subresources),
 				m_name,
-				ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc));
+				ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc),
+				false,
+				m_meta.processing.maxMipLevels);
 		}
 		RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture uploaded through TextureFactory without preprocessing");
 		m_hasUploadedFinalImage = true;

@@ -22,10 +22,8 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstring>
-#include <cstdlib>
 #include <unordered_map>
 #include <vector>
 
@@ -38,12 +36,6 @@ constexpr std::uint32_t kTransientBoneCapacity = 262144u;
 constexpr std::uint32_t kLatePhaseBit = 0x80000000u;
 constexpr std::uint32_t kDepthDescriptorMask = 0x7fffffffu;
 constexpr std::uint32_t kWindBoneFlagTrunk = 1u << 0u;
-
-bool ForceWindSkeletonDebugEnabled()
-{
-    const char* value = std::getenv("SARP_WIND_SKELETON_DEBUG");
-    return value != nullptr && value[0] != '\0' && value[0] != '0';
-}
 
 struct WindBoneGPU {
     std::uint32_t skinningSlot = 0u;
@@ -165,15 +157,6 @@ struct WindSharedResources {
                 std::memcpy(c.data(), result.data.data(), (std::min)(result.data.size(), sizeof(c)));
                 spdlog::info("ProceduralWind GPU telemetry: allocatedBones={} commands={} capacityRejects={} bucketOverflow={} allocatedAssemblies={} livePlacements={} stalePlacements={} frustumRejected={} distanceRejected={} visibleBucketed={} deferred={} deferredWritten={} lateOccluded={} lateAccepted={} deferredOverflow={}.",
                     c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]);
-            }, QueueKind::Copy);
-        readbackService->RequestReadbackCapture("ProceduralWind::DebugActiveSkeletons", diagnostics.get(), {},
-            [](ReadbackCaptureResult&& result) {
-                if (result.data.size() < 32u * sizeof(std::uint32_t)) return;
-                std::array<std::uint32_t, 32> d{}; std::memcpy(d.data(), result.data.data(), sizeof(d));
-                spdlog::info("ProceduralWind GPU sample: modelScale=[{:.3f},{:.3f},{:.3f}] rootWS=[{:.3f},{:.3f},{:.3f}] transform={} type={} firstSkinTranslation=[{:.3f},{:.3f},{:.3f}] finite={} finiteBoneWrites={} nonFiniteBoneWrites={} debugMeshGroups={} debugBones={} debugFrontFacingLines={} debugOnScreenLines={} debugPixelInvocations={}.",
-                    std::bit_cast<float>(d[0]), std::bit_cast<float>(d[1]), std::bit_cast<float>(d[2]),
-                    std::bit_cast<float>(d[3]), std::bit_cast<float>(d[4]), std::bit_cast<float>(d[5]), d[6], d[7],
-                    std::bit_cast<float>(d[8]), std::bit_cast<float>(d[9]), std::bit_cast<float>(d[10]), d[11], d[12], d[13], d[14], d[15], d[16], d[17], d[18]);
             }, QueueKind::Copy);
     }
 
@@ -654,7 +637,6 @@ public:
             Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::InstanceDrawRecordBuffer,
             Builtin::PerMeshInstanceBuffer, Builtin::PerInstanceTransformBuffer, Builtin::CameraBuffer)
-            .WithUnorderedAccess(m_resources->diagnostics)
             .WithConstantBuffer(Builtin::PerFrameBuffer)
             .WithIndirectArguments(m_resources->indirectCommands, m_resources->allocationCounters)
             .WithRenderTarget(Builtin::Backbuffer);
@@ -663,26 +645,16 @@ public:
     PassReturn Execute(PassExecutionContext& context) override
     {
         const auto outputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")();
-        const bool enabled = outputType == static_cast<unsigned int>(OutputType::SKELETONS) || ForceWindSkeletonDebugEnabled();
-        if (!m_loggedMode) {
-            spdlog::info("ProceduralWind skeleton debug: outputType={} skeletonOutput={} envOverride={} typeSlots={}.",
-                outputType, outputType == static_cast<unsigned int>(OutputType::SKELETONS), ForceWindSkeletonDebugEnabled(), m_resources->typeCount);
-            m_loggedMode = true;
-        }
-        if (!enabled || !m_resources->typeCount) return {};
-        if (!m_loggedDispatch) {
-            spdlog::info("ProceduralWind skeleton debug: executing GPU indirect mesh dispatch over typeSlots={} (command count from allocationCounters[1])",
-                m_resources->typeCount);
-            m_loggedDispatch = true;
-        }
+        const bool drawSkeletons = outputType == static_cast<unsigned int>(OutputType::SKELETONS);
+        const bool drawBoundingSpheres = outputType == static_cast<unsigned int>(OutputType::SKELETON_BOUNDING_SPHERES);
+        if ((!drawSkeletons && !drawBoundingSpheres) || !m_resources->typeCount) return {};
         auto* rc = context.hostData->Get<RenderContext>(); auto& cmd = context.commandList;
         cmd.SetDescriptorHeaps(rc->textureDescriptorHeap.GetHandle(), rc->samplerDescriptorHeap.GetHandle());
         rhi::PassBeginInfo pass{}; rhi::ColorAttachment color{};
         color.rtv = { rc->rtvHeap.GetHandle(), rc->frameIndex }; color.loadOp = rhi::LoadOp::Load; color.storeOp = rhi::StoreOp::Store;
         pass.colors = { &color }; pass.width = rc->outputResolution.x; pass.height = rc->outputResolution.y; pass.debugName = "Wind Skeleton Debug Overlay";
-        cmd.BeginPass(pass); cmd.SetPrimitiveTopology(rhi::PrimitiveTopology::LineList);
-        cmd.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle()); cmd.BindPipeline(m_pso->GetHandle());
-        BindResourceDescriptorIndices(cmd, m_bindings);
+        cmd.BeginPass(pass);
+        cmd.BindLayout(PSOManager::GetInstance().GetRootSignature().GetHandle());
         uint32_t constants[12] = {
             m_resources->windTypes->GetSRVInfo(0).slot.index, m_resources->boneEntries->GetSRVInfo(0).slot.index,
             m_resources->activeInstances->GetSRVInfo(0).slot.index,
@@ -691,14 +663,19 @@ public:
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo)->GetSRVInfo(0).slot.index,
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PerFrameBuffer)->GetCBVInfo().slot.index,
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index,
-            m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index,
+            0u,
             m_resources->skinnedPlacements ? m_resources->skinnedPlacements->GetSRVInfo(0).slot.index : 0u,
             m_resources->activeSkinnedPlacements ? m_resources->activeSkinnedPlacements->GetSRVInfo(0).slot.index : 0u,
             m_resources->residentPlacementCount };
         cmd.PushConstants(rhi::ShaderStage::AllGraphics, 0, MiscUintRootSignatureIndex, 0, 12, constants);
-        cmd.ExecuteIndirect(m_signature->GetHandle(), m_resources->indirectCommands->GetAPIResource().GetHandle(), 0,
-            m_resources->allocationCounters->GetAPIResource().GetHandle(), sizeof(uint32_t), m_resources->typeCount);
-        if (m_resources->residentPlacementCount != 0u) {
+        if (drawSkeletons) {
+            cmd.SetPrimitiveTopology(rhi::PrimitiveTopology::LineList);
+            cmd.BindPipeline(m_pso->GetHandle());
+            BindResourceDescriptorIndices(cmd, m_bindings);
+            cmd.ExecuteIndirect(m_signature->GetHandle(), m_resources->indirectCommands->GetAPIResource().GetHandle(), 0,
+                m_resources->allocationCounters->GetAPIResource().GetHandle(), sizeof(uint32_t), m_resources->typeCount);
+        }
+        if (drawBoundingSpheres && m_resources->residentPlacementCount != 0u) {
             cmd.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
             cmd.BindPipeline(m_spherePso->GetHandle());
             BindResourceDescriptorIndices(cmd, m_sphereBindings);
@@ -714,8 +691,6 @@ private:
     rhi::CommandSignaturePtr m_signature;
     PipelineResources m_bindings;
     PipelineResources m_sphereBindings;
-    bool m_loggedDispatch = false;
-    bool m_loggedMode = false;
 };
 
 } // namespace

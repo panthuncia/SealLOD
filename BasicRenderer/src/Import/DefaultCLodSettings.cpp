@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -40,8 +41,11 @@ namespace
 
     std::optional<std::filesystem::path> FindConfigPath()
     {
-        if (const char* configured = std::getenv("SARP_CLOD_BUILDER_CONFIG"); configured && *configured) {
-            return std::filesystem::path(configured);
+        char* configuredRaw = nullptr;
+        size_t configuredLength = 0;
+        if (_dupenv_s(&configuredRaw, &configuredLength, "SARP_CLOD_BUILDER_CONFIG") == 0) {
+            const std::unique_ptr<char, decltype(&std::free)> configured(configuredRaw, &std::free);
+            if (configuredLength > 1) return std::filesystem::path(configured.get());
         }
         const std::filesystem::path candidates[] = {
             std::filesystem::current_path() / "config" / "clod_builder_overrides.json",

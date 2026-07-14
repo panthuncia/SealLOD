@@ -43,6 +43,7 @@ struct VoxelSourceTriangleSample
 	DirectX::XMFLOAT3 positions[3]{};
 	DirectX::XMFLOAT3 normals[3]{};
 	DirectX::XMFLOAT2 uvs[3]{};
+	uint64_t uvChartId = std::numeric_limits<uint64_t>::max();
 	uint32_t dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
 };
 
@@ -81,6 +82,7 @@ public:
 	bool GetTriangleSample(
 		uint32_t triangleIndex,
 		VoxelSourceTriangleSample& outSample) const;
+	DirectX::XMFLOAT2 UvDensity() const { return m_uvDensity; }
 
 	const std::vector<std::byte>* Vertices() const { return m_vertices; }
 	size_t VertexStrideBytes() const { return m_vertexStrideBytes; }
@@ -92,6 +94,7 @@ public:
 
 private:
 	struct EmbreeScene;
+	DirectX::XMFLOAT2 ComputeUvDensity() const;
 
 	const std::vector<std::byte>* m_vertices = nullptr;
 	size_t m_vertexStrideBytes = 0;
@@ -100,6 +103,7 @@ private:
 	const std::vector<uint32_t>* m_triangleIndices = nullptr;
 	const std::vector<int32_t>* m_triangleRefinedGroupIds = nullptr;
 	bool m_doubleSidedTriangles = false;
+	DirectX::XMFLOAT2 m_uvDensity = { 0.0f, 0.0f };
 	std::vector<std::vector<int32_t>> m_refinedGroupDomainMap;
 	std::unique_ptr<EmbreeScene> m_embreeScene;
 };

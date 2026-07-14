@@ -44,7 +44,8 @@ public:
         TextureInitialData initialData,
         std::string_view debugName = {},
         bool preserveAlphaCoverage = false,
-        bool forceSrgbMipEncoding = false) const;
+        bool forceSrgbMipEncoding = false,
+        uint32_t maxMipLevels = 0u) const;
 
     std::shared_ptr<ComputePass> GetMipmappingPass() const { return m_mipmappingPass; }
     std::shared_ptr<ComputePass> GetBC7CompressionPass() const { return m_bc7CompressionPass; }

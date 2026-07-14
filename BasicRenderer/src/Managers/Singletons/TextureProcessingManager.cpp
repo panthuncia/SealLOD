@@ -554,6 +554,47 @@ std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const Text
 	return writtenConditionedCachePath;
 }
 
+uint32_t ResolveRequestedMipLevelCount(
+	const TextureProcessingSettings& settings,
+	uint32_t width,
+	uint32_t height)
+{
+	const uint32_t fullMipCount = CalcMipCount(width, height);
+	return settings.maxMipLevels == 0u
+		? fullMipCount
+		: (std::min)(fullMipCount, settings.maxMipLevels);
+}
+
+std::shared_ptr<TextureSourceData> ClampTextureSourceMipLevels(
+	const std::shared_ptr<TextureSourceData>& sourceData,
+	uint32_t maxMipLevels)
+{
+	if (!sourceData || maxMipLevels == 0u) {
+		return sourceData;
+	}
+	const uint32_t sourceMipLevels = GetTextureMipLevelCount(*sourceData);
+	const uint32_t retainedMipLevels = (std::min)(sourceMipLevels, maxMipLevels);
+	if (sourceMipLevels == 0u || retainedMipLevels == sourceMipLevels) {
+		return sourceData;
+	}
+
+	auto result = std::make_shared<TextureSourceData>(*sourceData);
+	result->desc.imageDimensions.clear();
+	result->subresources.clear();
+	const uint32_t slices = GetTextureTotalArraySlices(sourceData->desc);
+	result->desc.imageDimensions.reserve(static_cast<size_t>(slices) * retainedMipLevels);
+	result->subresources.reserve(static_cast<size_t>(slices) * retainedMipLevels);
+	for (uint32_t slice = 0u; slice < slices; ++slice) {
+		const size_t sourceBase = static_cast<size_t>(slice) * sourceMipLevels;
+		for (uint32_t mip = 0u; mip < retainedMipLevels; ++mip) {
+			result->desc.imageDimensions.push_back(sourceData->desc.imageDimensions[sourceBase + mip]);
+			result->subresources.push_back(sourceData->subresources[sourceBase + mip]);
+		}
+	}
+	result->hasFullMipChain = true;
+	return result;
+}
+
 std::wstring BuildStochasticCachePath(const std::string& key, const wchar_t* suffix) {
 	size_t seed = 0;
 	boost::hash_combine(seed, key);
@@ -1129,8 +1170,14 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 		throw std::runtime_error("TextureProcessingManager: source data is null");
 	}
 
-	const bool needMipChain = meta.processing.requestMipChain && !sourceData->hasFullMipChain;
-	const bool sourceIsBlockCompressed = IsSourceBlockCompressed(*sourceData);
+	const auto clampedSourceData = ClampTextureSourceMipLevels(sourceData, meta.processing.maxMipLevels);
+	const uint32_t requestedMipLevels = ResolveRequestedMipLevelCount(
+		meta.processing,
+		clampedSourceData->desc.imageDimensions[0].width,
+		clampedSourceData->desc.imageDimensions[0].height);
+	const uint32_t sourceMipLevels = GetTextureMipLevelCount(*clampedSourceData);
+	const bool needMipChain = meta.processing.requestMipChain && sourceMipLevels < requestedMipLevels;
+	const bool sourceIsBlockCompressed = IsSourceBlockCompressed(*clampedSourceData);
 	const bool needCompression = meta.processing.requestBlockCompression && !sourceIsBlockCompressed;
 	const bool needDecompression = !meta.processing.requestBlockCompression && sourceIsBlockCompressed;
 	const bool needNormalConventionConversion = NeedsNormalConventionConversion(meta);
@@ -1138,11 +1185,11 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 	const bool needCpuMipChain = needMipChain && !needGpuAlphaMipChain;
 
 	if (!needMipChain && !needCompression && !needDecompression && !needNormalConventionConversion) {
-		return sourceData;
+		return clampedSourceData;
 	}
 
 	ScratchImage workingImage;
-	HRESULT hr = InitializeScratchImageFromSource(*sourceData, workingImage);
+	HRESULT hr = InitializeScratchImageFromSource(*clampedSourceData, workingImage);
 	if (FAILED(hr)) {
 		throw std::runtime_error("TextureProcessingManager: failed to initialize working scratch image");
 	}
@@ -1191,7 +1238,7 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 			linearImage.GetImageCount(),
 			linearImage.GetMetadata(),
 			TEX_FILTER_DEFAULT,
-			0,
+			requestedMipLevels,
 			mipChainImage);
 		if (FAILED(hr)) {
 			throw std::runtime_error("TextureProcessingManager: DirectXTex GenerateMipMaps failed");
@@ -1308,7 +1355,7 @@ TextureProcessingManager& TextureProcessingManager::GetInstance() {
 
 bool TextureProcessingManager::ShouldProcess(const TextureFileMeta& meta) const {
 	return meta.processing.isParticipatingMaterialTexture &&
-		(meta.processing.requestMipChain || meta.processing.requestBlockCompression);
+		(meta.processing.requestMipChain || meta.processing.requestBlockCompression || meta.processing.maxMipLevels != 0u);
 }
 
 bool TextureProcessingManager::NeedsProcessing(const TextureSourceData& sourceData, const TextureFileMeta& meta) const {
@@ -1321,13 +1368,19 @@ bool TextureProcessingManager::NeedsProcessing(const TextureSourceData& sourceDa
 	}
 
 	const uint32_t mipLevelCount = GetTextureMipLevelCount(sourceData);
-	const bool hasResidentMipChain = mipLevelCount > 1u;
-	const bool needMipChain = meta.processing.requestMipChain && !sourceData.hasFullMipChain && !hasResidentMipChain;
+	const uint32_t requestedMipLevels = sourceData.desc.imageDimensions.empty()
+		? mipLevelCount
+		: ResolveRequestedMipLevelCount(
+			meta.processing,
+			sourceData.desc.imageDimensions[0].width,
+			sourceData.desc.imageDimensions[0].height);
+	const bool needMipChain = meta.processing.requestMipChain && mipLevelCount < requestedMipLevels;
+	const bool needMipClamp = meta.processing.maxMipLevels != 0u && mipLevelCount > requestedMipLevels;
 	const bool sourceIsBlockCompressed = IsSourceBlockCompressed(sourceData);
 	const bool needCompression = meta.processing.requestBlockCompression && !sourceIsBlockCompressed;
 	const bool needDecompression = !meta.processing.requestBlockCompression && sourceIsBlockCompressed;
 	const bool needNormalConventionConversion = NeedsNormalConventionConversion(meta);
-	return needMipChain || needCompression || needDecompression || needNormalConventionConversion;
+	return needMipChain || needMipClamp || needCompression || needDecompression || needNormalConventionConversion;
 }
 
 std::wstring TextureProcessingManager::GetExistingCachePathForFile(const TextureFileMeta& meta) const {
@@ -1565,8 +1618,9 @@ std::string TextureProcessingManager::BuildProcessingCacheKey(
 	boost::hash_combine(seed, meta.processing.preferSRGB);
 	boost::hash_combine(seed, meta.processing.preservePackedChannels);
 	boost::hash_combine(seed, static_cast<uint32_t>(meta.processing.normalConvention));
+	boost::hash_combine(seed, meta.processing.maxMipLevels);
 	boost::hash_combine(seed, meta.alphaIsAllOpaque);
-	boost::hash_combine(seed, 5u); // texture processing algorithm/cache version
+	boost::hash_combine(seed, 6u); // texture processing algorithm/cache version
 	return normalizedIdentity + "#" + TextureSemanticToString(meta.processing.semantic) + "#" + std::to_string(seed);
 }
 

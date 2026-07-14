@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -51,7 +52,7 @@ struct PreparedShaderSource
     ShaderPreprocessDiagnostics diagnostics;
 };
 
-inline constexpr uint32_t kBRSLPreprocessVersion = 1;
+inline constexpr uint32_t kBRSLPreprocessVersion = 2;
 
 static inline void SortAndUniqueStrings(std::vector<std::string>& values)
 {
@@ -115,6 +116,53 @@ static inline bool IsPreprocessedLineDirective(std::string_view line)
     }
 
     return numberStart != position;
+}
+
+// DXC may emit #line directives at macro expansion boundaries inside otherwise
+// contiguous syntax such as function parameter and argument lists. Tree-sitter's
+// C++-derived list rules do not accept preprocessor nodes in every such position.
+// Blank the directives only for parsing while preserving every byte and line
+// ending so that syntax-node offsets continue to address the original source.
+static inline std::string BuildTreeSitterShaderParseView(
+    const char* source,
+    size_t sourceSize)
+{
+    sourceSize = GetNormalizedShaderSourceSize(source, sourceSize);
+    if (!source || sourceSize == 0) {
+        return {};
+    }
+
+    std::string parseView(source, sourceSize);
+    size_t lineStart = 0;
+    while (lineStart < sourceSize) {
+        size_t lineEnd = lineStart;
+        while (lineEnd < sourceSize && source[lineEnd] != '\n' && source[lineEnd] != '\r') {
+            ++lineEnd;
+        }
+
+        if (IsPreprocessedLineDirective(
+                std::string_view(source + lineStart, lineEnd - lineStart)))
+        {
+            std::fill(
+                parseView.begin() + static_cast<std::ptrdiff_t>(lineStart),
+                parseView.begin() + static_cast<std::ptrdiff_t>(lineEnd),
+                ' ');
+        }
+
+        if (lineEnd < sourceSize && source[lineEnd] == '\r' &&
+            lineEnd + 1 < sourceSize && source[lineEnd + 1] == '\n')
+        {
+            lineStart = lineEnd + 2;
+        }
+        else if (lineEnd < sourceSize) {
+            lineStart = lineEnd + 1;
+        }
+        else {
+            lineStart = sourceSize;
+        }
+    }
+
+    return parseView;
 }
 
 static inline std::string CanonicalizePreprocessedShaderSourceForHash(
@@ -268,7 +316,8 @@ void ParseBRSLResourceIdentifiers(std::unordered_set<std::string>& outMandatoryI
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
-    TSTree* tree = ts_parser_parse_string(parser, nullptr, preprocessedSource, static_cast<uint32_t>(sourceSize));
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
+    TSTree* tree = ts_parser_parse_string(parser, nullptr, parseView.data(), static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     std::unordered_map<std::string, std::vector<TSNode>> functionDefs;
@@ -398,8 +447,9 @@ rewriteResourceDescriptorCalls(const char* preprocessedSource,
     sourceSize = GetNormalizedShaderSourceSize(preprocessedSource, sourceSize);
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
     TSTree* tree = ts_parser_parse_string(
-        parser, nullptr, preprocessedSource, static_cast<uint32_t>(sourceSize));
+        parser, nullptr, parseView.data(), static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     std::unordered_map<std::string, std::vector<TSNode>> functionDefs;
@@ -575,7 +625,8 @@ pruneUnusedCode(const char* preprocessedSource,
     sourceSize = GetNormalizedShaderSourceSize(preprocessedSource, sourceSize);
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
-    TSTree* tree = ts_parser_parse_string(parser, nullptr, preprocessedSource, static_cast<uint32_t>(sourceSize));
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
+    TSTree* tree = ts_parser_parse_string(parser, nullptr, parseView.data(), static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     std::unordered_map<std::string, std::vector<TSNode>> bodyMap, defMap;
@@ -996,9 +1047,10 @@ ShaderLibraryBRSLAnalysis AnalyzePreprocessedShaderLibrary(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
     TSTree* tree = ts_parser_parse_string(
-        parser, nullptr, preprocessedSource,
-        static_cast<uint32_t>(sourceSize));
+        parser, nullptr, parseView.data(),
+        static_cast<uint32_t>(parseView.size()));
 
     TSNode root = ts_tree_root_node(tree);
 
@@ -1681,11 +1733,12 @@ static inline ShaderPreprocessDiagnostics AnalyzeShaderSourceCatalog(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(source, sourceSize);
     TSTree* tree = ts_parser_parse_string(
         parser,
         nullptr,
-        source,
-        static_cast<uint32_t>(sourceSize));
+        parseView.data(),
+        static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     ShaderPreprocessDiagnostics diagnostics;
@@ -1729,11 +1782,13 @@ static inline bool ValidatePrunedShaderSource(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(
+        prunedSource.c_str(), prunedSource.size());
     TSTree* tree = ts_parser_parse_string(
         parser,
         nullptr,
-        prunedSource.c_str(),
-        static_cast<uint32_t>(prunedSource.size()));
+        parseView.data(),
+        static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     uint32_t prunedErrorNodeCount = 0;
@@ -1792,11 +1847,12 @@ static inline PreparedShaderSource PrepareShaderSourceForRoots(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(source, sourceSize);
     TSTree* tree = ts_parser_parse_string(
         parser,
         nullptr,
-        source,
-        static_cast<uint32_t>(sourceSize));
+        parseView.data(),
+        static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     PreparedShaderSource prepared;
@@ -1970,11 +2026,13 @@ static inline std::string FinalizePreparedShaderSource(
         TSParser* parser = ts_parser_new();
         ts_parser_set_language(parser, tree_sitter_hlsl());
 
+        const std::string parseView = BuildTreeSitterShaderParseView(
+            finalSource.c_str(), finalSource.size());
         TSTree* tree = ts_parser_parse_string(
             parser,
             nullptr,
-            finalSource.c_str(),
-            static_cast<uint32_t>(finalSource.size()));
+            parseView.data(),
+            static_cast<uint32_t>(parseView.size()));
         TSNode root = ts_tree_root_node(tree);
 
         std::vector<std::string> unresolvedInternalCalls =
@@ -2033,8 +2091,9 @@ std::string rewriteResourceDescriptorCallsMultiRoots(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
     TSTree* tree = ts_parser_parse_string(
-        parser, nullptr, preprocessedSource, static_cast<uint32_t>(sourceSize));
+        parser, nullptr, parseView.data(), static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     std::unordered_map<std::string, std::vector<TSNode>> functionDefs;
@@ -2169,8 +2228,9 @@ std::string pruneUnusedCodeMultiRoots(
     TSParser* parser = ts_parser_new();
     ts_parser_set_language(parser, tree_sitter_hlsl());
 
+    const std::string parseView = BuildTreeSitterShaderParseView(preprocessedSource, sourceSize);
     TSTree* tree = ts_parser_parse_string(
-        parser, nullptr, preprocessedSource, static_cast<uint32_t>(sourceSize));
+        parser, nullptr, parseView.data(), static_cast<uint32_t>(parseView.size()));
     TSNode root = ts_tree_root_node(tree);
 
     // function name -> [function_definition nodes], and [body nodes]

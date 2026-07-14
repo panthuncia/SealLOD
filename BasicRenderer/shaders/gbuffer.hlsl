@@ -274,6 +274,12 @@ void EvaluateGBufferOptimized(uint2 pixel)
             payload = PackDebugFloat3(float3(derivativeDebug, sample.materialDebugUvValid));
             break;
         }
+        case OUTPUT_VOXEL_UV_DENSITY:
+        {
+            const float2 densityDebug = saturate(0.5f.xx + log2(max(sample.voxelDebugUvDensity, 1.0e-12f.xx)) / 24.0f);
+            payload = PackDebugFloat3(sample.isVoxelPath ? float3(densityDebug, 1.0f) : 0.0f.xxx);
+            break;
+        }
         case OUTPUT_REYES_SOURCE_BARYCENTRICS:
             payload = PackDebugFloat3(saturate(sample.reyesDebugSourceBarycentrics));
             break;

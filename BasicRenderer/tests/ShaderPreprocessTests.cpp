@@ -207,6 +207,71 @@ void WG_TraverseNodes(
             "expected WG_TraverseNodes in discovered definitions");
         }, failureCount);
 
+    RunTest("catalog masks dxc line markers inside parameter and argument lists", []() {
+        const std::string source = R"(
+float LineMarkedHelper(
+    float first
+#line 120 "included.hlsli"
+    , float second)
+{
+    return first + second;
+}
+
+[numthreads(1, 1, 1)]
+void LineMarkedCS()
+{
+    const float result = LineMarkedHelper(
+        1.0f
+# 240 "shader.hlsl"
+        , 2.0f);
+}
+)";
+
+        ShaderPreprocessDiagnostics diagnostics =
+            AnalyzeShaderSourceCatalog(source.c_str(), source.size());
+
+        Require(diagnostics.parseSucceeded, "tree-sitter failed to produce a root for line-marked lists");
+        Require(diagnostics.errorNodeCount == 0, "line markers inside lists should not create parse errors");
+        Require(diagnostics.safeToPrune, "line-marked parameter and argument lists should be safe to prune");
+        const std::string definitions = JoinStrings(diagnostics.discoveredFunctionDefinitions, ",");
+        Require(Contains(definitions, "LineMarkedHelper"), "expected line-marked helper definition");
+        Require(Contains(definitions, "LineMarkedCS"), "expected line-marked entry-point definition");
+        }, failureCount);
+
+    RunTest("line marker masking preserves pruning byte offsets", []() {
+        const std::string source = R"(
+float RetainedHelper(float first
+#line 40 "included.hlsli"
+    , float second)
+{
+    return first + second;
+}
+
+float RemovedHelper()
+{
+    return 3.0f;
+}
+
+[numthreads(1, 1, 1)]
+void OffsetPreservingCS()
+{
+    const float result = RetainedHelper(1.0f
+#line 80 "shader.hlsl"
+        , 2.0f);
+}
+)";
+
+        PreparedShaderSource prepared =
+            PrepareShaderSourceForEntryPoint(MakeBuffer(source), "OffsetPreservingCS");
+
+        Require(prepared.diagnostics.safeToPrune, "line-marked source should remain safe to prune");
+        Require(prepared.diagnostics.pruningApplied, "unused helper should be pruned");
+        Require(Contains(prepared.sourceBeforeRewrite, "RetainedHelper"), "retained helper was removed");
+        Require(Contains(prepared.sourceBeforeRewrite, "OffsetPreservingCS"), "entry point was removed");
+        Require(!Contains(prepared.sourceBeforeRewrite, "RemovedHelper"),
+            "tree-sitter offsets did not remove the intended helper");
+        }, failureCount);
+
     RunTest("per-view depth copy drops unreachable helper chain", []() {
         const std::string source = R"(
 float UsedHelper()

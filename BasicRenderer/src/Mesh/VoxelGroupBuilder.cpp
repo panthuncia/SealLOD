@@ -161,6 +161,254 @@ namespace
 			uv0.y * bary0 + uv1.y * bary1 + uv2.y * bary2);
 	}
 
+	struct WeldCellKey
+	{
+		int64_t x = 0;
+		int64_t y = 0;
+		int64_t z = 0;
+
+		bool operator==(const WeldCellKey&) const = default;
+	};
+
+	struct WeldCellKeyHash
+	{
+		size_t operator()(const WeldCellKey& key) const
+		{
+			size_t seed = std::hash<int64_t>{}(key.x);
+			seed ^= std::hash<int64_t>{}(key.y) + 0x9E3779B9u + (seed << 6u) + (seed >> 2u);
+			seed ^= std::hash<int64_t>{}(key.z) + 0x9E3779B9u + (seed << 6u) + (seed >> 2u);
+			return seed;
+		}
+	};
+
+	struct WeldedEdgeKey
+	{
+		uint32_t a = 0;
+		uint32_t b = 0;
+
+		bool operator==(const WeldedEdgeKey&) const = default;
+	};
+
+	struct WeldedEdgeKeyHash
+	{
+		size_t operator()(const WeldedEdgeKey& key) const
+		{
+			return (static_cast<size_t>(key.a) << 32u) ^ static_cast<size_t>(key.b);
+		}
+	};
+
+	struct UvChartEdge
+	{
+		uint32_t triangleIndex = 0;
+		DirectX::XMFLOAT2 uvA{};
+		DirectX::XMFLOAT2 uvB{};
+	};
+
+	class DisjointSet
+	{
+	public:
+		explicit DisjointSet(uint32_t count) : m_parent(count), m_rank(count, 0u)
+		{
+			std::iota(m_parent.begin(), m_parent.end(), 0u);
+		}
+
+		uint32_t Find(uint32_t value)
+		{
+			uint32_t root = value;
+			while (m_parent[root] != root)
+			{
+				root = m_parent[root];
+			}
+			while (m_parent[value] != value)
+			{
+				const uint32_t next = m_parent[value];
+				m_parent[value] = root;
+				value = next;
+			}
+			return root;
+		}
+
+		void Unite(uint32_t lhs, uint32_t rhs)
+		{
+			lhs = Find(lhs);
+			rhs = Find(rhs);
+			if (lhs == rhs)
+			{
+				return;
+			}
+			if (m_rank[lhs] < m_rank[rhs])
+			{
+				std::swap(lhs, rhs);
+			}
+			m_parent[rhs] = lhs;
+			if (m_rank[lhs] == m_rank[rhs])
+			{
+				++m_rank[lhs];
+			}
+		}
+
+	private:
+		std::vector<uint32_t> m_parent;
+		std::vector<uint8_t> m_rank;
+	};
+
+	std::vector<uint32_t> BuildTriangleUvChartIds(
+		const std::vector<std::byte>& vertices,
+		size_t vertexStrideBytes,
+		const std::vector<uint32_t>& triangleIndices)
+	{
+		const size_t vertexCount = vertexStrideBytes > 0u ? vertices.size() / vertexStrideBytes : 0u;
+		const uint32_t triangleCount = static_cast<uint32_t>(triangleIndices.size() / 3u);
+		std::vector<uint32_t> chartIds(triangleCount);
+		std::iota(chartIds.begin(), chartIds.end(), 0u);
+		if (vertexCount == 0u || triangleCount == 0u)
+		{
+			return chartIds;
+		}
+
+		Float3 boundsMin(
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max());
+		Float3 boundsMax(
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max());
+		std::vector<Float3> positions(vertexCount);
+		for (uint32_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex)
+		{
+			const Float3 position = ReadPosition(vertices, vertexStrideBytes, vertexIndex);
+			positions[vertexIndex] = position;
+			if (std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(position.z))
+			{
+				boundsMin.x = std::min(boundsMin.x, position.x);
+				boundsMin.y = std::min(boundsMin.y, position.y);
+				boundsMin.z = std::min(boundsMin.z, position.z);
+				boundsMax.x = std::max(boundsMax.x, position.x);
+				boundsMax.y = std::max(boundsMax.y, position.y);
+				boundsMax.z = std::max(boundsMax.z, position.z);
+			}
+		}
+		const Float3 boundsExtent = boundsMax - boundsMin;
+		const float boundsDiagonal = std::sqrt(std::max(0.0f, boundsExtent.lengthSq()));
+		const float positionEpsilon = std::max(1.0e-6f, std::isfinite(boundsDiagonal) ? boundsDiagonal * 1.0e-6f : 1.0e-6f);
+		const float invPositionEpsilon = 1.0f / positionEpsilon;
+
+		std::unordered_map<WeldCellKey, std::vector<uint32_t>, WeldCellKeyHash> weldGrid;
+		weldGrid.reserve(vertexCount);
+		std::vector<Float3> weldPositions;
+		std::vector<uint32_t> vertexWeldIds(vertexCount);
+		for (uint32_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex)
+		{
+			const Float3 position = positions[vertexIndex];
+			if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
+			{
+				vertexWeldIds[vertexIndex] = static_cast<uint32_t>(weldPositions.size());
+				weldPositions.push_back(position);
+				continue;
+			}
+			const WeldCellKey cell{
+				static_cast<int64_t>(std::floor(position.x * invPositionEpsilon)),
+				static_cast<int64_t>(std::floor(position.y * invPositionEpsilon)),
+				static_cast<int64_t>(std::floor(position.z * invPositionEpsilon)) };
+			uint32_t weldId = std::numeric_limits<uint32_t>::max();
+			for (int32_t dz = -1; dz <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dz)
+			{
+				for (int32_t dy = -1; dy <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dy)
+				{
+					for (int32_t dx = -1; dx <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dx)
+					{
+						const auto it = weldGrid.find(WeldCellKey{ cell.x + dx, cell.y + dy, cell.z + dz });
+						if (it == weldGrid.end())
+						{
+							continue;
+						}
+						for (uint32_t candidate : it->second)
+						{
+							const Float3 delta = weldPositions[candidate] - position;
+							if (delta.lengthSq() <= positionEpsilon * positionEpsilon)
+							{
+								weldId = candidate;
+								break;
+							}
+						}
+					}
+				}
+			}
+			if (weldId == std::numeric_limits<uint32_t>::max())
+			{
+				weldId = static_cast<uint32_t>(weldPositions.size());
+				weldPositions.push_back(position);
+				weldGrid[cell].push_back(weldId);
+			}
+			vertexWeldIds[vertexIndex] = weldId;
+		}
+
+		constexpr float kUvContinuityEpsilon = 1.0e-5f;
+		auto uvMatches = [](const DirectX::XMFLOAT2& lhs, const DirectX::XMFLOAT2& rhs)
+		{
+			return std::isfinite(lhs.x) && std::isfinite(lhs.y) &&
+				std::isfinite(rhs.x) && std::isfinite(rhs.y) &&
+				std::abs(lhs.x - rhs.x) <= kUvContinuityEpsilon &&
+				std::abs(lhs.y - rhs.y) <= kUvContinuityEpsilon;
+		};
+
+		DisjointSet charts(triangleCount);
+		std::unordered_map<WeldedEdgeKey, std::vector<UvChartEdge>, WeldedEdgeKeyHash> edges;
+		edges.reserve(static_cast<size_t>(triangleCount) * 3u);
+		for (uint32_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
+		{
+			const uint32_t indices[3] = {
+				triangleIndices[static_cast<size_t>(triangleIndex) * 3u + 0u],
+				triangleIndices[static_cast<size_t>(triangleIndex) * 3u + 1u],
+				triangleIndices[static_cast<size_t>(triangleIndex) * 3u + 2u] };
+			for (uint32_t edgeIndex = 0u; edgeIndex < 3u; ++edgeIndex)
+			{
+				const uint32_t vertexA = indices[edgeIndex];
+				const uint32_t vertexB = indices[(edgeIndex + 1u) % 3u];
+				if (vertexA >= vertexCount || vertexB >= vertexCount)
+				{
+					continue;
+				}
+				uint32_t weldA = vertexWeldIds[vertexA];
+				uint32_t weldB = vertexWeldIds[vertexB];
+				DirectX::XMFLOAT2 uvA = ReadTexcoord(vertices, vertexStrideBytes, vertexA);
+				DirectX::XMFLOAT2 uvB = ReadTexcoord(vertices, vertexStrideBytes, vertexB);
+				if (weldA == weldB)
+				{
+					continue;
+				}
+				if (weldB < weldA)
+				{
+					std::swap(weldA, weldB);
+					std::swap(uvA, uvB);
+				}
+				const WeldedEdgeKey key{ weldA, weldB };
+				std::vector<UvChartEdge>& matches = edges[key];
+				for (const UvChartEdge& match : matches)
+				{
+					if (uvMatches(uvA, match.uvA) && uvMatches(uvB, match.uvB))
+					{
+						charts.Unite(triangleIndex, match.triangleIndex);
+					}
+				}
+				matches.push_back(UvChartEdge{ triangleIndex, uvA, uvB });
+			}
+		}
+
+		std::vector<uint32_t> componentMinimum(triangleCount, std::numeric_limits<uint32_t>::max());
+		for (uint32_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
+		{
+			const uint32_t root = charts.Find(triangleIndex);
+			componentMinimum[root] = std::min(componentMinimum[root], triangleIndex);
+		}
+		for (uint32_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
+		{
+			chartIds[triangleIndex] = componentMinimum[charts.Find(triangleIndex)];
+		}
+		return chartIds;
+	}
+
 	Float3 ToFloat3(const DirectX::XMFLOAT3& v) { return { v.x, v.y, v.z }; }
 	DirectX::XMFLOAT3 ToXM(const Float3& v) { return { v.x, v.y, v.z }; }
 	Float3 TriangleNormal(const Float3& a, const Float3& b, const Float3& c)
@@ -1237,6 +1485,21 @@ namespace
 
 	struct CellCoverageSample
 	{
+		struct UvSample
+		{
+			DirectX::XMFLOAT2 uv{};
+			float weight = 0.0f;
+			uint32_t triangleIndex = std::numeric_limits<uint32_t>::max();
+		};
+
+		struct UvChart
+		{
+			uint64_t chartId = std::numeric_limits<uint64_t>::max();
+			float weight = 0.0f;
+			DirectX::XMFLOAT2 accumulatedUv{};
+			std::vector<UvSample> samples;
+		};
+
 		float coverage = 0.0f;
 		float coverageWeight = 0.0f;
 		uint32_t hitCount = 0;
@@ -1244,61 +1507,113 @@ namespace
 		Float3 accumulatedNormal{};
 		SymmetricMatrix3 accumulatedSGGX{};
 		float sggxWeight = 0.0f;
-		DirectX::XMFLOAT2 accumulatedUv{};
-		float uvWeight = 0.0f;
-		std::vector<DirectX::XMFLOAT2> uvSamples;
+		DirectX::XMFLOAT2 representativeUv{};
+		std::vector<UvChart> uvCharts;
 		std::vector<Float3> normalSamples;
 		std::vector<float> normalWeights;
 	};
 
-	void AddCoverageUvSample(CellCoverageSample& sample, const DirectX::XMFLOAT2& uv, float weight)
+	DirectX::XMFLOAT2 ComputeTriangleUvDensity(
+		const Float3& p0,
+		const Float3& p1,
+		const Float3& p2,
+		const DirectX::XMFLOAT2& uv0,
+		const DirectX::XMFLOAT2& uv1,
+		const DirectX::XMFLOAT2& uv2)
+	{
+		const Float3 edge1 = p1 - p0;
+		const Float3 edge2 = p2 - p0;
+		const DirectX::XMFLOAT2 duv1{ uv1.x - uv0.x, uv1.y - uv0.y };
+		const DirectX::XMFLOAT2 duv2{ uv2.x - uv0.x, uv2.y - uv0.y };
+		const float determinant = duv1.x * duv2.y - duv2.x * duv1.y;
+		if (!std::isfinite(determinant) || std::abs(determinant) <= 1.0e-10f)
+		{
+			return { -1.0f, -1.0f };
+		}
+
+		const float invDeterminant = 1.0f / determinant;
+		const Float3 dPdu = (edge1 * duv2.y - edge2 * duv1.y) * invDeterminant;
+		const Float3 dPdv = (edge2 * duv1.x - edge1 * duv2.x) * invDeterminant;
+		const float dPduLength = std::sqrt(std::max(0.0f, dPdu.lengthSq()));
+		const float dPdvLength = std::sqrt(std::max(0.0f, dPdv.lengthSq()));
+		const float densityU = std::isfinite(dPduLength) && dPduLength > 1.0e-6f
+			? 1.0f / dPduLength
+			: -1.0f;
+		const float densityV = std::isfinite(dPdvLength) && dPdvLength > 1.0e-6f
+			? 1.0f / dPdvLength
+			: -1.0f;
+		return {
+			std::isfinite(densityU) ? densityU : -1.0f,
+			std::isfinite(densityV) ? densityV : -1.0f };
+	}
+
+	void AddCoverageUvSample(
+		CellCoverageSample& sample,
+		uint64_t chartId,
+		uint32_t triangleIndex,
+		const DirectX::XMFLOAT2& uv,
+		float weight)
 	{
 		if (weight <= 0.0f || !std::isfinite(uv.x) || !std::isfinite(uv.y))
 		{
 			return;
 		}
 
-		sample.accumulatedUv.x += uv.x * weight;
-		sample.accumulatedUv.y += uv.y * weight;
-		sample.uvWeight += weight;
-		sample.uvSamples.push_back(uv);
+		auto chartIt = std::find_if(sample.uvCharts.begin(), sample.uvCharts.end(), [chartId](const CellCoverageSample::UvChart& chart) {
+			return chart.chartId == chartId;
+		});
+		if (chartIt == sample.uvCharts.end())
+		{
+			chartIt = sample.uvCharts.insert(sample.uvCharts.end(), CellCoverageSample::UvChart{ .chartId = chartId });
+		}
+		chartIt->weight += weight;
+		chartIt->accumulatedUv.x += uv.x * weight;
+		chartIt->accumulatedUv.y += uv.y * weight;
+		chartIt->samples.push_back(CellCoverageSample::UvSample{ uv, weight, triangleIndex });
 	}
 
-	DirectX::XMFLOAT2 SelectRepresentativeUv(const CellCoverageSample& sample)
+	void SelectRepresentativeUv(CellCoverageSample& sample)
 	{
-		// TODO: This treats the samples as one continuous UV distribution. With disconnected atlas
-		// islands, a low-weight sample between two dominant modes can be selected merely because it
-		// is closest to the global mean. Associate coverage triangles with stable UV charts, select
-		// the dominant chart by accumulated coverage, then choose a representative near that chart's
-		// weighted mean (and consider retaining a second mode when one UV cannot represent the cell).
-		if (sample.uvWeight <= 0.0f)
+		if (sample.uvCharts.empty())
 		{
-			return DirectX::XMFLOAT2(0.0f, 0.0f);
+			return;
+		}
+
+		const CellCoverageSample::UvChart* selectedChart = &sample.uvCharts.front();
+		for (const CellCoverageSample::UvChart& chart : sample.uvCharts)
+		{
+			if (chart.weight > selectedChart->weight ||
+				(chart.weight == selectedChart->weight && chart.chartId < selectedChart->chartId))
+			{
+				selectedChart = &chart;
+			}
+		}
+		if (selectedChart->weight <= 0.0f || selectedChart->samples.empty())
+		{
+			return;
 		}
 
 		const DirectX::XMFLOAT2 mean(
-			sample.accumulatedUv.x / sample.uvWeight,
-			sample.accumulatedUv.y / sample.uvWeight);
-		if (sample.uvSamples.empty())
-		{
-			return mean;
-		}
-
-		DirectX::XMFLOAT2 representative = sample.uvSamples.front();
+			selectedChart->accumulatedUv.x / selectedChart->weight,
+			selectedChart->accumulatedUv.y / selectedChart->weight);
+		const CellCoverageSample::UvSample* representative = &selectedChart->samples.front();
 		float bestDistanceSq = std::numeric_limits<float>::max();
-		for (const DirectX::XMFLOAT2& uv : sample.uvSamples)
+		for (const CellCoverageSample::UvSample& candidate : selectedChart->samples)
 		{
-			const float dx = uv.x - mean.x;
-			const float dy = uv.y - mean.y;
+			const float dx = candidate.uv.x - mean.x;
+			const float dy = candidate.uv.y - mean.y;
 			const float distanceSq = dx * dx + dy * dy;
-			if (distanceSq < bestDistanceSq)
+			if (distanceSq < bestDistanceSq ||
+				(distanceSq == bestDistanceSq && candidate.weight > representative->weight) ||
+				(distanceSq == bestDistanceSq && candidate.weight == representative->weight && candidate.triangleIndex < representative->triangleIndex))
 			{
 				bestDistanceSq = distanceSq;
-				representative = uv;
+				representative = &candidate;
 			}
 		}
+		sample.representativeUv = representative->uv;
+		sample.representativeTriangleIndex = representative->triangleIndex;
 
-		return representative;
 	}
 
 	bool ApplyCoverageMaterialSample(
@@ -1375,6 +1690,7 @@ namespace
 			}
 
 			uint32_t nearestTriangleIndex = std::numeric_limits<uint32_t>::max();
+			uint64_t nearestChartId = std::numeric_limits<uint64_t>::max();
 			float traceTMin = tEnter;
 			Float3 nearestNormal{};
 			DirectX::XMFLOAT2 nearestUv{};
@@ -1449,6 +1765,7 @@ namespace
 				}
 
 				nearestTriangleIndex = triLocalIdx;
+				nearestChartId = triangleSample.uvChartId;
 				nearestNormal = candidateNormal;
 				nearestUv = candidateUv;
 				nearestWeight = candidateWeight;
@@ -1459,14 +1776,10 @@ namespace
 			{
 				++sample.hitCount;
 				sample.coverageWeight += nearestWeight;
-				if (sample.representativeTriangleIndex == std::numeric_limits<uint32_t>::max())
-				{
-					sample.representativeTriangleIndex = nearestTriangleIndex;
-				}
 				sample.accumulatedNormal = sample.accumulatedNormal + nearestNormal * nearestWeight;
 				sample.normalSamples.push_back(nearestNormal);
 				sample.normalWeights.push_back(nearestWeight);
-				AddCoverageUvSample(sample, nearestUv, nearestWeight);
+				AddCoverageUvSample(sample, nearestChartId, nearestTriangleIndex, nearestUv, nearestWeight);
 			}
 		}
 
@@ -1476,6 +1789,7 @@ namespace
 			sample.accumulatedSGGX = BuildSGGXFromWeightedNormals(sample.normalSamples, sample.normalWeights);
 			sample.sggxWeight = 1.0f;
 		}
+		SelectRepresentativeUv(sample);
 		return sample;
 	}
 
@@ -1675,6 +1989,11 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 		size_t vertexStrideBytes = 0;
 		const std::vector<uint32_t>* triangleIndices = nullptr;
 		uint32_t triangleCount = 0;
+		std::vector<uint32_t> triangleUvChartIds;
+		std::vector<DirectX::XMFLOAT2> triangleUvDensities;
+		std::vector<float> triangleAreas;
+		std::vector<uint32_t> uvDensitySampleTriangles;
+		std::vector<float> uvDensitySampleWeights;
 	};
 
 	struct InstanceRef
@@ -1689,6 +2008,7 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 	static constexpr int32_t kUnfilteredRefinedGroupScene = std::numeric_limits<int32_t>::min();
 
 	std::vector<DirectX::XMFLOAT3> vertices;
+	std::vector<uint32_t> triangleUvChartIds;
 	std::vector<RefinedGroupScene> refinedGroupScenes;
 	std::vector<PartScene> partScenes;
 	std::vector<InstanceRef> instances;
@@ -1799,6 +2119,7 @@ void VoxelSourceTriangleBVH::Build(
 	m_triangleIndices = triangleIndices;
 	m_triangleRefinedGroupIds = triangleRefinedGroupIds;
 	m_doubleSidedTriangles = doubleSidedTriangles;
+	m_uvDensity = { 0.0f, 0.0f };
 	m_embreeScene.reset();
 
 	if (vertices == nullptr || triangleIndices == nullptr || vertexStrideBytes < sizeof(float) * 3u || triangleIndices->size() < 3u || (triangleIndices->size() % 3u) != 0u)
@@ -1816,6 +2137,7 @@ void VoxelSourceTriangleBVH::Build(
 	}
 
 	std::unique_ptr<EmbreeScene> embreeScene = std::make_unique<EmbreeScene>();
+	embreeScene->triangleUvChartIds = BuildTriangleUvChartIds(*vertices, vertexStrideBytes, *triangleIndices);
 	const size_t sourceVertexCount = vertices->size() / vertexStrideBytes;
 	embreeScene->vertices.resize(sourceVertexCount);
 	for (size_t vertexIndex = 0; vertexIndex < sourceVertexCount; ++vertexIndex)
@@ -1922,6 +2244,7 @@ void VoxelSourceTriangleBVH::Build(
 			buildRefinedGroupScenes,
 			embreeScene->refinedGroupScenes.size());
 		m_embreeScene = std::move(embreeScene);
+		m_uvDensity = ComputeUvDensity();
 	}
 }
 
@@ -1938,6 +2261,7 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 	m_triangleIndices = nullptr;
 	m_triangleRefinedGroupIds = nullptr;
 	m_doubleSidedTriangles = doubleSidedTriangles;
+	m_uvDensity = { 0.0f, 0.0f };
 	m_embreeScene.reset();
 
 	if (parts.empty() || instances.empty())
@@ -1980,6 +2304,9 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 		partScene.vertexStrideBytes = part.vertexStrideBytes;
 		partScene.triangleIndices = part.triangleIndices;
 		partScene.triangleCount = static_cast<uint32_t>(sourceTriangleCount);
+		partScene.triangleUvChartIds = BuildTriangleUvChartIds(*part.vertices, part.vertexStrideBytes, *part.triangleIndices);
+		partScene.triangleUvDensities.resize(sourceTriangleCount, DirectX::XMFLOAT2(-1.0f, -1.0f));
+		partScene.triangleAreas.resize(sourceTriangleCount, 0.0f);
 		partScene.scene = rtcNewScene(device);
 
 		RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
@@ -2010,11 +2337,70 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 			for (size_t triangleIndex = 0; triangleIndex < sourceTriangleCount; ++triangleIndex)
 			{
 				const size_t triangleBase = triangleIndex * 3u;
+				const Float3 p0 = ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 0u]);
+				const Float3 p1 = ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 1u]);
+				const Float3 p2 = ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 2u]);
+				const float area = 0.5f * std::sqrt(std::max(0.0f, (p1 - p0).cross(p2 - p0).lengthSq()));
+				partScene.triangleAreas[triangleIndex] = std::isfinite(area) ? area : 0.0f;
+				partScene.triangleUvDensities[triangleIndex] = ComputeTriangleUvDensity(
+					p0,
+					p1,
+					p2,
+					ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 0u]),
+					ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 1u]),
+					ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 2u]));
 				embreeTriangles[triangleIndex] = EmbreeScene::Triangle{
 					(*part.triangleIndices)[triangleBase + 0u],
 					(*part.triangleIndices)[triangleBase + 1u],
 					(*part.triangleIndices)[triangleBase + 2u],
 				};
+			}
+		}
+
+		constexpr size_t kMaxAffineUvDensitySamplesPerPart = 256u;
+		float totalValidArea = 0.0f;
+		for (float area : partScene.triangleAreas)
+		{
+			if (std::isfinite(area) && area > 1.0e-12f)
+			{
+				totalValidArea += area;
+			}
+		}
+		if (totalValidArea > 0.0f)
+		{
+			if (sourceTriangleCount <= kMaxAffineUvDensitySamplesPerPart)
+			{
+				partScene.uvDensitySampleTriangles.reserve(sourceTriangleCount);
+				partScene.uvDensitySampleWeights.reserve(sourceTriangleCount);
+				for (uint32_t triangleIndex = 0u; triangleIndex < sourceTriangleCount; ++triangleIndex)
+				{
+					const float area = partScene.triangleAreas[triangleIndex];
+					if (std::isfinite(area) && area > 1.0e-12f)
+					{
+						partScene.uvDensitySampleTriangles.push_back(triangleIndex);
+						partScene.uvDensitySampleWeights.push_back(area);
+					}
+				}
+			}
+			else
+			{
+				partScene.uvDensitySampleTriangles.reserve(kMaxAffineUvDensitySamplesPerPart);
+				partScene.uvDensitySampleWeights.reserve(kMaxAffineUvDensitySamplesPerPart);
+				const float sampleWeight = totalValidArea / static_cast<float>(kMaxAffineUvDensitySamplesPerPart);
+				float accumulatedArea = 0.0f;
+				size_t triangleIndex = 0u;
+				for (size_t sampleIndex = 0u; sampleIndex < kMaxAffineUvDensitySamplesPerPart; ++sampleIndex)
+				{
+					const float targetArea = (static_cast<float>(sampleIndex) + 0.5f) * sampleWeight;
+					while (triangleIndex + 1u < sourceTriangleCount &&
+						accumulatedArea + std::max(partScene.triangleAreas[triangleIndex], 0.0f) < targetArea)
+					{
+						accumulatedArea += std::max(partScene.triangleAreas[triangleIndex], 0.0f);
+						++triangleIndex;
+					}
+					partScene.uvDensitySampleTriangles.push_back(static_cast<uint32_t>(triangleIndex));
+					partScene.uvDensitySampleWeights.push_back(sampleWeight);
+				}
 			}
 		}
 
@@ -2083,12 +2469,13 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 	embreeScene->refinedGroupScenes.push_back(std::move(topScene));
 	TracyPlot("CLOD.Voxel.BVH.InstancedTriangles", static_cast<int64_t>(totalTriangleCount));
 	TracyPlot("CLOD.Voxel.BVH.Instances", static_cast<int64_t>(embreeScene->instances.size()));
-	spdlog::info(
+	spdlog::debug(
 		"Voxel coverage Embree instanced BVH built: parts={} instances={} logical_triangles={} scenes=1",
 		parts.size(),
 		embreeScene->instances.size(),
 		totalTriangleCount);
 	m_embreeScene = std::move(embreeScene);
+	m_uvDensity = ComputeUvDensity();
 }
 
 bool VoxelSourceTriangleBVH::IsValid() const
@@ -2342,12 +2729,21 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 		{
 			return false;
 		}
-		return fillFromFlatTriangle(
+		if (!fillFromFlatTriangle(
 			*part.vertices,
 			part.vertexStrideBytes,
 			*part.triangleIndices,
 			triangleIndex - instance.firstTriangle,
-			&instance.localToWorld);
+			&instance.localToWorld))
+		{
+			return false;
+		}
+		const uint32_t localTriangleIndex = triangleIndex - instance.firstTriangle;
+		const uint32_t localChartId = localTriangleIndex < part.triangleUvChartIds.size()
+			? part.triangleUvChartIds[localTriangleIndex]
+			: localTriangleIndex;
+		outSample.uvChartId = (static_cast<uint64_t>(instance.partIndex) << 32u) | localChartId;
+		return true;
 	}
 
 	if (m_vertices == nullptr || m_triangleIndices == nullptr)
@@ -2358,8 +2754,218 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 	{
 		return false;
 	}
+	outSample.uvChartId = triangleIndex < m_embreeScene->triangleUvChartIds.size()
+		? m_embreeScene->triangleUvChartIds[triangleIndex]
+		: triangleIndex;
 	outSample.dominantBoneIndex = ComputeDominantBoneIndexForSourceTriangle(*this, triangleIndex);
 	return true;
+}
+
+DirectX::XMFLOAT2 VoxelSourceTriangleBVH::ComputeUvDensity() const
+{
+	ZoneScopedN("VoxelSourceTriangleBVH::ComputeUvDensity");
+	struct WeightedValue
+	{
+		float value;
+		float weight;
+		uint64_t stableIndex;
+	};
+
+	std::vector<WeightedValue> uValues;
+	std::vector<WeightedValue> vValues;
+	auto appendDensity = [&](const DirectX::XMFLOAT2& density, float area, uint64_t stableIndex)
+	{
+		if (!std::isfinite(area) || area <= 1.0e-12f)
+		{
+			return;
+		}
+		if (std::isfinite(density.x) && density.x >= 0.0f)
+		{
+			uValues.push_back({ density.x, area, stableIndex });
+		}
+		if (std::isfinite(density.y) && density.y >= 0.0f)
+		{
+			vValues.push_back({ density.y, area, stableIndex });
+		}
+	};
+
+	if (m_embreeScene != nullptr && m_embreeScene->instanced)
+	{
+		struct SimilarityGroup
+		{
+			uint32_t partIndex = 0;
+			float scale = 1.0f;
+			float areaScaleSum = 0.0f;
+		};
+		std::vector<SimilarityGroup> similarityGroups;
+		std::vector<uint32_t> nonSimilarityInstances;
+		similarityGroups.reserve(m_embreeScene->instances.size());
+		nonSimilarityInstances.reserve(m_embreeScene->instances.size());
+
+		auto similarityScale = [](const ClusterLODAssemblyTransform& transform, float& outScale) -> bool
+		{
+			const Float3 c0(transform.row0.x, transform.row1.x, transform.row2.x);
+			const Float3 c1(transform.row0.y, transform.row1.y, transform.row2.y);
+			const Float3 c2(transform.row0.z, transform.row1.z, transform.row2.z);
+			const float l0 = c0.lengthSq();
+			const float l1 = c1.lengthSq();
+			const float l2 = c2.lengthSq();
+			const float maxLengthSq = std::max(l0, std::max(l1, l2));
+			if (!std::isfinite(maxLengthSq) || maxLengthSq <= 1.0e-12f)
+			{
+				return false;
+			}
+			const float tolerance = maxLengthSq * 1.0e-5f;
+			if (std::abs(l0 - l1) > tolerance || std::abs(l0 - l2) > tolerance ||
+				std::abs(c0.dot(c1)) > tolerance || std::abs(c0.dot(c2)) > tolerance || std::abs(c1.dot(c2)) > tolerance)
+			{
+				return false;
+			}
+			outScale = std::sqrt((l0 + l1 + l2) / 3.0f);
+			if (std::abs(outScale - 1.0f) <= 1.0e-5f)
+			{
+				outScale = 1.0f;
+			}
+			return std::isfinite(outScale) && outScale > 1.0e-6f;
+		};
+
+		for (uint32_t instanceIndex = 0u; instanceIndex < m_embreeScene->instances.size(); ++instanceIndex)
+		{
+			const EmbreeScene::InstanceRef& instance = m_embreeScene->instances[instanceIndex];
+			float scale = 1.0f;
+			if (!similarityScale(instance.localToWorld, scale))
+			{
+				nonSimilarityInstances.push_back(instanceIndex);
+				continue;
+			}
+			auto groupIt = std::find_if(similarityGroups.begin(), similarityGroups.end(), [&](const SimilarityGroup& group) {
+				return group.partIndex == instance.partIndex && std::bit_cast<uint32_t>(group.scale) == std::bit_cast<uint32_t>(scale);
+			});
+			if (groupIt == similarityGroups.end())
+			{
+				groupIt = similarityGroups.insert(similarityGroups.end(), SimilarityGroup{ instance.partIndex, scale, 0.0f });
+			}
+			groupIt->areaScaleSum += scale * scale;
+		}
+
+		size_t collapsedTriangleCount = 0u;
+		for (const SimilarityGroup& group : similarityGroups)
+		{
+			if (group.partIndex < m_embreeScene->partScenes.size())
+			{
+				collapsedTriangleCount += m_embreeScene->partScenes[group.partIndex].triangleCount;
+			}
+		}
+		uValues.reserve(collapsedTriangleCount);
+		vValues.reserve(collapsedTriangleCount);
+		uint64_t stableIndex = 0u;
+		for (const SimilarityGroup& group : similarityGroups)
+		{
+			if (group.partIndex >= m_embreeScene->partScenes.size())
+			{
+				continue;
+			}
+			const EmbreeScene::PartScene& part = m_embreeScene->partScenes[group.partIndex];
+			const size_t triangleCount = std::min(part.triangleUvDensities.size(), part.triangleAreas.size());
+			for (size_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
+			{
+				const DirectX::XMFLOAT2 localDensity = part.triangleUvDensities[triangleIndex];
+				appendDensity(
+					DirectX::XMFLOAT2(localDensity.x / group.scale, localDensity.y / group.scale),
+					part.triangleAreas[triangleIndex] * group.areaScaleSum,
+					stableIndex++);
+			}
+		}
+
+		for (uint32_t instanceIndex : nonSimilarityInstances)
+		{
+			const EmbreeScene::InstanceRef& instance = m_embreeScene->instances[instanceIndex];
+			if (instance.partIndex >= m_embreeScene->partScenes.size())
+			{
+				continue;
+			}
+			const EmbreeScene::PartScene& part = m_embreeScene->partScenes[instance.partIndex];
+			const size_t sampleCount = std::min(part.uvDensitySampleTriangles.size(), part.uvDensitySampleWeights.size());
+			for (size_t sampleIndex = 0u; sampleIndex < sampleCount; ++sampleIndex)
+			{
+				const uint32_t triangleIndex = part.uvDensitySampleTriangles[sampleIndex];
+				const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
+				if (part.vertices == nullptr || part.triangleIndices == nullptr || triangleBase + 2u >= part.triangleIndices->size())
+				{
+					continue;
+				}
+				const Float3 p0 = ToFloat3(TransformCoveragePoint(instance.localToWorld, ToXM(ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 0u]))));
+				const Float3 p1 = ToFloat3(TransformCoveragePoint(instance.localToWorld, ToXM(ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 1u]))));
+				const Float3 p2 = ToFloat3(TransformCoveragePoint(instance.localToWorld, ToXM(ReadPosition(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 2u]))));
+				const float transformedArea = 0.5f * std::sqrt(std::max(0.0f, (p1 - p0).cross(p2 - p0).lengthSq()));
+				const float localArea = triangleIndex < part.triangleAreas.size() ? part.triangleAreas[triangleIndex] : 0.0f;
+				const float transformedSampleWeight = localArea > 1.0e-12f
+					? part.uvDensitySampleWeights[sampleIndex] * (transformedArea / localArea)
+					: 0.0f;
+				appendDensity(
+					ComputeTriangleUvDensity(
+						p0, p1, p2,
+						ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 0u]),
+						ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 1u]),
+						ReadTexcoord(*part.vertices, part.vertexStrideBytes, (*part.triangleIndices)[triangleBase + 2u])),
+					transformedSampleWeight,
+					stableIndex++);
+			}
+		}
+	}
+	else if (m_vertices != nullptr && m_triangleIndices != nullptr)
+	{
+		const uint32_t triangleCount = static_cast<uint32_t>(std::min<size_t>(
+			m_triangleIndices->size() / 3u,
+			std::numeric_limits<uint32_t>::max()));
+		uValues.reserve(triangleCount);
+		vValues.reserve(triangleCount);
+		for (uint32_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
+		{
+			const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
+			const Float3 p0 = ReadPosition(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 0u]);
+			const Float3 p1 = ReadPosition(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 1u]);
+			const Float3 p2 = ReadPosition(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 2u]);
+			const float area = 0.5f * std::sqrt(std::max(0.0f, (p1 - p0).cross(p2 - p0).lengthSq()));
+			appendDensity(
+				ComputeTriangleUvDensity(
+					p0, p1, p2,
+					ReadTexcoord(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 0u]),
+					ReadTexcoord(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 1u]),
+					ReadTexcoord(*m_vertices, m_vertexStrideBytes, (*m_triangleIndices)[triangleBase + 2u])),
+				area,
+				triangleIndex);
+		}
+	}
+
+	auto weightedMedian = [](std::vector<WeightedValue>& values) -> float
+	{
+		if (values.empty())
+		{
+			return 0.0f;
+		}
+		std::sort(values.begin(), values.end(), [](const WeightedValue& lhs, const WeightedValue& rhs) {
+			return lhs.value == rhs.value ? lhs.stableIndex < rhs.stableIndex : lhs.value < rhs.value;
+		});
+		float totalWeight = 0.0f;
+		for (const WeightedValue& value : values)
+		{
+			totalWeight += value.weight;
+		}
+		const float targetWeight = totalWeight * 0.5f;
+		float accumulatedWeight = 0.0f;
+		for (const WeightedValue& value : values)
+		{
+			accumulatedWeight += value.weight;
+			if (accumulatedWeight >= targetWeight)
+			{
+				return value.value;
+			}
+		}
+		return values.back().value;
+	};
+
+	return DirectX::XMFLOAT2(weightedMedian(uValues), weightedMedian(vValues));
 }
 
 // Public API: VoxelizeTriangles
@@ -2412,6 +3018,9 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 		input.aabbMin.y + input.voxelWidth * static_cast<float>(input.resolution),
 		input.aabbMin.z + input.voxelWidth * static_cast<float>(input.resolution));
 	result.voxelWidth = input.voxelWidth;
+	result.uvDensity = hasCoverageSourceTriangles
+		? input.coverageSourceTriangles->UvDensity()
+		: DirectX::XMFLOAT2(0.0f, 0.0f);
 
 	ScratchCellTriMap& cellTriMap = scratch.cellTriMap;
 	if (hasTriangleSources)
@@ -2708,7 +3317,7 @@ VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& 
 				? coverage.accumulatedSGGX * (1.0f / coverage.sggxWeight)
 				: SGGXFromNormal(normalSum);
 			vc.sggxAxisAndSigmas = EncodeAxialSGGX(CompressSGGXToAxial(sggx));
-			vc.uv = SelectRepresentativeUv(coverage);
+			vc.uv = coverage.representativeUv;
 			vc.dominantBoneIndex = dominantBoneIndex;
 			vc.refinedGroup = refinedGroup;
 
@@ -2851,6 +3460,7 @@ PackedVoxelGroupBuildResult PackVoxelGroupToCubes(const PackVoxelGroupInput& inp
 		input.voxelError);
 	result.metadata.firstCube = input.firstCube;
 	result.metadata.resolution = payload.resolution;
+	result.metadata.uvDensity = payload.uvDensity;
 
 	struct CubeAccum
 	{
@@ -3040,6 +3650,7 @@ void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t m
 			cluster.bounds = DirectX::XMFLOAT4(center.x, center.y, center.z, radius);
 			cluster.aabbMinAndVoxelWidth = packed.metadata.aabbMinAndVoxelWidth;
 			cluster.resolution = packed.metadata.resolution;
+			cluster.uvDensity = packed.metadata.uvDensity;
 			packed.clusterRecords.push_back(cluster);
 		}
 
