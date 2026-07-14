@@ -33,7 +33,7 @@ namespace {
 
 constexpr std::uint32_t kThreadsPerGroup = 64u;
 constexpr std::uint32_t kMaxInstancesPerType = 4096u;
-constexpr std::uint32_t kTransientBoneCapacity = 262144u;
+constexpr std::uint32_t kTransientBoneCapacity = 1048576;
 constexpr std::uint32_t kLatePhaseBit = 0x80000000u;
 constexpr std::uint32_t kDepthDescriptorMask = 0x7fffffffu;
 constexpr std::uint32_t kWindBoneFlagTrunk = 1u << 0u;

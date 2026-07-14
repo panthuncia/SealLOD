@@ -174,18 +174,61 @@ SkeletonManager::TransientWindRegion SkeletonManager::ReserveTransientWindRegion
 		return m_transientWindRegion;
 	}
 	const size_t bytes = static_cast<size_t>(matrixCapacity) * sizeof(DirectX::XMMATRIX);
-	m_transientWindTransformsView = m_boneTransforms->Allocate(bytes, sizeof(DirectX::XMMATRIX));
+	// Keep two equal forward-skin regions in one packed resource. Wind writes the
+	// current half while motion-vector reconstruction reads the untouched half
+	// produced by the previous frame.
+	m_transientWindTransformsView = m_boneTransforms->Allocate(bytes * 2u, sizeof(DirectX::XMMATRIX));
 	m_transientWindInverseSkinView = m_inverseSkinMatrices->Allocate(bytes, sizeof(DirectX::XMMATRIX));
 	if (!m_transientWindTransformsView || !m_transientWindInverseSkinView) {
 		m_transientWindTransformsView.reset();
 		m_transientWindInverseSkinView.reset();
 		return {};
 	}
-	m_transientWindRegion.transformBaseMatrices = BytesToMatrixIndex(m_transientWindTransformsView->GetOffset());
+	m_transientWindAllocationBaseMatrices = BytesToMatrixIndex(m_transientWindTransformsView->GetOffset());
+	const uint32_t currentIndex = static_cast<uint32_t>(m_lastBegunFrame == std::numeric_limits<uint64_t>::max()
+		? 0u
+		: (m_lastBegunFrame & 1u));
+	m_transientWindRegion.transformBaseMatrices = m_transientWindAllocationBaseMatrices + currentIndex * matrixCapacity;
+	m_transientWindRegion.previousTransformBaseMatrices =
+		m_transientWindAllocationBaseMatrices + (1u - currentIndex) * matrixCapacity;
 	m_transientWindRegion.inverseSkinBaseMatrices = BytesToMatrixIndex(m_transientWindInverseSkinView->GetOffset());
 	m_transientWindRegion.capacityMatrices = matrixCapacity;
 	m_transientWindRegion.valid = true;
 	return m_transientWindRegion;
+}
+
+void SkeletonManager::BeginFrame(uint64_t frameNumber) {
+	if (m_lastBegunFrame == frameNumber) {
+		return;
+	}
+	m_lastBegunFrame = frameNumber;
+
+	// A CPU palette only gains history when a new pose is uploaded below. Until
+	// then previous == current, preventing a stopped animation from emitting the
+	// same motion vector repeatedly.
+	for (auto& [skeleton, rec] : m_instances) {
+		rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+		SkinningInstanceGPUInfo info{};
+		info.transformOffsetMatrices = rec.transformOffsetMatrices;
+		info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
+		info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
+		info.boneCount = rec.boneCount;
+		info.flags = rec.base->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
+		if (rec.base->HasWindSimulationGroups()) {
+			info.flags |= kSkinningInstanceFlagProceduralWindType;
+			info.pad0 = rec.instanceSlot;
+		}
+		info.previousTransformOffsetMatrices = rec.previousTransformOffsetMatrices;
+		m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+	}
+
+	if (m_transientWindRegion.valid) {
+		const uint32_t currentIndex = static_cast<uint32_t>(frameNumber & 1u);
+		m_transientWindRegion.transformBaseMatrices =
+			m_transientWindAllocationBaseMatrices + currentIndex * m_transientWindRegion.capacityMatrices;
+		m_transientWindRegion.previousTransformBaseMatrices =
+			m_transientWindAllocationBaseMatrices + (1u - currentIndex) * m_transientWindRegion.capacityMatrices;
+	}
 }
 
 void SkeletonManager::EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity) {
@@ -216,8 +259,11 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
 
     // Allocate transforms region (unique per skinning instance)
     const size_t bytes = rec.boneCount * sizeof(DirectX::XMMATRIX);
-    rec.transformsView = m_boneTransforms->Allocate(bytes, sizeof(DirectX::XMMATRIX));
-    rec.transformOffsetMatrices = BytesToMatrixIndex(rec.transformsView->GetOffset());
+    rec.transformsView = m_boneTransforms->Allocate(bytes * 2u, sizeof(DirectX::XMMATRIX));
+    rec.transformOffsetsMatrices[0] = BytesToMatrixIndex(rec.transformsView->GetOffset());
+    rec.transformOffsetsMatrices[1] = rec.transformOffsetsMatrices[0] + rec.boneCount;
+    rec.transformOffsetMatrices = rec.transformOffsetsMatrices[0];
+    rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
     rec.inverseSkinView = m_inverseSkinMatrices->Allocate(bytes, sizeof(DirectX::XMMATRIX));
     rec.inverseSkinOffsetMatrices = BytesToMatrixIndex(rec.inverseSkinView->GetOffset());
     rec.invBindOffsetMatrices = baseRec.invBindOffsetMatrices;
@@ -232,6 +278,7 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     // Retained for cache/metadata compatibility. Shader-visible skin palettes now
     // use one canonical row-vector layout and never branch on this flag.
     info.flags = baseShared->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
+	info.previousTransformOffsetMatrices = rec.previousTransformOffsetMatrices;
 	if (baseShared->HasWindSimulationGroups()) {
 		info.flags |= kSkinningInstanceFlagProceduralWindType;
 		info.pad0 = rec.instanceSlot; // Wind type IDs are stable persistent assembly slots.
@@ -303,12 +350,24 @@ void SkeletonManager::UpdateInstanceTransforms(Skeleton& inst) {
         inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
             DirectX::XMMatrixInverse(nullptr, skinMatrix));
     }
+	if (rec.hasTransformHistory) {
+		rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+		rec.currentTransformIndex ^= 1u;
+	}
+	rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
     BUFFER_UPLOAD(skinMatrices.data(), bytes,
         rg::runtime::UploadTarget::FromShared(m_boneTransforms),
-        rec.transformsView->GetOffset());
+		static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX));
     BUFFER_UPLOAD(inverseSkinMatrices.data(), bytes,
         rg::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
         rec.inverseSkinView->GetOffset());
+	SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
+	info.transformOffsetMatrices = rec.transformOffsetMatrices;
+	info.previousTransformOffsetMatrices = rec.hasTransformHistory
+		? rec.previousTransformOffsetMatrices
+		: rec.transformOffsetMatrices;
+	m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+	rec.hasTransformHistory = true;
 
     rec.dirty = false;
     inst.ClearPoseDirty();
@@ -391,8 +450,13 @@ void SkeletonManager::UpdateAllDirtyInstances() {
 
     for (auto& upload : pending) {
         auto& rec = *upload.record;
+		if (rec.hasTransformHistory) {
+			rec.previousTransformOffsetMatrices = rec.transformOffsetMatrices;
+			rec.currentTransformIndex ^= 1u;
+		}
+		rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
         boneMatrixSpans.push_back({
-            rec.transformsView->GetOffset(),
+			static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX),
             upload.skinMatrices.data(),
             rec.boneCount
         });
@@ -407,6 +471,14 @@ void SkeletonManager::UpdateAllDirtyInstances() {
     UploadMatrixSpans(m_inverseSkinMatrices, inverseSkinSpans);
 
     for (auto& upload : pending) {
+		auto& rec = *upload.record;
+		SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
+		info.transformOffsetMatrices = rec.transformOffsetMatrices;
+		info.previousTransformOffsetMatrices = rec.hasTransformHistory
+			? rec.previousTransformOffsetMatrices
+			: rec.transformOffsetMatrices;
+		m_instanceInfo->UpdateAt(rec.instanceSlot, info);
+		rec.hasTransformHistory = true;
         upload.record->dirty = false;
         upload.skeleton->ClearPoseDirty();
     }

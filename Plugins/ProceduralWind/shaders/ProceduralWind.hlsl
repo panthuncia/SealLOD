@@ -271,6 +271,7 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 
 static const uint WindTransientSlotBase = 65536u;
 static const uint WindTypeFlag = 2u;
+static const uint WindHistoryValidFlag = 4u;
 
 static const uint WindLatePhaseBit = 0x80000000u;
 static const uint WindDepthDescriptorMask = 0x7fffffffu;
@@ -298,7 +299,15 @@ void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
     RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
-    if (tid.x < control.transformCount) infos[WindTransientSlotBase + tid.x] = (SkinningInstanceGPUInfo)0;
+    if (tid.x < control.transformCount) {
+        const uint slot = WindTransientSlotBase + tid.x;
+        SkinningInstanceGPUInfo info = infos[slot];
+        // Invalidate the current-frame lookup without discarding the palette
+        // address and placement identity needed as history by the build pass.
+        if (info.boneCount != 0u) info.flags |= WindHistoryValidFlag;
+        info.boneCount = 0u;
+        infos[slot] = info;
+    }
     if (tid.x < WT_TYPE_COUNT) typeCounters[tid.x] = 0u;
     if (tid.x < WT_TYPE_COUNT) {
         RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[control.processedTypeCountsDescriptor];
@@ -515,12 +524,23 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
             active.inverseSkinOffsetMatrices = WT_INVERSE_BASE + matrixOffset;
             activeInstances[bucketIndex] = active;
 
+            const uint transientSlot = WindTransientSlotBase + active.instanceTransformIndex;
+            const SkinningInstanceGPUInfo oldInfo = infos[transientSlot];
+            const bool hasMatchingHistory =
+                (oldInfo.flags & WindHistoryValidFlag) != 0u &&
+                oldInfo.pad0 == type.sourceSkinningSlot &&
+                oldInfo.stableSceneId == active.stableSceneId;
+
             SkinningInstanceGPUInfo transientInfo = source;
             transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
             transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
             transientInfo.boneCount = type.boneCount;
             transientInfo.flags |= WindRowVectorSkinMatrix;
-            infos[WindTransientSlotBase + active.instanceTransformIndex] = transientInfo;
+            transientInfo.previousTransformOffsetMatrices = hasMatchingHistory
+                ? oldInfo.transformOffsetMatrices
+                : active.transformOffsetMatrices;
+            transientInfo.stableSceneId = active.stableSceneId;
+            infos[transientSlot] = transientInfo;
         }
 
         WindIndirectCommandGPU command;

@@ -1039,8 +1039,8 @@ struct SkinningInstanceGPUInfo
     uint boneCount;
     uint flags;
     uint pad0;
-    uint pad1;
-    uint pad2;
+    uint previousTransformOffsetMatrices;
+    uint stableSceneId;
 };
 
 // Legacy/cache compatibility bit. Palette orientation is now canonical and does

@@ -2450,6 +2450,7 @@ void Renderer::Update(float elapsedSeconds) {
     }
 
     runCapturedStage("AnimationUpdate", [&]() {
+		m_pSkeletonManager->BeginFrame(m_totalFramesRendered);
         if (m_externalSceneMode) {
             m_pSkeletonManager->UpdateAllDirtyInstances();
         } else {

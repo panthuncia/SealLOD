@@ -646,8 +646,13 @@ struct SkinningInstanceGPUInfo {
     uint32_t boneCount = 0;
     uint32_t flags = 0;
     uint32_t pad0 = 0;
-    uint32_t pad1 = 0;
-    uint32_t pad2 = 0;
+    // The packed bone buffer contains ping-pong palettes. Motion-vector
+    // reconstruction reads this offset while ordinary skinning reads the
+    // current transformOffsetMatrices palette above.
+    uint32_t previousTransformOffsetMatrices = 0;
+    // Procedural-wind transient slots use this to reject history left behind
+    // when an instance-transform slot is recycled for a different placement.
+    uint32_t stableSceneId = 0;
 };
 
 // Legacy/cache compatibility bit. All current palette buffers use the canonical

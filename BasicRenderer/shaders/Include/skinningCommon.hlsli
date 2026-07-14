@@ -139,6 +139,13 @@ float4x4 LoadBoneInverseSkinMatrix(uint skinningInstanceSlot, uint jointIndex)
     return inverseSkin;
 }
 
+float4x4 LoadPreviousBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinningInfo, uint jointIndex)
+{
+    StructuredBuffer<SkinningMatrix> boneSkinMatricesBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
+    return boneSkinMatricesBuffer[skinningInfo.previousTransformOffsetMatrices + jointIndex];
+}
+
 void AddWeightedBoneSkinMatrix(
     inout float4x4 skinMatrix,
     inout float acceptedWeightSum,
@@ -149,6 +156,20 @@ void AddWeightedBoneSkinMatrix(
     if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.boneCount)
     {
         skinMatrix += weight * LoadBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
+        acceptedWeightSum += weight;
+    }
+}
+
+void AddWeightedPreviousBoneSkinMatrix(
+    inout float4x4 skinMatrix,
+    inout float acceptedWeightSum,
+    SkinningInstanceGPUInfo skinningInfo,
+    uint jointIndex,
+    float weight)
+{
+    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.boneCount)
+    {
+        skinMatrix += weight * LoadPreviousBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
         acceptedWeightSum += weight;
     }
 }
@@ -192,6 +213,29 @@ float4x4 BuildSkinMatrix(uint skinningInstanceSlot, SkinningInfluences skinning)
     return skinMatrix * rcp(weightSum);
 }
 
+float4x4 BuildPreviousSkinMatrix(uint skinningInstanceSlot, SkinningInfluences skinning)
+{
+    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot))
+    {
+        return IdentitySkinMatrix();
+    }
+
+    SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
+    float4x4 skinMatrix = (float4x4)0;
+    float weightSum = 0.0f;
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.x, skinning.weights0.x);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.y, skinning.weights0.y);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.z, skinning.weights0.z);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.w, skinning.weights0.w);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.x, skinning.weights1.x);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.y, skinning.weights1.y);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.z, skinning.weights1.z);
+    AddWeightedPreviousBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.w, skinning.weights1.w);
+    return (!isfinite(weightSum) || abs(weightSum) <= 1.0e-8f)
+        ? IdentitySkinMatrix()
+        : skinMatrix * rcp(weightSum);
+}
+
 // Expanded assembly skeletons are evaluated in assembly-root space, while the
 // vertices stored in an individual CLod bucket remain local to that bucket's
 // authored assembly transform.  The normal object transform subsequently
@@ -229,6 +273,16 @@ float4x4 BuildAssemblyLocalSkinMatrix(
         assemblyTransformIndex);
 }
 
+float4x4 BuildPreviousAssemblyLocalSkinMatrix(
+    uint skinningInstanceSlot,
+    SkinningInfluences skinning,
+    uint assemblyTransformIndex)
+{
+    return ConvertExpandedSkinMatrixToAssemblyLocal(
+        BuildPreviousSkinMatrix(skinningInstanceSlot, skinning),
+        assemblyTransformIndex);
+}
+
 float4x4 LoadAssemblyLocalBoneSkinMatrix(
     uint skinningInstanceSlot,
     uint jointIndex,
@@ -236,6 +290,20 @@ float4x4 LoadAssemblyLocalBoneSkinMatrix(
 {
     return ConvertExpandedSkinMatrixToAssemblyLocal(
         LoadBoneSkinMatrix(skinningInstanceSlot, jointIndex),
+        assemblyTransformIndex);
+}
+
+float4x4 LoadPreviousAssemblyLocalBoneSkinMatrix(
+    uint skinningInstanceSlot,
+    uint jointIndex,
+    uint assemblyTransformIndex)
+{
+    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot))
+    {
+        return IdentitySkinMatrix();
+    }
+    return ConvertExpandedSkinMatrixToAssemblyLocal(
+        LoadPreviousBoneSkinMatrixFromInfo(LoadSkinningInstanceInfo(skinningInstanceSlot), jointIndex),
         assemblyTransformIndex);
 }
 

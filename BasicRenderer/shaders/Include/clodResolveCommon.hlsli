@@ -991,6 +991,8 @@ MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
         d.drawcallAndMeshlet.y = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
         PerMeshInstanceBuffer inst = LoadMeshTemplateForDraw(d.drawcallAndMeshlet.x);
+        inst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+            d.drawcallAndMeshlet.x, inst.skinningInstanceSlot);
         d.objAndMesh = uint2(d.drawcallAndMeshlet.x, inst.perMeshBufferIndex);
         d.skinningInstanceSlot = inst.skinningInstanceSlot;
 
@@ -1243,6 +1245,31 @@ float CLodVoxelMaxWorldUnitsPerObjectUnit(float4x4 localToWorld)
     return max(max(finiteAxisScales.x, finiteAxisScales.y), max(finiteAxisScales.z, 1.0e-6f));
 }
 
+void ApplyPreviousClodSkinningToPosition(
+    uint meshletLocalVertex,
+    MeshletResolveData d,
+    uint assemblyTransformIndex,
+    inout float3 positionOS)
+{
+    if ((d.meshInfo.y & VERTEX_SKINNED) == 0u)
+    {
+        return;
+    }
+
+    SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, d);
+    skinning = DecodePackedWeights(meshletLocalVertex, d, skinning);
+    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(d.objAndMesh.x);
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    skinning = ResolveAssemblySkinningInfluences(
+        skinning,
+        metadataBuffer[offsets.clodMeshMetadataIndex],
+        assemblyTransformIndex);
+    const float4x4 previousSkinMatrix = BuildPreviousAssemblyLocalSkinMatrix(
+        d.skinningInstanceSlot, skinning, assemblyTransformIndex);
+    positionOS = mul(float4(positionOS, 1.0f), previousSkinMatrix).xyz;
+}
+
 float CLodVoxelEstimateObjectUnitsPerPixel(
     float3 worldPosition,
     float worldUnitsPerObjectUnit,
@@ -1263,7 +1290,7 @@ float CLodVoxelEstimateObjectUnitsPerPixel(
     return worldUnitsPerPixel / max(worldUnitsPerObjectUnit, 1.0e-6f);
 }
 
-float2 ComputeClodMotionVector(float3 posOS, float3 worldPosition, float4x4 prevModel, float4x4 unjitteredViewProj, float4x4 prevUnjitteredViewProj);
+float2 ComputeClodMotionVector(float3 previousPosOS, float3 worldPosition, float4x4 prevModel, float4x4 unjitteredViewProj, float4x4 prevUnjitteredViewProj);
 
 uint CLodVoxelHash(uint v)
 {
@@ -1397,7 +1424,11 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
         ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint assemblyTransformIndex = visibleClusterTransformIndices[visibleClusterIndex];
 
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
+    PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
+    // Match voxel rasterization: reconstruct the hit using the same transient
+    // procedural-wind palette that positioned the cube in the visibility pass.
+    instanceData.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+        instanceIndex, instanceData.skinningInstanceSlot);
     const PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(instanceIndex, assemblyTransformIndex);
     const PerMeshBuffer mesh = perMeshBuffer[instanceData.perMeshBufferIndex];
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
@@ -1444,6 +1475,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const float3 cubeMinObject = voxelCluster.aabbMinAndVoxelWidth.xyz + float3(cubeCoord) * (voxelWidth * 4.0f);
 
     float4x4 skinMatrix = IdentitySkinMatrix();
+    float4x4 previousSkinMatrix = IdentitySkinMatrix();
     float4x4 inverseSkinMatrix = IdentitySkinMatrix();
     if (cube.dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
     {
@@ -1452,6 +1484,8 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
             metadata,
             assemblyTransformIndex);
         skinMatrix = LoadAssemblyLocalBoneSkinMatrix(
+            instanceData.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+        previousSkinMatrix = LoadPreviousAssemblyLocalBoneSkinMatrix(
             instanceData.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
         inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
             instanceData.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
@@ -1481,7 +1515,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     }
 
     const float3 objectPosition = rayOriginObject + rayDirObject * tHitCube;
-    const float3 skinnedObjectPosition = mul(float4(objectPosition, 1.0f), skinMatrix).xyz;
+    const float3 previousSkinnedObjectPosition = mul(float4(objectPosition, 1.0f), previousSkinMatrix).xyz;
     const float3 worldPosition = mul(float4(objectPosition, 1.0f), localToWorld).xyz;
 
     const int3 cell = clamp(int3(floor((objectPosition - cubeMinObject) / voxelWidth)), int3(0, 0, 0), int3(3, 3, 3));
@@ -1547,7 +1581,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     sample.dpdxWS = 0.0f.xxx;
     sample.dpdyWS = 0.0f.xxx;
     sample.motionVector = ComputeClodMotionVector(
-        skinnedObjectPosition,
+        previousSkinnedObjectPosition,
         worldPosition,
         obj.prevModel,
         mul(cam.view, cam.unjitteredProjection),
@@ -1603,10 +1637,10 @@ uint3 DecodeTriangleCompact(uint triLocalIndex, MeshletResolveData d)
     return uint3(b0, b1, b2);
 }
 
-float2 ComputeClodMotionVector(float3 posOS, float3 worldPosition, float4x4 prevModel, float4x4 unjitteredViewProj, float4x4 prevUnjitteredViewProj)
+float2 ComputeClodMotionVector(float3 previousPosOS, float3 worldPosition, float4x4 prevModel, float4x4 unjitteredViewProj, float4x4 prevUnjitteredViewProj)
 {
     float4 clipCur = mul(float4(worldPosition, 1.0f), unjitteredViewProj);
-    float3 prevWorldPosition = mul(float4(posOS, 1.0f), prevModel).xyz;
+    float3 prevWorldPosition = mul(float4(previousPosOS, 1.0f), prevModel).xyz;
     float4 clipPrev = mul(float4(prevWorldPosition, 1.0f), prevUnjitteredViewProj);
 
     float2 ndcCur = clipCur.xy / clipCur.w;
@@ -1771,6 +1805,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3 p0 = DecodeCompressedPosition(triIdx.x, md);
     float3 p1 = DecodeCompressedPosition(triIdx.y, md);
     float3 p2 = DecodeCompressedPosition(triIdx.z, md);
+    float3 previousP0 = p0;
+    float3 previousP1 = p1;
+    float3 previousP2 = p2;
     float3 n0 = DecodeCompressedNormal(triIdx.x, md);
     float3 n1 = DecodeCompressedNormal(triIdx.y, md);
     float3 n2 = DecodeCompressedNormal(triIdx.z, md);
@@ -1795,6 +1832,9 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 #endif
 #if defined(PSO_CLOD_SKINNING)
+    ApplyPreviousClodSkinningToPosition(triIdx.x, md, assemblyTransformIndex, previousP0);
+    ApplyPreviousClodSkinningToPosition(triIdx.y, md, assemblyTransformIndex, previousP1);
+    ApplyPreviousClodSkinningToPosition(triIdx.z, md, assemblyTransformIndex, previousP2);
     ApplyClodSkinningToFrame(triIdx.x, md, assemblyTransformIndex, p0, n0, t0);
     ApplyClodSkinningToFrame(triIdx.y, md, assemblyTransformIndex, p1, n1, t1);
     ApplyClodSkinningToFrame(triIdx.z, md, assemblyTransformIndex, p2, n2, t2);
@@ -1946,6 +1986,13 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float3 interpPosZ = InterpolateWithDeriv(positionBary, evalPos0.z, evalPos1.z, evalPos2.z);
 
     float3 posOS = float3(interpPosX.x, interpPosY.x, interpPosZ.x);
+    // Use the same source-triangle barycentrics at the previous palette. This
+    // captures skeletal deformation instead of treating the current skinned
+    // object-space position as though it also existed last frame.
+    const float3 previousPosOS =
+        previousP0 * bary.m_lambda.x +
+        previousP1 * bary.m_lambda.y +
+        previousP2 * bary.m_lambda.z;
     float3 dpdxOS = float3(interpPosX.y, interpPosY.y, interpPosZ.y);
     float3 dpdyOS = float3(interpPosX.z, interpPosY.z, interpPosZ.z);
     if (useSourceDerivativeBary)
@@ -2199,7 +2246,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     sample.dpdxWS = dpdx;
     sample.dpdyWS = dpdy;
     sample.motionVector = ComputeClodMotionVector(
-        posOS,
+        previousPosOS,
         worldPosition,
         obj.prevModel,
         mul(cam.view, cam.unjitteredProjection),

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +18,7 @@ class SkeletonManager : public IResourceProvider {
 public:
 	struct TransientWindRegion {
 		uint32_t transformBaseMatrices = 0;
+		uint32_t previousTransformBaseMatrices = 0;
 		uint32_t inverseSkinBaseMatrices = 0;
 		uint32_t capacityMatrices = 0;
 		bool valid = false;
@@ -42,6 +44,10 @@ public:
 
     // Tick animations for all active skeletons
     void TickAnimations(float elapsedSeconds);
+	// Advances palette history once per rendered frame. CPU-driven instances
+	// collapse previous to current until a new pose is uploaded; procedural wind
+	// flips between its two fixed-capacity matrix regions.
+	void BeginFrame(uint64_t frameNumber);
 
     // Upload pose for a specific instance (or call UpdateAllDirtyInstances once per frame).
     void UpdateInstanceTransforms(Skeleton& skinningInstance);
@@ -77,6 +83,10 @@ private:
         const Skeleton* base = nullptr;
 
         uint32_t transformOffsetMatrices = 0;
+		uint32_t previousTransformOffsetMatrices = 0;
+		uint32_t transformOffsetsMatrices[2]{};
+		uint32_t currentTransformIndex = 0;
+		bool hasTransformHistory = false;
         uint32_t invBindOffsetMatrices = 0;
         uint32_t inverseSkinOffsetMatrices = 0;
     };
@@ -92,6 +102,8 @@ private:
 	std::unique_ptr<BufferView> m_transientWindTransformsView;
 	std::unique_ptr<BufferView> m_transientWindInverseSkinView;
 	TransientWindRegion m_transientWindRegion{};
+	uint32_t m_transientWindAllocationBaseMatrices = 0;
+	uint64_t m_lastBegunFrame = std::numeric_limits<uint64_t>::max();
 
     // Resource provider map
     std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;

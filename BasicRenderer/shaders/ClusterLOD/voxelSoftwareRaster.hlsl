@@ -980,6 +980,11 @@ bool VoxelRasterTryLoadWorkInputs(
 
 #if PSO_SKINNED
     meshInstance = LoadMeshTemplateForDraw(instanceIndex);
+    // Procedural wind palettes are frame-transient and indexed by the draw
+    // record's instance transform. The mesh template retains the source slot,
+    // which is bind pose for these assembly instances.
+    meshInstance.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+        instanceIndex, meshInstance.skinningInstanceSlot);
 #endif
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
     metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
