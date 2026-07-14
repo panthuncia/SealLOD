@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 
 inline constexpr const char* WindowResolutionPresetSettingName = "windowResolutionPreset";
+inline constexpr const char* ProceduralWindDisplacementScaleSettingName = "proceduralWindDisplacementScale";
 
 enum class WindowResolutionPreset : uint8_t {
     P720,

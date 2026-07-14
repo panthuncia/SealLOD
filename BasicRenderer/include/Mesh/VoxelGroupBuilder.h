@@ -28,6 +28,8 @@ struct VoxelSourceTrianglePart
 {
 	const std::vector<std::byte>* vertices = nullptr;
 	size_t vertexStrideBytes = 0;
+	const std::vector<std::byte>* skinningVertices = nullptr;
+	size_t skinningVertexStrideBytes = 0;
 	const std::vector<uint32_t>* triangleIndices = nullptr;
 };
 
@@ -36,6 +38,7 @@ struct VoxelSourceTriangleInstance
 	uint32_t partIndex = 0;
 	ClusterLODAssemblyTransform localToWorld{};
 	int32_t refinedGroup = -1;
+	std::span<const uint32_t> boneRemapIndices{};
 };
 
 struct VoxelSourceTriangleSample

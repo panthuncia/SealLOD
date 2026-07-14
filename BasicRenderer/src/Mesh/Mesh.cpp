@@ -950,7 +950,7 @@ void Mesh::EnsureAnimatedBoundingSpheresBuilt_() const
 
 			BoundingSphere sampledSphere{};
 			for (size_t boneIndex = 0; boneIndex < boneCount; ++boneIndex) {
-				const DirectX::XMMATRIX skinMatrix = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
+				const DirectX::XMMATRIX skinMatrix = DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
 				const BoundingSphere transformedSphere = TransformBoundingSphere(staticSphere, skinMatrix);
 				if (!initialized && boneIndex == 0) {
 					sampledSphere = transformedSphere;

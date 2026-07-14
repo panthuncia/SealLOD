@@ -361,7 +361,8 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
     skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
-    ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
+    ApplyAssemblySkinningToVertex(
+        setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, vertex);
 #else
     if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) == 0u)
     {
@@ -371,7 +372,8 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
     SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
     skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
     skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
-    ApplySkinningToVertex(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, vertex);
+    ApplyAssemblySkinningToVertex(
+        setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, vertex);
 #endif
 }
 
@@ -690,7 +692,8 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
         skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
         skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
-        position = ApplySkinningToPosition(setup.meshInstanceBuffer.skinningInstanceSlot, skinning, position);
+        position = ApplyAssemblySkinningToPosition(
+            setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, position);
     }
 
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];

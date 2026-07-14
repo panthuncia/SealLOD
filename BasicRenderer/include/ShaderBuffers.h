@@ -637,7 +637,8 @@ struct VisibleClusterInfo {
 };
 
 struct SkinningInstanceGPUInfo {
-    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores final bone * inverseBind skin matrices.
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores
+    // row-vector inverseBind * animatedGlobal skin matrices.
     uint32_t transformOffsetMatrices = 0;
     // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint32_t invBindOffsetMatrices = 0;
@@ -649,6 +650,8 @@ struct SkinningInstanceGPUInfo {
     uint32_t pad2 = 0;
 };
 
+// Legacy/cache compatibility bit. All current palette buffers use the canonical
+// shader-native row-vector layout regardless of this value.
 constexpr uint32_t kSkinningInstanceFlagRowVectorSkinMatrix = 1u << 0;
 constexpr uint32_t kSkinningInstanceFlagProceduralWindType = 1u << 1;
 constexpr uint32_t kProceduralWindTransientSlotBase = 65536u;

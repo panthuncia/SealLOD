@@ -405,6 +405,7 @@ std::string CLodShadowVariant::AppendFineRasterPassForPhase(
             reyesShadowRasterPassName,
             std::make_shared<ReyesVirtualShadowRasterizationPass>(
                 extension.m_visibleClustersBuffer,
+                extension.m_visibleClusterTransformIndicesBuffer,
                 extension.m_reyesDiceQueueBuffer,
                 extension.m_reyesDiceQueueCounterBuffer,
                 isPhase2 ? extension.m_reyesRasterWorkBufferPhase2 : extension.m_reyesRasterWorkBuffer,
@@ -1154,6 +1155,7 @@ std::string CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(
         reyesLargeShadowRasterPassName,
         std::make_shared<ReyesVirtualShadowRasterizationPass>(
             extension.m_swPageJobVisibleClustersBufferPhase2,
+            extension.m_swPageJobVisibleClusterTransformIndicesBufferPhase2,
             extension.m_reyesDiceQueueBuffer,
             extension.m_reyesDiceQueueCounterBuffer,
             extension.m_reyesRasterWorkBufferPhase2,

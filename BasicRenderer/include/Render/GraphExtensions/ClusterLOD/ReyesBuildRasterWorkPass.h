@@ -24,6 +24,7 @@ public:
         uint32_t rasterWorkCapacity,
         uint32_t phaseIndex = 0u,
         std::shared_ptr<Buffer> visibleClustersBuffer = nullptr,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer = nullptr,
         std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer = nullptr,
         std::shared_ptr<Buffer> replayDiceQueueBuffer = nullptr,
         std::shared_ptr<Buffer> replayDiceQueueCounterBuffer = nullptr,
@@ -47,6 +48,7 @@ private:
     std::shared_ptr<Buffer> m_indirectArgsBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_viewDepthSrvIndicesBuffer;
     std::shared_ptr<Buffer> m_replayDiceQueueBuffer;
     std::shared_ptr<Buffer> m_replayDiceQueueCounterBuffer;

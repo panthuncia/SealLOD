@@ -70,6 +70,7 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,
             Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseBindMatrices,

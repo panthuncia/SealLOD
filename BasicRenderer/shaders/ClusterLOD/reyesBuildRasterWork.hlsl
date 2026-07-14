@@ -92,7 +92,9 @@ float3 ReyesBuildRasterDecodeSkinnedPosition(
     uint pageByteOffset,
     uint pagePoolSlabDescriptorIndex,
     uint vertexFlags,
-    uint skinningInstanceSlot)
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pagePoolSlabDescriptorIndex)];
     float3 localPos = CLodLoadPagePosition(
@@ -106,7 +108,9 @@ float3 ReyesBuildRasterDecodeSkinnedPosition(
     {
         SkinningInfluences skinning = ReyesBuildRasterDecodePackedJoints(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
         skinning = ReyesBuildRasterDecodePackedWeights(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex, skinning);
-        localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(skinningInstanceSlot, skinning)).xyz;
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+        localPos = ApplyAssemblySkinningToPosition(
+            skinningInstanceSlot, skinning, assemblyTransformIndex, localPos);
     }
 
     return localPos;
@@ -332,6 +336,17 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const CLodReyesDiceQueueEntry diceEntry = diceQueue[diceIndex];
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
+    const MeshInstanceClodOffsets clodOffsets = LoadCLodOffsetsForDraw(diceEntry.instanceID);
+    StructuredBuffer<CLodMeshMetadata> clodMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata clodMetadata = clodMetadataBuffer[clodOffsets.clodMeshMetadataIndex];
+    uint assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    if (CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint> visibleClusterTransformIndices = ResourceDescriptorHeap[
+            CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+        assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex];
+    }
     if ((CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u ||
          CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED != 0u) &&
         CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
@@ -348,13 +363,14 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
             const uint3 sourceTriangle = ReyesBuildRasterDecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
-            const float3 sourcePosition0 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-            const float3 sourcePosition1 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-            const float3 sourcePosition2 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+            const float3 sourcePosition0 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+            const float3 sourcePosition1 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+            const float3 sourcePosition2 = ReyesBuildRasterDecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
             StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
             const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
             const float displacementMagnitude = ReyesGeometricDisplacementMagnitude(materialInfo);
-            const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
+            const PerObjectBuffer objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
+                diceEntry.instanceID, assemblyTransformIndex);
 
             if (CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u)
             {

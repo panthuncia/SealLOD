@@ -668,6 +668,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 reyesRasterWorkCapacity,
                 phaseIndex,
                 enableReyesPatchOcclusion ? m_visibleClustersBuffer : nullptr,
+                enableReyesPatchOcclusion ? m_visibleClusterTransformIndicesBuffer : nullptr,
                 reyesPatchOcclusionDepthIndices,
                 enableReyesPatchOcclusion ? m_reyesReplayDiceQueueBuffer : nullptr,
                 enableReyesPatchOcclusion ? m_reyesReplayDiceQueueCounterBuffer : nullptr,

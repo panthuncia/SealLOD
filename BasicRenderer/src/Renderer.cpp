@@ -1581,6 +1581,7 @@ void Renderer::SetSettings() {
         settingsManager.registerSetting<std::vector<float>>("directionalLightCascadeSplits", calculateCascadeSplits(numDirectionalCascades, 0.1f, maxShadowDistance, maxShadowDistance));
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);
+	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 1.0f);
 	settingsManager.registerSetting<bool>("enableWireframe", false);
 	settingsManager.registerSetting<bool>("enableShadows", false);
 	settingsManager.registerSetting<uint16_t>("skyboxResolution", 2048);

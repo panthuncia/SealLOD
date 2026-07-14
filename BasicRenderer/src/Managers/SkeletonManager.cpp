@@ -229,14 +229,17 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
     info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
     info.boneCount = rec.boneCount;
-    info.flags = baseShared->GetSkinningGPUFlags();
+    // Retained for cache/metadata compatibility. Shader-visible skin palettes now
+    // use one canonical row-vector layout and never branch on this flag.
+    info.flags = baseShared->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
 	if (baseShared->HasWindSimulationGroups()) {
 		info.flags |= kSkinningInstanceFlagProceduralWindType;
 		info.pad0 = rec.instanceSlot; // Wind type IDs are stable persistent assembly slots.
 		spdlog::info(
-			"SkeletonManager: registered procedural-wind assembly type slot={} bones={} profile='{}'",
+			"SkeletonManager: registered procedural-wind assembly type slot={} bones={} flags=0x{:X} profile='{}'",
 			rec.instanceSlot,
 			rec.boneCount,
+			info.flags,
 			baseShared->GetWindProfileIdentity());
 	}
 
@@ -291,10 +294,14 @@ void SkeletonManager::UpdateInstanceTransforms(Skeleton& inst) {
     const auto boneMatrices = inst.GetBoneMatrices();
     const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
     for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
-        skinMatrices[boneIndex] = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
-        inverseSkinMatrices[boneIndex] = DirectX::XMMatrixInverse(
-            nullptr,
-            skinMatrices[boneIndex]);
+        // Row-vector skinning is: bindPosition * inverseBind * animatedGlobal.
+        const DirectX::XMMATRIX skinMatrix =
+            DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
+        // Convert once at the CPU upload boundary. StructuredBuffer<row_major matrix>
+        // then exposes the intended row-vector matrix directly to every shader.
+        skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
+        inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
+            DirectX::XMMatrixInverse(nullptr, skinMatrix));
     }
     BUFFER_UPLOAD(skinMatrices.data(), bytes,
         rg::runtime::UploadTarget::FromShared(m_boneTransforms),
@@ -366,10 +373,14 @@ void SkeletonManager::UpdateAllDirtyInstances() {
             const auto boneMatrices = upload.skeleton->GetBoneMatrices();
             const auto inverseBindMatrices = rec.base->GetInverseBindMatrices();
             for (uint32_t boneIndex = 0; boneIndex < rec.boneCount; ++boneIndex) {
-                upload.skinMatrices[boneIndex] = DirectX::XMMatrixMultiply(boneMatrices[boneIndex], inverseBindMatrices[boneIndex]);
-                upload.inverseSkinMatrices[boneIndex] = DirectX::XMMatrixInverse(
-                    nullptr,
-                    upload.skinMatrices[boneIndex]);
+                // Row-vector skinning is: bindPosition * inverseBind * animatedGlobal.
+                const DirectX::XMMATRIX skinMatrix =
+                    DirectX::XMMatrixMultiply(inverseBindMatrices[boneIndex], boneMatrices[boneIndex]);
+                // Match UpdateInstanceTransforms: GPU buffers store matrices in the
+                // shader-native row-vector layout, so shader consumers load directly.
+                upload.skinMatrices[boneIndex] = DirectX::XMMatrixTranspose(skinMatrix);
+                upload.inverseSkinMatrices[boneIndex] = DirectX::XMMatrixTranspose(
+                    DirectX::XMMatrixInverse(nullptr, skinMatrix));
             }
         });
 

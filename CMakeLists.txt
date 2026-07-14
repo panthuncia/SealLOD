@@ -75,6 +75,14 @@ function(basicrenderer_use_release_library_for_debug target_name)
     return()
   endif()
 
+  # vcpkg's app-local deployment searches the Debug bin directory for Debug
+  # builds.  Linking the ASan build against release fmt makes the executable
+  # import fmt.dll, while deployment provides the Debug runtime, fmtd.dll.
+  # Keep fmt's link configuration aligned with app-local deployment for ASan.
+  if(ENABLE_ADDRESS_SANITIZER AND target_name STREQUAL "fmt::fmt")
+    return()
+  endif()
+
   set_target_properties(${target_name} PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
   foreach(_basicrenderer_imported_prop IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB)
     get_target_property(_basicrenderer_imported_release_value ${target_name} ${_basicrenderer_imported_prop}_RELEASE)

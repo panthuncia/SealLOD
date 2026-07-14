@@ -86,7 +86,8 @@ BoundingSphere CLodComputeSkinnedMeshletBounds(
             slab.Load(boneListBase + boneIndex * 4u),
             metadata,
             assemblyTransformIndex);
-        const float4x4 boneSkinMatrix = LoadBoneSkinMatrix(skinningInstanceSlot, jointIndex);
+        const float4x4 boneSkinMatrix = LoadAssemblyLocalBoneSkinMatrix(
+            skinningInstanceSlot, jointIndex, assemblyTransformIndex);
         const float3 transformedCenter = mul(float4(staticBounds.sphere.xyz, 1.0f), boneSkinMatrix).xyz;
         const float transformedRadius = staticBounds.sphere.w * SkinningMaxAxisScale_RowVector(boneSkinMatrix);
 

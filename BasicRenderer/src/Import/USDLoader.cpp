@@ -3711,7 +3711,6 @@ namespace USDLoader {
 					ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 					extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
-					extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
 					extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
@@ -3748,7 +3747,6 @@ namespace USDLoader {
 						ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
 						extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
-						extractOptions.importSkinningAsRigidBindPose = extractOptions.importSkinningAsRigidBindPose || retainArtifactsForAssetAssembly;
 						extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
@@ -5701,7 +5699,6 @@ namespace USDLoader {
 		if (!prebuilt) {
 			return nullptr;
 		}
-		MeshIngestBuilder ingest(0u, 0u, 0u, GetDefaultBuilderSettings());
 		std::string artifactError;
 		std::shared_ptr<Skeleton> baseSkeleton = SkeletonArtifactCache::ResolveSkeleton(prebuilt->assemblySkeletonArtifact, &artifactError);
 		if (!prebuilt->assemblySkeletonArtifact.Empty() && !baseSkeleton) {
@@ -5709,6 +5706,11 @@ namespace USDLoader {
 				prebuilt->assemblySkeletonArtifact.id.ToString(), artifactError);
 			return nullptr;
 		}
+		MeshIngestBuilder ingest(
+			0u,
+			0u,
+			baseSkeleton ? VertexFlags::VERTEX_SKINNED : 0u,
+			GetDefaultBuilderSettings());
 		auto mesh = ingest.Build(material ? material : Material::GetDefaultMaterial(), std::move(prebuilt), MeshCpuDataPolicy::ReleaseAfterUpload);
 		if (mesh && baseSkeleton) {
 			mesh->SetBaseSkin(baseSkeleton);
@@ -5817,6 +5819,8 @@ namespace USDLoader {
 					.coverageVertices = &result.ingest.GetVertices(),
 					.coverageIndices = &result.ingest.GetIndices(),
 					.coverageVertexSize = result.ingest.GetVertexSize(),
+					.coverageSkinningVertices = &result.ingest.GetSkinningVertices(),
+					.coverageSkinningVertexSize = result.ingest.GetSkinningVertexSize(),
 					.doubleSidedCoverageTriangles = result.forceDoubleSidedPreview });
 				bucket.partByResult.emplace(&result, partIndex);
 			}

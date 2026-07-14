@@ -56,6 +56,7 @@ using namespace pxr;
 namespace {
 
 constexpr size_t kMaxSkinInfluences = 8u;
+constexpr const char* kSkinningPayloadAbiSuffix = "#skinning_payloads=3";
 
 std::mutex& GetClusterLODCacheBuildMutex(const CLodCacheLoader::MeshCacheIdentity& identity)
 {
@@ -1697,6 +1698,12 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	if (options.importSkinningAsRigidBindPose) {
 		cacheIdentity.sourceIdentifier += "#usd_skinning_as_rigid_bind_pose=1";
 	}
+	else if (skinQ) {
+		// A whole-asset assembly can only pick up skinning changes if its source
+		// mesh CLod pages are invalidated too. In particular, simplified trunk
+		// groups carry the joint/weight payload chosen by this build.
+		cacheIdentity.sourceIdentifier += kSkinningPayloadAbiSuffix;
+	}
 	if (options.objectSurfaceSamplingMode != ObjectSurfaceSamplingMode::None) {
 		cacheIdentity.sourceIdentifier += "#object_surface_sampling=" +
 			std::to_string(static_cast<std::uint32_t>(options.objectSurfaceSamplingMode));
@@ -2227,8 +2234,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 
 	constexpr const char* kAssetAssemblySubsetName = "CLodAssetAssembly";
 	constexpr const char* kAssetAssemblyPrimName = "__CLodAssetAssembly";
-	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=19#authored_up_axis_baked=1#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
-	constexpr const char* kRigidBindPoseSuffix = "#bucket=rigid#usd_skinning_as_rigid_bind_pose=1";
+	constexpr const char* kAssetAssemblyAbiSuffix = "#usd_clod_asset_assembly=21#authored_up_axis_baked=1#assembly_parent_voxel_coverage=source_triangles_instanced_embree#assembly_proxy_errors_track_voxel_boundaries=1#assembly_portal_cut=2#part_library=1#structural_root_proxy_force_open=1#part_voxel_tail=1#assembly_double_sided_coverage=1#assembly_scaled_coverage_rays=1#weighted_voxel_coverage=1#hierarchical_voxel_sggx=2";
 
 	CLodCacheLoader::MeshCacheIdentity identity{};
 	(void)identityMesh;
@@ -2245,7 +2251,7 @@ std::optional<CLodCacheLoader::MeshCacheIdentity> BuildWholeAssetAssemblyIdentit
 		: std::string("/") + kAssetAssemblyPrimName;
 	identity.subsetName = kAssetAssemblySubsetName;
 	identity.sourceIdentifier += kAssetAssemblyAbiSuffix;
-	identity.sourceIdentifier += kRigidBindPoseSuffix;
+	identity.sourceIdentifier += kSkinningPayloadAbiSuffix;
 	return identity;
 }
 

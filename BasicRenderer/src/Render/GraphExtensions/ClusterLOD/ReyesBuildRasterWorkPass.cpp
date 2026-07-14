@@ -24,6 +24,7 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
     uint32_t rasterWorkCapacity,
     uint32_t phaseIndex,
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> viewDepthSrvIndicesBuffer,
     std::shared_ptr<Buffer> replayDiceQueueBuffer,
     std::shared_ptr<Buffer> replayDiceQueueCounterBuffer,
@@ -39,6 +40,7 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
     , m_indirectArgsBuffer(std::move(indirectArgsBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_viewDepthSrvIndicesBuffer(std::move(viewDepthSrvIndicesBuffer))
     , m_replayDiceQueueBuffer(std::move(replayDiceQueueBuffer))
     , m_replayDiceQueueCounterBuffer(std::move(replayDiceQueueCounterBuffer))
@@ -79,6 +81,11 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
             Builtin::CullingCameraBuffer,
             Builtin::CameraBuffer,
             Builtin::PerMaterialDataBuffer,
+            Builtin::CLod::Offsets,
+            Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo)
@@ -93,6 +100,9 @@ void ReyesBuildRasterWorkPass::DeclareResourceUsages(ComputePassBuilder* builder
     }
     if (m_visibleClustersBuffer) {
         builder->WithShaderResource(m_visibleClustersBuffer);
+    }
+    if (m_visibleClusterTransformIndicesBuffer) {
+        builder->WithShaderResource(m_visibleClusterTransformIndicesBuffer);
     }
     if (m_viewDepthSrvIndicesBuffer) {
         builder->WithShaderResource(m_viewDepthSrvIndicesBuffer);
@@ -145,6 +155,10 @@ PassReturn ReyesBuildRasterWorkPass::Execute(PassExecutionContext& executionCont
     uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer
         ? m_visibleClustersBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;
+    uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+        m_visibleClusterTransformIndicesBuffer
+            ? m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index
+            : 0xFFFFFFFFu;
     uintRootConstants[CLOD_REYES_BUILD_RASTER_WORK_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = m_viewDepthSrvIndicesBuffer
         ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
         : 0xFFFFFFFFu;

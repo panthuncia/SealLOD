@@ -6,7 +6,7 @@ add_library(ProceduralWindOffline STATIC
     src/WindOffline.cpp
     src/WindProfile.cpp)
 add_library(BasicRenderer::ProceduralWindOffline ALIAS ProceduralWindOffline)
-target_compile_features(ProceduralWindOffline PUBLIC cxx_std_20)
+target_compile_features(ProceduralWindOffline PUBLIC cxx_std_23)
 target_include_directories(ProceduralWindOffline PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
 target_link_libraries(ProceduralWindOffline PUBLIC nlohmann_json::nlohmann_json lz4::lz4 Microsoft::DirectX-Headers)
 

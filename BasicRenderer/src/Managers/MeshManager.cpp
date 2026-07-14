@@ -515,19 +515,88 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance),
 			sizeof(ClusterLODAssemblyInstance));
 	}
-	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
-	if (!mesh->GetCLodAssemblyBoneRemaps().empty()) {
-		clusterLODAssemblyBoneRemapsView = m_clusterLODAssemblyBoneRemaps->AddData(
-			mesh->GetCLodAssemblyBoneRemaps().data(),
-			mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap),
-			sizeof(ClusterLODAssemblyBoneRemap));
-	}
 	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapIndicesView = nullptr;
 	if (!mesh->GetCLodAssemblyBoneRemapIndices().empty()) {
 		clusterLODAssemblyBoneRemapIndicesView = m_clusterLODAssemblyBoneRemapIndices->AddData(
 			mesh->GetCLodAssemblyBoneRemapIndices().data(),
 			mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t),
 			sizeof(uint32_t));
+	}
+	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView = nullptr;
+	if (!mesh->GetCLodAssemblyBoneRemaps().empty()) {
+		// CLOD wind skinning keeps vertex joint indices local to each assembly transform.
+		// Validate the local-to-expanded-joint tables at the CPU/GPU upload boundary so
+		// malformed ranges cannot masquerade as a matrix-orientation problem in shaders.
+		if (mesh->HasBaseSkin() && mesh->GetBaseSkin()->HasWindSimulationGroups()) {
+			const auto& transforms = mesh->GetCLodAssemblyTransforms();
+			const auto& remaps = mesh->GetCLodAssemblyBoneRemaps();
+			const auto& indices = mesh->GetCLodAssemblyBoneRemapIndices();
+			const uint32_t expandedBoneCount = mesh->GetBaseSkin()->GetBoneCount();
+			size_t emptyRemaps = 0;
+			size_t invalidRanges = 0;
+			size_t invalidTargets = 0;
+			uint32_t minRemapCount = (std::numeric_limits<uint32_t>::max)();
+			uint32_t maxRemapCount = 0;
+			uint32_t maxTargetJoint = 0;
+
+			for (const ClusterLODAssemblyBoneRemap& remap : remaps) {
+				if (remap.remapIndexBase == CLOD_ASSEMBLY_BONE_REMAP_SENTINEL || remap.remapIndexCount == 0u) {
+					++emptyRemaps;
+					continue;
+				}
+				minRemapCount = std::min(minRemapCount, remap.remapIndexCount);
+				maxRemapCount = std::max(maxRemapCount, remap.remapIndexCount);
+				const uint64_t remapEnd = static_cast<uint64_t>(remap.remapIndexBase) + remap.remapIndexCount;
+				if (remapEnd > indices.size()) {
+					++invalidRanges;
+					continue;
+				}
+				for (uint32_t localJoint = 0; localJoint < remap.remapIndexCount; ++localJoint) {
+					const uint32_t targetJoint = indices[remap.remapIndexBase + localJoint];
+					maxTargetJoint = std::max(maxTargetJoint, targetJoint);
+					invalidTargets += targetJoint >= expandedBoneCount ? 1u : 0u;
+				}
+			}
+
+			if (minRemapCount == (std::numeric_limits<uint32_t>::max)()) {
+				minRemapCount = 0;
+			}
+			uint32_t maxVertexJoint = 0;
+			for (uint32_t joint : mesh->GetSkinningDebugJoints()) {
+				maxVertexJoint = std::max(maxVertexJoint, joint);
+			}
+			spdlog::info(
+				"CLOD skin remap telemetry: mesh={} transforms={} remaps={} indices={} expandedBones={} empty={} invalidRanges={} invalidTargets={} remapCount=[{},{}] maxTarget={} maxVertexJoint={}",
+				mesh->GetGlobalID(), transforms.size(), remaps.size(), indices.size(), expandedBoneCount,
+				emptyRemaps, invalidRanges, invalidTargets, minRemapCount, maxRemapCount,
+				maxTargetJoint, maxVertexJoint);
+		}
+		std::vector<ClusterLODAssemblyBoneRemap> gpuBoneRemaps = mesh->GetCLodAssemblyBoneRemaps();
+		const uint64_t globalRemapIndexBase = clusterLODAssemblyBoneRemapIndicesView != nullptr
+			? clusterLODAssemblyBoneRemapIndicesView->GetOffset() / sizeof(uint32_t)
+			: 0u;
+		if (globalRemapIndexBase > (std::numeric_limits<uint32_t>::max)()) {
+			spdlog::error("MeshManager::AddMesh: CLOD assembly bone-remap index base exceeds uint32_t range for mesh globalID={}", mesh->GetGlobalID());
+			return false;
+		}
+		for (ClusterLODAssemblyBoneRemap& remap : gpuBoneRemaps) {
+			if (remap.remapIndexBase == CLOD_ASSEMBLY_BONE_REMAP_SENTINEL) {
+				continue;
+			}
+			const uint64_t rebasedIndex = globalRemapIndexBase + remap.remapIndexBase;
+			if (rebasedIndex > (std::numeric_limits<uint32_t>::max)()) {
+				spdlog::error("MeshManager::AddMesh: CLOD assembly bone-remap index exceeds uint32_t range for mesh globalID={}", mesh->GetGlobalID());
+				return false;
+			}
+			// remapIndexBase is mesh-local in cached/prebuilt CLOD data, but the shader
+			// indexes the globally aggregated remap-index buffer. Rebase exactly once at
+			// upload so every shader consumer can use the stored index directly.
+			remap.remapIndexBase = static_cast<uint32_t>(rebasedIndex);
+		}
+		clusterLODAssemblyBoneRemapsView = m_clusterLODAssemblyBoneRemaps->AddData(
+			gpuBoneRemaps.data(),
+			gpuBoneRemaps.size() * sizeof(ClusterLODAssemblyBoneRemap),
+			sizeof(ClusterLODAssemblyBoneRemap));
 	}
 	if (!clusterLODGroupsView || !clusterLODSegmentsView || !clusterLODNodesView) {
 		spdlog::error("MeshManager::AddMesh: failed to allocate logical CLOD hierarchy views for mesh globalID={}", mesh->GetGlobalID());
@@ -1048,8 +1117,11 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 				row.skinnedBoundsScale = it->second->GetCurrentAnimationConservativeBoundsScale();
 				if (inserted) {
 					spdlog::info(
-						"MeshManager: registered static procedural-wind template type slot={} bones={}.",
-						row.skinningInstanceSlot, it->second->GetBoneCount());
+						"MeshManager: registered static procedural-wind template type slot={} bones={} vertexFlags=0x{:X} skinned={}.",
+						row.skinningInstanceSlot,
+						it->second->GetBoneCount(),
+						request.mesh->GetPerMeshCBData().vertexFlags,
+						(request.mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u);
 				}
 			}
 			row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));

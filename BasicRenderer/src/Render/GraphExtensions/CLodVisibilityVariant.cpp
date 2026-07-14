@@ -101,6 +101,7 @@ void CLodVisibilityVariant::AppendReyesRasterPassesForPhase(
                 extension.m_reyesRasterWorkCapacity,
                 phaseIndex,
                 enablePatchOcclusion ? extension.m_visibleClustersBuffer : nullptr,
+                enablePatchOcclusion ? extension.m_visibleClusterTransformIndicesBuffer : nullptr,
                 viewDepthSrvIndicesBuffer,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueBuffer : nullptr,
                 enablePatchOcclusion ? extension.m_reyesReplayDiceQueueCounterBuffer : nullptr,
@@ -151,6 +152,7 @@ std::string CLodVisibilityVariant::AppendFineRasterPassForPhase(
         passName,
         std::make_shared<ReyesPatchRasterizationPass>(
                 extension.m_visibleClustersBuffer,
+                extension.m_visibleClusterTransformIndicesBuffer,
                 extension.m_reyesDiceQueueBuffer,
                 extension.m_reyesDiceQueueCounterBuffer,
                 rasterWorkBuffer,

@@ -772,8 +772,10 @@ uint VoxelRasterPrepareCube(
     if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
     {
         const uint expandedBoneIndex = ResolveAssemblyBoneIndex(dominantBoneIndex, metadata, assemblyTransformIndex);
-        const float4x4 skinMatrix = LoadBoneSkinMatrix(meshInstance.skinningInstanceSlot, expandedBoneIndex);
-        const float4x4 inverseSkinMatrix = LoadBoneInverseSkinMatrix(meshInstance.skinningInstanceSlot, expandedBoneIndex);
+        const float4x4 skinMatrix = LoadAssemblyLocalBoneSkinMatrix(
+            meshInstance.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+        const float4x4 inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
+            meshInstance.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
         localToWorld = mul(skinMatrix, objectData.model);
         worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
     }

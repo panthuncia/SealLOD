@@ -7691,7 +7691,9 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 				simplifyAttributeStream[destinationFloatOffset + 1ull] = tangent.y;
 				simplifyAttributeStream[destinationFloatOffset + 2ull] = tangent.z;
 				simplifyAttributeStream[destinationFloatOffset + 3ull] = tangent.w;
+				destinationFloatOffset += 4ull;
 			}
+
 		}
 	}
 
@@ -8730,6 +8732,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		assemblyCoverageParts[partIndex] = VoxelSourceTrianglePart{
 			.vertices = parts[partIndex].coverageVertices,
 			.vertexStrideBytes = parts[partIndex].coverageVertexSize,
+			.skinningVertices = parts[partIndex].coverageSkinningVertices,
+			.skinningVertexStrideBytes = parts[partIndex].coverageSkinningVertexSize,
 			.triangleIndices = parts[partIndex].coverageIndices };
 		assemblyCoverageDoubleSidedTriangles =
 			assemblyCoverageDoubleSidedTriangles || parts[partIndex].doubleSidedCoverageTriangles;
@@ -9392,7 +9396,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		assemblyCoverageInstances.push_back(VoxelSourceTriangleInstance{
 			.partIndex = spec.partIndex,
 			.localToWorld = spec.transform,
-			.refinedGroup = static_cast<int32_t>(proxyGroupIndex) });
+			.refinedGroup = static_cast<int32_t>(proxyGroupIndex),
+			.boneRemapIndices = spec.boneRemapIndices });
 
 		uint32_t selectedSourceGroups = 0u;
 		float selectedMaxWorldVoxelWidth = 0.0f;

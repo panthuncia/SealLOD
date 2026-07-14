@@ -120,6 +120,7 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
             Builtin::CLod::MeshMetadata,
             Builtin::CLod::Groups,
             Builtin::CLod::GroupPageMap,
+            Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::SkeletonResources::InverseBindMatrices,

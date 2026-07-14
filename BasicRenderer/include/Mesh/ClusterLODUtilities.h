@@ -48,6 +48,8 @@ struct ClusterLODAssemblyPart
 	const std::vector<std::byte>* coverageVertices = nullptr;
 	const std::vector<uint32_t>* coverageIndices = nullptr;
 	unsigned int coverageVertexSize = 0;
+	const std::vector<std::byte>* coverageSkinningVertices = nullptr;
+	unsigned int coverageSkinningVertexSize = 0;
 	bool doubleSidedCoverageTriangles = false;
 };
 

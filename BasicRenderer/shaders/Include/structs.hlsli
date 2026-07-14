@@ -1030,7 +1030,8 @@ struct MaterialInputs
 
 struct SkinningInstanceGPUInfo
 {
-    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores final bone * inverseBind skin matrices.
+    // Offset into Builtin::SkeletonResources::BoneTransforms, which stores
+    // row-vector inverseBind * animatedGlobal skin matrices.
     uint transformOffsetMatrices;
     // Kept for CPU/debug compatibility; forward skinning no longer reads this in shaders.
     uint invBindOffsetMatrices;
@@ -1042,6 +1043,8 @@ struct SkinningInstanceGPUInfo
     uint pad2;
 };
 
+// Legacy/cache compatibility bit. Palette orientation is now canonical and does
+// not vary per instance.
 static const uint SkinningInstanceFlag_RowVectorSkinMatrix = 1u << 0;
 
 // TODO: packing?

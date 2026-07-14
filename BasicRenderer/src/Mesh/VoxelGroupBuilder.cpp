@@ -1987,6 +1987,8 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 		RTCScene scene = nullptr;
 		const std::vector<std::byte>* vertices = nullptr;
 		size_t vertexStrideBytes = 0;
+		const std::vector<std::byte>* skinningVertices = nullptr;
+		size_t skinningVertexStrideBytes = 0;
 		const std::vector<uint32_t>* triangleIndices = nullptr;
 		uint32_t triangleCount = 0;
 		std::vector<uint32_t> triangleUvChartIds;
@@ -2003,6 +2005,7 @@ struct VoxelSourceTriangleBVH::EmbreeScene
 		int32_t refinedGroup = -1;
 		uint32_t firstTriangle = 0;
 		uint32_t triangleCount = 0;
+		std::vector<uint32_t> boneRemapIndices;
 	};
 
 	static constexpr int32_t kUnfilteredRefinedGroupScene = std::numeric_limits<int32_t>::min();
@@ -2302,6 +2305,8 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 		EmbreeScene::PartScene& partScene = embreeScene->partScenes[partIndex];
 		partScene.vertices = part.vertices;
 		partScene.vertexStrideBytes = part.vertexStrideBytes;
+		partScene.skinningVertices = part.skinningVertices;
+		partScene.skinningVertexStrideBytes = part.skinningVertexStrideBytes;
 		partScene.triangleIndices = part.triangleIndices;
 		partScene.triangleCount = static_cast<uint32_t>(sourceTriangleCount);
 		partScene.triangleUvChartIds = BuildTriangleUvChartIds(*part.vertices, part.vertexStrideBytes, *part.triangleIndices);
@@ -2455,7 +2460,9 @@ void VoxelSourceTriangleBVH::BuildInstanced(
 			.localToWorld = sourceInstance.localToWorld,
 			.refinedGroup = sourceInstance.refinedGroup,
 			.firstTriangle = static_cast<uint32_t>(totalTriangleCount),
-			.triangleCount = partScene.triangleCount });
+			.triangleCount = partScene.triangleCount,
+			.boneRemapIndices = std::vector<uint32_t>(
+				sourceInstance.boneRemapIndices.begin(), sourceInstance.boneRemapIndices.end()) });
 		totalTriangleCount += partScene.triangleCount;
 	}
 
@@ -2679,7 +2686,10 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 		size_t vertexStrideBytes,
 		const std::vector<uint32_t>& triangleIndices,
 		uint32_t localTriangleIndex,
-		const ClusterLODAssemblyTransform* transform) -> bool
+		const ClusterLODAssemblyTransform* transform,
+		const std::vector<std::byte>* skinningVertices,
+		size_t skinningVertexStrideBytes,
+		std::span<const uint32_t> boneRemapIndices) -> bool
 	{
 		const size_t triangleBase = static_cast<size_t>(localTriangleIndex) * 3u;
 		if (vertexStrideBytes < sizeof(float) * 3u || triangleBase + 2u >= triangleIndices.size())
@@ -2702,6 +2712,32 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 			outSample.uvs[corner] = ReadTexcoord(vertices, vertexStrideBytes, vertexIndex);
 		}
 		outSample.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+		if (skinningVertices != nullptr && !skinningVertices->empty() && skinningVertexStrideBytes != 0u)
+		{
+			std::unordered_map<uint32_t, float> boneWeights;
+			boneWeights.reserve(8u);
+			for (uint32_t corner = 0; corner < 3u; ++corner)
+			{
+				PackedSkinningInfluences influences{};
+				if (!ReadSkinningInfluences(
+					*skinningVertices,
+					skinningVertexStrideBytes,
+					triangleIndices[triangleBase + corner],
+					influences))
+				{
+					continue;
+				}
+				AccumulateInfluenceSet(influences.joints0, influences.weights0, boneWeights);
+				AccumulateInfluenceSet(influences.joints1, influences.weights1, boneWeights);
+			}
+			const uint32_t localBoneIndex = SelectDominantBoneIndex(boneWeights);
+			if (localBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+			{
+				outSample.dominantBoneIndex = localBoneIndex < boneRemapIndices.size()
+					? boneRemapIndices[localBoneIndex]
+					: localBoneIndex;
+			}
+		}
 		return true;
 	};
 
@@ -2734,7 +2770,10 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 			part.vertexStrideBytes,
 			*part.triangleIndices,
 			triangleIndex - instance.firstTriangle,
-			&instance.localToWorld))
+			&instance.localToWorld,
+			part.skinningVertices,
+			part.skinningVertexStrideBytes,
+			instance.boneRemapIndices))
 		{
 			return false;
 		}
@@ -2750,7 +2789,15 @@ bool VoxelSourceTriangleBVH::GetTriangleSample(
 	{
 		return false;
 	}
-	if (!fillFromFlatTriangle(*m_vertices, m_vertexStrideBytes, *m_triangleIndices, triangleIndex, nullptr))
+	if (!fillFromFlatTriangle(
+		*m_vertices,
+		m_vertexStrideBytes,
+		*m_triangleIndices,
+		triangleIndex,
+		nullptr,
+		m_skinningVertices,
+		m_skinningVertexStrideBytes,
+		{}))
 	{
 		return false;
 	}

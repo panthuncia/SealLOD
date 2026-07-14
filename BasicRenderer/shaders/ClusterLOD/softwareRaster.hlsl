@@ -359,14 +359,16 @@ void SWRasterCluster(
         SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
         skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
         skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
-        localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+        localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
+            meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
 #else
         if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u)
         {
             SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
             skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
-            localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+            localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
+                meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
         }
 #endif
 

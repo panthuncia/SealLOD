@@ -3,6 +3,8 @@
 #include <condition_variable>
 #include <fstream>
 #include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <spdlog/spdlog.h>
 #include <tree_sitter/api.h>
 
@@ -2755,7 +2757,7 @@ ComPtr<IDxcResult> PSOManager::InvokeCompile(
     const std::wstring& target)
 {
     ComPtr<IDxcResult> result;
-    HRESULT hr = pCompiler->Compile(
+    const HRESULT compileHr = pCompiler->Compile(
         &src,
         arguments.data(),
         (UINT)arguments.size(),
@@ -2763,51 +2765,103 @@ ComPtr<IDxcResult> PSOManager::InvokeCompile(
         IID_PPV_ARGS(result.GetAddressOf())
     );
 
-    // on failure or errors, pull DXC_OUT_ERRORS and log
-    if (FAILED(hr)) {
-        ComPtr<IDxcBlobUtf8> errs;
-        if (result) {
-            result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(errs.GetAddressOf()), nullptr);
+    auto formatHResult = [](HRESULT value) {
+        std::ostringstream stream;
+        stream << "0x"
+            << std::uppercase
+            << std::hex
+            << std::setw(8)
+            << std::setfill('0')
+            << static_cast<uint32_t>(value);
+        return stream.str();
+        };
+
+    auto formatArguments = [&]() {
+        std::ostringstream stream;
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            if (i != 0) {
+                stream << ' ';
+            }
+
+            const std::string argument = arguments[i] ? ws2s(arguments[i]) : "<null>";
+            stream << std::quoted(argument);
         }
-        if (errs && errs->GetStringLength())
-            spdlog::error("Shader compile error: {}", errs->GetStringPointer());
-        //LogFailedShaderSource(filename, entryPoint, target, src);
-        ThrowIfFailed(hr);
-    }
+        return stream.str();
+        };
 
-    if (!result) {
-        spdlog::error("Shader compile produced no result for {} entry {} target {}", ws2s(filename), ws2s(entryPoint), ws2s(target));
-        ThrowIfFailed(E_FAIL);
-    }
+    HRESULT statusQueryHr = E_UNEXPECTED;
+    HRESULT compileStatus = E_UNEXPECTED;
+    HRESULT diagnosticsHr = S_FALSE;
+    bool diagnosticsPresent = false;
+    std::string diagnostics;
 
-    {
-        ComPtr<IDxcBlobUtf8> errs;
-        result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(errs.GetAddressOf()), nullptr);
-        if (errs && errs->GetStringLength()) {
-            spdlog::error("Shader compile warnings: {}", errs->GetStringPointer());
-            if (strstr(errs->GetStringPointer(), "error")) {
-                //LogFailedShaderSource(filename, entryPoint, target, src);
-                ThrowIfFailed(E_FAIL);
+    if (result) {
+        statusQueryHr = result->GetStatus(&compileStatus);
+
+        // GetOutput returns E_INVALIDARG when the requested output kind is absent.
+        // Check first so successful, diagnostic-free compiles do not generate a
+        // misleading failed HRESULT in an attached debugger.
+        diagnosticsPresent = result->HasOutput(DXC_OUT_ERRORS) != FALSE;
+        if (diagnosticsPresent) {
+            ComPtr<IDxcBlobUtf8> diagnosticsBlob;
+            diagnosticsHr = result->GetOutput(
+                DXC_OUT_ERRORS,
+                IID_PPV_ARGS(diagnosticsBlob.GetAddressOf()),
+                nullptr);
+            if (SUCCEEDED(diagnosticsHr) && diagnosticsBlob && diagnosticsBlob->GetStringLength() != 0) {
+                diagnostics.assign(
+                    diagnosticsBlob->GetStringPointer(),
+                    diagnosticsBlob->GetStringLength());
             }
         }
     }
 
-    HRESULT status = S_OK;
-    hr = result->GetStatus(&status);
-    if (FAILED(hr)) {
-        spdlog::error("Failed to query shader compile status for {} entry {} target {}", ws2s(filename), ws2s(entryPoint), ws2s(target));
-        ThrowIfFailed(hr);
-    }
-    if (FAILED(status)) {
-        ComPtr<IDxcBlobUtf8> errs;
-        result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(errs.GetAddressOf()), nullptr);
-        if (errs && errs->GetStringLength()) {
-            spdlog::error("Shader compile failed for {} entry {} target {}: {}", ws2s(filename), ws2s(entryPoint), ws2s(target), errs->GetStringPointer());
+    const bool compileFailed =
+        FAILED(compileHr)
+        || !result
+        || FAILED(statusQueryHr)
+        || FAILED(compileStatus);
+    if (compileFailed) {
+        std::ostringstream message;
+        message
+            << "Shader compilation failed for file='" << ws2s(filename)
+            << "', entry='" << ws2s(entryPoint)
+            << "', target='" << ws2s(target) << "'. "
+            << "IDxcCompiler3::Compile=" << formatHResult(compileHr) << "; ";
+
+        if (result) {
+            message
+                << "IDxcResult::GetStatus=" << formatHResult(statusQueryHr)
+                << "; compile status=" << formatHResult(compileStatus) << "; ";
+
+            if (diagnosticsPresent) {
+                message << "DXC_OUT_ERRORS GetOutput=" << formatHResult(diagnosticsHr) << "; ";
+            }
+            else {
+                message << "DXC_OUT_ERRORS=not present; ";
+            }
         }
         else {
-            spdlog::error("Shader compile failed for {} entry {} target {} with HRESULT 0x{:08X}", ws2s(filename), ws2s(entryPoint), ws2s(target), static_cast<unsigned int>(status));
+            message << "IDxcResult=<null>; ";
         }
-        ThrowIfFailed(status);
+
+        message << "arguments=" << formatArguments();
+        if (!diagnostics.empty()) {
+            message << "\nDXC diagnostics:\n" << diagnostics;
+        }
+
+        const std::string failureMessage = message.str();
+        spdlog::error("{}", failureMessage);
+        throw std::runtime_error(failureMessage);
+    }
+
+    if (!diagnostics.empty()) {
+        spdlog::warn(
+            "Shader compiler diagnostics for file='{}', entry='{}', target='{}':\n{}",
+            ws2s(filename),
+            ws2s(entryPoint),
+            ws2s(target),
+            diagnostics);
     }
 
     return result;

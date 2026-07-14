@@ -5,6 +5,7 @@
 #include "structs.hlsli"
 #include "vertex.hlsli"
 #include "clodStructs.hlsli"
+#include "instanceDrawRecordHelpers.hlsli"
 
 typedef row_major float4x4 SkinningMatrix;
 
@@ -97,11 +98,9 @@ float4x4 LoadBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinningInfo, uint j
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
 
     SkinningMatrix skin = boneSkinMatricesBuffer[skinningInfo.transformOffsetMatrices + jointIndex];
-    if ((skinningInfo.flags & SkinningInstanceFlag_RowVectorSkinMatrix) != 0u)
-    {
-        return skin;
-    }
-    return transpose(skin);
+    // CPU uploads and GPU writers both encode shader-native row-vector matrices.
+    // Keep orientation conversion at the upload boundary, not in every consumer.
+    return skin;
 }
 
 float3 TransformPositionByBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinningInfo, uint jointIndex, float3 position)
@@ -110,15 +109,7 @@ float3 TransformPositionByBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinnin
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
 
     SkinningMatrix skin = boneSkinMatricesBuffer[skinningInfo.transformOffsetMatrices + jointIndex];
-    if ((skinningInfo.flags & SkinningInstanceFlag_RowVectorSkinMatrix) != 0u)
-    {
-        return position.x * skin[0].xyz +
-            position.y * skin[1].xyz +
-            position.z * skin[2].xyz +
-            skin[3].xyz;
-    }
-
-    return mul(float4(position, 1.0f), transpose(skin)).xyz;
+    return mul(float4(position, 1.0f), skin).xyz;
 }
 
 float4x4 LoadBoneSkinMatrix(uint skinningInstanceSlot, uint jointIndex)
@@ -145,24 +136,21 @@ float4x4 LoadBoneInverseSkinMatrix(uint skinningInstanceSlot, uint jointIndex)
 
     SkinningInstanceGPUInfo skinningInfo = skinningInstanceBuffer[skinningInstanceSlot];
     SkinningMatrix inverseSkin = inverseSkinMatricesBuffer[skinningInfo.inverseSkinOffsetMatrices + jointIndex];
-    if ((skinningInfo.flags & SkinningInstanceFlag_RowVectorSkinMatrix) != 0u)
-    {
-        return inverseSkin;
-    }
-    return transpose(inverseSkin);
+    return inverseSkin;
 }
 
-float4x4 AddWeightedBoneSkinMatrix(
-    float4x4 skinMatrix,
+void AddWeightedBoneSkinMatrix(
+    inout float4x4 skinMatrix,
+    inout float acceptedWeightSum,
     SkinningInstanceGPUInfo skinningInfo,
     uint jointIndex,
     float weight)
 {
-    if (weight != 0.0f)
+    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.boneCount)
     {
         skinMatrix += weight * LoadBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
+        acceptedWeightSum += weight;
     }
-    return skinMatrix;
 }
 
 float4x4 IdentitySkinMatrix()
@@ -183,28 +171,117 @@ float4x4 BuildSkinMatrix(uint skinningInstanceSlot, SkinningInfluences skinning)
 
     SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
     float4x4 skinMatrix = (float4x4)0;
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints0.x, skinning.weights0.x);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints0.y, skinning.weights0.y);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints0.z, skinning.weights0.z);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints0.w, skinning.weights0.w);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints1.x, skinning.weights1.x);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints1.y, skinning.weights1.y);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints1.z, skinning.weights1.z);
-    skinMatrix = AddWeightedBoneSkinMatrix(skinMatrix, skinningInfo, skinning.joints1.w, skinning.weights1.w);
-    return skinMatrix;
+    float weightSum = 0.0f;
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.x, skinning.weights0.x);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.y, skinning.weights0.y);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.z, skinning.weights0.z);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.w, skinning.weights0.w);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.x, skinning.weights1.x);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.y, skinning.weights1.y);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.z, skinning.weights1.z);
+    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.w, skinning.weights1.w);
+    // USD permits non-normalized weights, and some assembly geometry has no
+    // authored influence at all.  An all-zero weighted matrix collapses those
+    // vertices to the part origin and stretches every adjacent triangle.  A
+    // missing influence is rigid/bind-pose geometry; otherwise normalize the
+    // affine blend so its homogeneous component remains one.
+    if (!isfinite(weightSum) || abs(weightSum) <= 1.0e-8f)
+    {
+        return IdentitySkinMatrix();
+    }
+    return skinMatrix * rcp(weightSum);
 }
 
-void AccumulateSkinnedPositionInfluence(
-    SkinningInstanceGPUInfo skinningInfo,
-    uint jointIndex,
-    float weight,
-    float3 sourcePosition,
-    inout float3 skinnedPosition)
+// Expanded assembly skeletons are evaluated in assembly-root space, while the
+// vertices stored in an individual CLod bucket remain local to that bucket's
+// authored assembly transform.  The normal object transform subsequently
+// applies localToAssembly, so conjugate the expanded skin matrix back into the
+// bucket's local space before applying it to a vertex:
+//
+//   pLocal * (T * S * inverse(T)) * T == pLocal * T * S
+//
+// This also keeps rigid and skinned paths using the same object transform.
+float4x4 ConvertExpandedSkinMatrixToAssemblyLocal(
+    float4x4 expandedSkinMatrix,
+    uint assemblyTransformIndex)
 {
-    if (weight != 0.0f)
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
     {
-        skinnedPosition += weight * TransformPositionByBoneSkinMatrixFromInfo(skinningInfo, jointIndex, sourcePosition);
+        return expandedSkinMatrix;
     }
+
+    StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+    const ClusterLODAssemblyTransform assemblyTransform = assemblyTransforms[assemblyTransformIndex];
+    const row_major float4x4 localToAssembly = CLodAssemblyTransformToMatrix(assemblyTransform);
+    const row_major float4x4 assemblyToLocal =
+        CLodAssemblyTransformToMatrix(CLodInvertAssemblyTransform(assemblyTransform));
+    return mul(mul(localToAssembly, expandedSkinMatrix), assemblyToLocal);
+}
+
+float4x4 BuildAssemblyLocalSkinMatrix(
+    uint skinningInstanceSlot,
+    SkinningInfluences skinning,
+    uint assemblyTransformIndex)
+{
+    return ConvertExpandedSkinMatrixToAssemblyLocal(
+        BuildSkinMatrix(skinningInstanceSlot, skinning),
+        assemblyTransformIndex);
+}
+
+float4x4 LoadAssemblyLocalBoneSkinMatrix(
+    uint skinningInstanceSlot,
+    uint jointIndex,
+    uint assemblyTransformIndex)
+{
+    return ConvertExpandedSkinMatrixToAssemblyLocal(
+        LoadBoneSkinMatrix(skinningInstanceSlot, jointIndex),
+        assemblyTransformIndex);
+}
+
+float4x4 LoadAssemblyLocalBoneInverseSkinMatrix(
+    uint skinningInstanceSlot,
+    uint jointIndex,
+    uint assemblyTransformIndex)
+{
+    return ConvertExpandedSkinMatrixToAssemblyLocal(
+        LoadBoneInverseSkinMatrix(skinningInstanceSlot, jointIndex),
+        assemblyTransformIndex);
+}
+
+float3 ApplyAssemblySkinningToPosition(
+    uint skinningInstanceSlot,
+    SkinningInfluences skinning,
+    uint assemblyTransformIndex,
+    float3 position)
+{
+    const float4x4 skinMatrix = BuildAssemblyLocalSkinMatrix(
+        skinningInstanceSlot,
+        skinning,
+        assemblyTransformIndex);
+    return mul(float4(position, 1.0f), skinMatrix).xyz;
+}
+
+void ApplyAssemblySkinningToVertex(
+    uint skinningInstanceSlot,
+    SkinningInfluences skinning,
+    uint assemblyTransformIndex,
+    inout Vertex vertex)
+{
+    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot))
+    {
+        vertex.skinning = skinning;
+        return;
+    }
+
+    const float4x4 skinMatrix = BuildAssemblyLocalSkinMatrix(
+        skinningInstanceSlot,
+        skinning,
+        assemblyTransformIndex);
+    vertex.position = mul(float4(vertex.position, 1.0f), skinMatrix).xyz;
+    vertex.normal = normalize(mul(vertex.normal, (float3x3)skinMatrix));
+    vertex.tangent = normalize(mul(vertex.tangent, (float3x3)skinMatrix));
+    vertex.skinning = skinning;
 }
 
 float3 ApplySkinningToPosition(uint skinningInstanceSlot, SkinningInfluences skinning, float3 position)
@@ -214,37 +291,7 @@ float3 ApplySkinningToPosition(uint skinningInstanceSlot, SkinningInfluences ski
         return position;
     }
 
-    SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
-    float3 skinnedPosition = float3(0.0f, 0.0f, 0.0f);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints0.x, skinning.weights0.x, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints0.y, skinning.weights0.y, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints0.z, skinning.weights0.z, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints0.w, skinning.weights0.w, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints1.x, skinning.weights1.x, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints1.y, skinning.weights1.y, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints1.z, skinning.weights1.z, position, skinnedPosition);
-    AccumulateSkinnedPositionInfluence(skinningInfo, skinning.joints1.w, skinning.weights1.w, position, skinnedPosition);
-    return skinnedPosition;
-}
-
-void AccumulateSkinnedVertexInfluence(
-    SkinningInstanceGPUInfo skinningInfo,
-    uint jointIndex,
-    float weight,
-    float3 sourcePosition,
-    float3 sourceNormal,
-    float3 sourceTangent,
-    inout float3 skinnedPosition,
-    inout float3 skinnedNormal,
-    inout float3 skinnedTangent)
-{
-    if (weight != 0.0f)
-    {
-        float4x4 skinMatrix = LoadBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
-        skinnedPosition += weight * mul(float4(sourcePosition, 1.0f), skinMatrix).xyz;
-        skinnedNormal += weight * mul(sourceNormal, (float3x3)skinMatrix);
-        skinnedTangent += weight * mul(sourceTangent, (float3x3)skinMatrix);
-    }
+    return mul(float4(position, 1.0f), BuildSkinMatrix(skinningInstanceSlot, skinning)).xyz;
 }
 
 void ApplySkinningToVertex(uint skinningInstanceSlot, SkinningInfluences skinning, inout Vertex vertex)
@@ -255,26 +302,10 @@ void ApplySkinningToVertex(uint skinningInstanceSlot, SkinningInfluences skinnin
         return;
     }
 
-    SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
-    const float3 sourcePosition = vertex.position;
-    const float3 sourceNormal = vertex.normal;
-    const float3 sourceTangent = vertex.tangent.xyz;
-    float3 skinnedPosition = float3(0.0f, 0.0f, 0.0f);
-    float3 skinnedNormal = float3(0.0f, 0.0f, 0.0f);
-    float3 skinnedTangent = float3(0.0f, 0.0f, 0.0f);
-
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints0.x, skinning.weights0.x, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints0.y, skinning.weights0.y, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints0.z, skinning.weights0.z, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints0.w, skinning.weights0.w, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints1.x, skinning.weights1.x, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints1.y, skinning.weights1.y, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints1.z, skinning.weights1.z, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-    AccumulateSkinnedVertexInfluence(skinningInfo, skinning.joints1.w, skinning.weights1.w, sourcePosition, sourceNormal, sourceTangent, skinnedPosition, skinnedNormal, skinnedTangent);
-
-    vertex.position = skinnedPosition;
-    vertex.normal = skinnedNormal;
-    vertex.tangent.xyz = skinnedTangent;
+    const float4x4 skinMatrix = BuildSkinMatrix(skinningInstanceSlot, skinning);
+    vertex.position = mul(float4(vertex.position, 1.0f), skinMatrix).xyz;
+    vertex.normal = normalize(mul(vertex.normal, (float3x3)skinMatrix));
+    vertex.tangent.xyz = normalize(mul(vertex.tangent.xyz, (float3x3)skinMatrix));
     vertex.skinning = skinning;
 }
 

@@ -774,6 +774,9 @@ private:
     float m_objectReyesDisplacementScale = 1.0f;
     std::function<float()> getObjectReyesDisplacementScale;
     std::function<void(float)> setObjectReyesDisplacementScale;
+    float m_proceduralWindDisplacementScale = 1.0f;
+    std::function<float()> getProceduralWindDisplacementScale;
+    std::function<void(float)> setProceduralWindDisplacementScale;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1454,6 +1457,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getObjectParallaxHeightScale = settingsManager.getSettingGetter<float>("objectParallaxHeightScale");
     m_objectParallaxHeightScale = getObjectParallaxHeightScale();
     observerSetting(m_objectParallaxHeightScale, "objectParallaxHeightScale");
+    setProceduralWindDisplacementScale = settingsManager.getSettingSetter<float>(ProceduralWindDisplacementScaleSettingName);
+    getProceduralWindDisplacementScale = settingsManager.getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName);
+    m_proceduralWindDisplacementScale = getProceduralWindDisplacementScale();
+    observerSetting(m_proceduralWindDisplacementScale, ProceduralWindDisplacementScaleSettingName);
     setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
     getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
     m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
@@ -2241,6 +2248,17 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_terrainParallaxFadeEndDistance = std::max(0.0f, m_terrainParallaxFadeEndDistance);
             setTerrainParallaxFadeEndDistance(m_terrainParallaxFadeEndDistance);
         }
+        }
+
+        if (ImGui::CollapsingHeader("Procedural Wind")) {
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Displacement Scale", &m_proceduralWindDisplacementScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindDisplacementScale = std::clamp(m_proceduralWindDisplacementScale, 0.0f, 100.0f);
+                setProceduralWindDisplacementScale(m_proceduralWindDisplacementScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales procedural wind bend and torsion before each profile's maximum-angle clamp.");
+            }
         }
 
         if (ImGui::CollapsingHeader("Post Processing and Ray Tracing")) {

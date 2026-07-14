@@ -233,7 +233,8 @@ void VsmLoadClusterScreenCoverage(
         SkinningInfluences skinning = PJ_DecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
         skinning = PJ_DecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
         skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
-        localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(meshInst.skinningInstanceSlot, skinning)).xyz;
+        localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
+            meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
 #endif
 
         const float4 clipPos = mul(float4(localPos, 1.0f), modelViewProjection);

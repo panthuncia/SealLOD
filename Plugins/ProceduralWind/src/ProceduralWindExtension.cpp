@@ -12,6 +12,7 @@
 #include "Render/PassBuilders.h"
 #include "Render/RenderContext.h"
 #include "Render/OutputTypes.h"
+#include "Render/RendererSettings.h"
 #include "RenderPasses/Base/RenderPass.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/PixelBuffer.h"
@@ -61,6 +62,8 @@ struct WindBoneGPU {
     float pad3 = 0.0f;
     std::array<float, 3> branchTangent{ 1.0f, 0.0f, 0.0f };
     float pad4 = 0.0f;
+    DirectX::XMFLOAT4X4 bindGlobal{};
+    DirectX::XMFLOAT4X4 inverseBind{};
 };
 
 struct WindRootConstants {
@@ -126,7 +129,7 @@ struct WindTransientConstants {
     float strength, gustStrength;
 };
 
-static_assert(sizeof(WindBoneGPU) == 128u);
+static_assert(sizeof(WindBoneGPU) == 256u);
 static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
@@ -157,6 +160,28 @@ struct WindSharedResources {
                 std::memcpy(c.data(), result.data.data(), (std::min)(result.data.size(), sizeof(c)));
                 spdlog::info("ProceduralWind GPU telemetry: allocatedBones={} commands={} capacityRejects={} bucketOverflow={} allocatedAssemblies={} livePlacements={} stalePlacements={} frustumRejected={} distanceRejected={} visibleBucketed={} deferred={} deferredWritten={} lateOccluded={} lateAccepted={} deferredOverflow={}.",
                     c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]);
+            }, QueueKind::Copy);
+        const float currentScale = displacementScale;
+        const float currentStrength = state.strength;
+        readbackService->RequestReadbackCapture("ProceduralWind::SimulateInstancesPhase2", diagnostics.get(), {},
+            [currentScale, currentStrength](ReadbackCaptureResult&& result) {
+                if (result.data.size() < 24u * sizeof(std::uint32_t)) return;
+                std::array<std::uint32_t, 32> d{};
+                std::memcpy(d.data(), result.data.data(), (std::min)(result.data.size(), sizeof(d)));
+                const auto asFloat = [&d](std::size_t index) {
+                    float value = 0.0f;
+                    std::memcpy(&value, &d[index], sizeof(value));
+                    return value;
+                };
+                spdlog::info(
+                    "ProceduralWind simulation telemetry: settingScale={:.3f} runtimeStrength={:.3f} effectiveScale={:.3f} "
+                    "windGroupBones={} movedBones={} matrixWrites={} finiteWrites={} nonFiniteWrites={} "
+                    "maxForcing={:.6f} maxBendRadians={:.6f} maxTorsionRadians={:.6f} "
+                    "maxJointDisplacementOS={:.6f} maxSkinMatrixDelta={:.6f} maxBindIdentityError={:.6f} "
+                    "maxBindOriginMappingError={:.6f}.",
+                    currentScale, currentStrength, currentScale * currentStrength,
+                    d[14], d[15], d[21], d[12], d[13],
+                    asFloat(16), asFloat(17), asFloat(18), asFloat(19), asFloat(20), asFloat(22), asFloat(23));
             }, QueueKind::Copy);
     }
 
@@ -212,6 +237,8 @@ struct WindSharedResources {
             const auto& authoredWind = instance.skeleton->GetDynamicWindMetadata();
             const auto profile = rebuildBoneEntries ? runtime->ResolveProfile(instance.skeleton->GetWindProfileIdentity()) : WindProfileSet{};
             const auto windBoneInvariants = instance.skeleton->GetWindBoneInvariants();
+            const auto bindGlobals = instance.skeleton->GetBindGlobalMatrices();
+            const auto inverseBinds = instance.skeleton->GetInverseBindMatrices();
             const auto firstEntry = rebuildBoneEntries
                 ? static_cast<std::uint32_t>(next.size())
                 : (instance.instanceSlot < firstBoneByTypeSlot.size() ? firstBoneByTypeSlot[instance.instanceSlot] : 0u);
@@ -234,8 +261,21 @@ struct WindSharedResources {
                 WindBoneGPU entry{};
                 entry.skinningSlot = instance.instanceSlot;
                 entry.jointIndex = joint;
+                // Keep every bone in an authored chain on the same harmonic phase.
+                // Independent per-joint phases are especially destructive on the
+                // densely segmented trunk: torsion barely moves the debug joint
+                // origins, but alternating rotations make the skinned surface wavy.
+                std::uint32_t phaseJoint = joint;
+                if (authoredWind.enabled && joint < authoredWind.bones.size()) {
+                    const std::uint32_t chainOrigin = authoredWind.bones[joint].chainOriginBoneIndex;
+                    if (chainOrigin != 0xFFFFFFFFu && chainOrigin < instance.boneCount) {
+                        phaseJoint = chainOrigin;
+                    }
+                }
                 entry.phaseSeed = instance.instanceSlot * 747796405u +
-                    (joint < windBoneInvariants.size() ? windBoneInvariants[joint].phaseSeed : joint * 2891336453u + 277803737u);
+                    (phaseJoint < windBoneInvariants.size()
+                        ? windBoneInvariants[phaseJoint].phaseSeed
+                        : phaseJoint * 2891336453u + 277803737u);
                 entry.simulationGroup = joint < groups.size() ? groups[joint] : kInvalidSimulationGroup;
                 if (joint < parents.size() && parents[joint] >= 0)
                     entry.parentEntry = firstEntry + static_cast<std::uint32_t>(parents[joint]);
@@ -275,8 +315,26 @@ struct WindSharedResources {
                     entry.branchAxis = { invariant.branchAxis.x, invariant.branchAxis.y, invariant.branchAxis.z };
                     entry.branchTangent = { invariant.branchTangent.x, invariant.branchTangent.y, invariant.branchTangent.z };
                 }
+                const DirectX::XMMATRIX inverseBind = joint < inverseBinds.size()
+                    ? inverseBinds[joint]
+                    : DirectX::XMMatrixIdentity();
+                const DirectX::XMMATRIX bindGlobal = joint < bindGlobals.size()
+                    ? bindGlobals[joint]
+                    : DirectX::XMMatrixInverse(nullptr, inverseBind);
+                DirectX::XMStoreFloat4x4(&entry.inverseBind, inverseBind);
+                DirectX::XMStoreFloat4x4(&entry.bindGlobal, bindGlobal);
                 next.push_back(entry);
             }
+        }
+        if (!types.empty()) {
+            // Shaders use slot zero as shared control metadata even when the first
+            // registered wind skeleton occupies a later persistent instance slot.
+            auto& control = types.front();
+            control.diagnosticsDescriptor = diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
+            control.activeEntriesDescriptor = activeSkinnedPlacements ? activeSkinnedPlacements->GetSRVInfo(0).slot.index : 0u;
+            control.transformCount = transformCount;
+            control.deferredEntriesDescriptor = deferredEntries->GetUAVShaderVisibleInfo(0).slot.index;
+            control.processedTypeCountsDescriptor = processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
         }
         const auto requestedBoneCount = rebuildBoneEntries ? static_cast<std::uint32_t>(next.size()) : static_cast<std::uint32_t>(boneEntries->Size());
         if (rebuildBoneEntries) {
@@ -314,6 +372,10 @@ struct WindSharedResources {
         }
         elapsedSeconds += context.deltaTime;
         state = runtime->SnapshotWindState();
+		displacementScale = std::clamp(
+			SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName)(),
+			0.0f,
+			100.0f);
 		RequestTelemetryReadback();
         TracyPlot("ProceduralWind.SimulatedBones", static_cast<std::int64_t>(activeBoneCount));
     }
@@ -346,6 +408,7 @@ struct WindSharedResources {
     float nextTelemetrySeconds = 2.0f;
     float elapsedSeconds = 0.0f;
     WindState state{};
+    float displacementScale = 1.0f;
     ResidentWindPair residentPair{};
     SkeletonManager::TransientWindRegion transientRegion{};
 };
@@ -417,7 +480,7 @@ WindTransientConstants MakeTransientConstants(WindSharedResources& resources, Gl
     c.elapsedSeconds = resources.elapsedSeconds;
     c.windX = resources.state.directionToWS.x;
     c.windY = resources.state.directionToWS.y;
-    c.strength = resources.state.strength;
+    c.strength = resources.state.strength * resources.displacementScale;
     c.gustStrength = resources.state.gustStrength;
     return c;
 }

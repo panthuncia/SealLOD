@@ -76,7 +76,8 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     std::string windProfileIdentity,
     DynamicWindMetadata dynamicWindMetadata,
     std::vector<uint32_t> evaluationOrder,
-    std::vector<SkeletonWindBoneInvariant> windBoneInvariants)
+    std::vector<SkeletonWindBoneInvariant> windBoneInvariants,
+    std::vector<Matrix> bindGlobalMatrices)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -117,6 +118,12 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     m_windProfileIdentity = std::move(windProfileIdentity);
     m_dynamicWindMetadata = std::move(dynamicWindMetadata);
     m_windBoneInvariants = std::move(windBoneInvariants);
+    m_bindGlobalMatrices = std::move(bindGlobalMatrices);
+    if (!m_bindGlobalMatrices.empty() && m_bindGlobalMatrices.size() != m_boneNames.size()) {
+        spdlog::warn("Skeleton: bind global count ({}) != bone name count ({}); discarding cached bind globals",
+            m_bindGlobalMatrices.size(), m_boneNames.size());
+        m_bindGlobalMatrices.clear();
+    }
     if (evaluationOrder.size() == m_boneNames.size()) m_evalOrder = std::move(evaluationOrder);
     else BuildEvalOrder_();
 }
@@ -156,6 +163,7 @@ Skeleton::Skeleton(const Skeleton& other)
         m_evalOrder = other.m_evalOrder;
         m_inverseBindMatrices = other.m_inverseBindMatrices;
 		m_rootParentGlobals = other.m_rootParentGlobals;
+		m_bindGlobalMatrices = other.m_bindGlobalMatrices;
 		m_windSimulationGroupIndices = other.m_windSimulationGroupIndices;
 		m_windProfileIdentity = other.m_windProfileIdentity;
 		m_dynamicWindMetadata = other.m_dynamicWindMetadata;
@@ -540,6 +548,13 @@ std::span<const Skeleton::Matrix> Skeleton::GetRootParentGlobals() const
 {
     if (m_isBaseSkeleton) return m_rootParentGlobals;
     if (m_baseSkeleton) return m_baseSkeleton->m_rootParentGlobals;
+    return {};
+}
+
+std::span<const Skeleton::Matrix> Skeleton::GetBindGlobalMatrices() const
+{
+    if (m_isBaseSkeleton) return m_bindGlobalMatrices;
+    if (m_baseSkeleton) return m_baseSkeleton->m_bindGlobalMatrices;
     return {};
 }
 

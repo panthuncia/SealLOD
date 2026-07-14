@@ -17,6 +17,7 @@ class ReyesPatchRasterizationPass final : public ComputePass, public IDynamicDec
 public:
     ReyesPatchRasterizationPass(
         std::shared_ptr<Buffer> visibleClustersBuffer,
+        std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> diceQueueBuffer,
         std::shared_ptr<Buffer> diceQueueCounterBuffer,
         std::shared_ptr<Buffer> rasterWorkBuffer,
@@ -41,6 +42,7 @@ public:
 
 private:
     std::shared_ptr<Buffer> m_visibleClustersBuffer;
+    std::shared_ptr<Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_diceQueueBuffer;
     std::shared_ptr<Buffer> m_diceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_rasterWorkBuffer;

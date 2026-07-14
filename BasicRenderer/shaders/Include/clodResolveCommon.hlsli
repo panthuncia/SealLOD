@@ -954,7 +954,8 @@ void ApplyClodSkinningToFrame(
         skinning,
         metadataBuffer[offsets.clodMeshMetadataIndex],
         assemblyTransformIndex);
-    float4x4 skinMatrix = BuildSkinMatrix(d.skinningInstanceSlot, skinning);
+    float4x4 skinMatrix = BuildAssemblyLocalSkinMatrix(
+        d.skinningInstanceSlot, skinning, assemblyTransformIndex);
     positionOS = mul(float4(positionOS, 1.0f), skinMatrix).xyz;
     normalOS = mul(normalOS, (float3x3)skinMatrix);
     tangentOS.xyz = mul(tangentOS.xyz, (float3x3)skinMatrix);
@@ -1450,8 +1451,10 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
             cube.dominantBoneIndex,
             metadata,
             assemblyTransformIndex);
-        skinMatrix = LoadBoneSkinMatrix(instanceData.skinningInstanceSlot, expandedBoneIndex);
-        inverseSkinMatrix = LoadBoneInverseSkinMatrix(instanceData.skinningInstanceSlot, expandedBoneIndex);
+        skinMatrix = LoadAssemblyLocalBoneSkinMatrix(
+            instanceData.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+        inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
+            instanceData.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
     }
     const row_major matrix localToWorld = mul(skinMatrix, obj.model);
     const row_major matrix worldToLocal = mul(obj.modelInverse, inverseSkinMatrix);

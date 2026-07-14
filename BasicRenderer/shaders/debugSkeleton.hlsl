@@ -72,6 +72,8 @@ float4 PSWindMain(SkeletonLineVertex input) : SV_Target
     return input.color;
 }
 
+typedef row_major float4x4 WindDebugMatrix;
+
 struct WindDebugType {
     uint firstBone, boneCount, sourceSkinningSlot, bucketBase;
     uint bucketCapacity, diagnosticsDescriptor, activeEntriesDescriptor, transformCount;
@@ -84,10 +86,10 @@ struct WindDebugBone {
     float maximumAngle, gustAttenuation; float2 pad0;
     float3 frequencies; float pad1; float3 weights; float pad2;
     float3 branchAxis; float pad3; float3 branchTangent; float pad4;
+    WindDebugMatrix bindGlobal;
+    WindDebugMatrix inverseBind;
 };
 struct WindDebugActiveInstance { uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices; };
-typedef row_major float4x4 WindDebugMatrix;
-
 static const uint kWindTypes = UintRootConstant0;
 static const uint kWindBones = UintRootConstant1;
 static const uint kWindActive = UintRootConstant2;
@@ -196,27 +198,40 @@ float4 PSWindAssemblySphereMain(WindSphereVertex input) : SV_Target
 
 WindDebugMatrix WindDebugInverse(WindDebugMatrix m)
 {
-    float3x3 r = (float3x3)m;
-    const float det = determinant(r);
+    const float a00=m[0][0], a01=m[0][1], a02=m[0][2];
+    const float a10=m[1][0], a11=m[1][1], a12=m[1][2];
+    const float a20=m[2][0], a21=m[2][1], a22=m[2][2];
+    const float det = a00*(a11*a22-a12*a21) - a01*(a10*a22-a12*a20) + a02*(a10*a21-a11*a20);
     if (abs(det) < 1.0e-8f) return m;
-    float3x3 ri = transpose(float3x3(cross(r[1], r[2]), cross(r[2], r[0]), cross(r[0], r[1])) / det);
+    const float invDet = 1.0f / det;
     WindDebugMatrix result = (WindDebugMatrix)0;
-    result[0].xyz = ri[0]; result[1].xyz = ri[1]; result[2].xyz = ri[2];
-    result[3].xyz = -mul(m[3].xyz, ri); result[3][3] = 1.0f;
+    result[0][0]=(a11*a22-a12*a21)*invDet;
+    result[0][1]=(a02*a21-a01*a22)*invDet;
+    result[0][2]=(a01*a12-a02*a11)*invDet;
+    result[1][0]=(a12*a20-a10*a22)*invDet;
+    result[1][1]=(a00*a22-a02*a20)*invDet;
+    result[1][2]=(a02*a10-a00*a12)*invDet;
+    result[2][0]=(a10*a21-a11*a20)*invDet;
+    result[2][1]=(a01*a20-a00*a21)*invDet;
+    result[2][2]=(a00*a11-a01*a10)*invDet;
+    result[3].xyz = -float3(
+        dot(m[3].xyz, float3(result[0][0], result[1][0], result[2][0])),
+        dot(m[3].xyz, float3(result[0][1], result[1][1], result[2][1])),
+        dot(m[3].xyz, float3(result[0][2], result[1][2], result[2][2])));
+    result[3][3] = 1.0f;
     return result;
 }
 
 float3 WindDebugJointPosition(
-    uint jointIndex,
+    WindDebugBone bone,
     WindDebugActiveInstance active,
     SkinningInstanceGPUInfo source,
-    StructuredBuffer<WindDebugMatrix> forward,
-    StructuredBuffer<WindDebugMatrix> inverseBind)
+    StructuredBuffer<WindDebugMatrix> forward)
 {
-    WindDebugMatrix invBind = inverseBind[source.invBindOffsetMatrices + jointIndex];
-    WindDebugMatrix skin = forward[active.transformOffsetMatrices + jointIndex];
-    if ((source.flags & 1u) == 0u) { invBind = transpose(invBind); skin = transpose(skin); }
-    return mul(skin, WindDebugInverse(invBind))[3].xyz;
+    WindDebugMatrix skin = forward[active.transformOffsetMatrices + bone.jointIndex];
+    // Forward skin matrices map bind-space points into the animated pose.
+    // With row-vector matrices, the bind origin therefore precedes skin.
+    return mul(bone.bindGlobal, skin)[3].xyz;
 }
 
 float4 WindDebugSimulationGroupColor(uint simulationGroup)
@@ -260,11 +275,10 @@ void MSWindMain(
     StructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[kWindSkinInfo];
     const SkinningInstanceGPUInfo source = infos[type.sourceSkinningSlot];
     StructuredBuffer<WindDebugMatrix> forward = ResourceDescriptorHeap[kWindForward];
-    StructuredBuffer<WindDebugMatrix> inverseBind = ResourceDescriptorHeap[kWindInverseBind];
     WindDebugBone parent = bone;
     if (emit) parent = bones[bone.parentEntry];
-    float3 start = WindDebugJointPosition(parent.jointIndex, active, source, forward, inverseBind);
-    float3 end = WindDebugJointPosition(bone.jointIndex, active, source, forward, inverseBind);
+    float3 start = WindDebugJointPosition(parent, active, source, forward);
+    float3 end = WindDebugJointPosition(bone, active, source, forward);
     StructuredBuffer<PerObjectBuffer> transforms =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
     const PerObjectBuffer objectData = transforms[active.instanceTransformIndex];

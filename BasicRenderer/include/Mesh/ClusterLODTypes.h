@@ -502,6 +502,10 @@ public:
 		return m_vertices;
 	}
 
+	const std::vector<std::byte>& GetSkinningVertices() const {
+		return m_skinningVertices;
+	}
+
 	const std::vector<uint32_t>& GetIndices() const {
 		return m_indices;
 	}

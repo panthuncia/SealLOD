@@ -140,7 +140,9 @@ float3 DecodeSkinnedPosition(
     uint pageByteOffset,
     uint pagePoolSlabDescriptorIndex,
     uint vertexFlags,
-    uint skinningInstanceSlot)
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
 {
     float3 localPos = DecodeCompressedPosition(
         meshletLocalVertex,
@@ -157,7 +159,9 @@ float3 DecodeSkinnedPosition(
     {
         SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
         skinning = DecodePackedWeights(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex, skinning);
-        localPos = mul(float4(localPos, 1.0f), BuildSkinMatrix(skinningInstanceSlot, skinning)).xyz;
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+        localPos = ApplyAssemblySkinningToPosition(
+            skinningInstanceSlot, skinning, assemblyTransformIndex, localPos);
     }
 
     return localPos;
@@ -205,7 +209,9 @@ float3 DecodeSkinnedNormal(
     uint pageByteOffset,
     uint pagePoolSlabDescriptorIndex,
     uint vertexFlags,
-    uint skinningInstanceSlot)
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
 {
     float3 localNormal = DecodeCompressedNormal(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
 
@@ -213,7 +219,9 @@ float3 DecodeSkinnedNormal(
     {
         SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex);
         skinning = DecodePackedWeights(meshletLocalVertex, hdr, desc, pageByteOffset, pagePoolSlabDescriptorIndex, skinning);
-        localNormal = mul(localNormal, (float3x3)BuildSkinMatrix(skinningInstanceSlot, skinning));
+        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+        localNormal = mul(localNormal, (float3x3)BuildAssemblyLocalSkinMatrix(
+            skinningInstanceSlot, skinning, assemblyTransformIndex));
     }
 
     return normalize(localNormal);
@@ -679,7 +687,15 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    const PerObjectBuffer objectData = LoadInstanceTransformForDraw(diceEntry.instanceID);
+    StructuredBuffer<uint> visibleClusterTransformIndices = ResourceDescriptorHeap[
+        CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex];
+    const MeshInstanceClodOffsets clodOffsets = LoadCLodOffsetsForDraw(diceEntry.instanceID);
+    StructuredBuffer<CLodMeshMetadata> clodMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const CLodMeshMetadata clodMetadata = clodMetadataBuffer[clodOffsets.clodMeshMetadataIndex];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
+        diceEntry.instanceID, assemblyTransformIndex);
     const CullingCameraInfo camera = cameras[diceEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
 
@@ -691,9 +707,9 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const uint3 sourceTriangle = DecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, meshletDesc.triangleByteOffset, sourceTriangleIndex);
-    const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+    const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+    const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+    const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
     const bool displacementEnabled = ReyesGeometricDisplacementEnabled(materialInfo);
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
@@ -703,9 +719,9 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     float2 sourceUv2 = float2(0.0f, 0.0f);
     if (displacementEnabled)
     {
-        sourceNormal0 = DecodeSkinnedNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-        sourceNormal1 = DecodeSkinnedNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-        sourceNormal2 = DecodeSkinnedNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
+        sourceNormal0 = DecodeSkinnedNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+        sourceNormal1 = DecodeSkinnedNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
+        sourceNormal2 = DecodeSkinnedNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
         sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);

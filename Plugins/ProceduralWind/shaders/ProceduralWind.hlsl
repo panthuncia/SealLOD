@@ -29,6 +29,8 @@ static const uint WindInvalidIndex = 0xFFFFFFFFu;
 static const uint WindRowVectorSkinMatrix = 1u;
 static const uint WindBoneFlagTrunk = 1u;
 
+typedef row_major float4x4 WindMatrix;
+
 struct WindBoneGPU
 {
     uint skinningSlot;
@@ -54,9 +56,9 @@ struct WindBoneGPU
     float pad3;
     float3 branchTangent;
     float pad4;
+    WindMatrix bindGlobal;
+    WindMatrix inverseBind;
 };
-
-typedef row_major float4x4 WindMatrix;
 
 float WindPhase(uint seed)
 {
@@ -70,19 +72,26 @@ float WindPhase(uint seed)
 
 WindMatrix WindInverse(WindMatrix m)
 {
-    float3x3 r = (float3x3)m;
-    float det = determinant(r);
+    const float a00=m[0][0], a01=m[0][1], a02=m[0][2];
+    const float a10=m[1][0], a11=m[1][1], a12=m[1][2];
+    const float a20=m[2][0], a21=m[2][1], a22=m[2][2];
+    const float det = a00*(a11*a22-a12*a21) - a01*(a10*a22-a12*a20) + a02*(a10*a21-a11*a20);
     if (abs(det) < 1.0e-8f) return m;
-    float3x3 ri = float3x3(
-        cross(r[1], r[2]),
-        cross(r[2], r[0]),
-        cross(r[0], r[1])) / det;
-    ri = transpose(ri);
+    const float invDet = 1.0f / det;
     WindMatrix result = (WindMatrix)0;
-    result[0].xyz = ri[0];
-    result[1].xyz = ri[1];
-    result[2].xyz = ri[2];
-    result[3].xyz = -mul(m[3].xyz, ri);
+    result[0][0]=(a11*a22-a12*a21)*invDet;
+    result[0][1]=(a02*a21-a01*a22)*invDet;
+    result[0][2]=(a01*a12-a02*a11)*invDet;
+    result[1][0]=(a12*a20-a10*a22)*invDet;
+    result[1][1]=(a00*a22-a02*a20)*invDet;
+    result[1][2]=(a02*a10-a00*a12)*invDet;
+    result[2][0]=(a10*a21-a11*a20)*invDet;
+    result[2][1]=(a01*a20-a00*a21)*invDet;
+    result[2][2]=(a00*a11-a01*a10)*invDet;
+    result[3].xyz = -float3(
+        dot(m[3].xyz, float3(result[0][0], result[1][0], result[2][0])),
+        dot(m[3].xyz, float3(result[0][1], result[1][1], result[2][1])),
+        dot(m[3].xyz, float3(result[0][2], result[1][2], result[2][2])));
     result[3][3] = 1.0f;
     return result;
 }
@@ -165,8 +174,8 @@ void CaptureWindBasePoseCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     SkinningInstanceGPUInfo info = instanceInfo[bone.skinningSlot];
     WindMatrix rawForward = forwardSkin[info.transformOffsetMatrices + bone.jointIndex];
     WindMatrix rawInverse = inverseSkin[info.inverseSkinOffsetMatrices + bone.jointIndex];
-    scratchForward[entryIndex] = (info.flags & WindRowVectorSkinMatrix) != 0u ? rawForward : transpose(rawForward);
-    scratchInverse[entryIndex] = (info.flags & WindRowVectorSkinMatrix) != 0u ? rawInverse : transpose(rawInverse);
+    scratchForward[entryIndex] = rawForward;
+    scratchInverse[entryIndex] = rawInverse;
 }
 
 [numthreads(64, 1, 1)]
@@ -188,16 +197,17 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint inverseIndex = targetInfo.inverseSkinOffsetMatrices + target.jointIndex;
     WindMatrix baseSkin = scratchForward[entryIndex];
     if (WIND_STRENGTH <= 0.0f) {
-        forwardSkin[forwardIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? baseSkin : transpose(baseSkin);
+        forwardSkin[forwardIndex] = baseSkin;
         WindMatrix baseInverse = scratchInverse[entryIndex];
-        inverseSkin[inverseIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? baseInverse : transpose(baseInverse);
+        inverseSkin[inverseIndex] = baseInverse;
         return;
     }
 
     WindMatrix targetInverseBind = inverseBind[targetInfo.invBindOffsetMatrices + target.jointIndex];
-    if ((targetInfo.flags & WindRowVectorSkinMatrix) == 0u) targetInverseBind = transpose(targetInverseBind);
     WindMatrix bindGlobal = WindInverse(targetInverseBind);
-    WindMatrix deformedPose = mul(baseSkin, bindGlobal);
+    // Row-vector skinning applies p * inverseBind * animatedGlobal.  Recover
+    // the animated global from the captured skin matrix in the same order.
+    WindMatrix deformedPose = mul(bindGlobal, baseSkin);
     float3 sampledWind = SampleLevel0Wind(deformedPose[3].xyz);
     float2 wind = normalize(length(sampledWind.xy) > 1.0e-5f ? sampledWind.xy : float2(WIND_X, WIND_Y));
     float windResponse = clamp(length(sampledWind), 0.0f, 4.0f);
@@ -206,9 +216,8 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         WindBoneGPU driver = entries[ancestor];
         SkinningInstanceGPUInfo driverInfo = instanceInfo[driver.skinningSlot];
         WindMatrix driverInverseBind = inverseBind[driverInfo.invBindOffsetMatrices + driver.jointIndex];
-        if ((driverInfo.flags & WindRowVectorSkinMatrix) == 0u) driverInverseBind = transpose(driverInverseBind);
         WindMatrix driverBind = WindInverse(driverInverseBind);
-        WindMatrix driverPose = mul(scratchForward[ancestor], driverBind);
+        WindMatrix driverPose = mul(driverBind, scratchForward[ancestor]);
         float3 pivot = driverPose[3].xyz;
         float gust = 1.0f + WIND_GUST * (0.5f + 0.5f * sin(WIND_TIME * 0.71f + WindPhase(driver.phaseSeed ^ 0x9e3779b9u)));
         float parallel = driver.meanBend + driver.parallelAmplitude * WindHarmonics(driver, 0.0f);
@@ -222,10 +231,10 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
         deformedPose = mul(deformedPose, aroundPivot);
         ancestor = driver.parentEntry;
     }
-    WindMatrix result = mul(deformedPose, targetInverseBind);
+    WindMatrix result = mul(targetInverseBind, deformedPose);
     WindMatrix resultInverse = WindInverse(result);
-    forwardSkin[forwardIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? result : transpose(result);
-    inverseSkin[inverseIndex] = (targetInfo.flags & WindRowVectorSkinMatrix) != 0u ? resultInverse : transpose(resultInverse);
+    forwardSkin[forwardIndex] = result;
+    inverseSkin[inverseIndex] = resultInverse;
 }
 
 // Frame-transient, per-skinned-assembly wind skeleton path.
@@ -510,6 +519,7 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
             transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
             transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
             transientInfo.boneCount = type.boneCount;
+            transientInfo.flags |= WindRowVectorSkinMatrix;
             infos[WindTransientSlotBase + active.instanceTransformIndex] = transientInfo;
         }
 
@@ -530,22 +540,35 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 
 float3 SampleTransientLevel0(float3 position)
 {
-    float3 fallback=float3(WT_WIND_X,WT_WIND_Y,0);
+    // SARP wind artifacts stay in native Skyrim space (X, Y, Z-up), while
+    // renderer space is (X, Z, -Y) with Y-up. Keep that conversion at the
+    // plugin boundary so the cache does not depend on renderer conventions.
+    const float3 positionSkyrim = float3(position.x, -position.z, position.y);
+    const float3 fallback = float3(WT_WIND_X, 0.0f, -WT_WIND_Y);
     if (WT_FIELD_CELL<=0 || WT_FIELD_DIMS==0u) return fallback;
     uint w=WT_FIELD_DIMS&0xffffu,h=WT_FIELD_DIMS>>16u;
-    float2 grid=(position.xy-float2(WT_FIELD_X,WT_FIELD_Y))/WT_FIELD_CELL-0.5f;
+    float2 grid=(positionSkyrim.xy-float2(WT_FIELD_X,WT_FIELD_Y))/WT_FIELD_CELL-0.5f;
     if(any(grid<0)||grid.x>=w-1||grid.y>=h-1) return fallback;
     uint2 b=(uint2)floor(grid); float2 f=frac(grid);
     StructuredBuffer<uint> a=ResourceDescriptorHeap[WT_FIELD0],z=ResourceDescriptorHeap[WT_FIELD1];
     float4 a0=lerp(LoadWindCell(a,b.y*w+b.x),LoadWindCell(a,b.y*w+b.x+1),f.x),a1=lerp(LoadWindCell(a,(b.y+1)*w+b.x),LoadWindCell(a,(b.y+1)*w+b.x+1),f.x);
     float4 z0=lerp(LoadWindCell(z,b.y*w+b.x),LoadWindCell(z,b.y*w+b.x+1),f.x),z1=lerp(LoadWindCell(z,(b.y+1)*w+b.x),LoadWindCell(z,(b.y+1)*w+b.x+1),f.x);
-    float4 va=lerp(a0,a1,f.y),vz=lerp(z0,z1,f.y); return min(va.w,vz.w)<0.5f?fallback:lerp(va.xyz,vz.xyz,WT_FIELD_LERP);
+    float4 va=lerp(a0,a1,f.y),vz=lerp(z0,z1,f.y);
+    if (min(va.w, vz.w) < 0.5f) return fallback;
+    const float3 windSkyrim = lerp(va.xyz, vz.xyz, WT_FIELD_LERP);
+    return float3(windSkyrim.x, windSkyrim.z, -windSkyrim.y);
 }
 
 float3 WindSafeNormalize(float3 value, float3 fallback)
 {
     const float lengthSquared = dot(value, value);
     return lengthSquared > 1.0e-10f ? value * rsqrt(lengthSquared) : fallback;
+}
+
+float WindMaxAbs4(float4 value)
+{
+    value = abs(value);
+    return max(max(value.x, value.y), max(value.z, value.w));
 }
 
 float3 WindWorldToObjectDirection(float3 directionWS, WindMatrix model)
@@ -587,21 +610,31 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     if(tid.x>=type.boneCount) return;
     StructuredBuffer<WindActiveInstanceGPU> instances=ResourceDescriptorHeap[WT_ACTIVE]; WindActiveInstanceGPU inst=instances[type.bucketBase+tid.y];
     StructuredBuffer<WindBoneGPU> bones=ResourceDescriptorHeap[WT_BONES]; WindBoneGPU target=bones[type.firstBone+tid.x];
-    StructuredBuffer<WindMatrix> invBinds=ResourceDescriptorHeap[WT_INVERSE_BIND];
     StructuredBuffer<SkinningInstanceGPUInfo> infos=ResourceDescriptorHeap[WT_SKIN_INFO]; SkinningInstanceGPUInfo source=infos[type.sourceSkinningSlot];
-    WindMatrix targetInv=invBinds[source.invBindOffsetMatrices+tid.x]; if((source.flags&WindRowVectorSkinMatrix)==0u) targetInv=transpose(targetInv);
-    WindMatrix pose=WindInverse(targetInv);
+    WindMatrix targetInv=target.inverseBind;
+    WindMatrix bindPose=target.bindGlobal;
+    const WindMatrix bindIdentity=mul(targetInv,bindPose);
+    const WindMatrix identityMatrix=WindTranslation(float3(0.0f,0.0f,0.0f));
+    const float bindIdentityError=max(
+        max(WindMaxAbs4(bindIdentity[0]-identityMatrix[0]),WindMaxAbs4(bindIdentity[1]-identityMatrix[1])),
+        max(WindMaxAbs4(bindIdentity[2]-identityMatrix[2]),WindMaxAbs4(bindIdentity[3]-identityMatrix[3])));
+    WindMatrix pose=bindPose;
     StructuredBuffer<PerObjectBuffer> transforms=ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
     PerObjectBuffer objectData=transforms[inst.instanceTransformIndex]; float3 rootWS=objectData.model[3].xyz;
     float3 sampled=SampleTransientLevel0(rootWS);
-    float2 rawWind = length(sampled.xy) > 1e-5 ? sampled.xy : float2(WT_WIND_X, WT_WIND_Y);
+    float2 rawWind = length(sampled.xz) > 1e-5 ? sampled.xz : float2(WT_WIND_X, -WT_WIND_Y);
     float rawWindLength = length(rawWind);
-    float3 windWS = float3(rawWindLength > 1e-5 ? rawWind / rawWindLength : float2(1.0f, 0.0f), 0.0f);
+    float2 horizontalWind = rawWindLength > 1e-5 ? rawWind / rawWindLength : float2(1.0f, 0.0f);
+    float3 windWS = float3(horizontalWind.x, 0.0f, horizontalWind.y);
     float3 windOS = WindWorldToObjectDirection(windWS, objectData.model);
     float response=clamp(length(sampled),0,4);
+    float maximumForcing = 0.0f;
+    float maximumBendAngle = 0.0f;
+    float maximumTorsionAngle = 0.0f;
+    bool appliedWind = false;
     uint ancestor=type.firstBone+tid.x;
     [loop] for(uint depth=0;depth<128 && ancestor!=WindInvalidIndex;++depth){
-        WindBoneGPU driver=bones[ancestor]; WindMatrix dib=invBinds[source.invBindOffsetMatrices+driver.jointIndex]; if((source.flags&WindRowVectorSkinMatrix)==0u) dib=transpose(dib); WindMatrix bind=WindInverse(dib); float3 pivot=bind[3].xyz;
+        WindBoneGPU driver=bones[ancestor]; WindMatrix bind=driver.bindGlobal; float3 pivot=bind[3].xyz;
         if (driver.simulationGroup != WindInvalidIndex && driver.maximumAngle > 0.0f && driver.influence > 0.0f) {
             const float3 branchAxis = WindSafeNormalize(driver.branchAxis, float3(0.0f, 0.0f, 1.0f));
             const float3 branchTangent = WindSafeNormalize(driver.branchTangent, float3(1.0f, 0.0f, 0.0f));
@@ -616,6 +649,7 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
                 0.30f * sin(WT_TIME * 1.93f + phase * 1.37f);
             const float gust = max(0.0f, 1.0f + WT_GUST * (1.0f - saturate(driver.gustAttenuation)) * gustNoise);
             const float forcing = driver.influence * WT_STRENGTH * response * gust;
+            maximumForcing = max(maximumForcing, abs(forcing));
 
             float drag = driver.meanBend + driver.parallelAmplitude * WindInstanceHarmonics(driver, inst.stableSceneId, 0u);
             float lateral = driver.parallelAmplitude * driver.perpendicularRatio * WindInstanceHarmonics(driver, inst.stableSceneId, 1u);
@@ -641,6 +675,9 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
             if (bendMagnitude > driver.maximumAngle)
                 bendAngles *= driver.maximumAngle / bendMagnitude;
             torsion = clamp(torsion * forcing, -driver.maximumAngle, driver.maximumAngle);
+            maximumBendAngle = max(maximumBendAngle, length(bendAngles));
+            maximumTorsionAngle = max(maximumTorsionAngle, abs(torsion));
+            appliedWind = appliedWind || any(abs(bendAngles) > 1.0e-7f) || abs(torsion) > 1.0e-7f;
 
             WindMatrix angularMotion = WindRotationAroundPivot(pivot, dragAxis, bendAngles.x);
             angularMotion = mul(angularMotion, WindRotationAroundPivot(pivot, lateralAxis, bendAngles.y));
@@ -649,10 +686,34 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
         }
         ancestor=driver.parentEntry;
     }
-    WindMatrix result=mul(pose,targetInv); RWStructuredBuffer<WindMatrix> forward=ResourceDescriptorHeap[WT_FORWARD],inverse=ResourceDescriptorHeap[WT_INVERSE]; forward[inst.transformOffsetMatrices+tid.x]=result; inverse[inst.inverseSkinOffsetMatrices+tid.x]=WindInverse(result);
+    // Consumers use row vectors (mul(position, skinMatrix)), so the skin
+    // transform is inverse bind followed by the animated global pose.
+    WindMatrix result=mul(targetInv,pose);
+    WindMatrix resultInverse=WindInverse(result);
+    RWStructuredBuffer<WindMatrix> forward=ResourceDescriptorHeap[WT_FORWARD],inverse=ResourceDescriptorHeap[WT_INVERSE];
+    // The transient palette uses the same shader-native row-vector layout as every
+    // other skinning buffer. CPU producers convert before upload; GPU producers write
+    // their logical matrices directly, so readers never need orientation branches.
+    forward[inst.transformOffsetMatrices+tid.x]=result;
+    inverse[inst.inverseSkinOffsetMatrices+tid.x]=resultInverse;
     RWStructuredBuffer<uint> diagnostics=ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
     const bool finiteResult = all(isfinite(result[0])) && all(isfinite(result[1])) && all(isfinite(result[2])) && all(isfinite(result[3]));
     InterlockedAdd(diagnostics[finiteResult ? 12u : 13u], 1u);
+    if (target.simulationGroup != WindInvalidIndex) InterlockedAdd(diagnostics[14], 1u);
+    if (appliedWind) InterlockedAdd(diagnostics[15], 1u);
+    InterlockedMax(diagnostics[16], asuint(maximumForcing));
+    InterlockedMax(diagnostics[17], asuint(maximumBendAngle));
+    InterlockedMax(diagnostics[18], asuint(maximumTorsionAngle));
+    InterlockedMax(diagnostics[19], asuint(length(pose[3].xyz - bindPose[3].xyz)));
+    const WindMatrix identity = WindTranslation(float3(0.0f, 0.0f, 0.0f));
+    const float skinDelta = max(
+        max(WindMaxAbs4(result[0] - identity[0]), WindMaxAbs4(result[1] - identity[1])),
+        max(WindMaxAbs4(result[2] - identity[2]), WindMaxAbs4(result[3] - identity[3])));
+    InterlockedMax(diagnostics[20], asuint(skinDelta));
+    InterlockedAdd(diagnostics[21], 1u);
+    InterlockedMax(diagnostics[22], asuint(bindIdentityError));
+    const float3 mappedBindOrigin = mul(float4(bindPose[3].xyz, 1.0f), result).xyz;
+    InterlockedMax(diagnostics[23], asuint(length(mappedBindOrigin - pose[3].xyz)));
     if (tid.x == 0u && tid.y == 0u && typeId == 0u) {
         diagnostics[8]=asuint(result[3].x); diagnostics[9]=asuint(result[3].y); diagnostics[10]=asuint(result[3].z); diagnostics[11]=finiteResult ? 1u : 0u;
     }

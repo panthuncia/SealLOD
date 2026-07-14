@@ -15,6 +15,7 @@
 
 ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     std::shared_ptr<Buffer> visibleClustersBuffer,
+    std::shared_ptr<Buffer> visibleClusterTransformIndicesBuffer,
     std::shared_ptr<Buffer> diceQueueBuffer,
     std::shared_ptr<Buffer> diceQueueCounterBuffer,
     std::shared_ptr<Buffer> rasterWorkBuffer,
@@ -30,6 +31,7 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
     uint32_t phaseIndex,
     uint32_t patchVisibilityIndexBase)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
+    , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_diceQueueBuffer(std::move(diceQueueBuffer))
     , m_diceQueueCounterBuffer(std::move(diceQueueCounterBuffer))
     , m_rasterWorkBuffer(std::move(rasterWorkBuffer))
@@ -66,6 +68,7 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
 {
     builder->WithShaderResource(
             m_visibleClustersBuffer,
+            m_visibleClusterTransformIndicesBuffer,
             m_diceQueueBuffer,
             m_diceQueueCounterBuffer,
             m_rasterWorkBuffer,
@@ -81,6 +84,11 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
             Builtin::PerMaterialDataBuffer,
+            Builtin::CLod::Offsets,
+            Builtin::CLod::MeshMetadata,
+            Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices,
             "Builtin::PerMaterialEvalDataBuffer",
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Material::TextureGroup,
@@ -166,6 +174,8 @@ PassReturn ReyesPatchRasterizationPass::Execute(PassExecutionContext& executionC
 
     uint32_t uintRootConstants[NumMiscUintRootConstants] = {};
     uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetSRVInfo(0).slot.index;
+    uintRootConstants[CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+        m_visibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_COUNTER_DESCRIPTOR_INDEX] = m_diceQueueCounterBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_WORK_BUFFER_DESCRIPTOR_INDEX] = m_rasterWorkBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_REYES_PATCH_RASTER_DICE_QUEUE_DESCRIPTOR_INDEX] = m_diceQueueBuffer->GetSRVInfo(0).slot.index;

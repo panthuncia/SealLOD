@@ -2,6 +2,7 @@
 
 #include "Animation/Skeleton.h"
 #include "Mesh/ClusterLODTypes.h"
+#include "ShaderBuffers.h"
 #include "Utilities/CachePathUtilities.h"
 
 #include <algorithm>
@@ -484,10 +485,16 @@ std::shared_ptr<Skeleton> ResolveSkeleton(const SkeletonArtifactReference& refer
 	if (!data) return {};
 	std::vector<DirectX::XMMATRIX> inverseBinds; inverseBinds.reserve(data->inverseBindMatrices.size());
 	for (const auto& matrix : data->inverseBindMatrices) inverseBinds.push_back(DirectX::XMLoadFloat4x4(&matrix));
+	std::vector<DirectX::XMMATRIX> bindGlobals; bindGlobals.reserve(data->bindGlobalMatrices.size());
+	for (const auto& matrix : data->bindGlobalMatrices) bindGlobals.push_back(DirectX::XMLoadFloat4x4(&matrix));
 	std::vector<Components::Transform> rest; rest.reserve(data->restLocalTransforms.size());
 	for (const auto& packed : data->restLocalTransforms) rest.emplace_back(Components::Position(packed.position), Components::Rotation(DirectX::XMLoadFloat4(&packed.rotation)), Components::Scale(packed.scale));
 	auto skeleton = std::make_shared<Skeleton>(data->jointNames, data->parentIndices, std::move(inverseBinds), std::move(rest), std::vector<DirectX::XMMATRIX>{},
-		data->windSimulationGroupIndices, data->windProfileIdentity, data->dynamicWindMetadata, data->evaluationOrder, data->windBoneInvariants);
+		data->windSimulationGroupIndices, data->windProfileIdentity, data->dynamicWindMetadata, data->evaluationOrder, data->windBoneInvariants,
+		std::move(bindGlobals));
+	// Retain the historical metadata bit for artifact compatibility. SkeletonManager
+	// converts computed palettes to the canonical shader-native layout before upload.
+	skeleton->SetSkinningGPUFlags(kSkinningInstanceFlagRowVectorSkinMatrix);
 	{
 		std::lock_guard lock(gRegistryMutex);
 		auto& entry = gRegistry[reference.id];

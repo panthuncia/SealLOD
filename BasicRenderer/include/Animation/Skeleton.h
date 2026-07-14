@@ -38,7 +38,8 @@ public:
         std::string windProfileIdentity = {},
         DynamicWindMetadata dynamicWindMetadata = {},
         std::vector<uint32_t> evaluationOrder = {},
-        std::vector<SkeletonWindBoneInvariant> windBoneInvariants = {});
+        std::vector<SkeletonWindBoneInvariant> windBoneInvariants = {},
+        std::vector<Matrix> bindGlobalMatrices = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -93,6 +94,7 @@ public:
     std::span<const std::string> GetBoneNames() const;
     std::span<const int32_t> GetParentIndices() const;
     std::span<const Matrix> GetRootParentGlobals() const;
+    std::span<const Matrix> GetBindGlobalMatrices() const;
     std::span<const uint32_t> GetWindSimulationGroupIndices() const;
     std::string_view GetWindProfileIdentity() const;
     const DynamicWindMetadata& GetDynamicWindMetadata() const;
@@ -115,6 +117,7 @@ private:
     std::vector<uint32_t>    m_evalOrder;          // parent-before-children order
     std::vector<Matrix>      m_inverseBindMatrices;
     std::vector<Matrix>      m_rootParentGlobals; // Transforms to apply to root nodes based on external hierarchy
+    std::vector<Matrix>      m_bindGlobalMatrices;
     std::vector<uint32_t>    m_windSimulationGroupIndices;
     std::string              m_windProfileIdentity;
     DynamicWindMetadata      m_dynamicWindMetadata;

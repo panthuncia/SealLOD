@@ -464,8 +464,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
 	//mountainScene->GetRoot().set<Components::Position>({ 0.0, -2.0, 0.0 });
 
-    //auto tigerScene = LoadModel("models/tiger.glb");
-    //tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
+    auto tigerScene = LoadModel("models/tiger.glb");
+    tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
 
 	//auto shiba = LoadModel("models/shiba.glb");
 
@@ -492,12 +492,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //auto pine = LoadModel("models/Trees/branch.usdz");
 	//pine->GetRoot().set<Components::Position>({ 0.0, 2.0, 0.0 });
 
-    auto needles = LoadModel("models/Trees/Tree_Baltic_Pine_01_A.usd");
+    //auto needles = LoadModel("models/Trees/Tree_Baltic_Pine_01_A.usd");
 
 	//auto farmhouse = LoadModel("models/iceberglarge.nif");
 
         renderer.SetCurrentScene(baseScene);
-    	renderer.GetCurrentScene()->AppendScene(needles->Clone());
+    	//renderer.GetCurrentScene()->AppendScene(needles->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(farmhouse->Clone());
 
@@ -582,10 +582,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     SkeletonVariantSet needleSkeletonVariants(NeedleSkeletonVariantCount);
     std::size_t appendedNeedleScenes = 0;
     for (const point& position : needlePositions) {
-        needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
-        auto needleClone = needles->Clone();
-        needleClone->AssignSkeletonVariants(needleSkeletonVariants);
-        renderer.GetCurrentScene()->AppendScene(needleClone);
+        //needles->GetRoot().set<Components::Position>({ position.x, position.y, position.z });
+        //auto needleClone = needles->Clone();
+        //needleClone->AssignSkeletonVariants(needleSkeletonVariants);
+        //renderer.GetCurrentScene()->AppendScene(needleClone);
         ++appendedNeedleScenes;
     }
     spdlog::info("Needle append completed: appended {} cloned scenes", appendedNeedleScenes);
@@ -611,7 +611,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
     
-	//renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
+	renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(robot->Clone());
 
@@ -629,7 +629,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 15.f, 1.f);
+        XMFLOAT3 pos = XMFLOAT3(0.f, 1.f, 2.f);
         XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians

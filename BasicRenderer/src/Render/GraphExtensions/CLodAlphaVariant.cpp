@@ -554,6 +554,7 @@ void CLodAlphaVariant::AppendSinglePassStructuralPasses(
                     MakeVariantPassName(traits, "ReyesPatchRasterPass1"),
                     std::make_shared<ReyesDeepVisibilityRasterizationPass>(
                         extension.m_visibleClustersBuffer,
+                        extension.m_visibleClusterTransformIndicesBuffer,
                         extension.m_reyesDiceQueueBuffer,
                         extension.m_reyesDiceQueueCounterBuffer,
                         extension.m_reyesRasterWorkBuffer,
