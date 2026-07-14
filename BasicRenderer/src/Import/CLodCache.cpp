@@ -756,7 +756,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // voxel coverage/SGGX estimator version
-		boost::hash_combine(seed, GetCLodBuilderSettingsOverrideConfigHash());
+		boost::hash_combine(seed, GetCLodAssetSettingsConfigHash());
 		hashEnvironmentString("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");
