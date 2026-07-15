@@ -86,6 +86,7 @@ static const uint CLOD_CLUSTER_CULL_FLAG_ANIMATED = 1u << 0;
 static const uint CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW = 1u << 1;
 static const uint CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT = 1u << 2;
 static const uint CLOD_TRIANGLE_PAGE_MAGIC = 0x4C435254u;
+static const uint CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u;
 
 struct CLodClusterCullHeader
 {
@@ -387,7 +388,6 @@ struct CLodVoxelRasterDispatchCommand
     uint dispatchZ;
 };
 
-static const uint CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u;
 static const uint CLOD_VOXEL_CLUSTER_RECORD_STRIDE = 64u;
 static const uint CLOD_VOXEL_CUBE_RECORD_STRIDE = 32u;
 static const uint CLOD_VOXEL_ATTRIBUTE_SAMPLE_STRIDE = 28u;
@@ -395,9 +395,9 @@ static const uint CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
 
 struct CLodVoxelPageHeader
 {
-    uint magic;
+    uint formatAndKind;
     uint clusterCount;
-    uint clusterRecordsOffset;
+    uint descriptorOffset;
     uint boneIndexStreamOffset;
     uint cubeCount;
     uint cubeRecordsOffset;
@@ -427,9 +427,9 @@ CLodVoxelPageHeader CLodLoadVoxelPageHeader(uint slabDescriptorIndex, uint pageB
     uint4 d2 = slab.Load4(pageByteOffset + 32u);
     uint4 d3 = slab.Load4(pageByteOffset + 48u);
     CLodVoxelPageHeader header;
-    header.magic = d0.x;
+    header.formatAndKind = d0.x;
     header.clusterCount = d0.y;
-    header.clusterRecordsOffset = d0.z;
+    header.descriptorOffset = d0.z;
     header.boneIndexStreamOffset = d0.w;
     header.cubeCount = d1.x;
     header.cubeRecordsOffset = d1.y;
@@ -446,10 +446,10 @@ CLodVoxelPageHeader CLodLoadVoxelPageHeader(uint slabDescriptorIndex, uint pageB
     return header;
 }
 
-CLodVoxelClusterRecord CLodLoadVoxelClusterFromPage(uint slabDescriptorIndex, uint pageByteOffset, uint clusterRecordsOffset, uint pageLocalClusterIndex)
+CLodVoxelClusterRecord CLodLoadVoxelClusterFromPage(uint slabDescriptorIndex, uint pageByteOffset, uint descriptorOffset, uint pageLocalClusterIndex)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    uint addr = pageByteOffset + clusterRecordsOffset + pageLocalClusterIndex * CLOD_VOXEL_CLUSTER_RECORD_STRIDE;
+    uint addr = pageByteOffset + descriptorOffset + pageLocalClusterIndex * CLOD_VOXEL_CLUSTER_RECORD_STRIDE;
     uint4 d0 = slab.Load4(addr + 0u);
     uint4 d1 = slab.Load4(addr + 16u);
     uint4 d2 = slab.Load4(addr + 32u);
@@ -521,7 +521,7 @@ bool CLodTryLoadVoxelPageForSegment(
 
     pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, segment.pageIndex);
     pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
-    if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC)
+    if (pageHeader.formatAndKind != CLOD_VOXEL_PAGE_MAGIC)
     {
         return false;
     }
@@ -587,7 +587,8 @@ static const uint CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES = CLOD_REPLAY_NODE_R
 static const uint CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
 
 static const uint CLOD_NODE_REPLAY_STRIDE_BYTES    = 16u;  // 4 uints (TraverseNodeRecord)
-static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = 32u;  // 8 uints (MeshletBucketRecord, aligned)
+static const uint CLOD_CLUSTER_RUN_RECORD_STRIDE_BYTES = 32u;
+static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = CLOD_CLUSTER_RUN_RECORD_STRIDE_BYTES;
 static const uint CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES = 60u; // sizeof(CLodReyesSplitQueueEntry)
 static const uint CLOD_REYES_DICE_REPLAY_STRIDE_BYTES  = 68u; // sizeof(CLodReyesDiceQueueEntry)
 

@@ -246,7 +246,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
     const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodNodeReplayStrideBytes;
-    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodMeshletReplayStrideBytes;
+    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodClusterRunRecordStrideBytes;
     spdlog::info(
         "CLod pure compute frontier allocation '{}': capacity={} nodeFrontier={} MiB each clusterFrontier={} MiB",
         passIdentifierForLog,
@@ -259,7 +259,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
     m_pureComputeNextNodeFrontierBuffer->SetName("CLod Pure Compute Next Node Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodMeshletReplayStrideBytes, true, false, false, true);
+    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodClusterRunRecordStrideBytes, true, false, false, true);
     m_pureComputeClusterFrontierBuffer->SetName("CLod Pure Compute Cluster Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeCurrentNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);

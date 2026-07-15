@@ -1280,18 +1280,8 @@ void CLodAppendVoxelRasterClusterWork(
     float4x4 objectModelMatrix,
     float lodUniformScale,
     Camera cullCamera,
-    CullingCameraInfo lodCam,
-    bool lodCameraIsOrtho,
-    bool clusterDirtyPageCullingEnabled,
-    uint meshBufferIndex,
-    float ownGroupErrorOverDistance,
-    bool acceptedAnimatedLeafBounds)
+    bool clusterDirtyPageCullingEnabled)
 {
-    (void)lodCam;
-    (void)lodCameraIsOrtho;
-    (void)meshBufferIndex;
-    (void)ownGroupErrorOverDistance;
-
     if (voxelSegment.meshletCount == 0u)
     {
         return;
@@ -1357,7 +1347,7 @@ void CLodAppendVoxelRasterClusterWork(
         const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelClusterFromPage(
             voxelPageEntry.slabDescriptorIndex,
             voxelPageEntry.slabByteOffset,
-            voxelPageHeader.clusterRecordsOffset,
+            voxelPageHeader.descriptorOffset,
             pageLocalClusterIndex);
         const CLodClusterCullHeader clusterCullHeader = CLodVoxelCullHeader(voxelCluster);
         const uint clusterPrimitiveCount = clusterCullHeader.primitiveCountAndRefinedGroup & 0xFFFFu;
@@ -1407,15 +1397,6 @@ void CLodAppendVoxelRasterClusterWork(
                     evaluatedClusterBounds.sphere = float4(mergedCenter, mergedRadius * (1.0f + 1.0e-5f));
                 }
             }
-            else
-            {
-            }
-        }
-        else if (clusterHasSkinnedCubes && clusterBoneOverflow)
-        {
-        }
-        else if (clusterHasSkinnedCubes)
-        {
         }
         float3 clusterWorldCenter = 0.0f.xxx;
         float clusterWorldRadius = 0.0f;
@@ -1445,8 +1426,6 @@ void CLodAppendVoxelRasterClusterWork(
 #else
         (void)clusterDirtyPageCullingEnabled;
 #endif
-
-        (void)acceptedAnimatedLeafBounds;
 
         uint combinedSlot = 0u;
         InterlockedAdd(replayState[0].visibleClusterCombinedCount, 1u, combinedSlot);
@@ -1596,13 +1575,13 @@ uint PackGroupId(uint groupId, uint sourceTag)
 uint UnpackGroupId(uint packed)        { return packed & 0x7FFFFFFFu; }
 uint UnpackGroupSourceTag(uint packed) { return packed >> 31u; }
 
-uint PackMeshletIndexAndCount(uint firstIndex, uint count)
+uint PackClusterIndexAndCount(uint firstIndex, uint count)
 {
     return (count << 16u) | (firstIndex & 0xFFFFu);
 }
 
-uint UnpackMeshletFirstIndex(uint packed) { return packed & 0xFFFFu; }
-uint UnpackMeshletCount(uint packed)      { return packed >> 16u; }
+uint UnpackClusterFirstIndex(uint packed) { return packed & 0xFFFFu; }
+uint UnpackClusterCount(uint packed)      { return packed >> 16u; }
 
 // Write a TraverseNodeRecord directly to the node replay region.
 bool ReplayTryAppendNode(uint instanceIndex, uint viewId, uint nodeId, uint assemblyTransformIndex)
@@ -1627,7 +1606,7 @@ bool ReplayTryAppendNode(uint instanceIndex, uint viewId, uint nodeId, uint asse
     return true;
 }
 
-// Write a MeshletBucketRecord directly to the meshlet replay region.
+// Write a CLodClusterRunRecord directly to the meshlet replay region.
 bool ReplayTryAppendMeshlet(uint instanceIndex, uint viewId, uint groupId, uint localMeshletIndex,
                             uint pageSlabDescriptorIndex, uint pageSlabByteOffset, uint assemblyTransformIndex)
 {
@@ -1644,12 +1623,12 @@ bool ReplayTryAppendMeshlet(uint instanceIndex, uint viewId, uint groupId, uint 
         return false;
     }
 
-    // MeshletBucketRecord layout: instanceIndex, viewId, groupIdPacked,
-    // meshletIndexAndCount, pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex, pad.
+    // CLodClusterRunRecord layout: instanceIndex, viewId, groupIdPacked,
+    // clusterIndexAndCount, pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex, pad.
     const uint byteOffset = CLOD_REPLAY_MESHLET_REGION_OFFSET + slot * CLOD_MESHLET_REPLAY_STRIDE_BYTES;
     replayBuffer.Store4(byteOffset,       uint4(instanceIndex, viewId,
                                                 PackGroupId(groupId, CLOD_RECORD_SOURCE_REPLAY),
-                                                PackMeshletIndexAndCount(localMeshletIndex, 1u)));
+                                                PackClusterIndexAndCount(localMeshletIndex, 1u)));
     replayBuffer.Store4(byteOffset + 16u, uint4(pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex, 0u));
     return true;
 }
@@ -1767,16 +1746,12 @@ struct CLodClusterRunRecord
     uint instanceIndex;
     uint viewId;
     uint groupIdPacked;         // [31]=sourceTag, [30:0]=groupId
-    uint meshletIndexAndCount;  // [31:16]=count, [15:0]=firstLocalMeshletIndex
+    uint clusterIndexAndCount;  // [31:16]=count, [15:0]=firstLocalMeshletIndex
     uint pageSlabDescriptorIndex;
     uint pageSlabByteOffset;
     uint assemblyTransformIndex;
     uint clusterKindAndPageIndex; // [0]=voxel payload, [31:1]=mesh-local page-map index
 };
-
-// Transitional source alias.  Replay storage remains byte-compatible while
-// callers migrate from meshlet-specific terminology.
-#define MeshletBucketRecord CLodClusterRunRecord
 
 uint PackClusterKindAndPageIndex(uint clusterKind, uint pageIndex)
 {
@@ -1793,12 +1768,12 @@ uint UnpackClusterPageIndex(uint packed)
     return packed >> 1u;
 }
 
-bool CLodBucketContainsVoxels(MeshletBucketRecord record)
+bool CLodBucketContainsVoxels(CLodClusterRunRecord record)
 {
     return UnpackClusterKind(record.clusterKindAndPageIndex) == CLOD_CLUSTER_KIND_VOXEL;
 }
 
-void CLodProcessVoxelClusterBucket(MeshletBucketRecord record)
+void CLodProcessVoxelClusterBucket(CLodClusterRunRecord record)
 {
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(record.instanceIndex);
@@ -1822,24 +1797,19 @@ void CLodProcessVoxelClusterBucket(MeshletBucketRecord record)
 
     ClusterLODGroupSegment segment = (ClusterLODGroupSegment)0;
     segment.refinedGroup = -1;
-    segment.firstMeshletInPage = UnpackMeshletFirstIndex(record.meshletIndexAndCount);
-    segment.meshletCount = UnpackMeshletCount(record.meshletIndexAndCount);
+    segment.firstMeshletInPage = UnpackClusterFirstIndex(record.clusterIndexAndCount);
+    segment.meshletCount = UnpackClusterCount(record.clusterIndexAndCount);
     segment.pageIndex = UnpackClusterPageIndex(record.clusterKindAndPageIndex);
 
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-    StructuredBuffer<CullingCameraInfo> cameraInfos =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
-    const uint lodViewId = CLodResolveLodViewId(record.viewId);
     const Camera cullCamera = cameras[record.viewId];
-    const Camera lodCamera = cameras[lodViewId];
-    const CullingCameraInfo lodCam = cameraInfos[lodViewId];
     const float uniformScale = SkinningMaxAxisScale_RowVector(instanceTransform.model);
-
-    StructuredBuffer<PerMeshBuffer> perMeshBuffers =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const bool acceptedAnimatedLeafBounds =
-        (perMeshBuffers[instanceData.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    const bool dirtyPageCullingEnabled = CLodWorkGraphShadowDirtyPageCullingEnabled();
+#else
+    const bool dirtyPageCullingEnabled = false;
+#endif
 
     CLodAppendVoxelRasterClusterWork(
         metadata,
@@ -1852,16 +1822,7 @@ void CLodProcessVoxelClusterBucket(MeshletBucketRecord record)
         instanceTransform.model,
         uniformScale,
         cullCamera,
-        lodCam,
-        lodCamera.isOrtho,
-#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        CLodWorkGraphShadowDirtyPageCullingEnabled(),
-#else
-        false,
-#endif
-        instanceData.perMeshBufferIndex,
-        0.0f,
-        acceptedAnimatedLeafBounds);
+        dirtyPageCullingEnabled);
 }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -2425,12 +2386,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
     row_major matrix objectModelMatrix,
     float lodUniformScale,
     Camera cullCamera,
-    CullingCameraInfo lodCam,
-    bool lodCameraIsOrtho,
-    bool dirtyPageCullingEnabled,
-    uint meshBufferIndex,
-    float errorOverDistance,
-    bool acceptedAnimatedLeafBounds)
+    bool dirtyPageCullingEnabled)
 {
     StructuredBuffer<ClusterLODGroupSegment> segments =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
@@ -2467,12 +2423,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
                 objectModelMatrix,
                 lodUniformScale,
                 cullCamera,
-                lodCam,
-                lodCameraIsOrtho,
-                dirtyPageCullingEnabled,
-                meshBufferIndex,
-                errorOverDistance,
-                acceptedAnimatedLeafBounds);
+                dirtyPageCullingEnabled);
         }
         return;
     }
@@ -2491,12 +2442,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
         objectModelMatrix,
         lodUniformScale,
         cullCamera,
-        lodCam,
-        lodCameraIsOrtho,
-        dirtyPageCullingEnabled,
-        meshBufferIndex,
-        errorOverDistance,
-        acceptedAnimatedLeafBounds);
+        dirtyPageCullingEnabled);
 }
 
 void CLodHandleRenderableLeaf(
@@ -2513,8 +2459,7 @@ void CLodHandleRenderableLeaf(
     PerMeshInstanceBuffer instanceData,
     bool nodeTouchesDirtyPages,
     bool dirtyPageCullingEnabled,
-    out MeshletBucketRecord bucketRecord,
-    out uint emittedSegmentMeshletCount,
+    out CLodClusterRunRecord bucketRecord,
     out uint n64,
     out uint n32,
     out uint n16,
@@ -2522,11 +2467,9 @@ void CLodHandleRenderableLeaf(
     out uint n4,
     out uint n2,
     out uint n1,
-    out bool emitBucket,
-    bool acceptedAnimatedLeafBounds)
+    out bool emitBucket)
 {
-    bucketRecord = (MeshletBucketRecord)0;
-    emittedSegmentMeshletCount = 0;
+    bucketRecord = (CLodClusterRunRecord)0;
     n64 = 0;
     n32 = 0;
     n16 = 0;
@@ -2612,12 +2555,7 @@ void CLodHandleRenderableLeaf(
             objectModelMatrix,
             lodUniformScale,
             cullCamera,
-            lodCam,
-            lodCamera.isOrtho,
-            dirtyPageCullingEnabled,
-            instanceData.perMeshBufferIndex,
-            leaf.errorOverDistance,
-            acceptedAnimatedLeafBounds);
+            dirtyPageCullingEnabled);
     }
     else
     {
@@ -2635,8 +2573,6 @@ void CLodHandleRenderableLeaf(
             {
                 WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRIANGLE_BUCKET_RECORDS, 1);
             }
-            emittedSegmentMeshletCount = seg.meshletCount;
-
             const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(clodMeshMetadata.pageMapBase, seg.pageIndex);
             if (pageEntry.slabDescriptorIndex == 0u)
             {
@@ -2648,7 +2584,7 @@ void CLodHandleRenderableLeaf(
             bucketRecord.instanceIndex = rec.instanceIndex;
             bucketRecord.viewId = rec.viewId;
             bucketRecord.groupIdPacked = PackGroupId(node.range.ownerGroupId, UnpackSourceTag(rec.nodeIdPacked));
-            bucketRecord.meshletIndexAndCount = PackMeshletIndexAndCount(seg.firstMeshletInPage, 0); // count set per-record below
+            bucketRecord.clusterIndexAndCount = PackClusterIndexAndCount(seg.firstMeshletInPage, 0); // count set per-record below
             bucketRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
             bucketRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
             bucketRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
@@ -2822,13 +2758,13 @@ void WG_TraverseNodes(
 #if CLOD_WG_SPLIT_LEAF_NODE
     [NodeID("LeafNodes")] [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<TraverseNodeRecord> LeafNodes)
 #else
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull1,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull2,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull4,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull8,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull16,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull32,
-    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<MeshletBucketRecord> ClusterCull64)
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull1,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull2,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull4,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull8,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull16,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull32,
+    [MaxRecordsSharedWith(TraverseNodes)] NodeOutput<CLodClusterRunRecord> ClusterCull64)
 #endif
 {
     const uint slot = GI;
@@ -2850,8 +2786,7 @@ void WG_TraverseNodes(
     uint emitLeafCount = 0;
     TraverseNodeRecord leafRecords[BVH_MAX_CHILDREN];
 #endif
-    MeshletBucketRecord bucketRecord = (MeshletBucketRecord)0;
-    uint emittedSegmentMeshletCount = 0;
+    CLodClusterRunRecord bucketRecord = (CLodClusterRunRecord)0;
     uint n64 = 0, n32 = 0, n16 = 0, n8 = 0, n4 = 0, n2 = 0, n1 = 0;
     bool emitBucket = false;
 
@@ -3047,7 +2982,6 @@ void WG_TraverseNodes(
                     nodeTouchesDirtyPages,
                     dirtyPageCullingEnabled,
                     bucketRecord,
-                    emittedSegmentMeshletCount,
                     n64,
                     n32,
                     n16,
@@ -3055,8 +2989,7 @@ void WG_TraverseNodes(
                     n4,
                     n2,
                     n1,
-                    emitBucket,
-                    isSkinned);
+                    emitBucket);
 #endif
             }
             else {
@@ -3231,13 +3164,13 @@ void WG_TraverseNodes(
 #if CLOD_WG_SPLIT_LEAF_NODE
     ThreadNodeOutputRecords<TraverseNodeRecord> outLeafNodes = LeafNodes.GetThreadNodeOutputRecords(emitLeafCount);
 #else
-    ThreadNodeOutputRecords<MeshletBucketRecord> out64 = ClusterCull64.GetThreadNodeOutputRecords(n64);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out32 = ClusterCull32.GetThreadNodeOutputRecords(n32);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out16 = ClusterCull16.GetThreadNodeOutputRecords(n16);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out8  = ClusterCull8.GetThreadNodeOutputRecords(n8);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out4  = ClusterCull4.GetThreadNodeOutputRecords(n4);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out2  = ClusterCull2.GetThreadNodeOutputRecords(n2);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out1  = ClusterCull1.GetThreadNodeOutputRecords(n1);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out64 = ClusterCull64.GetThreadNodeOutputRecords(n64);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out32 = ClusterCull32.GetThreadNodeOutputRecords(n32);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out16 = ClusterCull16.GetThreadNodeOutputRecords(n16);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out8  = ClusterCull8.GetThreadNodeOutputRecords(n8);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out4  = ClusterCull4.GetThreadNodeOutputRecords(n4);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out2  = ClusterCull2.GetThreadNodeOutputRecords(n2);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out1  = ClusterCull1.GetThreadNodeOutputRecords(n1);
 #endif
 
     if (emitTraverseCount > 0) {
@@ -3268,47 +3201,47 @@ void WG_TraverseNodes(
     }
 #else
     if (emitBucket) {
-        uint offset = UnpackMeshletFirstIndex(bucketRecord.meshletIndexAndCount);
+        uint offset = UnpackClusterFirstIndex(bucketRecord.clusterIndexAndCount);
 
         for (uint i = 0; i < n64; i++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 64);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 64);
             out64[i] = r;
             offset += 64;
         }
         for (uint i32 = 0; i32 < n32; i32++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 32);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 32);
             out32[i32] = r;
             offset += 32;
         }
         for (uint i16 = 0; i16 < n16; i16++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 16);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 16);
             out16[i16] = r;
             offset += 16;
         }
         for (uint i8 = 0; i8 < n8; i8++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 8);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 8);
             out8[i8] = r;
             offset += 8;
         }
         for (uint i4 = 0; i4 < n4; i4++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 4);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 4);
             out4[i4] = r;
             offset += 4;
         }
         for (uint i2 = 0; i2 < n2; i2++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 2);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 2);
             out2[i2] = r;
             offset += 2;
         }
         for (uint i1 = 0; i1 < n1; i1++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 1);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 1);
             out1[i1] = r;
             offset += 1;
         }
@@ -3337,20 +3270,19 @@ void WG_TraverseNodes(
 void WG_LeafNodes(
     [MaxRecords(TRAVERSE_RECORDS_PER_GROUP)] GroupNodeInputRecords<TraverseNodeRecord> inRecs,
     uint GI : SV_GroupIndex,
-    [MaxRecords(TRAVERSE_RECORDS_PER_GROUP * MAX_RECORDS_PER_SEGMENT)] NodeOutput<MeshletBucketRecord> ClusterCull1,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull2,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull4,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull8,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull16,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull32,
-    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<MeshletBucketRecord> ClusterCull64)
+    [MaxRecords(TRAVERSE_RECORDS_PER_GROUP * MAX_RECORDS_PER_SEGMENT)] NodeOutput<CLodClusterRunRecord> ClusterCull1,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull2,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull4,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull8,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull16,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull32,
+    [MaxRecordsSharedWith(ClusterCull1)] NodeOutput<CLodClusterRunRecord> ClusterCull64)
 {
     const uint slot = GI;
     const uint inputCount = inRecs.Count();
     const bool slotActive = slot < inputCount;
 
-    MeshletBucketRecord bucketRecord = (MeshletBucketRecord)0;
-    uint emittedSegmentMeshletCount = 0;
+    CLodClusterRunRecord bucketRecord = (CLodClusterRunRecord)0;
     uint n64 = 0, n32 = 0, n16 = 0, n8 = 0, n4 = 0, n2 = 0, n1 = 0;
     bool emitBucket = false;
 
@@ -3455,7 +3387,6 @@ void WG_LeafNodes(
                 nodeTouchesDirtyPages,
                 dirtyPageCullingEnabled,
                 bucketRecord,
-                emittedSegmentMeshletCount,
                 n64,
                 n32,
                 n16,
@@ -3463,61 +3394,60 @@ void WG_LeafNodes(
                 n4,
                 n2,
                 n1,
-                emitBucket,
-                isSkinned);
+                emitBucket);
         }
     }
 
-    ThreadNodeOutputRecords<MeshletBucketRecord> out64 = ClusterCull64.GetThreadNodeOutputRecords(n64);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out32 = ClusterCull32.GetThreadNodeOutputRecords(n32);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out16 = ClusterCull16.GetThreadNodeOutputRecords(n16);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out8  = ClusterCull8.GetThreadNodeOutputRecords(n8);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out4  = ClusterCull4.GetThreadNodeOutputRecords(n4);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out2  = ClusterCull2.GetThreadNodeOutputRecords(n2);
-    ThreadNodeOutputRecords<MeshletBucketRecord> out1  = ClusterCull1.GetThreadNodeOutputRecords(n1);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out64 = ClusterCull64.GetThreadNodeOutputRecords(n64);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out32 = ClusterCull32.GetThreadNodeOutputRecords(n32);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out16 = ClusterCull16.GetThreadNodeOutputRecords(n16);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out8  = ClusterCull8.GetThreadNodeOutputRecords(n8);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out4  = ClusterCull4.GetThreadNodeOutputRecords(n4);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out2  = ClusterCull2.GetThreadNodeOutputRecords(n2);
+    ThreadNodeOutputRecords<CLodClusterRunRecord> out1  = ClusterCull1.GetThreadNodeOutputRecords(n1);
 
     if (emitBucket) {
-        uint offset = UnpackMeshletFirstIndex(bucketRecord.meshletIndexAndCount);
+        uint offset = UnpackClusterFirstIndex(bucketRecord.clusterIndexAndCount);
 
         for (uint i = 0; i < n64; i++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 64);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 64);
             out64[i] = r;
             offset += 64;
         }
         for (uint i32 = 0; i32 < n32; i32++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 32);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 32);
             out32[i32] = r;
             offset += 32;
         }
         for (uint i16 = 0; i16 < n16; i16++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 16);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 16);
             out16[i16] = r;
             offset += 16;
         }
         for (uint i8 = 0; i8 < n8; i8++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 8);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 8);
             out8[i8] = r;
             offset += 8;
         }
         for (uint i4 = 0; i4 < n4; i4++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 4);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 4);
             out4[i4] = r;
             offset += 4;
         }
         for (uint i2 = 0; i2 < n2; i2++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 2);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 2);
             out2[i2] = r;
             offset += 2;
         }
         for (uint i1 = 0; i1 < n1; i1++) {
-            MeshletBucketRecord r = bucketRecord;
-            r.meshletIndexAndCount = PackMeshletIndexAndCount(offset, 1);
+            CLodClusterRunRecord r = bucketRecord;
+            r.clusterIndexAndCount = PackClusterIndexAndCount(offset, 1);
             out1[i1] = r;
             offset += 1;
         }
@@ -3581,7 +3511,7 @@ struct ReyesRasterBatchRecord
 // FIXED_LOOP_COUNT is the bucket size (1, 2, 4, 8, 16, 32, or 64) - all active lanes
 // in a variant wave process the same number of iterations, minimizing WaveActiveMax divergence.
 void ClusterCullBody(
-    MeshletBucketRecord b,
+    CLodClusterRunRecord b,
     bool hasBucket,
     bool countReplayBucketRecord,
     uint GI,
@@ -3599,8 +3529,8 @@ void ClusterCullBody(
         const uint expectedMagic = CLodBucketContainsVoxels(b)
             ? CLOD_VOXEL_PAGE_MAGIC
             : CLOD_TRIANGLE_PAGE_MAGIC;
-        const uint firstCluster = UnpackMeshletFirstIndex(b.meshletIndexAndCount);
-        const uint runClusterCount = UnpackMeshletCount(b.meshletIndexAndCount);
+        const uint firstCluster = UnpackClusterFirstIndex(b.clusterIndexAndCount);
+        const uint runClusterCount = UnpackClusterCount(b.clusterIndexAndCount);
         commonPageValid =
             prefix.formatAndKind == expectedMagic &&
             prefix.descriptorOffset != 0u &&
@@ -3615,7 +3545,7 @@ void ClusterCullBody(
     if (hasBucket && commonPageValid && CLodBucketContainsVoxels(b))
     {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1u);
-        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, UnpackMeshletCount(b.meshletIndexAndCount));
+        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, UnpackClusterCount(b.clusterIndexAndCount));
         CLodProcessVoxelClusterBucket(b);
         swPendingOut = 0u;
         pageJobPendingOut = 0u;
@@ -3628,7 +3558,7 @@ void ClusterCullBody(
     // Telemetry (coalesced launch level)
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1);
     if (hasBucket) {
-        const uint bucketMeshletCount = UnpackMeshletCount(b.meshletIndexAndCount);
+        const uint bucketMeshletCount = UnpackClusterCount(b.clusterIndexAndCount);
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, bucketMeshletCount);
         if (countReplayBucketRecord) {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_BUCKET_RECORDS_DISPATCHED, 1);
@@ -3783,7 +3713,7 @@ void ClusterCullBody(
 
     // Meshlet loop - fixed iteration count eliminates WaveActiveMax divergence.
     // Lanes with fewer meshlets (e.g. replay count=1) simply skip inactive iterations.
-    const uint meshletCount = hasBucket ? UnpackMeshletCount(b.meshletIndexAndCount) : 0;
+    const uint meshletCount = hasBucket ? UnpackClusterCount(b.clusterIndexAndCount) : 0;
 
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
@@ -3848,7 +3778,7 @@ void ClusterCullBody(
         bool meshletNeedsReyesDisplacement = reyesDisplacementCandidate;
 
         if (active) {
-            const uint localMeshlet = UnpackMeshletFirstIndex(b.meshletIndexAndCount) + m;
+            const uint localMeshlet = UnpackClusterFirstIndex(b.clusterIndexAndCount) + m;
 
             if (localMeshlet < pageMeshletCount) {
                 localMeshletIndex = localMeshlet;
@@ -4776,7 +4706,7 @@ void ClusterCullBody(
 [NodeIsProgramEntry]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull1(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 1 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4784,7 +4714,7 @@ void WG_ClusterCull1(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4800,7 +4730,7 @@ void WG_ClusterCull1(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull2(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 2 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4808,7 +4738,7 @@ void WG_ClusterCull2(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4824,7 +4754,7 @@ void WG_ClusterCull2(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull4(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 4 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4832,7 +4762,7 @@ void WG_ClusterCull4(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4848,7 +4778,7 @@ void WG_ClusterCull4(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull8(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 8 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4856,7 +4786,7 @@ void WG_ClusterCull8(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4872,7 +4802,7 @@ void WG_ClusterCull8(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull16(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 16 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4880,7 +4810,7 @@ void WG_ClusterCull16(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4896,7 +4826,7 @@ void WG_ClusterCull16(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull32(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 32 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4904,7 +4834,7 @@ void WG_ClusterCull32(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;
@@ -4920,7 +4850,7 @@ void WG_ClusterCull32(
 [NodeLaunch("coalescing")]
 [NumThreads(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP, 1, 1)]
 void WG_ClusterCull64(
-    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<MeshletBucketRecord> inRecs,
+    [MaxRecords(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP)] GroupNodeInputRecords<CLodClusterRunRecord> inRecs,
     CLOD_CLUSTER_CULL_SW_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / SW_BATCH_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_PAGEJOB_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / PAGEJOB_BUILD_MAX_CLUSTERS)
     CLOD_CLUSTER_CULL_REYES_PARAM(CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP * 64 / REYES_SEED_BATCH_MAX_CLUSTERS)
@@ -4928,7 +4858,7 @@ void WG_ClusterCull64(
 {
     const uint inputCount = inRecs.Count();
     const bool hasBucket = GI < inputCount;
-    MeshletBucketRecord b = (MeshletBucketRecord)0;
+    CLodClusterRunRecord b = (CLodClusterRunRecord)0;
     if (hasBucket) b = inRecs[GI];
     uint swPending = 0;
     uint pageJobPending = 0;

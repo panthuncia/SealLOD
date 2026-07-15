@@ -1445,7 +1445,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
 
     GroupPageMapEntry pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
     CLodVoxelPageHeader pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
-    if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
+    if (pageHeader.formatAndKind != CLOD_VOXEL_PAGE_MAGIC ||
         pageLocalClusterIndex >= pageHeader.clusterCount)
     {
         return false;
@@ -1454,7 +1454,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const CLodVoxelClusterRecord voxelCluster = CLodLoadVoxelClusterFromPage(
         pageEntry.slabDescriptorIndex,
         pageEntry.slabByteOffset,
-        pageHeader.clusterRecordsOffset,
+        pageHeader.descriptorOffset,
         pageLocalClusterIndex);
     const uint cubeLocalIndex = primID;
     if (cubeLocalIndex >= voxelCluster.cubeCount)

@@ -40,6 +40,7 @@ constexpr uint32_t CLodClusterCullMetadataBoneCount(uint32_t metadata)
 	return metadata >> CLOD_CLUSTER_CULL_BONE_COUNT_SHIFT;
 }
 static constexpr uint32_t CLOD_TRIANGLE_PAGE_MAGIC = 0x4C435254u; // TRCL
+static constexpr uint32_t CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u; // VXCL
 
 // Representation-neutral, resident culling prefix.  Page encoders keep this
 // contract even when their payload tails use different stream layouts.
@@ -61,6 +62,27 @@ struct CLodClusterPagePrefix
 	uint32_t boneIndexStreamOffset = 0;
 };
 static_assert(sizeof(CLodClusterPagePrefix) == 16, "CLodClusterPagePrefix must be 16 bytes");
+
+struct CLodVoxelPageHeader
+{
+	uint32_t formatAndKind = CLOD_VOXEL_PAGE_MAGIC;
+	uint32_t clusterCount = 0;
+	uint32_t descriptorOffset = 0;
+	uint32_t boneIndexStreamOffset = 0;
+	uint32_t cubeCount = 0;
+	uint32_t cubeRecordsOffset = 0;
+	uint32_t attributeSamplesOffset = 0;
+	uint32_t attributeSamplesPerCube = 0;
+	uint32_t clusterRecordStride = 0;
+	uint32_t cubeRecordStride = 0;
+	uint32_t attributeSampleStride = 0;
+	uint32_t firstCluster = 0;
+	uint32_t firstCube = 0;
+	uint32_t reserved0 = 0;
+	uint32_t reserved1 = 0;
+	uint32_t reserved2 = 0;
+};
+static_assert(sizeof(CLodVoxelPageHeader) == 64, "CLodVoxelPageHeader must be 64 bytes");
 
 // Embedded at byte 0 of each page-tile in the page pool.
 // Compression params moved to per-meshlet descriptors.

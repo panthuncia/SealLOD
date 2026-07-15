@@ -1014,7 +1014,7 @@ bool VoxelRasterTryLoadWorkInputs(
 
     pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
     pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
-    if (pageHeader.magic != CLOD_VOXEL_PAGE_MAGIC ||
+    if (pageHeader.formatAndKind != CLOD_VOXEL_PAGE_MAGIC ||
         pageLocalClusterIndex >= pageHeader.clusterCount)
     {
         if (GI == 0u)
@@ -1028,7 +1028,7 @@ bool VoxelRasterTryLoadWorkInputs(
     voxelCluster = CLodLoadVoxelClusterFromPage(
         pageEntry.slabDescriptorIndex,
         pageEntry.slabByteOffset,
-        pageHeader.clusterRecordsOffset,
+        pageHeader.descriptorOffset,
         pageLocalClusterIndex);
     if (voxelCluster.cubeCount == 0u || voxelCluster.cubeCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
     {

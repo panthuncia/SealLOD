@@ -23,6 +23,35 @@
 #include "Mesh/SGGX.h"
 #include "Mesh/VertexLayout.h"
 
+uint32_t ComputeVoxelClusterCullMetadata(
+	std::span<const CLodVoxelCubeRecord> cubeRecords,
+	uint32_t firstCube,
+	uint32_t cubeCount)
+{
+	uint32_t flags = CLOD_CLUSTER_KIND_VOXEL;
+	bool hasSkinned = false;
+	bool hasRigid = false;
+	const uint32_t endCube = std::min<uint32_t>(
+		static_cast<uint32_t>(cubeRecords.size()),
+		firstCube + cubeCount);
+	for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
+	{
+		if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+		{
+			hasSkinned = true;
+		}
+		else
+		{
+			hasRigid = true;
+		}
+	}
+	if (hasSkinned)
+		flags |= (CLOD_CLUSTER_CULL_FLAG_ANIMATED | CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
+	if (hasRigid)
+		flags |= CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
+	return flags;
+}
+
 namespace
 {
 	// Helpers
@@ -34,35 +63,6 @@ namespace
 	using br::mesh::sggx::SymmetricMatrix3;
 	using br::mesh::sggx::BuildSGGXFromNormals;
 	using br::mesh::sggx::BuildSGGXFromWeightedNormals;
-
-	uint32_t ComputeVoxelClusterFlags(
-		const std::vector<CLodVoxelCubeRecord>& cubeRecords,
-		uint32_t firstCube,
-		uint32_t cubeCount)
-	{
-		uint32_t flags = CLOD_CLUSTER_KIND_VOXEL;
-		bool hasSkinned = false;
-		bool hasRigid = false;
-		const uint32_t endCube = std::min<uint32_t>(
-			static_cast<uint32_t>(cubeRecords.size()),
-			firstCube + cubeCount);
-		for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
-		{
-			if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
-			{
-				hasSkinned = true;
-			}
-			else
-			{
-				hasRigid = true;
-			}
-		}
-		if (hasSkinned)
-			flags |= (CLOD_CLUSTER_CULL_FLAG_ANIMATED | CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
-		if (hasRigid)
-			flags |= CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
-		return flags;
-	}
 
 	std::pmr::memory_resource*& CurrentVoxelizationScratchResource()
 	{
@@ -3702,7 +3702,7 @@ void BuildVoxelClustersFromCubes(PackedVoxelGroupBuildResult& packed, uint32_t m
 			cluster.firstCube = clusterBegin;
 			cluster.cubeCount = clusterEnd - clusterBegin;
 			cluster.refinedGroup = refinedGroup;
-			cluster.flags = ComputeVoxelClusterFlags(packed.cubeRecords, cluster.firstCube, cluster.cubeCount);
+			cluster.flags = ComputeVoxelClusterCullMetadata(packed.cubeRecords, cluster.firstCube, cluster.cubeCount);
 			cluster.bounds = DirectX::XMFLOAT4(center.x, center.y, center.z, radius);
 			cluster.aabbMinAndVoxelWidth = packed.metadata.aabbMinAndVoxelWidth;
 			cluster.resolution = packed.metadata.resolution;

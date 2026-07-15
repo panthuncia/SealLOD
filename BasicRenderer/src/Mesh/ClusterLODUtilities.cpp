@@ -41,8 +41,6 @@ namespace
 	constexpr uint32_t CLOD_COMPRESSED_POSITIONS = 1u << 0;
 	constexpr uint32_t CLOD_COMPRESSED_MESHLET_VERTEX_INDICES = 1u << 1;
 	constexpr uint32_t CLOD_COMPRESSED_NORMALS = 1u << 2;
-	constexpr uint32_t CLOD_VOXEL_PAGE_MAGIC = 0x4C435856u; // VXCL
-	constexpr uint32_t CLOD_VOXEL_PAGE_HEADER_SIZE = 64u;
 	constexpr uint32_t CLOD_STREAMING_PAGE_SIZE_BYTES = 256u * 1024u;
 	constexpr uint32_t CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
 	constexpr uint32_t kMaxSkinInfluences = 8u;
@@ -170,35 +168,6 @@ namespace
 		return attributeCount;
 	}
 
-	uint32_t ComputeVoxelClusterFlags(
-		std::span<const CLodVoxelCubeRecord> cubeRecords,
-		uint32_t firstCube,
-		uint32_t cubeCount)
-	{
-		uint32_t flags = CLOD_CLUSTER_KIND_VOXEL;
-		bool hasSkinned = false;
-		bool hasRigid = false;
-		const uint32_t endCube = std::min<uint32_t>(
-			static_cast<uint32_t>(cubeRecords.size()),
-			firstCube + cubeCount);
-		for (uint32_t cubeIndex = firstCube; cubeIndex < endCube; ++cubeIndex)
-		{
-			if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
-			{
-				hasSkinned = true;
-			}
-			else
-			{
-				hasRigid = true;
-			}
-		}
-		if (hasSkinned)
-			flags |= (CLOD_CLUSTER_CULL_FLAG_ANIMATED | CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
-		if (hasRigid)
-			flags |= CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
-		return flags;
-	}
-
 	bool BuildVoxelGroupPayloadFromPackedMapping(
 		const VoxelGroupMapping& mapping,
 		uint32_t groupIndex,
@@ -306,7 +275,7 @@ namespace
 		}
 
 		auto align4 = [](size_t value) -> size_t { return (value + 3u) & ~size_t(3); };
-		const uint32_t clusterRecordOffset = CLOD_VOXEL_PAGE_HEADER_SIZE;
+		const uint32_t clusterRecordOffset = sizeof(CLodVoxelPageHeader);
 
 		pageBlobs.reserve(pageSegments.size());
 		uint32_t runningFirstClusterInGroup = 0u;
@@ -371,7 +340,7 @@ namespace
 			}
 
 			std::vector<std::byte> blob(pageSize, std::byte{ 0 });
-			const std::array<uint32_t, 16> header = {
+			const CLodVoxelPageHeader header = {
 				CLOD_VOXEL_PAGE_MAGIC,
 				pageClusterCount,
 				clusterRecordOffset,
@@ -389,7 +358,7 @@ namespace
 				0u,
 				0u
 			};
-			std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
+			StorePod(blob, 0u, header);
 
 			uint32_t pageBoneCursor = 0u;
 			for (uint32_t clusterIndex = 0; clusterIndex < pageClusterCount; ++clusterIndex)
@@ -453,7 +422,7 @@ namespace
 
 	uint32_t ComputeVoxelPageSizeBytes(uint32_t clusterCount, uint32_t cubeCount, uint32_t attributeCount, uint32_t boneIndexCount)
 	{
-		constexpr uint32_t fixedBytes = CLOD_VOXEL_PAGE_HEADER_SIZE;
+		constexpr uint32_t fixedBytes = sizeof(CLodVoxelPageHeader);
 		return fixedBytes +
 			clusterCount * static_cast<uint32_t>(sizeof(CLodVoxelClusterRecord)) +
 			cubeCount * static_cast<uint32_t>(sizeof(CLodVoxelCubeRecord)) +
@@ -586,7 +555,7 @@ namespace
 				CLodVoxelClusterRecord pageCluster = sourceCluster;
 				pageCluster.firstCube = sourceCluster.firstCube + cubeOffset;
 				pageCluster.cubeCount = chunkCubes;
-				pageCluster.flags = ComputeVoxelClusterFlags(
+				pageCluster.flags = ComputeVoxelClusterCullMetadata(
 					std::span<const CLodVoxelCubeRecord>(packed.cubeRecords.data(), packed.cubeRecords.size()),
 					pageCluster.firstCube,
 					pageCluster.cubeCount);
@@ -2682,26 +2651,6 @@ namespace
 		uint32_t boneIndexCount = 0;
 	};
 
-	struct VoxelPageHeaderFields
-	{
-		uint32_t magic = 0;
-		uint32_t clusterCount = 0;
-		uint32_t clusterRecordsOffset = 0;
-		uint32_t boneIndexStreamOffset = 0;
-		uint32_t cubeCount = 0;
-		uint32_t cubeRecordsOffset = 0;
-		uint32_t attributeSamplesOffset = 0;
-		uint32_t attributeSamplesPerCube = 0;
-		uint32_t clusterRecordStride = 0;
-		uint32_t cubeRecordStride = 0;
-		uint32_t attributeSampleStride = 0;
-		uint32_t firstCluster = 0;
-		uint32_t firstCube = 0;
-		uint32_t reserved0 = 0;
-		uint32_t reserved1 = 0;
-		uint32_t reserved2 = 0;
-	};
-
 	template<typename T>
 	bool ReadPodAt(const std::vector<std::byte>& bytes, size_t offset, T& outValue)
 	{
@@ -2763,33 +2712,18 @@ namespace
 			outHeader.triangleStreamOffset != 0u;
 	}
 
-	bool ReadVoxelPageHeader(const std::vector<std::byte>& blob, VoxelPageHeaderFields& outHeader)
+	bool ReadVoxelPageHeader(const std::vector<std::byte>& blob, CLodVoxelPageHeader& outHeader)
 	{
-		if (blob.size() < CLOD_VOXEL_PAGE_HEADER_SIZE || !IsVoxelPageBlob(blob))
+		if (blob.size() < sizeof(CLodVoxelPageHeader) || !IsVoxelPageBlob(blob))
 		{
 			return false;
 		}
-
-		std::array<uint32_t, 16> words{};
-		std::memcpy(words.data(), blob.data(), words.size() * sizeof(uint32_t));
-		outHeader.magic = words[0];
-		outHeader.clusterCount = words[1];
-		outHeader.clusterRecordsOffset = words[2];
-		outHeader.boneIndexStreamOffset = words[3];
-		outHeader.cubeCount = words[4];
-		outHeader.cubeRecordsOffset = words[5];
-		outHeader.attributeSamplesOffset = words[6];
-		outHeader.attributeSamplesPerCube = words[7];
-		outHeader.clusterRecordStride = words[8];
-		outHeader.cubeRecordStride = words[9];
-		outHeader.attributeSampleStride = words[10];
-		outHeader.firstCluster = words[11];
-		outHeader.firstCube = words[12];
-		outHeader.reserved0 = words[13];
-		outHeader.reserved1 = words[14];
-		outHeader.reserved2 = words[15];
-		return outHeader.magic == CLOD_VOXEL_PAGE_MAGIC &&
-			outHeader.clusterRecordsOffset != 0u &&
+		if (!ReadPodAt(blob, 0u, outHeader))
+		{
+			return false;
+		}
+		return outHeader.formatAndKind == CLOD_VOXEL_PAGE_MAGIC &&
+			outHeader.descriptorOffset != 0u &&
 			outHeader.cubeRecordsOffset != 0u &&
 			outHeader.attributeSamplesOffset != 0u &&
 			outHeader.attributeSamplesPerCube == CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT &&
@@ -2800,7 +2734,7 @@ namespace
 
 	bool ReadVoxelClusterRecord(
 		const std::vector<std::byte>& blob,
-		const VoxelPageHeaderFields& header,
+		const CLodVoxelPageHeader& header,
 		uint32_t clusterIndex,
 		CLodVoxelClusterRecord& outRecord)
 	{
@@ -2810,13 +2744,13 @@ namespace
 		}
 		return ReadPodAt(
 			blob,
-			static_cast<size_t>(header.clusterRecordsOffset) + static_cast<size_t>(clusterIndex) * header.clusterRecordStride,
+			static_cast<size_t>(header.descriptorOffset) + static_cast<size_t>(clusterIndex) * header.clusterRecordStride,
 			outRecord);
 	}
 
 	bool ReadVoxelCubeRecord(
 		const std::vector<std::byte>& blob,
-		const VoxelPageHeaderFields& header,
+		const CLodVoxelPageHeader& header,
 		uint32_t cubeIndex,
 		CLodVoxelCubeRecord& outRecord)
 	{
@@ -3231,7 +3165,7 @@ namespace
 			}
 
 			const std::vector<std::byte>& sourceBlob = state.groupPageBlobs[segment.groupIndex][segment.sourcePageIndex];
-			VoxelPageHeaderFields sourceHeader{};
+			CLodVoxelPageHeader sourceHeader{};
 			if (!ReadVoxelPageHeader(sourceBlob, sourceHeader) ||
 				segment.firstMeshletInPage + segment.meshletCount > sourceHeader.clusterCount)
 			{
@@ -3272,7 +3206,7 @@ namespace
 			return {};
 		}
 
-		const uint32_t clusterRecordOffset = CLOD_VOXEL_PAGE_HEADER_SIZE;
+		const uint32_t clusterRecordOffset = sizeof(CLodVoxelPageHeader);
 		const uint32_t cubeRecordOffset = static_cast<uint32_t>(align4(
 			static_cast<size_t>(clusterRecordOffset) +
 			static_cast<size_t>(totals.clusterCount) * sizeof(CLodVoxelClusterRecord)));
@@ -3287,7 +3221,7 @@ namespace
 		}
 
 		std::vector<std::byte> blob(pageSize, std::byte{ 0 });
-		const std::array<uint32_t, 16> header = {
+		const CLodVoxelPageHeader header = {
 			CLOD_VOXEL_PAGE_MAGIC,
 			totals.clusterCount,
 			clusterRecordOffset,
@@ -3305,7 +3239,7 @@ namespace
 			0u,
 			0u
 		};
-		std::memcpy(blob.data(), header.data(), header.size() * sizeof(uint32_t));
+		StorePod(blob, 0u, header);
 
 		uint32_t outputClusterIndex = 0u;
 		uint32_t outputCubeIndex = 0u;
@@ -3320,7 +3254,7 @@ namespace
 			}
 
 			const std::vector<std::byte>& sourceBlob = state.groupPageBlobs[segment.groupIndex][segment.sourcePageIndex];
-			VoxelPageHeaderFields sourceHeader{};
+			CLodVoxelPageHeader sourceHeader{};
 			if (!ReadVoxelPageHeader(sourceBlob, sourceHeader) ||
 				segment.firstMeshletInPage + segment.meshletCount > sourceHeader.clusterCount)
 			{
@@ -3619,7 +3553,7 @@ namespace
 			[](const std::vector<std::byte>& sourceBlob, VoxelPageTraits& outTraits) -> bool
 			{
 				(void)outTraits;
-				VoxelPageHeaderFields sourceHeader{};
+				CLodVoxelPageHeader sourceHeader{};
 				return ReadVoxelPageHeader(sourceBlob, sourceHeader);
 			},
 			[](VoxelPageTraits& target, const VoxelPageTraits& source)
@@ -3630,7 +3564,7 @@ namespace
 			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const VoxelPageTraits&) -> size_t
 			{
 				const VoxelMeshPageBuildTotals totals = ComputeVoxelMeshPageTotals(packState, segments);
-				return CLOD_VOXEL_PAGE_HEADER_SIZE +
+				return sizeof(CLodVoxelPageHeader) +
 					static_cast<size_t>(totals.clusterCount) * sizeof(CLodVoxelClusterRecord) +
 					static_cast<size_t>(totals.cubeCount) * sizeof(CLodVoxelCubeRecord) +
 					static_cast<size_t>(totals.attributeCount) * sizeof(CLodVoxelAttributeSample) +

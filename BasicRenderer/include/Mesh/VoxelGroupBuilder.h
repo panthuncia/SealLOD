@@ -10,6 +10,11 @@
 
 #include "Mesh/ClusterLODTypes.h"
 
+uint32_t ComputeVoxelClusterCullMetadata(
+	std::span<const CLodVoxelCubeRecord> cubeRecords,
+	uint32_t firstCube,
+	uint32_t cubeCount);
+
 struct VoxelSourceCandidatePayload
 {
 	const VoxelGroupPayload* payload = nullptr;

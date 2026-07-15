@@ -75,7 +75,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
 {
     RWByteAddressBuffer replayBuffer = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<MeshletBucketRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodClusterRunRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint count = min(replayState[0].meshletWriteCount, min(CLOD_WG_VISIBLE_CLUSTERS_CAPACITY, CLOD_MESHLET_REPLAY_CAPACITY));
@@ -91,11 +91,11 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
     const uint4 head = replayBuffer.Load4(byteOffset);
     const uint4 tail = replayBuffer.Load4(byteOffset + 16u);
 
-    MeshletBucketRecord record = (MeshletBucketRecord)0;
+    CLodClusterRunRecord record = (CLodClusterRunRecord)0;
     record.instanceIndex = head.x;
     record.viewId = head.y;
     record.groupIdPacked = head.z;
-    record.meshletIndexAndCount = head.w;
+    record.clusterIndexAndCount = head.w;
     record.pageSlabDescriptorIndex = tail.x;
     record.pageSlabByteOffset = tail.y;
     record.assemblyTransformIndex = tail.z;
@@ -216,7 +216,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<TraverseNodeRecord> nextFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<MeshletBucketRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodClusterRunRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> clusterCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -502,11 +502,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                     InterlockedAdd(clusterCounter[0], 1u, outputIndex);
                     if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
                     {
-                        MeshletBucketRecord outRecord = (MeshletBucketRecord)0;
+                        CLodClusterRunRecord outRecord = (CLodClusterRunRecord)0;
                         outRecord.instanceIndex = rec.instanceIndex;
                         outRecord.viewId = rec.viewId;
                         outRecord.groupIdPacked = PackGroupId(node.range.ownerGroupId, UnpackSourceTag(rec.nodeIdPacked));
-                        outRecord.meshletIndexAndCount = PackMeshletIndexAndCount(clusterBase, chunkCount);
+                        outRecord.clusterIndexAndCount = PackClusterIndexAndCount(clusterBase, chunkCount);
                         outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
                         outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
                         outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
@@ -553,11 +553,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             uint outputIndex = 0u;
             InterlockedAdd(clusterCounter[0], 1u, outputIndex);
             if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
-                MeshletBucketRecord outRecord = (MeshletBucketRecord)0;
+                CLodClusterRunRecord outRecord = (CLodClusterRunRecord)0;
                 outRecord.instanceIndex = rec.instanceIndex;
                 outRecord.viewId = rec.viewId;
                 outRecord.groupIdPacked = PackGroupId(node.range.ownerGroupId, sourceTag);
-                outRecord.meshletIndexAndCount = PackMeshletIndexAndCount(meshletBase, chunkCount);
+                outRecord.clusterIndexAndCount = PackClusterIndexAndCount(meshletBase, chunkCount);
                 outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
                 outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
                 outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
@@ -715,7 +715,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 [numthreads(32, 1, 1)]
 void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThreadID, const uint GI : SV_GroupIndex)
 {
-    StructuredBuffer<MeshletBucketRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<CLodClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -723,7 +723,7 @@ void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThre
     const uint groupBase = dispatchThreadID.x - GI;
     const uint activeCount = (groupBase < inputCount) ? min(32u, inputCount - groupBase) : 0u;
     const bool hasBucket = (index < inputCount);
-    MeshletBucketRecord bucket = (MeshletBucketRecord)0;
+    CLodClusterRunRecord bucket = (CLodClusterRunRecord)0;
     if (hasBucket) {
         bucket = inputFrontier[index];
     }
@@ -736,7 +736,7 @@ void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThre
     ClusterCullBody(bucket, hasBucket, true, GI, activeCount, 64u, swPending, pageJobPending, reyesPending);
 }
 
-groupshared MeshletBucketRecord gs_phase2Records[64];
+groupshared CLodClusterRunRecord gs_phase2Records[64];
 groupshared uint gs_phase2ActiveClusterCount;
 
 [numthreads(64, 1, 1)]
@@ -744,7 +744,7 @@ void PureComputeDenseClusterWorkCS(
     const uint3 groupID : SV_GroupID,
     const uint GI : SV_GroupIndex)
 {
-    StructuredBuffer<MeshletBucketRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<CLodClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -761,7 +761,7 @@ void PureComputeDenseClusterWorkCS(
         if (recordIndex < inputCount) {
             gs_phase2Records[GI] = inputFrontier[recordIndex];
         } else {
-            gs_phase2Records[GI] = (MeshletBucketRecord)0;
+            gs_phase2Records[GI] = (CLodClusterRunRecord)0;
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -770,7 +770,7 @@ void PureComputeDenseClusterWorkCS(
         uint activeClusterCount = 0u;
         [loop]
         for (uint recordIndex = 0u; recordIndex < recordsThisGroup; ++recordIndex) {
-            activeClusterCount += UnpackMeshletCount(gs_phase2Records[recordIndex].meshletIndexAndCount);
+            activeClusterCount += UnpackClusterCount(gs_phase2Records[recordIndex].clusterIndexAndCount);
         }
         gs_phase2ActiveClusterCount = activeClusterCount;
     }
@@ -782,8 +782,8 @@ void PureComputeDenseClusterWorkCS(
         return;
     }
 
-    const MeshletBucketRecord inputBucket = gs_phase2Records[recordSlotInGroup];
-    const uint meshletCount = UnpackMeshletCount(inputBucket.meshletIndexAndCount);
+    const CLodClusterRunRecord inputBucket = gs_phase2Records[recordSlotInGroup];
+    const uint meshletCount = UnpackClusterCount(inputBucket.clusterIndexAndCount);
     if (laneInRecord == 0u && meshletCount > 0u) {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_DENSE_EXPANSION_BUCKETS, 1u);
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_DENSE_CLUSTERS_DISPATCHED, meshletCount);
@@ -796,9 +796,9 @@ void PureComputeDenseClusterWorkCS(
         return;
     }
 
-    MeshletBucketRecord bucket = inputBucket;
-    bucket.meshletIndexAndCount =
-        PackMeshletIndexAndCount(UnpackMeshletFirstIndex(inputBucket.meshletIndexAndCount) + laneInRecord, 1u);
+    CLodClusterRunRecord bucket = inputBucket;
+    bucket.clusterIndexAndCount =
+        PackClusterIndexAndCount(UnpackClusterFirstIndex(inputBucket.clusterIndexAndCount) + laneInRecord, 1u);
 
     uint swPending = 0u;
     uint pageJobPending = 0u;
