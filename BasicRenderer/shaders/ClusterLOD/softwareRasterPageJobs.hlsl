@@ -82,6 +82,8 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
+    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
@@ -388,7 +390,8 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint weightArrayOffset = hdr.weightArrayOffset;
     const int3 minQ = int3(desc.minQx, desc.minQy, desc.minQz);
 
-    const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
     const uint perMeshBufferIndex = meshInst.perMeshBufferIndex;
     const uint skinningInstanceSlot = meshInst.skinningInstanceSlot;
     StructuredBuffer<CullingCameraInfo> cullingCameras =

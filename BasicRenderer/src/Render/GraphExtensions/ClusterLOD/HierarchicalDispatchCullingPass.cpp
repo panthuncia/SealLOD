@@ -445,6 +445,7 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CullingCameraBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
+            Builtin::SkinnedAssemblyPlacements,
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CameraBuffer,

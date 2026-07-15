@@ -24,6 +24,40 @@ PerMeshInstanceBuffer LoadMeshTemplateForDraw(uint drawRecordIndex)
     return LoadMeshTemplateForDrawRecord(LoadInstanceDrawRecord(drawRecordIndex));
 }
 
+BoundingSphere LoadCoarseCullBoundsForDrawRecord(
+    InstanceDrawRecordBuffer record,
+    PerMeshInstanceBuffer meshTemplate,
+    out float boundsScale)
+{
+    boundsScale = max(meshTemplate.skinnedBoundsScale, 1.0f);
+    if (record.skinnedAssemblyPlacementIndex == 0xFFFFFFFFu)
+    {
+        return meshTemplate.boundingSphere;
+    }
+
+    StructuredBuffer<SkinnedAssemblyPlacementBuffer> placements =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkinnedAssemblyPlacements)];
+    uint placementCount = 0u;
+    uint placementStride = 0u;
+    placements.GetDimensions(placementCount, placementStride);
+    if (record.skinnedAssemblyPlacementIndex >= placementCount)
+    {
+        return meshTemplate.boundingSphere;
+    }
+
+    const SkinnedAssemblyPlacementBuffer placement =
+        placements[record.skinnedAssemblyPlacementIndex];
+    if (placement.generation == 0u ||
+        placement.instanceTransformIndex != record.instanceTransformIndex)
+    {
+        return meshTemplate.boundingSphere;
+    }
+
+    BoundingSphere assemblyBounds = { placement.localBoundingSphere };
+    boundsScale = max(placement.boundsScale, 1.0f);
+    return assemblyBounds;
+}
+
 PerObjectBuffer LoadInstanceTransformForDrawRecord(InstanceDrawRecordBuffer record)
 {
     StructuredBuffer<PerObjectBuffer> instanceTransforms =

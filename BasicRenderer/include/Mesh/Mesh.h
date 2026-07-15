@@ -112,6 +112,8 @@ public:
 	}
 
 	BoundingSphere GetAnimatedBoundingSphere(size_t animationIndex) const;
+	void SetSkinnedTraversalBoundsScale(float scale) { m_skinnedTraversalBoundsScale = scale; }
+	float GetSkinnedTraversalBoundsScale() const { return m_skinnedTraversalBoundsScale; }
 
 	void SetMaterialDataIndex(unsigned int index);
 	void SetMaterialEvalCompileFlagsID(unsigned int index);
@@ -348,6 +350,7 @@ private:
 	std::vector<MeshUvSetData> m_uvSets;
 	std::shared_ptr<const ObjectReyesAtlasBakeData> m_objectReyesAtlasBakeData;
 	mutable std::vector<BoundingSphere> m_animationBoundingSpheres;
+	float m_skinnedTraversalBoundsScale = 1.0f;
 	std::unique_ptr<BufferView> m_perMeshBufferView;
 	MeshManager* m_pCurrentMeshManager = nullptr;
 

@@ -1154,7 +1154,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 				drawRecord.meshTemplateIndex = perMeshInstanceBufferIndex;
 				drawRecord.instanceTransformIndex = instanceTransformIndex;
 				drawRecord.clodOffsetIndex = perMeshInstanceBufferIndex;
-				drawRecord.flags = 0u;
+				drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
 				drawRecords.push_back(drawRecord);
 				if (transformIndex == 0) {
 					drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
@@ -1699,6 +1699,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 			}
 		}
 		for (auto& type : skinnedTypes) type.bounds = FitBoundingSpheres(type.components);
+		const std::size_t skinnedPlacementBase = transaction.skinnedAssemblyPlacements.size();
 		for (const auto& type : skinnedTypes) {
 			for (std::uint32_t transformIndex = 0; transformIndex < transformCount; ++transformIndex) {
 				MaterializedStaticImportTransaction::PendingSkinnedAssemblyPlacement pending{};
@@ -1729,7 +1730,23 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 					record.meshTemplateIndex = meshTemplate.meshTemplateIndex;
 					record.instanceTransformIndex = static_cast<std::uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
 					record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
-					record.flags = 0u;
+					record.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+					if (meshTemplate.skinnedAssemblyTypeSlot != 0xFFFFFFFFu) {
+						const auto typeIt = std::ranges::find(
+							skinnedTypes,
+							meshTemplate.skinnedAssemblyTypeSlot,
+							&TypeBounds::slot);
+						if (typeIt != skinnedTypes.end()) {
+							const auto typeOrdinal = static_cast<std::size_t>(
+								std::distance(skinnedTypes.begin(), typeIt));
+							const auto pendingPlacementIndex =
+								skinnedPlacementBase + typeOrdinal * transformCount + transformIndex;
+							if (pendingPlacementIndex < transaction.skinnedAssemblyPlacements.size()) {
+								transaction.skinnedAssemblyPlacements[pendingPlacementIndex]
+									.drawRecordRowIndices.push_back(transaction.drawRecordRows.size());
+							}
+						}
+					}
 					transaction.drawRecordRows.push_back(record);
 
 					drawInfo.drawInfo.indices.push_back(drawRecordIndex);
@@ -1782,6 +1799,11 @@ void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTra
 		pending.placement.generation = 1u;
 		const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
 		m_skinnedAssemblyPlacementCPU.push_back(pending.placement);
+		for (const auto rowIndex : pending.drawRecordRowIndices) {
+			if (rowIndex < transaction.drawRecordRows.size()) {
+				transaction.drawRecordRows[rowIndex].skinnedAssemblyPlacementIndex = placementIndex;
+			}
+		}
 		if (pending.groupIndex < transaction.drawInfos.size()) {
 			transaction.drawInfos[pending.groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
 		}
@@ -1809,6 +1831,10 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishInputBytes", static_cast<int64_t>(transaction.reservation.preparedBytes));
 
 	const auto publishBegin = std::chrono::steady_clock::now();
+	// Placement indices are part of the draw-record contract. Publish and patch
+	// them before staging draw records so every assembly component shares the
+	// fitted assembly-wide coarse culling sphere.
+	PublishSkinnedAssemblyPlacements(transaction);
 	{
 		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageUploadRows");
 		if (!transaction.normalRows.empty() && !transaction.reservation.normalMatrixRanges.empty()) {
@@ -1842,7 +1868,6 @@ ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTrans
 	}
 
 	AssignStaticImportTransactionGenerations(transaction);
-	PublishSkinnedAssemblyPlacements(transaction);
 
 	if (transaction.reservation.visibilityDirtyStart < transaction.reservation.visibilityDirtyEnd) {
 		ZoneScopedN("ObjectManager::PublishStaticImportTransaction::StageVisibilityGenerations");
@@ -1947,6 +1972,10 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	TracyPlot("ObjectManager.StaticImportTransaction.BulkInputBytes", static_cast<int64_t>(result.preparedBytes));
 
 	const auto publishBegin = std::chrono::steady_clock::now();
+	for (auto* transactionPtr : transactions) {
+		assert(transactionPtr);
+		PublishSkinnedAssemblyPlacements(*transactionPtr);
+	}
 	const auto firstValidRange = [](const std::vector<DynamicBuffer::PagedAllocation>& ranges) -> const DynamicBuffer::PagedAllocation* {
 		for (const auto& range : ranges) {
 			if (range.IsValid()) {
@@ -1994,10 +2023,6 @@ ObjectManager::StaticImportBulkPublishResult ObjectManager::PublishStaticImportT
 	}
 
 	AssignStaticImportTransactionGenerations(transactions);
-	for (auto* transactionPtr : transactions) {
-		assert(transactionPtr);
-		PublishSkinnedAssemblyPlacements(*transactionPtr);
-	}
 
 	std::size_t visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
 	std::size_t visibilityDirtyEnd = 0;
@@ -2569,7 +2594,18 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					drawRecord.meshTemplateIndex = sourceRecord.meshTemplateIndex;
 					drawRecord.instanceTransformIndex = static_cast<uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
 					drawRecord.clodOffsetIndex = sourceRecord.clodOffsetIndex;
-					drawRecord.flags = 0u;
+					drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+					if (sourceRecord.skinnedAssemblyTypeSlot != 0xFFFFFFFFu) {
+						for (const auto placementIndex : drawInfo.skinnedAssemblyPlacementIndices) {
+							if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;
+							const auto& placement = m_skinnedAssemblyPlacementCPU[placementIndex];
+							if (placement.instanceTransformIndex == drawRecord.instanceTransformIndex &&
+								placement.skinningTypeSlot == sourceRecord.skinnedAssemblyTypeSlot) {
+								drawRecord.skinnedAssemblyPlacementIndex = placementIndex;
+								break;
+							}
+						}
+					}
 					packetDrawRecords.push_back(drawRecord);
 
 					drawInfo.drawInfo.indices.push_back(drawRecordIndex);

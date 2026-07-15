@@ -860,7 +860,17 @@ struct InstanceDrawRecordBuffer {
     uint meshTemplateIndex;
     uint instanceTransformIndex;
     uint clodOffsetIndex;
-    uint flags;
+    uint skinnedAssemblyPlacementIndex;
+};
+
+struct SkinnedAssemblyPlacementBuffer {
+    uint instanceTransformIndex;
+    uint skinningTypeSlot;
+    uint stableSceneId;
+    uint generation;
+    float4 localBoundingSphere;
+    float boundsScale;
+    uint3 pad;
 };
 
 #define LIGHTS_PER_PAGE 12

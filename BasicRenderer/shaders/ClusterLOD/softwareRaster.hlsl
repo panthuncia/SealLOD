@@ -315,6 +315,8 @@ void SWRasterCluster(
 
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
+    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const uint materialDataIndex = perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex;

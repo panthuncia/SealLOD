@@ -3,6 +3,8 @@
 #include "Managers/SkeletonManager.h"
 #include "Materials/Material.h"
 
+#include <algorithm>
+
 MeshInstance::~MeshInstance() {
     ReleaseSkinningInstance_();
 }
@@ -57,13 +59,15 @@ void MeshInstance::SetMaterialOverride(std::shared_ptr<Material> material) {
 void MeshInstance::SyncSkinningStateFromSkeleton() {
     if (m_skeleton != nullptr) {
         m_perMeshInstanceBufferData.skinningInstanceSlot = m_skeleton->GetSkinningInstanceSlot();
-        m_perMeshInstanceBufferData.skinnedBoundsScale = m_skeleton->GetCurrentAnimationConservativeBoundsScale();
+        m_perMeshInstanceBufferData.skinnedBoundsScale = (std::max)(
+            m_mesh->GetSkinnedTraversalBoundsScale(),
+            m_skeleton->GetCurrentAnimationConservativeBoundsScale());
         m_perMeshInstanceBufferData.boundingSphere =
             m_mesh->GetAnimatedBoundingSphere(m_skeleton->GetActiveAnimationIndex());
     }
     else {
         m_perMeshInstanceBufferData.skinningInstanceSlot = 0xFFFFFFFF;
-        m_perMeshInstanceBufferData.skinnedBoundsScale = 1.0f;
+        m_perMeshInstanceBufferData.skinnedBoundsScale = m_mesh->GetSkinnedTraversalBoundsScale();
         m_perMeshInstanceBufferData.boundingSphere = m_mesh->GetPerMeshCBData().boundingSphere;
     }
 

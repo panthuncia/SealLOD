@@ -4381,12 +4381,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 };
                 rejectionRow("Invalid bounds", objectCullInvalidBounds, objectCullRejectedTotal);
                 rejectionRow("Frustum reject", objectCullRejectedFrustum, objectCullRejectedTotal);
-                rejectionRow("Left plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneLeft), objectCullRejectedFrustum);
-                rejectionRow("Right plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneRight), objectCullRejectedFrustum);
-                rejectionRow("Bottom plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneBottom), objectCullRejectedFrustum);
-                rejectionRow("Top plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneTop), objectCullRejectedFrustum);
-                rejectionRow("Near plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneNear), objectCullRejectedFrustum);
-                rejectionRow("Far plane", counter(CLodWorkGraphCounterIndex::ObjectCullRejectedPlaneFar), objectCullRejectedFrustum);
             }
             drawUtilizationRow(
                 "TraverseNodes active child threads",
@@ -4539,7 +4533,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             ImGui::Separator();
             ImGui::TextUnformatted("ClusterCull meshlet rejection breakdown");
             {
-                const uint32_t meshletIter = counter(CLodWorkGraphCounterIndex::ClusterCullMeshletIterations);
                 const uint32_t rejFrustum = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedFrustum);
                 const uint32_t rejCond2 = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCondition2);
                 const uint32_t rejOccl = counter(CLodWorkGraphCounterIndex::ClusterCullRejectedOcclusion);
@@ -4554,7 +4547,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 const uint32_t survived = counter(CLodWorkGraphCounterIndex::ClusterCullSurvivingLanes);
                 const uint32_t totalRejected = rejFrustum + rejCond2 + rejOccl + rejOOR + rejPageBounds + rejCleanPages;
 
-                ImGui::Text("Meshlet iterations evaluated: %u", meshletIter);
                 ImGui::Text("Survived: %u", survived);
                 ImGui::Text("Rejected total: %u", totalRejected);
 

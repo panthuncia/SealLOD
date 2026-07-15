@@ -183,7 +183,7 @@ struct InstanceDrawRecordCB {
     unsigned int meshTemplateIndex;
     unsigned int instanceTransformIndex;
     unsigned int clodOffsetIndex;
-    unsigned int flags;
+    unsigned int skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
 };
 
 struct PerMaterialCB {

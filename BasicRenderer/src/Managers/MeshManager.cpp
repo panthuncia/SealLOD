@@ -1095,7 +1095,7 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 			PerMeshInstanceCB row{};
 			row.boundingSphere = request.mesh->GetPerMeshCBData().boundingSphere;
 			row.skinningInstanceSlot = 0xFFFFFFFFu;
-			row.skinnedBoundsScale = 1.0f;
+			row.skinnedBoundsScale = request.mesh->GetSkinnedTraversalBoundsScale();
 			if ((request.mesh->GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u &&
 				(!request.mesh->HasBaseSkin() || !request.mesh->GetBaseSkin()->HasWindSimulationGroups())) {
 				static std::atomic_uint32_t loggedMissingWindSkin{ 0u };
@@ -1114,7 +1114,9 @@ std::vector<MeshManager::StaticMeshTemplateRegistration> MeshManager::AddStaticM
 					m_skeletonManager->AcquireSkinningInstance(it->second);
 				}
 				row.skinningInstanceSlot = it->second->GetSkinningInstanceSlot();
-				row.skinnedBoundsScale = it->second->GetCurrentAnimationConservativeBoundsScale();
+				row.skinnedBoundsScale = (std::max)(
+					row.skinnedBoundsScale,
+					it->second->GetCurrentAnimationConservativeBoundsScale());
 				if (inserted) {
 					spdlog::info(
 						"MeshManager: registered static procedural-wind template type slot={} bones={} vertexFlags=0x{:X} skinned={}.",

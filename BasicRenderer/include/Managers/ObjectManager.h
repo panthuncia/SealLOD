@@ -289,6 +289,7 @@ public:
 		struct PendingSkinnedAssemblyPlacement {
 			std::size_t groupIndex = 0;
 			SkinnedAssemblyPlacementGPU placement{};
+			std::vector<std::size_t> drawRecordRowIndices;
 		};
 		StaticImportReservation reservation;
 		std::vector<PerObjectCB> perObjectRows;

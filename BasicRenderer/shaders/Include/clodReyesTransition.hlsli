@@ -57,14 +57,40 @@ float CLodMaxAxisScale_RowVector(row_major matrix m)
     return sqrt(max(dot(row0, row0), max(dot(row1, row1), dot(row2, row2))));
 }
 
-BoundingSphere CLodComputeSkinnedMeshletBounds(
+void CLodMergeBoundingSphere(
+    inout float3 mergedCenter,
+    inout float mergedRadius,
+    float3 candidateCenter,
+    float candidateRadius)
+{
+    const float3 delta = candidateCenter - mergedCenter;
+    const float dist = length(delta);
+    if (dist + candidateRadius <= mergedRadius)
+    {
+        return;
+    }
+    if (dist + mergedRadius <= candidateRadius)
+    {
+        mergedCenter = candidateCenter;
+        mergedRadius = candidateRadius;
+        return;
+    }
+
+    const float newRadius = 0.5f * (dist + mergedRadius + candidateRadius);
+    const float t = (newRadius - mergedRadius) / max(dist, 1.0e-12f);
+    mergedCenter += delta * t;
+    mergedRadius = newRadius;
+}
+
+BoundingSphere CLodComputeSkinnedMeshletBoundsForPose(
     CLodMeshletDescriptor desc,
     CLodPageHeader pageHeader,
     uint pageSlabDescriptorIndex,
     uint pageSlabByteOffset,
     uint skinningInstanceSlot,
     CLodMeshMetadata metadata,
-    uint assemblyTransformIndex)
+    uint assemblyTransformIndex,
+    bool previousPose)
 {
     BoundingSphere staticBounds = { desc.bounds };
     if (!IsValidSkinningInstanceSlot(skinningInstanceSlot) || CLodDescBoneCount(desc) == 0u)
@@ -75,9 +101,14 @@ BoundingSphere CLodComputeSkinnedMeshletBounds(
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
     const uint boneListBase = pageSlabByteOffset + pageHeader.boneIndexStreamOffset + desc.boneListOffset * 4u;
 
-    float3 mergedCenter = float3(0.0f, 0.0f, 0.0f);
+    // A skinned cluster has one current-pose sphere: the union of its valid
+    // palette transforms. Fall back to bind pose only when no palette entry can
+    // be evaluated; do not permanently inflate every animated bound with bind
+    // pose geometry.
+    float3 mergedCenter = 0.0f.xxx;
     float mergedRadius = 0.0f;
-    bool mergedInitialized = false;
+    bool hasValidBone = false;
+    const SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
 
     [loop]
     for (uint boneIndex = 0; boneIndex < CLodDescBoneCount(desc); ++boneIndex)
@@ -86,45 +117,88 @@ BoundingSphere CLodComputeSkinnedMeshletBounds(
             slab.Load(boneListBase + boneIndex * 4u),
             metadata,
             assemblyTransformIndex);
-        const float4x4 boneSkinMatrix = LoadAssemblyLocalBoneSkinMatrix(
-            skinningInstanceSlot, jointIndex, assemblyTransformIndex);
+        if (jointIndex >= skinningInfo.boneCount)
+        {
+            continue;
+        }
+        const float4x4 boneSkinMatrix = previousPose
+            ? LoadPreviousAssemblyLocalBoneSkinMatrix(
+                skinningInstanceSlot, jointIndex, assemblyTransformIndex)
+            : LoadAssemblyLocalBoneSkinMatrix(
+                skinningInstanceSlot, jointIndex, assemblyTransformIndex);
         const float3 transformedCenter = mul(float4(staticBounds.sphere.xyz, 1.0f), boneSkinMatrix).xyz;
         const float transformedRadius = staticBounds.sphere.w * SkinningMaxAxisScale_RowVector(boneSkinMatrix);
 
-        if (!mergedInitialized)
+        if (!hasValidBone)
         {
             mergedCenter = transformedCenter;
             mergedRadius = transformedRadius;
-            mergedInitialized = true;
-            continue;
+            hasValidBone = true;
         }
-
-        const float3 delta = transformedCenter - mergedCenter;
-        const float dist = length(delta);
-        if (dist + transformedRadius <= mergedRadius)
+        else
         {
-            continue;
+            CLodMergeBoundingSphere(
+                mergedCenter,
+                mergedRadius,
+                transformedCenter,
+                transformedRadius);
         }
-        if (dist + mergedRadius <= transformedRadius)
-        {
-            mergedCenter = transformedCenter;
-            mergedRadius = transformedRadius;
-            continue;
-        }
-
-        const float newRadius = 0.5f * (dist + mergedRadius + transformedRadius);
-        const float t = (newRadius - mergedRadius) / max(dist, 1.0e-12f);
-        mergedCenter += delta * t;
-        mergedRadius = newRadius;
     }
 
-    if (!mergedInitialized)
+    if (!hasValidBone)
     {
         return staticBounds;
     }
 
     BoundingSphere result = { float4(mergedCenter, mergedRadius * (1.0f + 1.0e-5f)) };
     return result;
+}
+
+BoundingSphere CLodComputeSkinnedMeshletBounds(
+    CLodMeshletDescriptor desc,
+    CLodPageHeader pageHeader,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
+{
+    return CLodComputeSkinnedMeshletBoundsForPose(
+        desc,
+        pageHeader,
+        pageSlabDescriptorIndex,
+        pageSlabByteOffset,
+        skinningInstanceSlot,
+        metadata,
+        assemblyTransformIndex,
+        false);
+}
+
+BoundingSphere CLodComputePreviousMeshletBounds(
+    CLodMeshletDescriptor desc,
+    CLodPageHeader pageHeader,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint vertexFlags,
+    uint skinningInstanceSlot,
+    CLodMeshMetadata metadata,
+    uint assemblyTransformIndex)
+{
+    if ((vertexFlags & VERTEX_SKINNED) != 0u)
+    {
+        return CLodComputeSkinnedMeshletBoundsForPose(
+            desc,
+            pageHeader,
+            pageSlabDescriptorIndex,
+            pageSlabByteOffset,
+            skinningInstanceSlot,
+            metadata,
+            assemblyTransformIndex,
+            true);
+    }
+
+    BoundingSphere bounds = { desc.bounds };
+    return bounds;
 }
 
 BoundingSphere CLodComputeMeshletBounds(

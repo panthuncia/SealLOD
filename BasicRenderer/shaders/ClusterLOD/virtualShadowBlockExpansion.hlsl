@@ -179,7 +179,9 @@ void VsmLoadClusterScreenCoverage(
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
     const uint shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
 
-    const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+    // Keep virtual-shadow deformation on the same transient wind palette as visibility rasterization.
+    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
     const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
