@@ -101,6 +101,11 @@ static const uint CLOD_NODE_CULL_OVERFLOW_FALLBACK = 2u;
 static const uint CLOD_NODE_CULL_ASSEMBLY_FALLBACK = 3u;
 static const uint CLOD_NODE_CULL_INVALID_FALLBACK = 4u;
 
+static const uint CLOD_MESHLET_BOUNDS_STATIC = 0u;
+static const uint CLOD_MESHLET_BOUNDS_SKINNED_LIVE = 1u;
+static const uint CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK = 2u;
+static const uint CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK = 3u;
+
 uint CLodResolveAnimatedNodeCullSphere(
     uint nodeLocalId,
     float4 bindSphere,
@@ -299,6 +304,10 @@ static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED = 180u;
 static const uint WG_COUNTER_NODE_BOUNDS_OVERFLOW_FALLBACKS = 181u;
 static const uint WG_COUNTER_NODE_BOUNDS_ASSEMBLY_FALLBACKS = 182u;
 static const uint WG_COUNTER_NODE_BOUNDS_INVALID_FALLBACKS = 183u;
+static const uint WG_COUNTER_MESHLET_BOUNDS_SKINNED_LIVE_EVALUATIONS = 184u;
+static const uint WG_COUNTER_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACKS = 185u;
+static const uint WG_COUNTER_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACKS = 186u;
+static const uint WG_COUNTER_MESHLET_BOUNDS_SKINNED_FALLBACK_FRUSTUM_REJECTED = 187u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -1275,7 +1284,8 @@ void CLodAppendVoxelRasterClusterWork(
     bool lodCameraIsOrtho,
     bool clusterDirtyPageCullingEnabled,
     uint meshBufferIndex,
-    float ownGroupErrorOverDistance)
+    float ownGroupErrorOverDistance,
+    bool acceptedAnimatedLeafBounds)
 {
     (void)lodCam;
     (void)lodCameraIsOrtho;
@@ -1350,18 +1360,29 @@ void CLodAppendVoxelRasterClusterWork(
             continue;
         }
 
-        const float3 clusterWorldCenter = mul(float4(voxelCluster.bounds.xyz, 1.0f), objectModelMatrix).xyz;
-        const float clusterWorldRadius = voxelCluster.bounds.w * lodUniformScale;
-        const float3 clusterViewCenter = mul(float4(clusterWorldCenter, 1.0f), cullCamera.view).xyz;
-        if (CLodWorkGraphFrustumCullingEnabled() &&
-            SphereOutsideFrustumViewSpace(clusterViewCenter, clusterWorldRadius, cullCamera))
+        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(voxelCluster);
+        float3 clusterWorldCenter = 0.0f.xxx;
+        float clusterWorldRadius = 0.0f;
+        bool clusterOutside = false;
+        if (!acceptedAnimatedLeafBounds || clusterDirtyPageCullingEnabled)
+        {
+            clusterWorldCenter = mul(float4(voxelCluster.bounds.xyz, 1.0f), objectModelMatrix).xyz;
+            clusterWorldRadius = voxelCluster.bounds.w * lodUniformScale;
+        }
+        if (!acceptedAnimatedLeafBounds && CLodWorkGraphFrustumCullingEnabled())
+        {
+            const float3 clusterViewCenter = mul(float4(clusterWorldCenter, 1.0f), cullCamera.view).xyz;
+            clusterOutside = SphereOutsideFrustumViewSpace(clusterViewCenter, clusterWorldRadius, cullCamera);
+        }
+        if (clusterOutside)
         {
             WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_PROJECTION_REJECTED, 1);
             continue;
         }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        if (clusterDirtyPageCullingEnabled && !CLodVirtualShadowBoundsTouchDirtyPages(clusterWorldCenter, clusterWorldRadius, viewId))
+        if (clusterDirtyPageCullingEnabled &&
+            !CLodVirtualShadowBoundsTouchDirtyPages(clusterWorldCenter, clusterWorldRadius, viewId))
         {
             continue;
         }
@@ -1377,8 +1398,6 @@ void CLodAppendVoxelRasterClusterWork(
             ++droppedCount;
             continue;
         }
-
-        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(voxelCluster);
 
         uint baseSlot = 0u;
         if (clusterHasSkinnedCubes)
@@ -1828,6 +1847,45 @@ bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera 
     return false;
 }
 
+bool CLodNodeBoundsOutsideFrustum(
+    uint classification,
+    float4 bindSphere,
+    BoundingSphere resolvedSphere,
+    row_major matrix objectModelMatrix,
+    float uniformScale,
+    Camera camera)
+{
+    if (classification == CLOD_NODE_CULL_OVERFLOW_FALLBACK ||
+        classification == CLOD_NODE_CULL_ASSEMBLY_FALLBACK ||
+        classification == CLOD_NODE_CULL_INVALID_FALLBACK)
+    {
+        return false;
+    }
+
+    const float3 resolvedCenterView = ToViewSpace(
+        resolvedSphere.sphere.xyz,
+        objectModelMatrix,
+        camera.view);
+    const bool resolvedOutside = SphereOutsideFrustumViewSpace(
+        resolvedCenterView,
+        resolvedSphere.sphere.w * uniformScale,
+        camera);
+    if (classification != CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+    {
+        return resolvedOutside;
+    }
+
+    // Animated voxel leaves can contain rigid static-sentinel cubes alongside
+    // skinned cubes. The accepted node bound must cover both copies because it
+    // authorizes inline emission without a second per-cluster frustum test.
+    const float3 bindCenterView = ToViewSpace(bindSphere.xyz, objectModelMatrix, camera.view);
+    const bool bindOutside = SphereOutsideFrustumViewSpace(
+        bindCenterView,
+        bindSphere.w * uniformScale,
+        camera);
+    return bindOutside && resolvedOutside;
+}
+
 bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, float4 planes[6])
 {
     [unroll]
@@ -2223,7 +2281,8 @@ void CLodAppendVoxelRasterWorkForLeaf(
     bool lodCameraIsOrtho,
     bool dirtyPageCullingEnabled,
     uint meshBufferIndex,
-    float errorOverDistance)
+    float errorOverDistance,
+    bool acceptedAnimatedLeafBounds)
 {
     StructuredBuffer<ClusterLODGroupSegment> segments =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
@@ -2264,7 +2323,8 @@ void CLodAppendVoxelRasterWorkForLeaf(
                 lodCameraIsOrtho,
                 dirtyPageCullingEnabled,
                 meshBufferIndex,
-                errorOverDistance);
+                errorOverDistance,
+                acceptedAnimatedLeafBounds);
         }
         return;
     }
@@ -2287,7 +2347,8 @@ void CLodAppendVoxelRasterWorkForLeaf(
         lodCameraIsOrtho,
         dirtyPageCullingEnabled,
         meshBufferIndex,
-        errorOverDistance);
+        errorOverDistance,
+        acceptedAnimatedLeafBounds);
 }
 
 void CLodHandleRenderableLeaf(
@@ -2313,7 +2374,8 @@ void CLodHandleRenderableLeaf(
     out uint n4,
     out uint n2,
     out uint n1,
-    out bool emitBucket)
+    out bool emitBucket,
+    bool acceptedAnimatedLeafBounds)
 {
     bucketRecord = (MeshletBucketRecord)0;
     emittedSegmentMeshletCount = 0;
@@ -2406,7 +2468,8 @@ void CLodHandleRenderableLeaf(
             lodCamera.isOrtho,
             dirtyPageCullingEnabled,
             instanceData.perMeshBufferIndex,
-            leaf.errorOverDistance);
+            leaf.errorOverDistance,
+            acceptedAnimatedLeafBounds);
     }
     else
     {
@@ -2724,12 +2787,15 @@ void WG_TraverseNodes(
         const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
         const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
         const bool nodeCulled =
-            nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
-            nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
-            nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
-            SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
+            CLodNodeBoundsOutsideFrustum(
+                nodeCullClassification,
+                node.metric.cullCenterAndRadius,
+                nodeCullBounds,
+                objectModelMatrix,
+                cullUniformScale,
+                cullCamera);
     #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
         const bool dirtyPageCullingEnabled =
@@ -2839,7 +2905,8 @@ void WG_TraverseNodes(
                     n4,
                     n2,
                     n1,
-                    emitBucket);
+                    emitBucket,
+                    isSkinned);
 #endif
             }
             else {
@@ -2943,12 +3010,15 @@ void WG_TraverseNodes(
                                 const float childCullRadiusOS = childCullBounds.sphere.w;
                                 const float3 childCenterVS = ToViewSpace(childCullCenterOS, objectModelMatrix, cullCamera.view);
                                 const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-                                if (childCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
-                                    childCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
-                                    childCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
-                                    CLodWorkGraphFrustumCullingEnabled() &&
+                                if (CLodWorkGraphFrustumCullingEnabled() &&
                                     !replaySource &&
-                                    SphereOutsideFrustumViewSpace(childCenterVS, childRadiusWorld, cullCamera)) {
+                                    CLodNodeBoundsOutsideFrustum(
+                                        childCullClassification,
+                                        child.metric.cullCenterAndRadius,
+                                        childCullBounds,
+                                        objectModelMatrix,
+                                        cullUniformScale,
+                                        cullCamera)) {
                                     if (childCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
                                         WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
                                     WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
@@ -3188,12 +3258,15 @@ void WG_LeafNodes(
         const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
         const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
         const bool nodeCulled =
-            nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
-            nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
-            nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
-            SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
+            CLodNodeBoundsOutsideFrustum(
+                nodeCullClassification,
+                node.metric.cullCenterAndRadius,
+                nodeCullBounds,
+                objectModelMatrix,
+                cullUniformScale,
+                cullCamera);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
         const bool dirtyPageCullingEnabled =
@@ -3240,7 +3313,8 @@ void WG_LeafNodes(
                 n4,
                 n2,
                 n1,
-                emitBucket);
+                emitBucket,
+                isSkinned);
         }
     }
 
@@ -3597,15 +3671,44 @@ void ClusterCullBody(
 
                 // Load per-meshlet descriptor (5 x Load4 = 80 bytes)
                 CLodMeshletDescriptor desc = LoadMeshletDescriptor(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet);
-                BoundingSphere meshletBounds = CLodComputeMeshletBounds(
-                    desc,
-                    pageHeader,
-                    pageSlabDesc,
-                    pageSlabOff,
-                    meshVertexFlags,
-                    skinningInstanceSlot,
-                    clodMeshMetadata,
-                    b.assemblyTransformIndex);
+                uint meshletBoundsClassification = CLOD_MESHLET_BOUNDS_STATIC;
+                BoundingSphere meshletBounds;
+                if ((meshVertexFlags & VERTEX_SKINNED) != 0u && CLodDescBoneCount(desc) != 0u)
+                {
+                    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot))
+                    {
+                        meshletBounds.sphere = desc.bounds;
+                        meshletBoundsClassification = CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK;
+                        WGTelemetryAdd(WG_COUNTER_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACKS, 1u);
+                    }
+                    else
+                    {
+                        meshletBounds = CLodComputeSkinnedMeshletBounds(
+                            desc,
+                            pageHeader,
+                            pageSlabDesc,
+                            pageSlabOff,
+                            skinningInstanceSlot,
+                            clodMeshMetadata,
+                            b.assemblyTransformIndex);
+                        // The helper returns the descriptor sphere only when no remapped
+                        // palette entry can be evaluated. Exact float4 equality is valid
+                        // here because that fallback copies desc.bounds verbatim.
+                        const bool usedBindFallback = all(meshletBounds.sphere == desc.bounds);
+                        meshletBoundsClassification = usedBindFallback
+                            ? CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK
+                            : CLOD_MESHLET_BOUNDS_SKINNED_LIVE;
+                        WGTelemetryAdd(
+                            usedBindFallback
+                                ? WG_COUNTER_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACKS
+                                : WG_COUNTER_MESHLET_BOUNDS_SKINNED_LIVE_EVALUATIONS,
+                            1u);
+                    }
+                }
+                else
+                {
+                    meshletBounds.sphere = desc.bounds;
+                }
                 meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, viewMatrix);
                 meshletCenterWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
                 meshletRadiusWorld = meshletBounds.sphere.w * cullUniformScale;
@@ -3625,6 +3728,11 @@ void ClusterCullBody(
                     !SphereOutsideFrustumViewSpace(meshletCenterViewSpace, meshletRadiusWorld, frustumPlanes);
                 
                 if (!survives) {
+                    if (meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK ||
+                        meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK)
+                    {
+                        WGTelemetryAdd(WG_COUNTER_MESHLET_BOUNDS_SKINNED_FALLBACK_FRUSTUM_REJECTED, 1u);
+                    }
                     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_FRUSTUM, 1);
                 }
 

@@ -210,6 +210,10 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     NodeBoundsOverflowFallbacks,
     NodeBoundsAssemblyFallbacks,
     NodeBoundsInvalidFallbacks,
+    MeshletBoundsSkinnedLiveEvaluations,
+    MeshletBoundsSkinnedInvalidSlotFallbacks,
+    MeshletBoundsSkinnedNoValidBoneFallbacks,
+    MeshletBoundsSkinnedFallbackFrustumRejected,
 
     Count
 };

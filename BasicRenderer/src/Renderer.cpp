@@ -2907,6 +2907,13 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::NodeBoundsOverflowFallbacks),
 				counter(CLodWorkGraphCounterIndex::NodeBoundsAssemblyFallbacks),
 				counter(CLodWorkGraphCounterIndex::NodeBoundsInvalidFallbacks));
+			spdlog::info(
+				"SARP CLOD animated meshlet bounds: frame={} live_evaluations={} invalid_slot_fallbacks={} no_valid_bone_fallbacks={} fallback_frustum_rejections={}",
+				requestedFrame,
+				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedLiveEvaluations),
+				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedInvalidSlotFallbacks),
+				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedNoValidBoneFallbacks),
+				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedFallbackFrustumRejected));
         });
 
     readbackService->RequestReadbackCapture(

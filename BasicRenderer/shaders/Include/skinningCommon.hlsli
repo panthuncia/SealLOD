@@ -87,10 +87,22 @@ SkinningInfluences ResolveAssemblySkinningInfluences(
 
 float SkinningMaxAxisScale_RowVector(SkinningMatrix M)
 {
-    float sx = length(M[0].xyz);
-    float sy = length(M[1].xyz);
-    float sz = length(M[2].xyz);
-    return max(sx, max(sy, sz));
+    // Conservative upper bound for the spectral norm of the affine linear
+    // part. Max row length is not conservative when assembly conjugation
+    // introduces shear. Gershgorin on A*A^T is exact for orthogonal rows and
+    // remains conservative for the general case.
+    const float3 r0 = M[0].xyz;
+    const float3 r1 = M[1].xyz;
+    const float3 r2 = M[2].xyz;
+    const float d0 = dot(r0, r0);
+    const float d1 = dot(r1, r1);
+    const float d2 = dot(r2, r2);
+    const float o01 = abs(dot(r0, r1));
+    const float o02 = abs(dot(r0, r2));
+    const float o12 = abs(dot(r1, r2));
+    return sqrt(max(
+        d0 + o01 + o02,
+        max(d1 + o01 + o12, d2 + o02 + o12)));
 }
 
 float4x4 IdentitySkinMatrix();

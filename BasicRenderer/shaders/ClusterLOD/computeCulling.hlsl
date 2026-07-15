@@ -305,12 +305,15 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
     const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
     const bool nodeCulled =
-        nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
-        nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
-        nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
         CLodWorkGraphFrustumCullingEnabled() &&
         !replaySource &&
-        SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
+        CLodNodeBoundsOutsideFrustum(
+            nodeCullClassification,
+            node.metric.cullCenterAndRadius,
+            nodeCullBounds,
+            objectModelMatrix,
+            cullUniformScale,
+            cullCamera);
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
@@ -475,7 +478,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 false,
 #endif
                 instanceData.perMeshBufferIndex,
-                leaf.errorOverDistance);
+                leaf.errorOverDistance,
+                isSkinned);
             return;
         }
 
@@ -613,12 +617,15 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         const float childCullRadiusOS = childCullBounds.sphere.w;
         const float3 childCenterVS = ToViewSpace(childCullCenterOS, objectModelMatrix, cullCamera.view);
         const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-        if (childCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
-            childCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
-            childCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
-            CLodWorkGraphFrustumCullingEnabled() &&
+        if (CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
-            SphereOutsideFrustumViewSpace(childCenterVS, childRadiusWorld, cullCamera)) {
+            CLodNodeBoundsOutsideFrustum(
+                childCullClassification,
+                child.metric.cullCenterAndRadius,
+                childCullBounds,
+                objectModelMatrix,
+                cullUniformScale,
+                cullCamera)) {
             if (childCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
                 WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
             WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
