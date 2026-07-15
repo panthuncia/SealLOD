@@ -124,6 +124,8 @@ public:
 		std::unique_ptr<BufferView> clusterLODGroupsView,
 		std::unique_ptr<BufferView> clusterLODSegmentsView,
 		std::unique_ptr<BufferView> clodNodesView,
+		std::unique_ptr<BufferView> clodNodeSkinningInfosView,
+		std::unique_ptr<BufferView> clodNodeBoneIndicesView,
 		std::unique_ptr<BufferView> clodAssemblyTransformsView = nullptr,
 		std::unique_ptr<BufferView> clodAssemblyInstancesView = nullptr,
 		std::unique_ptr<BufferView> clodAssemblyBoneRemapsView = nullptr,
@@ -179,6 +181,9 @@ public:
 	const std::vector<ClusterLODNode>& GetCLodNodes() const {
 		return m_clodNodes;
 	}
+	const std::vector<ClusterLODNodeSkinningInfo>& GetCLodNodeSkinningInfos() const { return m_clodNodeSkinningInfos; }
+	const std::vector<uint32_t>& GetCLodNodeBoneIndices() const { return m_clodNodeBoneIndices; }
+	uint32_t GetCLodNodeBoneLimit() const { return m_clodNodeBoneLimit; }
 
 	const std::vector<ClusterLODAssemblyTransform>& GetCLodAssemblyTransforms() const {
 		return m_clodAssemblyTransforms;
@@ -317,6 +322,9 @@ private:
 	ClusterLODCacheSource m_clodCacheSource;
 
 	std::vector<ClusterLODNode>      m_clodNodes;
+	std::vector<ClusterLODNodeSkinningInfo> m_clodNodeSkinningInfos;
+	std::vector<uint32_t> m_clodNodeBoneIndices;
+	uint32_t m_clodNodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 	std::vector<ClusterLODNodeRangeAlloc> m_clodLodNodeRanges;  // per depth
 	std::vector<uint32_t>            m_clodLodLevelRoots;        // node index per depth (== 1+depth)
 	std::vector<ClusterLODAssemblyTransform> m_clodAssemblyTransforms;
@@ -333,6 +341,8 @@ private:
 	std::unique_ptr<BufferView> m_clusterLODGroupsView = nullptr;
 	std::unique_ptr<BufferView> m_clusterLODSegmentsView = nullptr;
 	std::unique_ptr<BufferView> m_clusterLODNodesView = nullptr;
+	std::unique_ptr<BufferView> m_clusterLODNodeSkinningInfosView = nullptr;
+	std::unique_ptr<BufferView> m_clusterLODNodeBoneIndicesView = nullptr;
 	std::unique_ptr<BufferView> m_clusterLODAssemblyTransformsView = nullptr;
 	std::unique_ptr<BufferView> m_clusterLODAssemblyInstancesView = nullptr;
 	std::unique_ptr<BufferView> m_clusterLODAssemblyBoneRemapsView = nullptr;

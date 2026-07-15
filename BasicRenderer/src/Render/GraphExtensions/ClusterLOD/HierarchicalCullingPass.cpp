@@ -316,6 +316,8 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::CLod::Groups,
             Builtin::CLod::Segments,
             Builtin::CLod::Nodes,
+			Builtin::CLod::NodeSkinningInfos,
+			Builtin::CLod::NodeBoneIndices,
             Builtin::CLod::AssemblyInstances,
             Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
@@ -447,6 +449,8 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
 }
 
 void HierarchicalCullingPass::Setup() {
+	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
+	RegisterSRV(Builtin::CLod::NodeBoneIndices);
     if (UsesWorkGraphSWRaster(m_workGraphMode) && UsesVirtualShadowOutput(m_rasterOutputKind)) {
         RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }

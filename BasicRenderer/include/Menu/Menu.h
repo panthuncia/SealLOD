@@ -4414,6 +4414,12 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
                 counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords));
+			ImGui::Text("Animated node bounds: explicit=%u explicitFrustumReject=%u overflowFallback=%u assemblyFallback=%u invalidFallback=%u",
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitEvaluations),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitFrustumRejected),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsOverflowFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsAssemblyFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsInvalidFallbacks));
 
             ImGui::Text("Voxel leaves: reached=%u rejectedByError=%u segmentPageHit=%u segmentPageMiss=%u rasterWork=%u rasterDrop=%u",
                 counter(CLodWorkGraphCounterIndex::TraverseNodesVoxelLeafRecords),

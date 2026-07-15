@@ -136,6 +136,7 @@ namespace
         ReadSetting(object, "lodErrorMergePrevious", settings.lodErrorMergePrevious);
         ReadSetting(object, "lodErrorMergeAdditive", settings.lodErrorMergeAdditive);
         ReadSetting(object, "partitionSizeFloor", settings.partitionSizeFloor);
+        ReadSetting(object, "nodeBoneLimit", settings.nodeBoneLimit);
         ReadSetting(object, "preserveImportedNormals", settings.preserveImportedNormals);
         ReadSetting(object, "enableNormalAttributeSimplification", settings.enableNormalAttributeSimplification);
         ReadSetting(object, "normalAttributeWeight", settings.normalAttributeWeight);
@@ -163,6 +164,7 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     settings.lodErrorMergePrevious = 1.5f;
     settings.lodErrorMergeAdditive = 0.0f;
     settings.partitionSizeFloor = 8u;
+    settings.nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
     settings.preserveImportedNormals = true;
     settings.enableNormalAttributeSimplification = true;
     settings.normalAttributeWeight = 1.0f;

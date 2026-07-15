@@ -95,6 +95,141 @@ struct ClusterLODNode
     ClusterLODTraversalMetric metric;
 };
 
+static const uint CLOD_NODE_CULL_STATIC_BIND_POSE = 0u;
+static const uint CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS = 1u;
+static const uint CLOD_NODE_CULL_OVERFLOW_FALLBACK = 2u;
+static const uint CLOD_NODE_CULL_ASSEMBLY_FALLBACK = 3u;
+static const uint CLOD_NODE_CULL_INVALID_FALLBACK = 4u;
+
+uint CLodResolveAnimatedNodeCullSphere(
+    uint nodeLocalId,
+    float4 bindSphere,
+    CLodMeshMetadata metadata,
+    uint skinningInstanceSlot,
+    uint assemblyTransformIndex,
+    out BoundingSphere resolvedBounds)
+{
+    resolvedBounds.sphere = bindSphere;
+    if (nodeLocalId >= metadata.nodeSkinningInfoCount || metadata.nodeSkinningInfoCount == 0u)
+        return CLOD_NODE_CULL_INVALID_FALLBACK;
+
+    StructuredBuffer<ClusterLODNodeSkinningInfo> nodeInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::NodeSkinningInfos)];
+	uint nodeInfoDimension = 0u;
+	uint nodeInfoStride = 0u;
+	nodeInfos.GetDimensions(nodeInfoDimension, nodeInfoStride);
+	if (metadata.nodeSkinningInfoBase > nodeInfoDimension ||
+		nodeLocalId >= nodeInfoDimension - metadata.nodeSkinningInfoBase)
+		return CLOD_NODE_CULL_INVALID_FALLBACK;
+    const ClusterLODNodeSkinningInfo nodeInfo = nodeInfos[metadata.nodeSkinningInfoBase + nodeLocalId];
+    const uint boneCount = CLodNodeBoneCount(nodeInfo);
+    const uint flags = CLodNodeSkinningFlags(nodeInfo);
+	const uint validFlags = CLOD_NODE_SKINNING_FLAG_OVERFLOW | CLOD_NODE_SKINNING_FLAG_COARSE_FALLBACK;
+	if ((flags & ~validFlags) != 0u || flags == validFlags || (flags != 0u && boneCount != 0u))
+		return CLOD_NODE_CULL_INVALID_FALLBACK;
+    if ((flags & CLOD_NODE_SKINNING_FLAG_COARSE_FALLBACK) != 0u)
+        return CLOD_NODE_CULL_ASSEMBLY_FALLBACK;
+    if ((flags & CLOD_NODE_SKINNING_FLAG_OVERFLOW) != 0u)
+        return CLOD_NODE_CULL_OVERFLOW_FALLBACK;
+    if (boneCount == 0u)
+        return CLOD_NODE_CULL_STATIC_BIND_POSE;
+    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot) ||
+        boneCount > min(metadata.nodeBoneLimit, CLOD_NODE_BONE_LIMIT_HARD_MAX) ||
+        nodeInfo.boneListOffset > metadata.nodeBoneIndexCount ||
+        boneCount > metadata.nodeBoneIndexCount - nodeInfo.boneListOffset)
+        return CLOD_NODE_CULL_INVALID_FALLBACK;
+
+    StructuredBuffer<uint> nodeBoneIndices =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::NodeBoneIndices)];
+	uint nodeBoneDimension = 0u;
+	uint nodeBoneStride = 0u;
+	nodeBoneIndices.GetDimensions(nodeBoneDimension, nodeBoneStride);
+	const uint globalBoneListOffset = metadata.nodeBoneIndexBase + nodeInfo.boneListOffset;
+	if (globalBoneListOffset < metadata.nodeBoneIndexBase ||
+		globalBoneListOffset > nodeBoneDimension || boneCount > nodeBoneDimension - globalBoneListOffset)
+		return CLOD_NODE_CULL_INVALID_FALLBACK;
+	StructuredBuffer<SkinningInstanceGPUInfo> skinningInfos =
+		ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::SkinningInstanceInfo)];
+	uint skinningInfoDimension = 0u;
+	uint skinningInfoStride = 0u;
+	skinningInfos.GetDimensions(skinningInfoDimension, skinningInfoStride);
+	if (skinningInstanceSlot >= skinningInfoDimension)
+		return CLOD_NODE_CULL_INVALID_FALLBACK;
+    const SkinningInstanceGPUInfo skinningInfo = LoadSkinningInstanceInfo(skinningInstanceSlot);
+	StructuredBuffer<SkinningMatrix> boneMatrices =
+		ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
+	uint boneMatrixDimension = 0u;
+	uint boneMatrixStride = 0u;
+	boneMatrices.GetDimensions(boneMatrixDimension, boneMatrixStride);
+	if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL &&
+		(assemblyTransformIndex < metadata.assemblyTransformBase ||
+		 assemblyTransformIndex - metadata.assemblyTransformBase >= metadata.assemblyTransformCount))
+		return CLOD_NODE_CULL_INVALID_FALLBACK;
+	ClusterLODAssemblyBoneRemap activeBoneRemap = (ClusterLODAssemblyBoneRemap)0;
+	bool hasActiveBoneRemap = false;
+	if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL && metadata.assemblyBoneRemapCount != 0u)
+	{
+		const uint localTransformIndex = assemblyTransformIndex - metadata.assemblyTransformBase;
+		if (localTransformIndex >= metadata.assemblyBoneRemapCount)
+			return CLOD_NODE_CULL_INVALID_FALLBACK;
+		StructuredBuffer<ClusterLODAssemblyBoneRemap> boneRemaps =
+			ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
+		uint boneRemapDimension = 0u;
+		uint boneRemapStride = 0u;
+		boneRemaps.GetDimensions(boneRemapDimension, boneRemapStride);
+		const uint globalRemapIndex = metadata.assemblyBoneRemapBase + localTransformIndex;
+		if (globalRemapIndex < metadata.assemblyBoneRemapBase || globalRemapIndex >= boneRemapDimension)
+			return CLOD_NODE_CULL_INVALID_FALLBACK;
+		activeBoneRemap = boneRemaps[globalRemapIndex];
+		hasActiveBoneRemap = activeBoneRemap.remapIndexBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
+	}
+	StructuredBuffer<uint> assemblyBoneRemapIndices =
+		ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
+	uint assemblyBoneRemapIndexDimension = 0u;
+	uint assemblyBoneRemapIndexStride = 0u;
+	assemblyBoneRemapIndices.GetDimensions(assemblyBoneRemapIndexDimension, assemblyBoneRemapIndexStride);
+    float3 mergedCenter = 0.0f.xxx;
+    float mergedRadius = 0.0f;
+    bool hasValidBone = false;
+    [loop]
+    for (uint bone = 0u; bone < boneCount; ++bone)
+    {
+		const uint localJoint = nodeBoneIndices[globalBoneListOffset + bone];
+		uint jointIndex = localJoint;
+		if (hasActiveBoneRemap)
+		{
+			const uint remapIndex = activeBoneRemap.remapIndexBase + localJoint;
+			if (localJoint >= activeBoneRemap.remapIndexCount ||
+				remapIndex < activeBoneRemap.remapIndexBase || remapIndex >= assemblyBoneRemapIndexDimension)
+				return CLOD_NODE_CULL_INVALID_FALLBACK;
+			jointIndex = assemblyBoneRemapIndices[remapIndex];
+		}
+		const uint matrixIndex = skinningInfo.transformOffsetMatrices + jointIndex;
+        if (jointIndex >= skinningInfo.boneCount || matrixIndex < skinningInfo.transformOffsetMatrices ||
+			matrixIndex >= boneMatrixDimension)
+            return CLOD_NODE_CULL_INVALID_FALLBACK;
+        const float4x4 boneSkinMatrix = LoadAssemblyLocalBoneSkinMatrix(
+            skinningInstanceSlot, jointIndex, assemblyTransformIndex);
+        const float3 transformedCenter = mul(float4(bindSphere.xyz, 1.0f), boneSkinMatrix).xyz;
+        const float transformedRadius = bindSphere.w * SkinningMaxAxisScale_RowVector(boneSkinMatrix);
+        if (!all(isfinite(transformedCenter)) || !isfinite(transformedRadius))
+            return CLOD_NODE_CULL_INVALID_FALLBACK;
+        if (!hasValidBone)
+        {
+            mergedCenter = transformedCenter;
+            mergedRadius = transformedRadius;
+            hasValidBone = true;
+        }
+        else
+        {
+            CLodMergeBoundingSphere(mergedCenter, mergedRadius, transformedCenter, transformedRadius);
+        }
+    }
+    if (!hasValidBone) return CLOD_NODE_CULL_INVALID_FALLBACK;
+    resolvedBounds.sphere = float4(mergedCenter, mergedRadius * (1.0f + 1.0e-5f));
+    return CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS;
+}
+
 static const uint WG_COUNTER_OBJECT_CULL_THREADS = 0;
 static const uint WG_COUNTER_OBJECT_CULL_IN_RANGE_THREADS = 1;
 static const uint WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS = 2;
@@ -159,6 +294,11 @@ static const uint WG_COUNTER_ASSEMBLY_PART_TRAVERSAL_RECORDS = 175u;
 static const uint WG_COUNTER_ASSEMBLY_PART_VOXEL_LEAF_RECORDS = 176u;
 static const uint WG_COUNTER_ASSEMBLY_PART_VOXEL_RASTER_WORK_RECORDS = 177u;
 static const uint WG_COUNTER_ASSEMBLY_PART_TRIANGLE_BUCKET_RECORDS = 178u;
+static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_EVALUATIONS = 179u;
+static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED = 180u;
+static const uint WG_COUNTER_NODE_BOUNDS_OVERFLOW_FALLBACKS = 181u;
+static const uint WG_COUNTER_NODE_BOUNDS_ASSEMBLY_FALLBACKS = 182u;
+static const uint WG_COUNTER_NODE_BOUNDS_INVALID_FALLBACKS = 183u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -1095,6 +1235,18 @@ void WGTelemetryAdd(uint counterIndex, uint value)
 
     RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX];
     InterlockedAdd(telemetryCounters[counterIndex], value);
+}
+
+void CLodTelemetryNodeCullClassification(uint classification)
+{
+    if (classification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+        WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_EVALUATIONS, 1u);
+    else if (classification == CLOD_NODE_CULL_OVERFLOW_FALLBACK)
+        WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_OVERFLOW_FALLBACKS, 1u);
+    else if (classification == CLOD_NODE_CULL_ASSEMBLY_FALLBACK)
+        WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_ASSEMBLY_FALLBACKS, 1u);
+    else if (classification == CLOD_NODE_CULL_INVALID_FALLBACK)
+        WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_INVALID_FALLBACKS, 1u);
 }
 
 float ProjectedGeometricError(
@@ -2557,14 +2709,24 @@ void WG_TraverseNodes(
         const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
         const float cullUniformScale = objectUniformScale;
         const float lodUniformScale = objectUniformScale;
-        const float3 nodeCullCenterObjectSpace = node.metric.cullCenterAndRadius.xyz;
-        const float nodeCullRadiusObjectSpace = node.metric.cullCenterAndRadius.w;
+        const uint nodeSkinningInstanceSlot = ResolveProceduralWindSkinningSlot(rec.instanceIndex, instanceData.skinningInstanceSlot);
+        BoundingSphere nodeCullBounds = { node.metric.cullCenterAndRadius };
+        const uint nodeCullClassification = isSkinned
+            ? CLodResolveAnimatedNodeCullSphere(
+                nodeLocalId, node.metric.cullCenterAndRadius, clodMeshMetadata,
+                nodeSkinningInstanceSlot, rec.assemblyTransformIndex, nodeCullBounds)
+            : CLOD_NODE_CULL_STATIC_BIND_POSE;
+        CLodTelemetryNodeCullClassification(nodeCullClassification);
+        const float3 nodeCullCenterObjectSpace = nodeCullBounds.sphere.xyz;
+        const float nodeCullRadiusObjectSpace = nodeCullBounds.sphere.w;
         const float3 nodeLodCenterObjectSpace = node.metric.lodCenterAndRadius.xyz;
         const float nodeLodRadiusObjectSpace = node.metric.lodCenterAndRadius.w;
         const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
         const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
         const bool nodeCulled =
-            !isSkinned &&
+            nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
+            nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
+            nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
             SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
@@ -2577,6 +2739,8 @@ void WG_TraverseNodes(
     #endif
 
         if (nodeCulled) {
+            if (nodeCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+                WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_CULLED_NODE_RECORDS, 1);
         }
         else {
@@ -2768,14 +2932,25 @@ void WG_TraverseNodes(
                                 const ClusterLODNode child = lodNodes[clodMeshMetadata.lodNodesBase + childNodeId];
 
                                 // Frustum cull child.
-                                const float3 childCullCenterOS = child.metric.cullCenterAndRadius.xyz;
-                                const float childCullRadiusOS = child.metric.cullCenterAndRadius.w;
+                                BoundingSphere childCullBounds = { child.metric.cullCenterAndRadius };
+                                const uint childCullClassification = isSkinned
+                                    ? CLodResolveAnimatedNodeCullSphere(
+                                        childNodeId, child.metric.cullCenterAndRadius, clodMeshMetadata,
+                                        nodeSkinningInstanceSlot, rec.assemblyTransformIndex, childCullBounds)
+                                    : CLOD_NODE_CULL_STATIC_BIND_POSE;
+                                CLodTelemetryNodeCullClassification(childCullClassification);
+                                const float3 childCullCenterOS = childCullBounds.sphere.xyz;
+                                const float childCullRadiusOS = childCullBounds.sphere.w;
                                 const float3 childCenterVS = ToViewSpace(childCullCenterOS, objectModelMatrix, cullCamera.view);
                                 const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-                                if (!isSkinned &&
+                                if (childCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
+                                    childCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
+                                    childCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
                                     CLodWorkGraphFrustumCullingEnabled() &&
                                     !replaySource &&
                                     SphereOutsideFrustumViewSpace(childCenterVS, childRadiusWorld, cullCamera)) {
+                                    if (childCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+                                        WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
                                     WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
                                     continue;
                                 }
@@ -2993,18 +3168,29 @@ void WG_LeafNodes(
         StructuredBuffer<ClusterLODNode> lodNodes =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
-        const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + UnpackNodeId(rec.nodeIdPacked)];
+		const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
+		const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_LEAF_NODE_RECORDS, 1);
 
         const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
         const float cullUniformScale = objectUniformScale;
         const float lodUniformScale = objectUniformScale;
-        const float3 nodeCullCenterObjectSpace = node.metric.cullCenterAndRadius.xyz;
-        const float nodeCullRadiusObjectSpace = node.metric.cullCenterAndRadius.w;
+        const uint nodeSkinningInstanceSlot = ResolveProceduralWindSkinningSlot(rec.instanceIndex, instanceData.skinningInstanceSlot);
+        BoundingSphere nodeCullBounds = { node.metric.cullCenterAndRadius };
+        const uint nodeCullClassification = isSkinned
+            ? CLodResolveAnimatedNodeCullSphere(
+                nodeLocalId, node.metric.cullCenterAndRadius, clodMeshMetadata,
+                nodeSkinningInstanceSlot, rec.assemblyTransformIndex, nodeCullBounds)
+            : CLOD_NODE_CULL_STATIC_BIND_POSE;
+        CLodTelemetryNodeCullClassification(nodeCullClassification);
+        const float3 nodeCullCenterObjectSpace = nodeCullBounds.sphere.xyz;
+        const float nodeCullRadiusObjectSpace = nodeCullBounds.sphere.w;
         const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
         const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
         const bool nodeCulled =
-            !isSkinned &&
+            nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
+            nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
+            nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
             SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
@@ -3017,6 +3203,8 @@ void WG_LeafNodes(
 #endif
 
         if (nodeCulled) {
+            if (nodeCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+                WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
             WGTelemetryAdd(WG_COUNTER_TRAVERSE_CULLED_NODE_RECORDS, 1);
         }
         else {

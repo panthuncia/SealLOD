@@ -6,6 +6,7 @@
 // CLod shader types header.
 
 #include <cstdint>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -79,6 +80,19 @@ struct ClusterLODNode
 	ClusterLODNodeRange        range{};
 	ClusterLODTraversalMetric  traversalMetric{};
 };
+
+struct ClusterLODNodeSkinningInfo
+{
+	uint32_t boneListOffset = 0;
+	uint16_t boneCount = 0;
+	uint16_t flags = 0;
+};
+static_assert(sizeof(ClusterLODNodeSkinningInfo) == 8, "ClusterLODNodeSkinningInfo must be 8 bytes");
+
+static constexpr uint16_t CLOD_NODE_SKINNING_FLAG_OVERFLOW = 1u << 0;
+static constexpr uint16_t CLOD_NODE_SKINNING_FLAG_COARSE_FALLBACK = 1u << 1;
+static constexpr uint32_t CLOD_NODE_BONE_LIMIT_DEFAULT = 16u;
+static constexpr uint32_t CLOD_NODE_BONE_LIMIT_HARD_MAX = 64u;
 
 struct ClusterLODNodeRangeAlloc
 {
@@ -221,6 +235,9 @@ struct ClusterLODPrebuiltData
 	uint32_t voxelPageCount = 0;
 	ClusterLODCacheSource cacheSource;
 	std::vector<ClusterLODNode> nodes;
+	std::vector<ClusterLODNodeSkinningInfo> nodeSkinningInfos;
+	std::vector<uint32_t> nodeBoneIndices;
+	uint32_t nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 	std::vector<ClusterLODNodeRangeAlloc> lodNodeRanges;
 	std::vector<uint32_t> lodLevelRoots;
 	std::vector<ClusterLODAssemblyTransform> assemblyTransforms;
@@ -284,6 +301,7 @@ struct ClusterLODBuilderSettings
 	float lodErrorMergePrevious = 1.5f;
 	float lodErrorMergeAdditive = 0.0f;
 	uint32_t partitionSizeFloor = 8u;
+	uint32_t nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 	bool preserveImportedNormals = true;
 	bool enableNormalAttributeSimplification = true;
 	float normalAttributeWeight = 1.0f;
@@ -389,6 +407,7 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readFloat("BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", settings.voxelFallbackAcceptanceBias);
 	readFloat("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD", settings.voxelFallbackOpacityThreshold);
 	readUint("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", settings.voxelTailMaxLevels);
+	readUint("BASICRENDERER_CLOD_NODE_BONE_LIMIT", settings.nodeBoneLimit);
 	readFloat("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", settings.voxelTailGrowthFactor);
 	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
 	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);

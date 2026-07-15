@@ -291,6 +291,8 @@ private:
 	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshlets;
 	//std::shared_ptr<DynamicBuffer> m_clusterLODMeshletBounds;
 	std::shared_ptr<DynamicBuffer> m_clusterLODNodes;
+	std::shared_ptr<DynamicBuffer> m_clusterLODNodeSkinningInfos;
+	std::shared_ptr<DynamicBuffer> m_clusterLODNodeBoneIndices;
 	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyTransforms;
 	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyInstances;
 	std::shared_ptr<DynamicBuffer> m_clusterLODAssemblyBoneRemaps;

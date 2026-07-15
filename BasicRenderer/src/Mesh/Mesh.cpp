@@ -549,6 +549,10 @@ void Mesh::ReleaseCLodHierarchyCpuData()
 	m_clodSegments.shrink_to_fit();
 	m_clodNodes.clear();
 	m_clodNodes.shrink_to_fit();
+	m_clodNodeSkinningInfos.clear();
+	m_clodNodeSkinningInfos.shrink_to_fit();
+	m_clodNodeBoneIndices.clear();
+	m_clodNodeBoneIndices.shrink_to_fit();
 	m_clodAssemblyTransforms.clear();
 	m_clodAssemblyTransforms.shrink_to_fit();
 	m_clodAssemblyInstances.clear();
@@ -589,6 +593,9 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodVoxelPageCount = data.voxelPageCount;
 	m_clodCacheSource = data.cacheSource;
 	m_clodNodes = data.nodes;
+	m_clodNodeSkinningInfos = data.nodeSkinningInfos;
+	m_clodNodeBoneIndices = data.nodeBoneIndices;
+	m_clodNodeBoneLimit = data.nodeBoneLimit;
 	m_clodLodNodeRanges = data.lodNodeRanges;
 	m_clodLodLevelRoots = data.lodLevelRoots;
 	m_clodAssemblyTransforms = data.assemblyTransforms;
@@ -740,6 +747,9 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodNodes.empty()) {
 		out.nodes = m_clodNodes;
 	}
+	if (!m_clodNodeSkinningInfos.empty()) out.nodeSkinningInfos = m_clodNodeSkinningInfos;
+	if (!m_clodNodeBoneIndices.empty()) out.nodeBoneIndices = m_clodNodeBoneIndices;
+	out.nodeBoneLimit = m_clodNodeBoneLimit;
 	if (!m_clodLodNodeRanges.empty()) {
 		out.lodNodeRanges = m_clodLodNodeRanges;
 	}
@@ -815,6 +825,8 @@ void Mesh::SetCLodBufferViews(
 	std::unique_ptr<BufferView> clusterLODGroupsView,
 	std::unique_ptr<BufferView> clusterLODSegmentsView,
 	std::unique_ptr<BufferView> clusterLODNodesView,
+	std::unique_ptr<BufferView> clusterLODNodeSkinningInfosView,
+	std::unique_ptr<BufferView> clusterLODNodeBoneIndicesView,
 	std::unique_ptr<BufferView> clusterLODAssemblyTransformsView,
 	std::unique_ptr<BufferView> clusterLODAssemblyInstancesView,
 	std::unique_ptr<BufferView> clusterLODAssemblyBoneRemapsView,
@@ -823,6 +835,8 @@ void Mesh::SetCLodBufferViews(
 	m_clusterLODGroupsView = std::move(clusterLODGroupsView);
 	m_clusterLODSegmentsView = std::move(clusterLODSegmentsView);
 	m_clusterLODNodesView = std::move(clusterLODNodesView);
+	m_clusterLODNodeSkinningInfosView = std::move(clusterLODNodeSkinningInfosView);
+	m_clusterLODNodeBoneIndicesView = std::move(clusterLODNodeBoneIndicesView);
 	m_clusterLODAssemblyTransformsView = std::move(clusterLODAssemblyTransformsView);
 	m_clusterLODAssemblyInstancesView = std::move(clusterLODAssemblyInstancesView);
 	m_clusterLODAssemblyBoneRemapsView = std::move(clusterLODAssemblyBoneRemapsView);

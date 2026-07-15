@@ -17,6 +17,8 @@ struct Builtin {
     inline static constexpr std::string_view GroupPageMap = "Builtin::CLod::GroupPageMap";
     inline static constexpr std::string_view Groups = "Builtin::CLod::Groups";
     inline static constexpr std::string_view MeshMetadata = "Builtin::CLod::MeshMetadata";
+    inline static constexpr std::string_view NodeBoneIndices = "Builtin::CLod::NodeBoneIndices";
+    inline static constexpr std::string_view NodeSkinningInfos = "Builtin::CLod::NodeSkinningInfos";
     inline static constexpr std::string_view Nodes = "Builtin::CLod::Nodes";
     inline static constexpr std::string_view Offsets = "Builtin::CLod::Offsets";
     inline static constexpr std::string_view PagePoolSlabBase = "Builtin::CLod::PagePoolSlabBase";

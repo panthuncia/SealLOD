@@ -290,14 +290,24 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
     const float cullUniformScale = objectUniformScale;
     const float lodUniformScale = objectUniformScale;
-    const float3 nodeCullCenterObjectSpace = node.metric.cullCenterAndRadius.xyz;
-    const float nodeCullRadiusObjectSpace = node.metric.cullCenterAndRadius.w;
+    const uint nodeSkinningInstanceSlot = ResolveProceduralWindSkinningSlot(rec.instanceIndex, instanceData.skinningInstanceSlot);
+    BoundingSphere nodeCullBounds = { node.metric.cullCenterAndRadius };
+    const uint nodeCullClassification = isSkinned
+        ? CLodResolveAnimatedNodeCullSphere(
+            nodeLocalId, node.metric.cullCenterAndRadius, clodMeshMetadata,
+            nodeSkinningInstanceSlot, rec.assemblyTransformIndex, nodeCullBounds)
+        : CLOD_NODE_CULL_STATIC_BIND_POSE;
+    CLodTelemetryNodeCullClassification(nodeCullClassification);
+    const float3 nodeCullCenterObjectSpace = nodeCullBounds.sphere.xyz;
+    const float nodeCullRadiusObjectSpace = nodeCullBounds.sphere.w;
     const float3 nodeLodCenterObjectSpace = node.metric.lodCenterAndRadius.xyz;
     const float nodeLodRadiusObjectSpace = node.metric.lodCenterAndRadius.w;
     const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
     const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
     const bool nodeCulled =
-        !isSkinned &&
+        nodeCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
+        nodeCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
+        nodeCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
         CLodWorkGraphFrustumCullingEnabled() &&
         !replaySource &&
         SphereOutsideFrustumViewSpace(nodeCenterViewSpace, nodeRadiusWorld, cullCamera);
@@ -309,6 +319,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #endif
 
     if (nodeCulled) {
+        if (nodeCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+            WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_CULLED_NODE_RECORDS, 1);
         return;
     }
@@ -590,14 +602,25 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         const uint childNodeId = node.range.indexOrOffset + childIndex;
         const ClusterLODNode child = lodNodes[clodMeshMetadata.lodNodesBase + childNodeId];
 
-        const float3 childCullCenterOS = child.metric.cullCenterAndRadius.xyz;
-        const float childCullRadiusOS = child.metric.cullCenterAndRadius.w;
+        BoundingSphere childCullBounds = { child.metric.cullCenterAndRadius };
+        const uint childCullClassification = isSkinned
+            ? CLodResolveAnimatedNodeCullSphere(
+                childNodeId, child.metric.cullCenterAndRadius, clodMeshMetadata,
+                nodeSkinningInstanceSlot, rec.assemblyTransformIndex, childCullBounds)
+            : CLOD_NODE_CULL_STATIC_BIND_POSE;
+        CLodTelemetryNodeCullClassification(childCullClassification);
+        const float3 childCullCenterOS = childCullBounds.sphere.xyz;
+        const float childCullRadiusOS = childCullBounds.sphere.w;
         const float3 childCenterVS = ToViewSpace(childCullCenterOS, objectModelMatrix, cullCamera.view);
         const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-        if (!isSkinned &&
+        if (childCullClassification != CLOD_NODE_CULL_OVERFLOW_FALLBACK &&
+            childCullClassification != CLOD_NODE_CULL_ASSEMBLY_FALLBACK &&
+            childCullClassification != CLOD_NODE_CULL_INVALID_FALLBACK &&
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
             SphereOutsideFrustumViewSpace(childCenterVS, childRadiusWorld, cullCamera)) {
+            if (childCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
+                WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
             WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
             continue;
         }

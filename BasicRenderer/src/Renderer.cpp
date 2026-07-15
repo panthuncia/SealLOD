@@ -2899,6 +2899,14 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::AssemblyVoxelSuppressedByChildRecords),
                 counter(CLodWorkGraphCounterIndex::AssemblyVoxelNonResidentRecords),
                 counter(CLodWorkGraphCounterIndex::AssemblyVoxelRasterWorkRecords));
+			spdlog::info(
+				"SARP CLOD animated node bounds: frame={} explicit_evaluations={} explicit_frustum_rejections={} overflow_fallbacks={} assembly_fallbacks={} invalid_data_fallbacks={}",
+				requestedFrame,
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitEvaluations),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitFrustumRejected),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsOverflowFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsAssemblyFallbacks),
+				counter(CLodWorkGraphCounterIndex::NodeBoundsInvalidFallbacks));
         });
 
     readbackService->RequestReadbackCapture(

@@ -1,6 +1,7 @@
 #include "Import/CLodCache.h"
 #include "Mesh/DefaultCLodSettings.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -203,6 +204,9 @@ namespace CLodCache {
 			WritePod(out, cacheSource.buildConfigHash);
 			WriteString(out, ws2s(cacheSource.containerFileName));
 			WriteVectorPod(out, prebuiltData.nodes);
+			WriteVectorPod(out, prebuiltData.nodeSkinningInfos);
+			WriteVectorPod(out, prebuiltData.nodeBoneIndices);
+			WritePod(out, prebuiltData.nodeBoneLimit);
 			WriteVectorPod(out, prebuiltData.lodNodeRanges);
 			WriteVectorPod(out, prebuiltData.lodLevelRoots);
 			WriteVectorPod(out, prebuiltData.assemblyTransforms);
@@ -255,6 +259,9 @@ namespace CLodCache {
 			if (!ReadString(blob, offset, containerFileName)) return false;
 			out.prebuiltData.cacheSource.containerFileName = s2ws(containerFileName);
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodes)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodeSkinningInfos)) return false;
+			if (!ReadVectorPod(blob, offset, out.prebuiltData.nodeBoneIndices)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.nodeBoneLimit)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodNodeRanges)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.lodLevelRoots)) return false;
 			if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransforms)) return false;
@@ -736,6 +743,20 @@ namespace CLodCache {
 		{
 			boost::hash_combine(seed, GetClusterLODEnvironmentVariable(name));
 		};
+		auto hashEffectiveNodeBoneLimit = [&seed]()
+		{
+			const std::string text = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_NODE_BONE_LIMIT");
+			char* end = nullptr;
+			const unsigned long parsed = text.empty() ? 0ul : std::strtoul(text.c_str(), &end, 10);
+			const bool hasValidOverride = !text.empty() && end != text.c_str();
+			boost::hash_combine(seed, hasValidOverride);
+			if (hasValidOverride)
+			{
+				const uint32_t effective = std::clamp(
+					static_cast<uint32_t>(parsed), 1u, CLOD_NODE_BONE_LIMIT_HARD_MAX);
+				boost::hash_combine(seed, effective);
+			}
+		};
 
 		boost::hash_combine(seed, static_cast<uint32_t>(kSchemaVersion));
 		boost::hash_combine(seed, static_cast<uint32_t>(MS_MESHLET_SIZE));
@@ -768,6 +789,7 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH");
+		hashEffectiveNodeBoneLimit();
 		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
 		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
 		return static_cast<uint64_t>(seed);

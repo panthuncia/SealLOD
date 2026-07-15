@@ -691,7 +691,7 @@ fs::path AssetManifestPath()
 // whenever that ownership/serialization contract changes so preprocessing
 // cannot hide a stale inline-skeleton assembly behind an otherwise valid NIF
 // payload cache.
-constexpr std::uint32_t kPayloadCacheVersion = 46u;
+constexpr std::uint32_t kPayloadCacheVersion = 47u;
 
 enum class CachedSkeletonStorage : std::uint8_t
 {

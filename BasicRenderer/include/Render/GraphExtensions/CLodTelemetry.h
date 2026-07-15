@@ -205,6 +205,11 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     AssemblyPartVoxelLeafRecords,
     AssemblyPartVoxelRasterWorkRecords,
     AssemblyPartTriangleBucketRecords,
+    NodeBoundsExplicitEvaluations,
+    NodeBoundsExplicitFrustumRejected,
+    NodeBoundsOverflowFallbacks,
+    NodeBoundsAssemblyFallbacks,
+    NodeBoundsInvalidFallbacks,
 
     Count
 };

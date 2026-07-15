@@ -433,6 +433,8 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::CLod::Groups,
             Builtin::CLod::Segments,
             Builtin::CLod::Nodes,
+			Builtin::CLod::NodeSkinningInfos,
+			Builtin::CLod::NodeBoneIndices,
             Builtin::CLod::AssemblyInstances,
             Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
@@ -537,6 +539,10 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
 
 void HierarchicalDispatchCullingPass::Setup()
 {
+	// Pure-compute traversal uses the same bindless node-bounds sidecars as the
+	// work graph. Keep explicit registrations in addition to graph declarations.
+	RegisterSRV(Builtin::CLod::NodeSkinningInfos);
+	RegisterSRV(Builtin::CLod::NodeBoneIndices);
 }
 
 PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& executionContext)

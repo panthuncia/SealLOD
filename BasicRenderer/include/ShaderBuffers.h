@@ -704,7 +704,14 @@ struct CLodMeshMetadata
     uint assemblyInstanceCount;
     uint assemblyBoneRemapBase;
     uint assemblyBoneRemapCount;
+    uint nodeSkinningInfoBase;
+    uint nodeSkinningInfoCount;
+    uint nodeBoneIndexBase;
+    uint nodeBoneIndexCount;
+    uint nodeBoneLimit;
+    uint padNodeSkinning[3]{};
 };
+static_assert(sizeof(CLodMeshMetadata) == 96, "CLodMeshMetadata must match the HLSL structured-buffer layout");
 
 struct CLodHierarchyLevelInfo
 {

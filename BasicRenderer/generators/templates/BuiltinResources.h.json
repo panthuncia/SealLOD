@@ -53,6 +53,8 @@
       "Segments": {},
       "MeshMetadata": {},
       "Nodes": {},
+      "NodeSkinningInfos": {},
+      "NodeBoneIndices": {},
       "AssemblyTransforms": {},
       "AssemblyInstances": {},
       "AssemblyBoneRemaps": {},

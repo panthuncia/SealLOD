@@ -36,7 +36,25 @@ struct CLodMeshMetadata
     uint assemblyInstanceCount;
     uint assemblyBoneRemapBase;
     uint assemblyBoneRemapCount;
+    uint nodeSkinningInfoBase;
+    uint nodeSkinningInfoCount;
+    uint nodeBoneIndexBase;
+    uint nodeBoneIndexCount;
+    uint nodeBoneLimit;
+    uint3 padNodeSkinning;
 };
+
+struct ClusterLODNodeSkinningInfo
+{
+    uint boneListOffset;
+    uint boneCountAndFlags;
+};
+
+static const uint CLOD_NODE_SKINNING_FLAG_OVERFLOW = 1u << 0;
+static const uint CLOD_NODE_SKINNING_FLAG_COARSE_FALLBACK = 1u << 1;
+static const uint CLOD_NODE_BONE_LIMIT_HARD_MAX = 64u;
+uint CLodNodeBoneCount(ClusterLODNodeSkinningInfo info) { return info.boneCountAndFlags & 0xFFFFu; }
+uint CLodNodeSkinningFlags(ClusterLODNodeSkinningInfo info) { return info.boneCountAndFlags >> 16u; }
 
 struct CLodHierarchyLevelInfo
 {
