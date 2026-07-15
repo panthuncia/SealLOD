@@ -7,6 +7,9 @@
 
 inline constexpr const char* WindowResolutionPresetSettingName = "windowResolutionPreset";
 inline constexpr const char* ProceduralWindDisplacementScaleSettingName = "proceduralWindDisplacementScale";
+inline constexpr const char* ProceduralWindSkeletonLodThresholdsSettingName = "proceduralWindSkeletonLodThresholds";
+inline constexpr const char* ProceduralWindSkeletonLodHysteresisSettingName = "proceduralWindSkeletonLodHysteresis";
+inline constexpr const char* ProceduralWindForcedSkeletonLodSettingName = "proceduralWindForcedSkeletonLod";
 
 enum class WindowResolutionPreset : uint8_t {
     P720,

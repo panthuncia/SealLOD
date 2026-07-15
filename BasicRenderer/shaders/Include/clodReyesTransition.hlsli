@@ -117,7 +117,7 @@ BoundingSphere CLodComputeSkinnedMeshletBoundsForPose(
             slab.Load(boneListBase + boneIndex * 4u),
             metadata,
             assemblyTransformIndex);
-        if (jointIndex >= skinningInfo.boneCount)
+        if (jointIndex >= skinningInfo.sourceBoneCount)
         {
             continue;
         }

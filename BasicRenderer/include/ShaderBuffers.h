@@ -653,7 +653,12 @@ struct SkinningInstanceGPUInfo {
     // Procedural-wind transient slots use this to reject history left behind
     // when an instance-transform slot is recycled for a different placement.
     uint32_t stableSceneId = 0;
+	uint32_t boneRemapDescriptor = 0xFFFFFFFFu;
+	uint32_t boneRemapOffset = 0u;
+	uint32_t sourceBoneCount = 0u;
+	uint32_t skeletonLodVariant = 0u;
 };
+static_assert(sizeof(SkinningInstanceGPUInfo) == 48u);
 
 // Legacy/cache compatibility bit. All current palette buffers use the canonical
 // shader-native row-vector layout regardless of this value.
@@ -902,6 +907,14 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     UintRootConstant27,
     UintRootConstant28,
     UintRootConstant29,
+	UintRootConstant30,
+	UintRootConstant31,
+	UintRootConstant32,
+	UintRootConstant33,
+	UintRootConstant34,
+	UintRootConstant35,
+	UintRootConstant36,
+	UintRootConstant37,
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
@@ -910,7 +923,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscEnableShadows = UintRootConstant24,
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
-	NumMiscUintRootConstants = UintRootConstant29 + 1
+	NumMiscUintRootConstants = UintRootConstant37 + 1
 };
 
 enum ResourceDescriptorIndicesRootConstants { // Auto-assigned, do not set manually

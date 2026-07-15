@@ -1,6 +1,7 @@
 #include "Import/CLodCacheLoader.h"
 
 #include "Import/CLodCache.h"
+#include "Import/SkeletonArtifactValidation.h"
 #include "Mesh/DefaultCLodSettings.h"
 
 #include <atomic>
@@ -221,6 +222,30 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 		ws2s(lookup.metadataPath),
 		ws2s(lookup.containerPath));
 	auto cached = CLodCache::TryLoad(cacheKey, buildHash);
+	std::string skeletonArtifactError;
+	if (cached && cached->prebuiltData.assemblySkeletonArtifact.jointCount != 0u &&
+		!SkeletonArtifactValidation::Validate(cached->prebuiltData.assemblySkeletonArtifact, &skeletonArtifactError)) {
+		spdlog::info(
+			"CLod cache STALE src='{}' prim='{}' subset='{}': skeleton artifact {} is unavailable or invalid ({})",
+			identity.sourceIdentifier,
+			identity.primPath,
+			identity.subsetName,
+			cached->prebuiltData.assemblySkeletonArtifact.id.ToString(),
+			skeletonArtifactError);
+		cached.reset();
+		std::error_code metadataError;
+		std::error_code containerError;
+		std::filesystem::remove(lookup.metadataPath, metadataError);
+		std::filesystem::remove(lookup.containerPath, containerError);
+		if (metadataError || containerError) {
+			spdlog::warn(
+				"CLod cache stale-entry removal reported errors: metadata='{}' ({}) container='{}' ({})",
+				ws2s(lookup.metadataPath),
+				metadataError.message(),
+				ws2s(lookup.containerPath),
+				containerError.message());
+		}
+	}
 	TracyPlot("CLOD.Cache.TryLoadPrebuilt.Hit", cached.has_value() ? int64_t{ 1 } : int64_t{ 0 });
 	if (!cached.has_value()) {
 		static std::atomic<uint32_t> loggedMisses{ 0u };

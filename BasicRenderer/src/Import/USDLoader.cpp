@@ -4823,11 +4823,23 @@ namespace USDLoader {
 					wind.enabled = root.value("bIsEnabled", false);
 					wind.groundCover = root.value("bIsGroundCover", false);
 					wind.gustAttenuation = root.value("gustAttenuation", 0.0f);
+					wind.attachedBranchProfileGroupId = root.value("attachedBranchProfileGroupId", 1u);
 					if (const auto it = root.find("simulationGroups"); it != root.end() && it->is_array()) {
 						for (const auto& entry : *it) {
 							DynamicWindSimulationGroupData group;
 							if (entry.value("bUseDualInfluence", false)) group.flags |= DynamicWindMetadata::GroupFlagDualInfluence;
 							if (entry.value("bIsTrunkGroup", false)) group.flags |= DynamicWindMetadata::GroupFlagTrunk;
+							group.role = (group.flags & DynamicWindMetadata::GroupFlagTrunk) != 0u
+								? DynamicWindSimulationGroupRole::Trunk
+								: DynamicWindSimulationGroupRole::DetailBranch;
+							group.profileGroupId = entry.value("profileGroupId", static_cast<std::uint32_t>(wind.groups.size()));
+							group.lastAnimatedLod = entry.value(
+								"lastAnimatedLod",
+								group.role == DynamicWindSimulationGroupRole::Trunk ? 5u : 1u);
+							const std::string role = entry.value("skeletonLodRole", std::string{});
+							if (role == "trunk") group.role = DynamicWindSimulationGroupRole::Trunk;
+							else if (role == "detailBranch") group.role = DynamicWindSimulationGroupRole::DetailBranch;
+							else if (role == "attachedBranch") group.role = DynamicWindSimulationGroupRole::AttachedBranch;
 							group.influence = entry.value("influence", 1.0f);
 							group.minInfluence = entry.value("minInfluence", 0.0f);
 							group.maxInfluence = entry.value("maxInfluence", 0.0f);
@@ -5940,6 +5952,36 @@ namespace USDLoader {
 				expandedAssemblySkeleton.dynamicWindMetadata = metadata.dynamicWindMetadata;
 				expandedAssemblySkeleton.dynamicWindMetadata.bones.clear();
 			}
+			std::vector<uint32_t> assemblyGroupByLocal(metadata.dynamicWindMetadata.groups.size(), 0xFFFFFFFFu);
+			for (uint32_t localGroup = 0; localGroup < assemblyGroupByLocal.size(); ++localGroup) {
+				const auto& sourceGroup = metadata.dynamicWindMetadata.groups[localGroup];
+				auto found = std::ranges::find_if(expandedAssemblySkeleton.dynamicWindMetadata.groups, [&](const auto& candidate) {
+					return candidate.role == sourceGroup.role && candidate.profileGroupId == sourceGroup.profileGroupId &&
+						candidate.flags == sourceGroup.flags && candidate.lastAnimatedLod == sourceGroup.lastAnimatedLod;
+				});
+				if (found == expandedAssemblySkeleton.dynamicWindMetadata.groups.end()) {
+					assemblyGroupByLocal[localGroup] = static_cast<uint32_t>(expandedAssemblySkeleton.dynamicWindMetadata.groups.size());
+					expandedAssemblySkeleton.dynamicWindMetadata.groups.push_back(sourceGroup);
+				}
+				else assemblyGroupByLocal[localGroup] = static_cast<uint32_t>(std::distance(expandedAssemblySkeleton.dynamicWindMetadata.groups.begin(), found));
+			}
+			auto attachedGroup = [&]() {
+				auto found = std::ranges::find(expandedAssemblySkeleton.dynamicWindMetadata.groups,
+					DynamicWindSimulationGroupRole::AttachedBranch, &DynamicWindSimulationGroupData::role);
+				if (found != expandedAssemblySkeleton.dynamicWindMetadata.groups.end())
+					return static_cast<uint32_t>(std::distance(expandedAssemblySkeleton.dynamicWindMetadata.groups.begin(), found));
+				DynamicWindSimulationGroupData group;
+				if (expandedAssemblySkeleton.dynamicWindMetadata.groups.size() > 1u)
+					group = expandedAssemblySkeleton.dynamicWindMetadata.groups[1u];
+				group.flags &= ~DynamicWindMetadata::GroupFlagTrunk;
+				group.role = DynamicWindSimulationGroupRole::AttachedBranch;
+				group.profileGroupId = expandedAssemblySkeleton.dynamicWindMetadata.attachedBranchProfileGroupId;
+				group.lastAnimatedLod = 0u;
+				const uint32_t index = static_cast<uint32_t>(expandedAssemblySkeleton.dynamicWindMetadata.groups.size());
+				expandedAssemblySkeleton.dynamicWindMetadata.groups.push_back(group);
+				return index;
+			};
+			std::vector<uint32_t> generatedAttachedLocals;
 			for (uint32_t jointIndex = 0; jointIndex < static_cast<uint32_t>(metadata.boneNames.size()); ++jointIndex) {
 				const GfMatrix4d sourceBind = jointIndex < metadata.bindXforms.size()
 					? metadata.bindXforms[jointIndex]
@@ -6002,10 +6044,15 @@ namespace USDLoader {
 				expandedAssemblySkeleton.inverseBindMatrices.push_back(inverseBind);
 				expandedAssemblySkeleton.restLocalMatrices.push_back(restLocalMatrix);
 				expandedAssemblySkeleton.bindGlobalMatrices.push_back(bindGlobalMatrix);
-				expandedAssemblySkeleton.windSimulationGroupIndices.push_back(
-					jointIndex < metadata.windSimulationGroupIndices.size()
-						? metadata.windSimulationGroupIndices[jointIndex]
-						: 0xFFFFFFFFu);
+				const uint32_t localGroup = jointIndex < metadata.windSimulationGroupIndices.size()
+					? metadata.windSimulationGroupIndices[jointIndex]
+					: 0xFFFFFFFFu;
+				uint32_t assemblyGroup = localGroup < assemblyGroupByLocal.size() ? assemblyGroupByLocal[localGroup] : 0xFFFFFFFFu;
+				if (assemblyGroup == 0xFFFFFFFFu && !bindJoint.empty()) {
+					assemblyGroup = attachedGroup();
+					generatedAttachedLocals.push_back(jointIndex);
+				}
+				expandedAssemblySkeleton.windSimulationGroupIndices.push_back(assemblyGroup);
 				DynamicWindBoneData windBone;
 				if (jointIndex < metadata.dynamicWindMetadata.bones.size()) {
 					windBone = metadata.dynamicWindMetadata.bones[jointIndex];
@@ -6017,6 +6064,42 @@ namespace USDLoader {
 				expandedAssemblySkeleton.dynamicWindMetadata.bones.push_back(windBone);
 				expandedBindGlobals.push_back(expandedBind);
 				remap[jointIndex] = baseJoint + jointIndex;
+			}
+			for (uint32_t localJoint : generatedAttachedLocals) {
+				uint32_t origin = localJoint;
+				uint32_t chainIndex = 0u;
+				float distanceFromOrigin = 0.0f;
+				while (origin < metadata.parentIndices.size() && metadata.parentIndices[origin] >= 0) {
+					const uint32_t parent = static_cast<uint32_t>(metadata.parentIndices[origin]);
+					if (!std::ranges::contains(generatedAttachedLocals, parent)) break;
+					const auto& childBind = expandedAssemblySkeleton.bindGlobalMatrices[baseJoint + origin];
+					const auto& parentBind = expandedAssemblySkeleton.bindGlobalMatrices[baseJoint + parent];
+					const float dx = childBind._41 - parentBind._41;
+					const float dy = childBind._42 - parentBind._42;
+					const float dz = childBind._43 - parentBind._43;
+					distanceFromOrigin += std::sqrt(dx * dx + dy * dy + dz * dz);
+					origin = parent;
+					++chainIndex;
+				}
+				auto& windBone = expandedAssemblySkeleton.dynamicWindMetadata.bones[baseJoint + localJoint];
+				windBone.chainOriginBoneIndex = baseJoint + origin;
+				windBone.indexInBoneChain = chainIndex;
+				windBone.chainBoneCount = 1u;
+				windBone.chainLength = distanceFromOrigin;
+			}
+			std::unordered_map<uint32_t, float> generatedChainLengths;
+			for (uint32_t localJoint : generatedAttachedLocals) {
+				auto& bone = expandedAssemblySkeleton.dynamicWindMetadata.bones[baseJoint + localJoint];
+				if (bone.chainOriginBoneIndex >= expandedAssemblySkeleton.dynamicWindMetadata.bones.size()) continue;
+				auto& origin = expandedAssemblySkeleton.dynamicWindMetadata.bones[bone.chainOriginBoneIndex];
+				origin.chainBoneCount = (std::max)(origin.chainBoneCount, bone.indexInBoneChain + 1u);
+				generatedChainLengths[bone.chainOriginBoneIndex] = (std::max)(generatedChainLengths[bone.chainOriginBoneIndex], bone.chainLength);
+			}
+			for (uint32_t localJoint : generatedAttachedLocals) {
+				auto& bone = expandedAssemblySkeleton.dynamicWindMetadata.bones[baseJoint + localJoint];
+				const auto& origin = expandedAssemblySkeleton.dynamicWindMetadata.bones[bone.chainOriginBoneIndex];
+				bone.chainBoneCount = origin.chainBoneCount;
+				bone.chainLength = generatedChainLengths[bone.chainOriginBoneIndex];
 			}
 			remapByInstanceKey.emplace(instanceKey, remap);
 			return remap;

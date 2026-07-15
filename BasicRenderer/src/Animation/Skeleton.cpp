@@ -77,7 +77,8 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     DynamicWindMetadata dynamicWindMetadata,
     std::vector<uint32_t> evaluationOrder,
     std::vector<SkeletonWindBoneInvariant> windBoneInvariants,
-    std::vector<Matrix> bindGlobalMatrices)
+    std::vector<Matrix> bindGlobalMatrices,
+    std::vector<SkeletonLodVariant> lodVariants)
 {
     m_isBaseSkeleton = true;
     m_boneNames = std::move(boneNames);
@@ -118,6 +119,7 @@ Skeleton::Skeleton(std::vector<std::string> boneNames,
     m_windProfileIdentity = std::move(windProfileIdentity);
     m_dynamicWindMetadata = std::move(dynamicWindMetadata);
     m_windBoneInvariants = std::move(windBoneInvariants);
+	m_lodVariants = std::move(lodVariants);
     m_bindGlobalMatrices = std::move(bindGlobalMatrices);
     if (!m_bindGlobalMatrices.empty() && m_bindGlobalMatrices.size() != m_boneNames.size()) {
         spdlog::warn("Skeleton: bind global count ({}) != bone name count ({}); discarding cached bind globals",
@@ -168,6 +170,7 @@ Skeleton::Skeleton(const Skeleton& other)
 		m_windProfileIdentity = other.m_windProfileIdentity;
 		m_dynamicWindMetadata = other.m_dynamicWindMetadata;
 		m_windBoneInvariants = other.m_windBoneInvariants;
+		m_lodVariants = other.m_lodVariants;
         m_skinningGPUFlags = other.m_skinningGPUFlags;
 
         animations = other.animations;
@@ -244,6 +247,12 @@ std::span<const SkeletonWindBoneInvariant> Skeleton::GetWindBoneInvariants() con
 {
     auto base = GetBaseSkeletonShared();
     return base ? std::span<const SkeletonWindBoneInvariant>(base->m_windBoneInvariants) : std::span<const SkeletonWindBoneInvariant>{};
+}
+
+std::span<const SkeletonLodVariant> Skeleton::GetSkeletonLodVariants() const
+{
+	auto base = GetBaseSkeletonShared();
+	return base ? std::span<const SkeletonLodVariant>(base->m_lodVariants) : std::span<const SkeletonLodVariant>{};
 }
 
 uint32_t Skeleton::GetSkinningGPUFlags() const noexcept

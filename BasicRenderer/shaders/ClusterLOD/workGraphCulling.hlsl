@@ -209,8 +209,9 @@ uint CLodResolveAnimatedNodeCullSphere(
 				return CLOD_NODE_CULL_INVALID_FALLBACK;
 			jointIndex = assemblyBoneRemapIndices[remapIndex];
 		}
-		const uint matrixIndex = skinningInfo.transformOffsetMatrices + jointIndex;
-        if (jointIndex >= skinningInfo.boneCount || matrixIndex < skinningInfo.transformOffsetMatrices ||
+		const uint compactJointIndex = ResolveSkeletonLodBoneIndex(skinningInfo, jointIndex);
+		const uint matrixIndex = skinningInfo.transformOffsetMatrices + compactJointIndex;
+		if (compactJointIndex == 0xFFFFFFFFu || jointIndex >= skinningInfo.sourceBoneCount || matrixIndex < skinningInfo.transformOffsetMatrices ||
 			matrixIndex >= boneMatrixDimension)
             return CLOD_NODE_CULL_INVALID_FALLBACK;
         const float4x4 boneSkinMatrix = LoadAssemblyLocalBoneSkinMatrix(

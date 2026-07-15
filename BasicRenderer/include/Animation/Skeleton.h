@@ -39,7 +39,8 @@ public:
         DynamicWindMetadata dynamicWindMetadata = {},
         std::vector<uint32_t> evaluationOrder = {},
         std::vector<SkeletonWindBoneInvariant> windBoneInvariants = {},
-        std::vector<Matrix> bindGlobalMatrices = {});
+        std::vector<Matrix> bindGlobalMatrices = {},
+        std::vector<SkeletonLodVariant> lodVariants = {});
 
     // Creates an INSTANCE skeleton referencing an existing base skeleton.
     explicit Skeleton(const std::shared_ptr<Skeleton>& baseSkeleton);
@@ -99,6 +100,7 @@ public:
     std::string_view GetWindProfileIdentity() const;
     const DynamicWindMetadata& GetDynamicWindMetadata() const;
     std::span<const SkeletonWindBoneInvariant> GetWindBoneInvariants() const;
+	std::span<const SkeletonLodVariant> GetSkeletonLodVariants() const;
     bool HasWindSimulationGroups() const { return !GetWindSimulationGroupIndices().empty(); }
 
     // Optional hook for SkeletonManager (or draw-data) to store an instance slot/index.
@@ -122,6 +124,7 @@ private:
     std::string              m_windProfileIdentity;
     DynamicWindMetadata      m_dynamicWindMetadata;
     std::vector<SkeletonWindBoneInvariant> m_windBoneInvariants;
+	std::vector<SkeletonLodVariant> m_lodVariants;
 
     // Animation library (base)
 public:

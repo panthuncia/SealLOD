@@ -33,6 +33,7 @@ set(CLOD_SHARED_SOURCES
     # CLod build & cache infrastructure
     "${BR_SRC}/Import/CLodCache.cpp"
     "${BR_SRC}/Import/CLodCacheLoader.cpp"
+    "${BR_SRC}/Import/SkeletonArtifactValidation.cpp"
     "${BR_SRC}/Import/DefaultCLodSettings.cpp"
     "${BR_SRC}/Mesh/MeshIngestBuilder.cpp"
     "${BR_SRC}/Mesh/ClusterLOD.cpp"
@@ -110,6 +111,7 @@ find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(Tracy REQUIRED CONFIG)
 find_package(embree CONFIG REQUIRED)
 find_package(flecs CONFIG REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
 
 # OpenUSD – prefix path already set by the top-level CMakeLists.txt
 find_package(pxr REQUIRED CONFIG)
@@ -151,6 +153,8 @@ target_link_libraries(CLodCacheTool PRIVATE
     Tracy::TracyClient
     embree
     flecs::flecs_static
+    bcrypt.lib
+    lz4::lz4
     "${CLOD_CACHE_TOOL_TBB12_LIBRARY}"
 
     # OpenUSD libs needed by CLodCache / CLodCacheLoader / USDGeometryExtractor

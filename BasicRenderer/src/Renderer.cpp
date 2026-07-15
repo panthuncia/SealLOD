@@ -1582,6 +1582,17 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);
 	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 1.0f);
+	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodThresholdsSettingName, { 512.0f, 256.0f, 128.0f, 64.0f, 32.0f, 12.0f });
+	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
+	int32_t forcedSkeletonLod = -1;
+	if (const char* value = std::getenv("SARP_PROCEDURAL_WIND_FORCE_LOD")) {
+		char* end = nullptr;
+		const long parsed = std::strtol(value, &end, 10);
+		if (end != value && *end == '\0') {
+			forcedSkeletonLod = std::clamp(static_cast<int32_t>(parsed), -1, 6);
+		}
+	}
+	settingsManager.registerSetting<int32_t>(ProceduralWindForcedSkeletonLodSettingName, forcedSkeletonLod);
 	settingsManager.registerSetting<bool>("enableWireframe", false);
 	settingsManager.registerSetting<bool>("enableShadows", false);
 	settingsManager.registerSetting<uint16_t>("skyboxResolution", 2048);

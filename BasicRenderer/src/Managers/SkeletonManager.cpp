@@ -213,6 +213,7 @@ void SkeletonManager::BeginFrame(uint64_t frameNumber) {
 		info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
 		info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
 		info.boneCount = rec.boneCount;
+		info.sourceBoneCount = rec.boneCount;
 		info.flags = rec.base->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;
 		if (rec.base->HasWindSimulationGroups()) {
 			info.flags |= kSkinningInstanceFlagProceduralWindType;
@@ -274,7 +275,8 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     info.transformOffsetMatrices = rec.transformOffsetMatrices;
     info.invBindOffsetMatrices = rec.invBindOffsetMatrices;
     info.inverseSkinOffsetMatrices = rec.inverseSkinOffsetMatrices;
-    info.boneCount = rec.boneCount;
+	info.boneCount = rec.boneCount;
+	info.sourceBoneCount = rec.boneCount;
     // Retained for cache/metadata compatibility. Shader-visible skin palettes now
     // use one canonical row-vector layout and never branch on this flag.
     info.flags = baseShared->GetSkinningGPUFlags() | kSkinningInstanceFlagRowVectorSkinMatrix;

@@ -78,6 +78,8 @@ struct WindDebugType {
     uint firstBone, boneCount, sourceSkinningSlot, bucketBase;
     uint bucketCapacity, diagnosticsDescriptor, activeEntriesDescriptor, transformCount;
     uint deferredEntriesDescriptor, processedTypeCountsDescriptor;
+	uint remapDescriptor, remapOffset, sourceBoneCount, lodLevel;
+	uint baseTypeLookupDescriptor, baseTypeLookupCount;
 };
 struct WindDebugBone {
     uint skinningSlot, jointIndex, parentEntry, simulationGroup;
@@ -224,11 +226,15 @@ WindDebugMatrix WindDebugInverse(WindDebugMatrix m)
 
 float3 WindDebugJointPosition(
     WindDebugBone bone,
+    uint compactJointIndex,
     WindDebugActiveInstance active,
     SkinningInstanceGPUInfo source,
     StructuredBuffer<WindDebugMatrix> forward)
 {
-    WindDebugMatrix skin = forward[active.transformOffsetMatrices + bone.jointIndex];
+    // WindBone::jointIndex identifies the source/base skeleton joint used to
+    // derive simulation parameters. Transient palettes are compact, so matrix
+    // addressing must use the variant-local joint index instead.
+    WindDebugMatrix skin = forward[active.transformOffsetMatrices + compactJointIndex];
     // Forward skin matrices map bind-space points into the animated pose.
     // With row-vector matrices, the bind origin therefore precedes skin.
     return mul(bone.bindGlobal, skin)[3].xyz;
@@ -277,8 +283,9 @@ void MSWindMain(
     StructuredBuffer<WindDebugMatrix> forward = ResourceDescriptorHeap[kWindForward];
     WindDebugBone parent = bone;
     if (emit) parent = bones[bone.parentEntry];
-    float3 start = WindDebugJointPosition(parent, active, source, forward);
-    float3 end = WindDebugJointPosition(bone, active, source, forward);
+    const uint parentCompactIndex = emit ? bone.parentEntry - type.firstBone : boneIndex;
+    float3 start = WindDebugJointPosition(parent, parentCompactIndex, active, source, forward);
+    float3 end = WindDebugJointPosition(bone, boneIndex, active, source, forward);
     StructuredBuffer<PerObjectBuffer> transforms =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
     const PerObjectBuffer objectData = transforms[active.instanceTransformIndex];

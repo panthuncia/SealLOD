@@ -25,10 +25,10 @@
 
 namespace {
 
-constexpr std::array<char, 8> kMagic{ 'B', 'R', 'S', 'K', 'E', 'L', '0', '1' };
+constexpr std::array<char, 8> kMagic{ 'B', 'R', 'S', 'K', 'E', 'L', '0', '3' };
 constexpr std::uint32_t kInvalidGroup = 0xFFFFFFFFu;
 constexpr std::uint32_t kWindFlagTrunk = 1u << 0u;
-constexpr std::size_t kArtifactSectionCount = 12u;
+constexpr std::size_t kArtifactSectionCount = 13u;
 
 struct ArtifactHeader
 {
@@ -109,6 +109,41 @@ bool ReadStrings(const std::vector<std::byte>& in, std::size_t& offset, std::vec
 	return true;
 }
 
+void WriteLodVariants(std::vector<std::byte>& out, const std::vector<SkeletonLodVariant>& variants)
+{
+	WritePod(out, static_cast<std::uint64_t>(variants.size()));
+	for (const auto& variant : variants) {
+		WritePod(out, variant.level);
+		WriteVector(out, variant.parentIndices);
+		WriteVector(out, variant.evaluationOrder);
+		WriteVector(out, variant.restLocalMatrices);
+		WriteVector(out, variant.inverseBindMatrices);
+		WriteVector(out, variant.bindGlobalMatrices);
+		WriteVector(out, variant.windSimulationGroupIndices);
+		WriteVector(out, variant.windBoneInvariants);
+		WriteVector(out, variant.windBones);
+		WriteVector(out, variant.windResponseScales);
+		WriteVector(out, variant.baseToLodBone);
+		WriteVector(out, variant.lodToBaseBone);
+	}
+}
+
+bool ReadLodVariants(const std::vector<std::byte>& in, std::size_t& offset, std::vector<SkeletonLodVariant>& variants)
+{
+	std::uint64_t count = 0;
+	if (!ReadPod(in, offset, count) || count > 16u) return false;
+	variants.resize(static_cast<std::size_t>(count));
+	for (auto& variant : variants) {
+		if (!ReadPod(in, offset, variant.level) || !ReadVector(in, offset, variant.parentIndices) ||
+			!ReadVector(in, offset, variant.evaluationOrder) || !ReadVector(in, offset, variant.restLocalMatrices) ||
+			!ReadVector(in, offset, variant.inverseBindMatrices) || !ReadVector(in, offset, variant.bindGlobalMatrices) ||
+			!ReadVector(in, offset, variant.windSimulationGroupIndices) || !ReadVector(in, offset, variant.windBoneInvariants) ||
+			!ReadVector(in, offset, variant.windBones) || !ReadVector(in, offset, variant.windResponseScales) ||
+			!ReadVector(in, offset, variant.baseToLodBone) || !ReadVector(in, offset, variant.lodToBaseBone)) return false;
+	}
+	return true;
+}
+
 std::string NormalizeProfileIdentity(std::string value)
 {
 	std::ranges::replace(value, '\\', '/');
@@ -161,6 +196,171 @@ std::array<float, 3> Normalize(const std::array<float, 3>& value, const std::arr
 	if (!(lengthSquared > 1.0e-12f) || !std::isfinite(lengthSquared)) return fallback;
 	const float inverseLength = 1.0f / std::sqrt(lengthSquared);
 	return { value[0] * inverseLength, value[1] * inverseLength, value[2] * inverseLength };
+}
+
+SkeletonLodVariant BuildLodVariant(const SkeletonArtifactData& source, std::uint32_t level, const std::vector<bool>& keep)
+{
+	SkeletonLodVariant result;
+	result.level = level;
+	const std::uint32_t count = static_cast<std::uint32_t>(source.jointNames.size());
+	result.baseToLodBone.assign(count, 0xFFFFFFFFu);
+	for (std::uint32_t bone : source.evaluationOrder) {
+		if (bone < keep.size() && keep[bone]) {
+			result.baseToLodBone[bone] = static_cast<std::uint32_t>(result.lodToBaseBone.size());
+			result.lodToBaseBone.push_back(bone);
+		}
+	}
+	const std::uint32_t fallback = result.lodToBaseBone.empty() ? 0xFFFFFFFFu : 0u;
+	for (std::uint32_t bone : source.evaluationOrder) {
+		if (result.baseToLodBone[bone] != 0xFFFFFFFFu) continue;
+		std::int32_t ancestor = source.parentIndices[bone];
+		while (ancestor >= 0 && result.baseToLodBone[static_cast<std::uint32_t>(ancestor)] == 0xFFFFFFFFu)
+			ancestor = source.parentIndices[static_cast<std::uint32_t>(ancestor)];
+		result.baseToLodBone[bone] = ancestor >= 0 ? result.baseToLodBone[static_cast<std::uint32_t>(ancestor)] : fallback;
+	}
+	result.windResponseScales.assign(result.lodToBaseBone.size(), 1.0f);
+	std::vector<std::uint32_t> contributorCounts(result.lodToBaseBone.size(), 0u);
+	for (std::uint32_t base = 0; base < count; ++base) {
+		const std::uint32_t compact = result.baseToLodBone[base];
+		if (compact >= result.lodToBaseBone.size()) continue;
+		const std::uint32_t retainedBase = result.lodToBaseBone[compact];
+		if (source.windSimulationGroupIndices[base] == source.windSimulationGroupIndices[retainedBase])
+			++contributorCounts[compact];
+	}
+	for (std::uint32_t compact = 0; compact < result.lodToBaseBone.size(); ++compact) {
+		const std::uint32_t base = result.lodToBaseBone[compact];
+		std::int32_t parent = source.parentIndices[base];
+		while (parent >= 0 && result.baseToLodBone[static_cast<std::uint32_t>(parent)] == compact)
+			parent = source.parentIndices[static_cast<std::uint32_t>(parent)];
+		const std::int32_t compactParent = parent >= 0 ? static_cast<std::int32_t>(result.baseToLodBone[static_cast<std::uint32_t>(parent)]) : -1;
+		result.parentIndices.push_back(compactParent);
+		result.evaluationOrder.push_back(compact);
+		result.inverseBindMatrices.push_back(source.inverseBindMatrices[base]);
+		result.bindGlobalMatrices.push_back(source.bindGlobalMatrices[base]);
+		DirectX::XMMATRIX local = DirectX::XMLoadFloat4x4(&source.bindGlobalMatrices[base]);
+		if (compactParent >= 0) local = DirectX::XMMatrixMultiply(local,
+			DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&result.bindGlobalMatrices[static_cast<std::uint32_t>(compactParent)])));
+		DirectX::XMFLOAT4X4 localStored;
+		DirectX::XMStoreFloat4x4(&localStored, local);
+		result.restLocalMatrices.push_back(localStored);
+		result.windSimulationGroupIndices.push_back(source.windSimulationGroupIndices[base]);
+		result.windBoneInvariants.push_back(source.windBoneInvariants[base]);
+		DynamicWindBoneData windBone = source.dynamicWindMetadata.bones[base];
+		if (windBone.chainOriginBoneIndex < result.baseToLodBone.size())
+			windBone.chainOriginBoneIndex = result.baseToLodBone[windBone.chainOriginBoneIndex];
+		result.windBones.push_back(windBone);
+		result.windResponseScales[compact] = static_cast<float>((std::max)(1u, contributorCounts[compact]));
+	}
+	return result;
+}
+
+void BuildSkeletonLods(SkeletonArtifactData& data)
+{
+	const std::uint32_t count = static_cast<std::uint32_t>(data.jointNames.size());
+	if (count == 0u) return;
+	for (std::uint32_t groupIndex = 0; groupIndex < data.dynamicWindMetadata.groups.size(); ++groupIndex) {
+		auto& group = data.dynamicWindMetadata.groups[groupIndex];
+		if (group.profileGroupId == 0xFFFFFFFFu) group.profileGroupId = groupIndex;
+		if (group.role == DynamicWindSimulationGroupRole::Unassigned) {
+			group.role = (group.flags & DynamicWindMetadata::GroupFlagTrunk) != 0u
+				? DynamicWindSimulationGroupRole::Trunk : DynamicWindSimulationGroupRole::DetailBranch;
+		}
+		if (group.lastAnimatedLod == 0xFFFFFFFFu)
+			group.lastAnimatedLod = group.role == DynamicWindSimulationGroupRole::Trunk ? 5u :
+				(group.role == DynamicWindSimulationGroupRole::AttachedBranch ? 0u : 1u);
+	}
+	auto roleForBone = [&](std::uint32_t bone) {
+		const auto group = data.windSimulationGroupIndices[bone];
+		return group < data.dynamicWindMetadata.groups.size()
+			? data.dynamicWindMetadata.groups[group].role : DynamicWindSimulationGroupRole::Unassigned;
+	};
+	auto lastAnimatedLodForBone = [&](std::uint32_t bone) {
+		const auto group = data.windSimulationGroupIndices[bone];
+		return group < data.dynamicWindMetadata.groups.size() ? data.dynamicWindMetadata.groups[group].lastAnimatedLod : 5u;
+	};
+	std::vector<bool> lod0(count, true);
+	std::vector<bool> lod1(count, true);
+	std::vector<bool> lod2(count, false);
+	for (std::uint32_t bone = 0; bone < count; ++bone) {
+		lod1[bone] = lastAnimatedLodForBone(bone) >= 1u;
+		lod2[bone] = lastAnimatedLodForBone(bone) >= 2u || data.parentIndices[bone] < 0;
+	}
+	for (std::uint32_t bone = 0; bone < count; ++bone) if (lod2[bone]) {
+		for (std::int32_t parent = data.parentIndices[bone]; parent >= 0; parent = data.parentIndices[static_cast<std::uint32_t>(parent)])
+			lod2[static_cast<std::uint32_t>(parent)] = true;
+	}
+	std::vector<std::uint32_t> retainedChildren(count, 0u);
+	for (std::uint32_t bone = 0; bone < count; ++bone) if (lod2[bone] && data.parentIndices[bone] >= 0 && lod2[static_cast<std::uint32_t>(data.parentIndices[bone])])
+		++retainedChildren[static_cast<std::uint32_t>(data.parentIndices[bone])];
+	auto reduced = [&](std::uint32_t stride, const std::vector<bool>& parentKeep) {
+		std::vector<bool> keep(count, false);
+		for (std::uint32_t bone = 0; bone < count; ++bone) if (parentKeep[bone]) {
+			const bool mandatory = data.parentIndices[bone] < 0 || retainedChildren[bone] != 1u;
+			const auto& wind = data.dynamicWindMetadata.bones[bone];
+			keep[bone] = mandatory || wind.indexInBoneChain % stride == 0u;
+		}
+		return keep;
+	};
+	std::vector<bool> lod3 = reduced(2u, lod2);
+	std::vector<bool> lod4 = reduced(4u, lod3);
+	std::vector<bool> lod5(count, false);
+	for (std::uint32_t bone = 0; bone < count; ++bone) if (data.parentIndices[bone] < 0) lod5[bone] = true;
+	std::vector<std::uint32_t> trunk;
+	for (std::uint32_t bone : data.evaluationOrder) if (roleForBone(bone) == DynamicWindSimulationGroupRole::Trunk) trunk.push_back(bone);
+	if (!trunk.empty()) {
+		lod5[trunk.front()] = true;
+		std::vector<float> trunkArc(count, 0.0f);
+		float maximumTrunkArc = 0.0f;
+		for (const auto bone : data.evaluationOrder) {
+			if (roleForBone(bone) != DynamicWindSimulationGroupRole::Trunk) continue;
+			const auto parent = data.parentIndices[bone];
+			if (parent >= 0 && roleForBone(static_cast<std::uint32_t>(parent)) == DynamicWindSimulationGroupRole::Trunk) {
+				const auto& childBind = data.bindGlobalMatrices[bone];
+				const auto& parentBind = data.bindGlobalMatrices[static_cast<std::uint32_t>(parent)];
+				const float dx = childBind._41 - parentBind._41;
+				const float dy = childBind._42 - parentBind._42;
+				const float dz = childBind._43 - parentBind._43;
+				trunkArc[bone] = trunkArc[static_cast<std::uint32_t>(parent)] + std::sqrt(dx * dx + dy * dy + dz * dz);
+			}
+			maximumTrunkArc = (std::max)(maximumTrunkArc, trunkArc[bone]);
+		}
+
+		float crownPosition = 0.75f;
+		if (maximumTrunkArc > 0.0f) {
+			std::vector<float> attachmentPositions;
+			for (std::uint32_t bone = 0; bone < count; ++bone) {
+				const auto role = roleForBone(bone);
+				if (role != DynamicWindSimulationGroupRole::DetailBranch && role != DynamicWindSimulationGroupRole::AttachedBranch) continue;
+				const auto parent = data.parentIndices[bone];
+				if (parent >= 0 && roleForBone(static_cast<std::uint32_t>(parent)) == role) continue;
+				for (auto ancestor = parent; ancestor >= 0; ancestor = data.parentIndices[static_cast<std::uint32_t>(ancestor)]) {
+					if (roleForBone(static_cast<std::uint32_t>(ancestor)) == DynamicWindSimulationGroupRole::Trunk) {
+						attachmentPositions.push_back(trunkArc[static_cast<std::uint32_t>(ancestor)] / maximumTrunkArc);
+						break;
+					}
+				}
+			}
+			if (!attachmentPositions.empty()) {
+				const auto middle = attachmentPositions.begin() + attachmentPositions.size() / 2u;
+				std::nth_element(attachmentPositions.begin(), middle, attachmentPositions.end());
+				crownPosition = *middle;
+			}
+		}
+		crownPosition = std::clamp(crownPosition, 0.60f, 0.85f);
+		const auto crown = (std::min_element)(trunk.begin(), trunk.end(), [&](const auto left, const auto right) {
+			const float leftPosition = maximumTrunkArc > 0.0f ? trunkArc[left] / maximumTrunkArc : 0.0f;
+			const float rightPosition = maximumTrunkArc > 0.0f ? trunkArc[right] / maximumTrunkArc : 0.0f;
+			return std::abs(leftPosition - crownPosition) < std::abs(rightPosition - crownPosition);
+		});
+		lod5[*crown] = true;
+	}
+	data.lodVariants.clear();
+	data.lodVariants.push_back(BuildLodVariant(data, 0u, lod0));
+	data.lodVariants.push_back(BuildLodVariant(data, 1u, lod1));
+	data.lodVariants.push_back(BuildLodVariant(data, 2u, lod2));
+	data.lodVariants.push_back(BuildLodVariant(data, 3u, lod3));
+	data.lodVariants.push_back(BuildLodVariant(data, 4u, lod4));
+	data.lodVariants.push_back(BuildLodVariant(data, 5u, lod5));
 }
 
 bool BuildArtifact(const ClusterLODAssemblySkeletonData& source, SkeletonArtifactData& out, std::string& error)
@@ -265,6 +465,7 @@ bool BuildArtifact(const ClusterLODAssemblySkeletonData& source, SkeletonArtifac
 		invariant.normalizedChainPosition = std::clamp(static_cast<float>(bone.indexInBoneChain) / denominator, 0.0f, 1.0f);
 	}
 	out.validationFlags = SKELETON_ARTIFACT_VALID_FINITE | SKELETON_ARTIFACT_VALID_HIERARCHY | SKELETON_ARTIFACT_VALID_WIND;
+	BuildSkeletonLods(out);
 	return true;
 }
 
@@ -301,10 +502,13 @@ std::vector<std::byte> Serialize(
 	WritePod(out, data.dynamicWindMetadata.enabled);
 	WritePod(out, data.dynamicWindMetadata.groundCover);
 	WritePod(out, data.dynamicWindMetadata.gustAttenuation);
+	WritePod(out, data.dynamicWindMetadata.attachedBranchProfileGroupId);
 	beginSection();
 	WriteVector(out, data.dynamicWindMetadata.groups);
 	beginSection();
 	WriteVector(out, data.dynamicWindMetadata.bones);
+	beginSection();
+	WriteLodVariants(out, data.lodVariants);
 	beginSection();
 	WritePod(out, data.maximumHierarchyDepth);
 	WritePod(out, data.validationFlags);
@@ -327,8 +531,10 @@ bool Deserialize(
 		ReadVector(bytes, offset, data.bindGlobalMatrices) && ReadVector(bytes, offset, data.windSimulationGroupIndices) &&
 		ReadVector(bytes, offset, data.windBoneInvariants) && ReadString(bytes, offset, data.windProfileIdentity) &&
 		ReadPod(bytes, offset, data.dynamicWindMetadata.enabled) && ReadPod(bytes, offset, data.dynamicWindMetadata.groundCover) &&
-		ReadPod(bytes, offset, data.dynamicWindMetadata.gustAttenuation) && ReadVector(bytes, offset, data.dynamicWindMetadata.groups) &&
-		ReadVector(bytes, offset, data.dynamicWindMetadata.bones) && ReadPod(bytes, offset, data.maximumHierarchyDepth) &&
+		ReadPod(bytes, offset, data.dynamicWindMetadata.gustAttenuation) && ReadPod(bytes, offset, data.dynamicWindMetadata.attachedBranchProfileGroupId) &&
+		ReadVector(bytes, offset, data.dynamicWindMetadata.groups) &&
+		ReadVector(bytes, offset, data.dynamicWindMetadata.bones) &&
+		ReadLodVariants(bytes, offset, data.lodVariants) && ReadPod(bytes, offset, data.maximumHierarchyDepth) &&
 		ReadPod(bytes, offset, data.validationFlags) && offset == bytes.size();
 }
 
@@ -352,16 +558,6 @@ std::wstring ArtifactPath(const SkeletonArtifactId& id)
 	return GetCacheFilePath(s2ws("skeleton_" + id.ToString() + ".brskel"), L"skeleton");
 }
 
-}
-
-bool SkeletonArtifactId::Empty() const noexcept { return std::ranges::all_of(digest, [](std::uint8_t b) { return b == 0; }); }
-
-std::string SkeletonArtifactId::ToString() const
-{
-	static constexpr char hex[] = "0123456789abcdef";
-	std::string result(digest.size() * 2u, '0');
-	for (std::size_t i = 0; i < digest.size(); ++i) { result[i * 2] = hex[digest[i] >> 4]; result[i * 2 + 1] = hex[digest[i] & 15]; }
-	return result;
 }
 
 namespace SkeletonArtifactCache {
@@ -491,7 +687,7 @@ std::shared_ptr<Skeleton> ResolveSkeleton(const SkeletonArtifactReference& refer
 	for (const auto& packed : data->restLocalTransforms) rest.emplace_back(Components::Position(packed.position), Components::Rotation(DirectX::XMLoadFloat4(&packed.rotation)), Components::Scale(packed.scale));
 	auto skeleton = std::make_shared<Skeleton>(data->jointNames, data->parentIndices, std::move(inverseBinds), std::move(rest), std::vector<DirectX::XMMATRIX>{},
 		data->windSimulationGroupIndices, data->windProfileIdentity, data->dynamicWindMetadata, data->evaluationOrder, data->windBoneInvariants,
-		std::move(bindGlobals));
+		std::move(bindGlobals), data->lodVariants);
 	// Retain the historical metadata bit for artifact compatibility. SkeletonManager
 	// converts computed palettes to the canonical shader-native layout before upload.
 	skeleton->SetSkinningGPUFlags(kSkinningInstanceFlagRowVectorSkinMatrix);

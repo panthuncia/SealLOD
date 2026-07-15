@@ -114,11 +114,22 @@ SkinningInstanceGPUInfo LoadSkinningInstanceInfo(uint skinningInstanceSlot)
     return skinningInstanceBuffer[skinningInstanceSlot];
 }
 
+uint ResolveSkeletonLodBoneIndex(SkinningInstanceGPUInfo skinningInfo, uint jointIndex)
+{
+	if (skinningInfo.boneRemapDescriptor == 0xFFFFFFFFu) return jointIndex;
+	if (jointIndex >= skinningInfo.sourceBoneCount) return 0xFFFFFFFFu;
+	StructuredBuffer<uint> remap = ResourceDescriptorHeap[skinningInfo.boneRemapDescriptor];
+	const uint compact = remap[skinningInfo.boneRemapOffset + jointIndex];
+	return compact < skinningInfo.boneCount ? compact : 0xFFFFFFFFu;
+}
+
 float4x4 LoadBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinningInfo, uint jointIndex)
 {
     StructuredBuffer<SkinningMatrix> boneSkinMatricesBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
 
+	jointIndex = ResolveSkeletonLodBoneIndex(skinningInfo, jointIndex);
+	if (jointIndex == 0xFFFFFFFFu) return IdentitySkinMatrix();
     SkinningMatrix skin = boneSkinMatricesBuffer[skinningInfo.transformOffsetMatrices + jointIndex];
     // CPU uploads and GPU writers both encode shader-native row-vector matrices.
     // Keep orientation conversion at the upload boundary, not in every consumer.
@@ -130,6 +141,8 @@ float3 TransformPositionByBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinnin
     StructuredBuffer<SkinningMatrix> boneSkinMatricesBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
 
+	jointIndex = ResolveSkeletonLodBoneIndex(skinningInfo, jointIndex);
+	if (jointIndex == 0xFFFFFFFFu) return position;
     SkinningMatrix skin = boneSkinMatricesBuffer[skinningInfo.transformOffsetMatrices + jointIndex];
     return mul(float4(position, 1.0f), skin).xyz;
 }
@@ -157,6 +170,8 @@ float4x4 LoadBoneInverseSkinMatrix(uint skinningInstanceSlot, uint jointIndex)
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::InverseSkinMatrices)];
 
     SkinningInstanceGPUInfo skinningInfo = skinningInstanceBuffer[skinningInstanceSlot];
+	jointIndex = ResolveSkeletonLodBoneIndex(skinningInfo, jointIndex);
+	if (jointIndex == 0xFFFFFFFFu) return IdentitySkinMatrix();
     SkinningMatrix inverseSkin = inverseSkinMatricesBuffer[skinningInfo.inverseSkinOffsetMatrices + jointIndex];
     return inverseSkin;
 }
@@ -165,7 +180,8 @@ float4x4 LoadPreviousBoneSkinMatrixFromInfo(SkinningInstanceGPUInfo skinningInfo
 {
     StructuredBuffer<SkinningMatrix> boneSkinMatricesBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::SkeletonResources::BoneTransforms)];
-    return boneSkinMatricesBuffer[skinningInfo.previousTransformOffsetMatrices + jointIndex];
+	jointIndex = ResolveSkeletonLodBoneIndex(skinningInfo, jointIndex);
+	return jointIndex == 0xFFFFFFFFu ? IdentitySkinMatrix() : boneSkinMatricesBuffer[skinningInfo.previousTransformOffsetMatrices + jointIndex];
 }
 
 void AddWeightedBoneSkinMatrix(
@@ -175,7 +191,7 @@ void AddWeightedBoneSkinMatrix(
     uint jointIndex,
     float weight)
 {
-    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.boneCount)
+    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.sourceBoneCount)
     {
         skinMatrix += weight * LoadBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
         acceptedWeightSum += weight;
@@ -189,7 +205,7 @@ void AddWeightedPreviousBoneSkinMatrix(
     uint jointIndex,
     float weight)
 {
-    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.boneCount)
+    if (weight > 0.0f && isfinite(weight) && jointIndex < skinningInfo.sourceBoneCount)
     {
         skinMatrix += weight * LoadPreviousBoneSkinMatrixFromInfo(skinningInfo, jointIndex);
         acceptedWeightSum += weight;

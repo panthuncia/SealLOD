@@ -268,6 +268,14 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_WIND_Y asfloat(UintRootConstant27)
 #define WT_STRENGTH asfloat(UintRootConstant28)
 #define WT_GUST asfloat(UintRootConstant29)
+#define WT_LOD0 asfloat(UintRootConstant30)
+#define WT_LOD1 asfloat(UintRootConstant31)
+#define WT_LOD2 asfloat(UintRootConstant32)
+#define WT_LOD3 asfloat(UintRootConstant33)
+#define WT_LOD4 asfloat(UintRootConstant34)
+#define WT_LOD5 asfloat(UintRootConstant35)
+#define WT_LOD_HYSTERESIS asfloat(UintRootConstant36)
+#define WT_FORCE_LOD asint(UintRootConstant37)
 
 static const uint WindTransientSlotBase = 65536u;
 static const uint WindTypeFlag = 2u;
@@ -280,6 +288,8 @@ struct WindTypeGPU {
     uint firstBone, boneCount, sourceSkinningSlot, bucketBase;
     uint bucketCapacity, diagnosticsDescriptor, activeEntriesDescriptor, transformCount;
     uint deferredEntriesDescriptor, processedTypeCountsDescriptor;
+	uint remapDescriptor, remapOffset, sourceBoneCount, lodLevel;
+	uint baseTypeLookupDescriptor, baseTypeLookupCount;
 };
 struct SkinnedAssemblyPlacementGPU {
     uint instanceTransformIndex, skinningTypeSlot, stableSceneId, generation;
@@ -314,7 +324,7 @@ void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
         processedTypeCounts[tid.x] = 0u;
     }
     if (tid.x < 15u) counters[tid.x] = 0u;
-    if (tid.x < 32u) {
+    if (tid.x < 64u) {
         RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
         diagnostics[tid.x] = 0u;
     }
@@ -384,19 +394,31 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     if (placement.generation != activeEntry.y) { InterlockedAdd(counters[6], 1u); return; }
     if (!latePhase) InterlockedAdd(counters[5], 1u);
 
-    RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
-    SkinningInstanceGPUInfo source = infos[placement.skinningTypeSlot];
-    if ((source.flags & WindTypeFlag) == 0u || source.pad0 >= WT_TYPE_COUNT) return;
-    WindTypeGPU type = types[source.pad0];
-    if (type.boneCount == 0u) return;
-
-    StructuredBuffer<PerObjectBuffer> transforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
-    PerObjectBuffer objectData = transforms[placement.instanceTransformIndex];
-    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-    Camera camera = cameras[WT_CAMERA_INDEX];
-    float3 centerWS = mul(float4(placement.localBoundingSphere.xyz, 1.0f), objectData.model).xyz;
-    float radiusWS = placement.localBoundingSphere.w * placement.boundsScale * WindMaxAxisScale(objectData.model);
-    float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
+	RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
+	SkinningInstanceGPUInfo source = infos[placement.skinningTypeSlot];
+	if ((source.flags & WindTypeFlag) == 0u) return;
+	StructuredBuffer<PerObjectBuffer> transforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+	PerObjectBuffer objectData = transforms[placement.instanceTransformIndex];
+	StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+	Camera camera = cameras[WT_CAMERA_INDEX];
+	float3 centerWS = mul(float4(placement.localBoundingSphere.xyz, 1.0f), objectData.model).xyz;
+	float radiusWS = placement.localBoundingSphere.w * placement.boundsScale * WindMaxAxisScale(objectData.model);
+	float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
+	ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+	const float projectedDiameterPixels = radiusWS * max(abs(camera.projection._11), abs(camera.projection._22)) *
+		max((float)perFrame.screenResX, (float)perFrame.screenResY) / max(abs(centerVS.z), radiusWS + 1.0e-3f);
+	uint lodLevel = projectedDiameterPixels >= WT_LOD0 ? 0u : projectedDiameterPixels >= WT_LOD1 ? 1u :
+		projectedDiameterPixels >= WT_LOD2 ? 2u : projectedDiameterPixels >= WT_LOD3 ? 3u :
+		projectedDiameterPixels >= WT_LOD4 ? 4u : projectedDiameterPixels >= WT_LOD5 ? 5u : 6u;
+	if (WT_FORCE_LOD >= 0) lodLevel = min((uint)WT_FORCE_LOD, 6u);
+	const uint historySlot = WindTransientSlotBase + placement.instanceTransformIndex;
+	SkinningInstanceGPUInfo oldLod = infos[historySlot];
+	if (oldLod.stableSceneId == placement.stableSceneId && oldLod.skeletonLodVariant < 6u) {
+		const float thresholds[6] = { WT_LOD0, WT_LOD1, WT_LOD2, WT_LOD3, WT_LOD4, WT_LOD5 };
+		const uint previousLod = oldLod.skeletonLodVariant;
+		if (WT_FORCE_LOD < 0 && lodLevel > previousLod && projectedDiameterPixels >= thresholds[previousLod] * (1.0f - WT_LOD_HYSTERESIS)) lodLevel = previousLod;
+		else if (WT_FORCE_LOD < 0 && lodLevel < previousLod && projectedDiameterPixels <= thresholds[lodLevel] * (1.0f + WT_LOD_HYSTERESIS)) lodLevel = previousLod;
+	}
     [unroll] for (uint p=0u; p<6u; ++p) if (dot(camera.clippingPlanes[p].plane.xyz, centerVS) + camera.clippingPlanes[p].plane.w < -radiusWS) { InterlockedAdd(counters[7], 1u); return; }
     if (distance(centerWS, camera.positionWorldSpace.xyz) > 32768.0f + radiusWS) { InterlockedAdd(counters[8], 1u); return; }
 
@@ -433,8 +455,36 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
         }
         return;
     }
+	RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
+	InterlockedAdd(lodDiagnostics[32u + min(lodLevel, 6u)], 1u);
+	if (lodLevel >= 6u) {
+		InterlockedAdd(lodDiagnostics[31], 1u);
+		oldLod.stableSceneId = placement.stableSceneId;
+		oldLod.skeletonLodVariant = 6u;
+		oldLod.boneCount = 0u;
+		infos[historySlot] = oldLod;
+		return;
+	}
+	const uint baseTypeCount = WT_TYPE_COUNT / 6u;
+	if (placement.skinningTypeSlot >= control.baseTypeLookupCount) {
+		InterlockedAdd(lodDiagnostics[46], 1u);
+		return;
+	}
+	StructuredBuffer<uint> baseTypeLookup = ResourceDescriptorHeap[control.baseTypeLookupDescriptor];
+	const uint baseTypeIndex = baseTypeLookup[placement.skinningTypeSlot];
+	if (baseTypeIndex >= baseTypeCount) {
+		InterlockedAdd(lodDiagnostics[46], 1u);
+		return;
+	}
+	const uint typeId = lodLevel * baseTypeCount + baseTypeIndex;
+	if (typeId >= WT_TYPE_COUNT) return;
+	WindTypeGPU type = types[typeId];
+	if (type.boneCount == 0u) {
+		InterlockedAdd(lodDiagnostics[43], 1u);
+		return;
+	}
     RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
-    uint localIndex; InterlockedAdd(typeCounters[source.pad0], 1u, localIndex);
+	uint localIndex; InterlockedAdd(typeCounters[typeId], 1u, localIndex);
     if (localIndex >= type.bucketCapacity) { InterlockedAdd(counters[3], 1u); return; }
 
     WindActiveInstanceGPU active;
@@ -446,7 +496,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     activeInstances[type.bucketBase + localIndex] = active;
     if (latePhase) InterlockedAdd(counters[13], 1u);
     InterlockedAdd(counters[9], 1u);
-    if (localIndex == 0u && source.pad0 == 0u) {
+	if (localIndex == 0u && typeId == 0u) {
         RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
         diagnostics[0] = asuint(length(objectData.model[0].xyz));
         diagnostics[1] = asuint(length(objectData.model[1].xyz));
@@ -455,7 +505,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
         diagnostics[4] = asuint(objectData.model[3].y);
         diagnostics[5] = asuint(objectData.model[3].z);
         diagnostics[6] = placement.instanceTransformIndex;
-        diagnostics[7] = source.pad0;
+		diagnostics[7] = typeId;
     }
 }
 
@@ -463,7 +513,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 {
     StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
-    StructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
+	RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
     RWStructuredBuffer<WindIndirectCommandGPU> commands = ResourceDescriptorHeap[WT_COMMANDS];
     RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
@@ -498,8 +548,37 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
         const uint remainingBones = allocatedBones < WT_MATRIX_CAPACITY
             ? WT_MATRIX_CAPACITY - allocatedBones
             : 0u;
-        const uint acceptedCount = min(newCandidateCount, remainingBones / type.boneCount);
-        capacityRejects += newCandidateCount - acceptedCount;
+		const uint acceptedCount = min(newCandidateCount, remainingBones / type.boneCount);
+		if (acceptedCount != 0u) {
+			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+			InterlockedAdd(lodDiagnostics[24u + min(type.lodLevel, 5u)], acceptedCount);
+		}
+		const uint demotedCount = newCandidateCount - acceptedCount;
+		capacityRejects += demotedCount;
+		if (demotedCount != 0u && type.lodLevel < 5u && typeId + WT_TYPE_COUNT / 6u < WT_TYPE_COUNT) {
+			const uint fallbackTypeId = typeId + WT_TYPE_COUNT / 6u;
+			const WindTypeGPU fallbackType = types[fallbackTypeId];
+			if (fallbackType.sourceSkinningSlot == type.sourceSkinningSlot && fallbackType.boneCount != 0u) {
+				const uint fallbackStart = typeCounters[fallbackTypeId];
+				const uint writable = min(demotedCount, fallbackType.bucketCapacity > fallbackStart ? fallbackType.bucketCapacity - fallbackStart : 0u);
+				for (uint i = 0u; i < writable; ++i)
+					activeInstances[fallbackType.bucketBase + fallbackStart + i] = activeInstances[type.bucketBase + processedCount + acceptedCount + i];
+				typeCounters[fallbackTypeId] = fallbackStart + writable;
+			}
+		}
+		else if (demotedCount != 0u) {
+			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+			InterlockedAdd(lodDiagnostics[31], demotedCount);
+			for (uint i = 0u; i < demotedCount; ++i) {
+				const WindActiveInstanceGPU rejected = activeInstances[type.bucketBase + processedCount + acceptedCount + i];
+				const uint transientSlot = WindTransientSlotBase + rejected.instanceTransformIndex;
+				SkinningInstanceGPUInfo staticInfo = infos[transientSlot];
+				staticInfo.boneCount = 0u;
+				staticInfo.stableSceneId = rejected.stableSceneId;
+				staticInfo.skeletonLodVariant = 6u;
+				infos[transientSlot] = staticInfo;
+			}
+		}
         const uint totalAcceptedCount = previousAcceptedCount + acceptedCount;
         processedTypeCounts[typeId] = (candidateCount & 0xffffu) | (totalAcceptedCount << 16u);
         if (acceptedCount == 0u) {
@@ -526,15 +605,32 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 
             const uint transientSlot = WindTransientSlotBase + active.instanceTransformIndex;
             const SkinningInstanceGPUInfo oldInfo = infos[transientSlot];
+			if (oldInfo.boneCount != 0u && oldInfo.stableSceneId == active.stableSceneId) {
+				RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+				InterlockedAdd(lodDiagnostics[39], 1u);
+				lodDiagnostics[40] = active.stableSceneId;
+				lodDiagnostics[41] = (oldInfo.skeletonLodVariant & 0xffffu) | ((type.lodLevel & 0xffffu) << 16u);
+				lodDiagnostics[42] = active.instanceTransformIndex;
+			}
             const bool hasMatchingHistory =
                 (oldInfo.flags & WindHistoryValidFlag) != 0u &&
                 oldInfo.pad0 == type.sourceSkinningSlot &&
-                oldInfo.stableSceneId == active.stableSceneId;
+				oldInfo.stableSceneId == active.stableSceneId &&
+				oldInfo.skeletonLodVariant == type.lodLevel;
+			if ((oldInfo.flags & WindHistoryValidFlag) != 0u && oldInfo.stableSceneId == active.stableSceneId &&
+				oldInfo.skeletonLodVariant != type.lodLevel) {
+				RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+				InterlockedAdd(lodDiagnostics[30], 1u);
+			}
 
             SkinningInstanceGPUInfo transientInfo = source;
             transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
             transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
             transientInfo.boneCount = type.boneCount;
+			transientInfo.boneRemapDescriptor = type.remapDescriptor;
+			transientInfo.boneRemapOffset = type.remapOffset;
+			transientInfo.sourceBoneCount = type.sourceBoneCount;
+			transientInfo.skeletonLodVariant = type.lodLevel;
             transientInfo.flags |= WindRowVectorSkinMatrix;
             transientInfo.previousTransformOffsetMatrices = hasMatchingHistory
                 ? oldInfo.transformOffsetMatrices
@@ -653,7 +749,9 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     float maximumTorsionAngle = 0.0f;
     bool appliedWind = false;
     uint ancestor=type.firstBone+tid.x;
-    [loop] for(uint depth=0;depth<128 && ancestor!=WindInvalidIndex;++depth){
+	uint simulationDepth = 0u;
+	[loop] for(uint depth=0;depth<128 && ancestor!=WindInvalidIndex;++depth){
+		simulationDepth = depth + 1u;
         WindBoneGPU driver=bones[ancestor]; WindMatrix bind=driver.bindGlobal; float3 pivot=bind[3].xyz;
         if (driver.simulationGroup != WindInvalidIndex && driver.maximumAngle > 0.0f && driver.influence > 0.0f) {
             const float3 branchAxis = WindSafeNormalize(driver.branchAxis, float3(0.0f, 0.0f, 1.0f));
@@ -734,6 +832,17 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     InterlockedMax(diagnostics[22], asuint(bindIdentityError));
     const float3 mappedBindOrigin = mul(float4(bindPose[3].xyz, 1.0f), result).xyz;
     InterlockedMax(diagnostics[23], asuint(length(mappedBindOrigin - pose[3].xyz)));
+	InterlockedAdd(diagnostics[48u + min(type.lodLevel, 5u)], 1u);
+	InterlockedMax(diagnostics[54], simulationDepth);
+	const uint absolutePaletteIndex = inst.transformOffsetMatrices + tid.x;
+	if (absolutePaletteIndex < WT_TRANSFORM_BASE || absolutePaletteIndex >= WT_TRANSFORM_BASE + WT_MATRIX_CAPACITY)
+		InterlockedAdd(diagnostics[47], 1u);
+	else
+		InterlockedMax(diagnostics[55], absolutePaletteIndex - WT_TRANSFORM_BASE);
+	if (target.jointIndex >= type.sourceBoneCount) InterlockedAdd(diagnostics[44], 1u);
+	if (target.parentEntry != WindInvalidIndex &&
+		(target.parentEntry < type.firstBone || target.parentEntry >= type.firstBone + type.boneCount))
+		InterlockedAdd(diagnostics[45], 1u);
     if (tid.x == 0u && tid.y == 0u && typeId == 0u) {
         diagnostics[8]=asuint(result[3].x); diagnostics[9]=asuint(result[3].y); diagnostics[10]=asuint(result[3].z); diagnostics[11]=finiteResult ? 1u : 0u;
     }
