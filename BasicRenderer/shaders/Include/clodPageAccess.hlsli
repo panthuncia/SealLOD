@@ -16,24 +16,23 @@ CLodPageHeader LoadPageHeader(uint slabDescriptorIndex, uint pageByteOffset)
     uint4 d2 = slab.Load4(pageByteOffset + 32);
 
     CLodPageHeader hdr;
-    hdr.meshletCount               = d0.x;
-    hdr.compressedPositionQuantExp = d0.y;
-    hdr.attributeMask              = d0.z;
-    hdr.uvSetCount                 = d0.w;
-
-    hdr.descriptorOffset           = d1.x;
-    hdr.uvDescriptorOffset         = d1.y;
-    hdr.positionBitstreamOffset    = d1.z;
-    hdr.normalArrayOffset          = d1.w;
-    hdr.colorArrayOffset           = d2.x;
-    hdr.jointArrayOffset           = d2.y;
-    hdr.weightArrayOffset          = d2.z;
-    hdr.uvBitstreamDirectoryOffset = d2.w;
+    hdr.formatAndKind              = d0.x;
+    hdr.meshletCount               = d0.y;
+    hdr.descriptorOffset           = d0.z;
+    hdr.boneIndexStreamOffset      = d0.w;
+    hdr.compressedPositionQuantExp = d1.x;
+    hdr.attributeMask              = d1.y;
+    hdr.uvSetCount                 = d1.z;
+    hdr.uvDescriptorOffset         = d1.w;
+    hdr.positionBitstreamOffset    = d2.x;
+    hdr.normalArrayOffset          = d2.y;
+    hdr.colorArrayOffset           = d2.z;
+    hdr.jointArrayOffset           = d2.w;
     uint4 d3 = slab.Load4(pageByteOffset + 48);
-    hdr.triangleStreamOffset       = d3.x;
-    hdr.boneIndexStreamOffset      = d3.y;
-    hdr.tangentFrameArrayOffset    = d3.z;
-    hdr.reserved1 = d3.w;
+    hdr.weightArrayOffset          = d3.x;
+    hdr.uvBitstreamDirectoryOffset = d3.y;
+    hdr.triangleStreamOffset       = d3.z;
+    hdr.tangentFrameArrayOffset    = d3.w;
 
     return hdr;
 }
@@ -49,19 +48,19 @@ CLodMeshletDescriptor LoadMeshletDescriptor(uint slabDescriptorIndex, uint pageB
     uint4 d3 = slab.Load4(addr + 48);
 
     CLodMeshletDescriptor desc;
-    desc.positionBitOffset           = d0.x;
-    desc.vertexAttributeOffset       = d0.y;
-    desc.triangleByteOffset          = d0.z;
-    desc.boneListOffset              = d0.w;
-    desc.minQx                       = asint(d1.x);
-    desc.minQy                       = asint(d1.y);
-    desc.minQz                       = asint(d1.z);
-    desc.bitsAndVertexCount          = d1.w;
-    desc.triangleCountAndRefinedGroup = d2.x;
-    desc.boneCount                   = d2.y;
-    desc.sourceGroupLocalIndex       = d2.z;
-    desc.terrainRvtLocalSkyrimXYRadius = asfloat(d2.w);
-    desc.bounds                      = asfloat(d3);
+    desc.bounds                       = asfloat(d0);
+    desc.positionBitOffset            = d1.x;
+    desc.triangleCountAndRefinedGroup = d1.y;
+    desc.boneListOffset               = d1.z;
+    desc.boneCount                    = d1.w;
+    desc.vertexAttributeOffset        = d2.x;
+    desc.triangleByteOffset           = d2.y;
+    desc.minQx                        = asint(d2.z);
+    desc.minQy                        = asint(d2.w);
+    desc.minQz                        = asint(d3.x);
+    desc.bitsAndVertexCount           = d3.y;
+    desc.sourceGroupLocalIndex        = d3.z;
+    desc.terrainRvtLocalSkyrimXYRadius = asfloat(d3.w);
 
     return desc;
 }
@@ -98,11 +97,11 @@ uint LoadPageUvBitstreamOffset(uint slabDescriptorIndex, uint pageByteOffset, ui
     return slab.Load(pageByteOffset + uvBitstreamDirectoryOffset + uvSetIndex * 4u);
 }
 
-// Load only the meshletCount from the page header (first uint32).
+// Load only the meshletCount from the common page prefix (second uint32).
 uint LoadPageMeshletCount(uint slabDescriptorIndex, uint pageByteOffset)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    return slab.Load(pageByteOffset); // meshletCount is uint[0]
+    return slab.Load(pageByteOffset + 4u);
 }
 
 // Resolve a group-local page index to a physical slab location via the GroupPageMap buffer.

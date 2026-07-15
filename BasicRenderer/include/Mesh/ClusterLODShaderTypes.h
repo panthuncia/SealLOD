@@ -21,28 +21,69 @@ static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME = 1u << 4;
 static constexpr uint32_t CLOD_POSITION_FORMAT_FLOAT3 = 1u;
 static constexpr uint32_t CLOD_POSITION_FORMAT_FLOAT3_STRIDE_BYTES = sizeof(float) * 3u;
 
+static constexpr uint32_t CLOD_CLUSTER_KIND_TRIANGLE = 0u;
+static constexpr uint32_t CLOD_CLUSTER_KIND_VOXEL = 1u;
+static constexpr uint32_t CLOD_CLUSTER_CULL_FLAG_ANIMATED = 1u << 0;
+static constexpr uint32_t CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW = 1u << 1;
+static constexpr uint32_t CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT = 1u << 2;
+static constexpr uint32_t CLOD_CLUSTER_CULL_KIND_MASK = 0xFFu;
+static constexpr uint32_t CLOD_CLUSTER_CULL_FLAGS_SHIFT = 8u;
+static constexpr uint32_t CLOD_CLUSTER_CULL_BONE_COUNT_SHIFT = 16u;
+constexpr uint32_t CLodPackClusterCullMetadata(uint32_t kind, uint32_t flags, uint32_t boneCount)
+{
+	return (kind & CLOD_CLUSTER_CULL_KIND_MASK) |
+		((flags & 0xFFu) << CLOD_CLUSTER_CULL_FLAGS_SHIFT) |
+		((boneCount & 0xFFFFu) << CLOD_CLUSTER_CULL_BONE_COUNT_SHIFT);
+}
+constexpr uint32_t CLodClusterCullMetadataBoneCount(uint32_t metadata)
+{
+	return metadata >> CLOD_CLUSTER_CULL_BONE_COUNT_SHIFT;
+}
+static constexpr uint32_t CLOD_TRIANGLE_PAGE_MAGIC = 0x4C435254u; // TRCL
+
+// Representation-neutral, resident culling prefix.  Page encoders keep this
+// contract even when their payload tails use different stream layouts.
+struct CLodClusterCullHeader
+{
+	DirectX::XMFLOAT4 bounds = {};
+	uint32_t payloadBase = 0;
+	uint32_t primitiveCountAndRefinedGroup = 0;
+	uint32_t boneListOffset = 0;
+	uint32_t kindFlagsAndBoneCount = 0;
+};
+static_assert(sizeof(CLodClusterCullHeader) == 32, "CLodClusterCullHeader must be 32 bytes");
+
+struct CLodClusterPagePrefix
+{
+	uint32_t formatAndKind = 0;
+	uint32_t clusterCount = 0;
+	uint32_t descriptorOffset = 0;
+	uint32_t boneIndexStreamOffset = 0;
+};
+static_assert(sizeof(CLodClusterPagePrefix) == 16, "CLodClusterPagePrefix must be 16 bytes");
+
 // Embedded at byte 0 of each page-tile in the page pool.
 // Compression params moved to per-meshlet descriptors.
 // 16 x uint32 = 64 bytes.
 struct CLodPageHeader
 {
-	uint32_t meshletCount = 0;            // [0] number of meshlets in this page
-	uint32_t compressedPositionQuantExp = 0; // [1] CLOD_POSITION_FORMAT_* value
-	uint32_t attributeMask = 0;           // [2] page-wide optional non-UV attribute mask
-	uint32_t uvSetCount = 0;              // [3] UV set count packed into this page
+	uint32_t formatAndKind = CLOD_TRIANGLE_PAGE_MAGIC; // [0] common page magic/kind
+	uint32_t meshletCount = 0;            // [1] common cluster count
+	uint32_t descriptorOffset = 0;        // [2] common descriptor-stream byte offset
+	uint32_t boneIndexStreamOffset = 0;   // [3] common page-local bone stream byte offset
 
-	uint32_t descriptorOffset = 0;        // [4] byte offset to CLodMeshletDescriptor array
-	uint32_t uvDescriptorOffset = 0;      // [5] byte offset to CLodMeshletUvDescriptor table
-	uint32_t positionBitstreamOffset = 0; // [6] byte offset to native position stream
-	uint32_t normalArrayOffset = 0;       // [7] byte offset to normal array (oct-encoded uint32 per vertex)
-	uint32_t colorArrayOffset = 0;        // [8] byte offset to RGBA8_UNORM color array per vertex
-	uint32_t jointArrayOffset = 0;        // [9] byte offset to two-uint4 joint array per vertex
-	uint32_t weightArrayOffset = 0;       // [10] byte offset to two-float4 weight array per vertex
-	uint32_t uvBitstreamDirectoryOffset = 0; // [11] byte offset to UV bitstream offset table
-	uint32_t triangleStreamOffset = 0;    // [12] byte offset to triangle byte stream
-	uint32_t boneIndexStreamOffset = 0;   // [13] byte offset to page-local meshlet bone-index stream
-	uint32_t tangentFrameArrayOffset = 0; // [14] byte offset to tangent-frame angle/sign array
-	uint32_t reserved = 0;                // [15] pad to 64 bytes
+	uint32_t compressedPositionQuantExp = 0; // [4] CLOD_POSITION_FORMAT_* value
+	uint32_t attributeMask = 0;           // [5] page-wide optional non-UV attribute mask
+	uint32_t uvSetCount = 0;              // [6] UV set count packed into this page
+	uint32_t uvDescriptorOffset = 0;      // [7] byte offset to CLodMeshletUvDescriptor table
+	uint32_t positionBitstreamOffset = 0; // [8] byte offset to native position stream
+	uint32_t normalArrayOffset = 0;       // [9] byte offset to normal array
+	uint32_t colorArrayOffset = 0;        // [10] byte offset to RGBA8_UNORM color array
+	uint32_t jointArrayOffset = 0;        // [11] byte offset to joint array
+	uint32_t weightArrayOffset = 0;       // [12] byte offset to weight array
+	uint32_t uvBitstreamDirectoryOffset = 0; // [13] byte offset to UV stream directory
+	uint32_t triangleStreamOffset = 0;    // [14] byte offset to triangle byte stream
+	uint32_t tangentFrameArrayOffset = 0; // [15] byte offset to tangent-frame array
 };
 static_assert(sizeof(CLodPageHeader) == 64, "CLodPageHeader must be 64 bytes");
 
@@ -50,27 +91,20 @@ static_assert(sizeof(CLodPageHeader) == 64, "CLodPageHeader must be 64 bytes");
 // Self-contained: each meshlet carries its own non-UV compression params, bounds, and LOD metadata.
 struct CLodMeshletDescriptor
 {
-	// Stream offsets within the page
-	uint32_t positionBitOffset = 0;       // [0] byte offset into page native position stream
-	uint32_t vertexAttributeOffset = 0;   // [1] element offset into page vertex-attribute arrays
-	uint32_t triangleByteOffset = 0;      // [2] byte offset into page triangle stream
-	uint32_t boneListOffset = 0;          // [3] uint offset into page bone-index stream
+	DirectX::XMFLOAT4 bounds = {};        // [0-3] common bind-pose culling sphere
+	uint32_t positionBitOffset = 0;       // [4] common payload base
+	uint32_t triangleCountAndRefinedGroup = 0; // [5] common primitive count/refined group
+	uint32_t boneListOffset = 0;          // [6] common page-local bone-list offset
+	uint32_t boneCount = 0;               // [7] common bounded bone count
 
-	// Reserved for future compact position encodings.
-	int32_t  minQx = 0;                   // [4]
-	int32_t  minQy = 0;                   // [5]
-	int32_t  minQz = 0;                   // [6]
-
-	// Packed: reserved:24 | vertexCount:8
-	uint32_t bitsAndVertexCount = 0;      // [7]
-	// Packed: triangleCount:16 | refinedGroupId+1:16 (0 = terminal, >0 = groupId+1)
-	uint32_t triangleCountAndRefinedGroup = 0; // [8]
-	uint32_t boneCount = 0;               // [9]
-	uint32_t sourceGroupLocalIndex = 0xFFFFFFFFu; // [10] temporary diagnostic source group tag
-	float terrainRvtLocalSkyrimXYRadius = 0.0f; // [11] local terrain XY footprint radius for cluster request mips
-
-	// Bounding sphere (object space)
-	DirectX::XMFLOAT4 bounds = {};        // [12-15] {cx, cy, cz, radius}
+	uint32_t vertexAttributeOffset = 0;   // [8] triangle payload tail
+	uint32_t triangleByteOffset = 0;      // [9]
+	int32_t  minQx = 0;                   // [10]
+	int32_t  minQy = 0;                   // [11]
+	int32_t  minQz = 0;                   // [12]
+	uint32_t bitsAndVertexCount = 0;      // [13]
+	uint32_t sourceGroupLocalIndex = 0xFFFFFFFFu; // [14]
+	float terrainRvtLocalSkyrimXYRadius = 0.0f; // [15]
 };
 static_assert(sizeof(CLodMeshletDescriptor) == 64, "CLodMeshletDescriptor must be 64 bytes");
 
@@ -179,19 +213,20 @@ static_assert(sizeof(ClusterLODAssemblyBoneRemap) == 16, "ClusterLODAssemblyBone
 
 static constexpr uint32_t CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
-static constexpr uint32_t CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES = 1u << 0;
+static constexpr uint32_t CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES =
+	CLOD_CLUSTER_CULL_FLAG_ANIMATED << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
 
 struct CLodVoxelClusterRecord
 {
-	uint32_t firstCube = 0;
-	uint32_t cubeCount = 0;
-	int32_t refinedGroup = -1;
-	uint32_t flags = 0;
-	DirectX::XMFLOAT4 bounds = {};
+	DirectX::XMFLOAT4 bounds = {};        // [0-3] common bind-pose culling sphere
+	uint32_t firstCube = 0;               // [4] common payload base
+	uint32_t cubeCount = 0;               // [5] common primitive count
+	uint32_t reserved2 = 0;               // [6] common page-local bone-list offset
+	uint32_t flags = 0;                   // [7] common kind/flags/bone-count metadata
 	DirectX::XMFLOAT4 aabbMinAndVoxelWidth = {}; // xyz=min, w=voxel width
 	uint32_t resolution = 0;
 	DirectX::XMFLOAT2 uvDensity = { 0.0f, 0.0f };
-	uint32_t reserved2 = 0;
+	int32_t refinedGroup = -1;
 };
 static_assert(sizeof(CLodVoxelClusterRecord) == 64, "CLodVoxelClusterRecord must be 64 bytes");
 

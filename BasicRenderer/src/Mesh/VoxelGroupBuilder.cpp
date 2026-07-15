@@ -40,7 +40,9 @@ namespace
 		uint32_t firstCube,
 		uint32_t cubeCount)
 	{
-		uint32_t flags = 0u;
+		uint32_t flags = CLOD_CLUSTER_KIND_VOXEL;
+		bool hasSkinned = false;
+		bool hasRigid = false;
 		const uint32_t endCube = std::min<uint32_t>(
 			static_cast<uint32_t>(cubeRecords.size()),
 			firstCube + cubeCount);
@@ -48,10 +50,17 @@ namespace
 		{
 			if (cubeRecords[cubeIndex].dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
 			{
-				flags |= CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES;
-				break;
+				hasSkinned = true;
+			}
+			else
+			{
+				hasRigid = true;
 			}
 		}
+		if (hasSkinned)
+			flags |= (CLOD_CLUSTER_CULL_FLAG_ANIMATED | CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
+		if (hasRigid)
+			flags |= CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT << CLOD_CLUSTER_CULL_FLAGS_SHIFT;
 		return flags;
 	}
 

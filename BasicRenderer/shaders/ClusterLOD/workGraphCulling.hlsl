@@ -1305,6 +1305,10 @@ void CLodAppendVoxelRasterClusterWork(
         return;
     }
 
+    const PerMeshInstanceBuffer voxelInstanceData = LoadMeshTemplateForDraw(instanceIndex);
+    const uint voxelSkinningInstanceSlot =
+        ResolveProceduralWindSkinningSlot(instanceIndex, voxelInstanceData.skinningInstanceSlot);
+
     StructuredBuffer<CLodVoxelRasterQueueDescriptors> queueDescriptorBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID)];
     const CLodVoxelRasterQueueDescriptors queueDescriptors = queueDescriptorBuffer[0];
@@ -1355,21 +1359,73 @@ void CLodAppendVoxelRasterClusterWork(
             voxelPageEntry.slabByteOffset,
             voxelPageHeader.clusterRecordsOffset,
             pageLocalClusterIndex);
-        if (voxelCluster.cubeCount == 0u || voxelCluster.cubeCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
+        const CLodClusterCullHeader clusterCullHeader = CLodVoxelCullHeader(voxelCluster);
+        const uint clusterPrimitiveCount = clusterCullHeader.primitiveCountAndRefinedGroup & 0xFFFFu;
+        if (clusterPrimitiveCount == 0u || clusterPrimitiveCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
         {
             continue;
         }
 
-        const bool clusterHasSkinnedCubes = CLodVoxelClusterHasSkinnedCubes(voxelCluster);
+        const uint clusterCullFlags = CLodClusterCullFlags(clusterCullHeader);
+        const uint clusterBoneCount = CLodClusterCullBoneCount(clusterCullHeader);
+        const bool clusterHasSkinnedCubes =
+            (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_ANIMATED) != 0u;
+        const bool clusterBoneOverflow =
+            (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) != 0u;
+        bool hasConservativeClusterBounds = !clusterHasSkinnedCubes;
+        BoundingSphere evaluatedClusterBounds = { clusterCullHeader.bounds };
+        if (clusterHasSkinnedCubes && !clusterBoneOverflow && clusterBoneCount != 0u &&
+            IsValidSkinningInstanceSlot(voxelSkinningInstanceSlot))
+        {
+            CLodMeshletDescriptor boundsDescriptor = (CLodMeshletDescriptor)0;
+            boundsDescriptor.bounds = clusterCullHeader.bounds;
+            boundsDescriptor.boneListOffset = clusterCullHeader.boneListOffset;
+            boundsDescriptor.boneCount = clusterCullHeader.kindFlagsAndBoneCount;
+            CLodPageHeader boundsPageHeader = (CLodPageHeader)0;
+            boundsPageHeader.boneIndexStreamOffset = voxelPageHeader.boneIndexStreamOffset;
+            const BoundingSphere liveBounds = CLodComputeSkinnedMeshletBounds(
+                boundsDescriptor,
+                boundsPageHeader,
+                voxelPageEntry.slabDescriptorIndex,
+                voxelPageEntry.slabByteOffset,
+                voxelSkinningInstanceSlot,
+                clodMeshMetadata,
+                assemblyTransformIndex);
+            if (!all(liveBounds.sphere == clusterCullHeader.bounds))
+            {
+                evaluatedClusterBounds = liveBounds;
+                hasConservativeClusterBounds = true;
+                if ((clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT) != 0u)
+                {
+                    float3 mergedCenter = evaluatedClusterBounds.sphere.xyz;
+                    float mergedRadius = evaluatedClusterBounds.sphere.w;
+                    CLodMergeBoundingSphere(
+                        mergedCenter,
+                        mergedRadius,
+                        clusterCullHeader.bounds.xyz,
+                        clusterCullHeader.bounds.w);
+                    evaluatedClusterBounds.sphere = float4(mergedCenter, mergedRadius * (1.0f + 1.0e-5f));
+                }
+            }
+            else
+            {
+            }
+        }
+        else if (clusterHasSkinnedCubes && clusterBoneOverflow)
+        {
+        }
+        else if (clusterHasSkinnedCubes)
+        {
+        }
         float3 clusterWorldCenter = 0.0f.xxx;
         float clusterWorldRadius = 0.0f;
         bool clusterOutside = false;
-        if (!acceptedAnimatedLeafBounds || clusterDirtyPageCullingEnabled)
+        if (hasConservativeClusterBounds || clusterDirtyPageCullingEnabled)
         {
-            clusterWorldCenter = mul(float4(voxelCluster.bounds.xyz, 1.0f), objectModelMatrix).xyz;
-            clusterWorldRadius = voxelCluster.bounds.w * lodUniformScale;
+            clusterWorldCenter = mul(float4(evaluatedClusterBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
+            clusterWorldRadius = evaluatedClusterBounds.sphere.w * lodUniformScale;
         }
-        if (!acceptedAnimatedLeafBounds && CLodWorkGraphFrustumCullingEnabled())
+        if (hasConservativeClusterBounds && CLodWorkGraphFrustumCullingEnabled())
         {
             const float3 clusterViewCenter = mul(float4(clusterWorldCenter, 1.0f), cullCamera.view).xyz;
             clusterOutside = SphereOutsideFrustumViewSpace(clusterViewCenter, clusterWorldRadius, cullCamera);
@@ -1389,6 +1445,8 @@ void CLodAppendVoxelRasterClusterWork(
 #else
         (void)clusterDirtyPageCullingEnabled;
 #endif
+
+        (void)acceptedAnimatedLeafBounds;
 
         uint combinedSlot = 0u;
         InterlockedAdd(replayState[0].visibleClusterCombinedCount, 1u, combinedSlot);
@@ -1704,7 +1762,7 @@ struct TraverseNodeRecord
     uint assemblyTransformIndex;
 };
 
-struct MeshletBucketRecord
+struct CLodClusterRunRecord
 {
     uint instanceIndex;
     uint viewId;
@@ -1713,8 +1771,98 @@ struct MeshletBucketRecord
     uint pageSlabDescriptorIndex;
     uint pageSlabByteOffset;
     uint assemblyTransformIndex;
-    uint pad0;
+    uint clusterKindAndPageIndex; // [0]=voxel payload, [31:1]=mesh-local page-map index
 };
+
+// Transitional source alias.  Replay storage remains byte-compatible while
+// callers migrate from meshlet-specific terminology.
+#define MeshletBucketRecord CLodClusterRunRecord
+
+uint PackClusterKindAndPageIndex(uint clusterKind, uint pageIndex)
+{
+    return (pageIndex << 1u) | (clusterKind & 1u);
+}
+
+uint UnpackClusterKind(uint packed)
+{
+    return packed & 1u;
+}
+
+uint UnpackClusterPageIndex(uint packed)
+{
+    return packed >> 1u;
+}
+
+bool CLodBucketContainsVoxels(MeshletBucketRecord record)
+{
+    return UnpackClusterKind(record.clusterKindAndPageIndex) == CLOD_CLUSTER_KIND_VOXEL;
+}
+
+void CLodProcessVoxelClusterBucket(MeshletBucketRecord record)
+{
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(record.instanceIndex);
+    const PerObjectBuffer instanceTransform =
+        LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, record.assemblyTransformIndex);
+
+    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const MeshInstanceClodOffsets clodOffsets = LoadCLodOffsetsForDrawRecord(drawRecord);
+    const CLodMeshMetadata metadata = metadataBuffer[clodOffsets.clodMeshMetadataIndex];
+
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const uint localGroupId = UnpackGroupId(record.groupIdPacked);
+    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u)
+    {
+        WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER, 1u);
+        return;
+    }
+
+    ClusterLODGroupSegment segment = (ClusterLODGroupSegment)0;
+    segment.refinedGroup = -1;
+    segment.firstMeshletInPage = UnpackMeshletFirstIndex(record.meshletIndexAndCount);
+    segment.meshletCount = UnpackMeshletCount(record.meshletIndexAndCount);
+    segment.pageIndex = UnpackClusterPageIndex(record.clusterKindAndPageIndex);
+
+    StructuredBuffer<Camera> cameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    StructuredBuffer<CullingCameraInfo> cameraInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+    const uint lodViewId = CLodResolveLodViewId(record.viewId);
+    const Camera cullCamera = cameras[record.viewId];
+    const Camera lodCamera = cameras[lodViewId];
+    const CullingCameraInfo lodCam = cameraInfos[lodViewId];
+    const float uniformScale = SkinningMaxAxisScale_RowVector(instanceTransform.model);
+
+    StructuredBuffer<PerMeshBuffer> perMeshBuffers =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    const bool acceptedAnimatedLeafBounds =
+        (perMeshBuffers[instanceData.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u;
+
+    CLodAppendVoxelRasterClusterWork(
+        metadata,
+        record.instanceIndex,
+        record.assemblyTransformIndex,
+        record.viewId,
+        localGroupId,
+        group,
+        segment,
+        instanceTransform.model,
+        uniformScale,
+        cullCamera,
+        lodCam,
+        lodCamera.isOrtho,
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        CLodWorkGraphShadowDirtyPageCullingEnabled(),
+#else
+        false,
+#endif
+        instanceData.perMeshBufferIndex,
+        0.0f,
+        acceptedAnimatedLeafBounds);
+}
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 struct CLodVirtualShadowPredictiveInvalidationCandidate
@@ -2504,6 +2652,8 @@ void CLodHandleRenderableLeaf(
             bucketRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
             bucketRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
             bucketRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
+            bucketRecord.clusterKindAndPageIndex =
+                PackClusterKindAndPageIndex(CLOD_CLUSTER_KIND_TRIANGLE, seg.pageIndex);
 
             // Decompose meshlet count into bucket-sized records (max 8 records)
             uint tail = seg.meshletCount;
@@ -3441,6 +3591,40 @@ void ClusterCullBody(
     out uint pageJobPendingOut,
     out uint reyesPendingOut)
 {
+    bool commonPageValid = false;
+    if (hasBucket && b.pageSlabDescriptorIndex != 0u)
+    {
+        const CLodClusterPagePrefix prefix =
+            CLodLoadClusterPagePrefix(b.pageSlabDescriptorIndex, b.pageSlabByteOffset);
+        const uint expectedMagic = CLodBucketContainsVoxels(b)
+            ? CLOD_VOXEL_PAGE_MAGIC
+            : CLOD_TRIANGLE_PAGE_MAGIC;
+        const uint firstCluster = UnpackMeshletFirstIndex(b.meshletIndexAndCount);
+        const uint runClusterCount = UnpackMeshletCount(b.meshletIndexAndCount);
+        commonPageValid =
+            prefix.formatAndKind == expectedMagic &&
+            prefix.descriptorOffset != 0u &&
+            runClusterCount != 0u &&
+            firstCluster < prefix.clusterCount &&
+            runClusterCount <= prefix.clusterCount - firstCluster;
+    }
+
+    // Voxel and triangle runs share the same frontier and wave scheduling.  The
+    // payload tails remain representation-specific, but traversal no longer
+    // launches or executes a separate voxel-leaf cull path.
+    if (hasBucket && commonPageValid && CLodBucketContainsVoxels(b))
+    {
+        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1u);
+        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, UnpackMeshletCount(b.meshletIndexAndCount));
+        CLodProcessVoxelClusterBucket(b);
+        swPendingOut = 0u;
+        pageJobPendingOut = 0u;
+        reyesPendingOut = 0u;
+        return;
+    }
+
+    hasBucket = hasBucket && commonPageValid;
+
     // Telemetry (coalesced launch level)
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1);
     if (hasBucket) {
@@ -3669,15 +3853,21 @@ void ClusterCullBody(
             if (localMeshlet < pageMeshletCount) {
                 localMeshletIndex = localMeshlet;
 
-                // Load per-meshlet descriptor (5 x Load4 = 80 bytes)
+                // Load the common 64-byte descriptor (4 x Load4).
                 CLodMeshletDescriptor desc = LoadMeshletDescriptor(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet);
+                const CLodClusterCullHeader clusterCullHeader = CLodMeshletCullHeader(desc);
                 uint meshletBoundsClassification = CLOD_MESHLET_BOUNDS_STATIC;
                 BoundingSphere meshletBounds;
-                if ((meshVertexFlags & VERTEX_SKINNED) != 0u && CLodDescBoneCount(desc) != 0u)
+                const uint clusterCullFlags = CLodClusterCullFlags(clusterCullHeader);
+                const bool animatedCluster =
+                    (meshVertexFlags & VERTEX_SKINNED) != 0u &&
+                    (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_ANIMATED) != 0u;
+                if (animatedCluster)
                 {
-                    if (!IsValidSkinningInstanceSlot(skinningInstanceSlot))
+                    if ((clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) != 0u ||
+                        !IsValidSkinningInstanceSlot(skinningInstanceSlot))
                     {
-                        meshletBounds.sphere = desc.bounds;
+                        meshletBounds.sphere = clusterCullHeader.bounds;
                         meshletBoundsClassification = CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK;
                         WGTelemetryAdd(WG_COUNTER_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACKS, 1u);
                     }
@@ -3694,7 +3884,7 @@ void ClusterCullBody(
                         // The helper returns the descriptor sphere only when no remapped
                         // palette entry can be evaluated. Exact float4 equality is valid
                         // here because that fallback copies desc.bounds verbatim.
-                        const bool usedBindFallback = all(meshletBounds.sphere == desc.bounds);
+                        const bool usedBindFallback = all(meshletBounds.sphere == clusterCullHeader.bounds);
                         meshletBoundsClassification = usedBindFallback
                             ? CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK
                             : CLOD_MESHLET_BOUNDS_SKINNED_LIVE;
@@ -3707,7 +3897,7 @@ void ClusterCullBody(
                 }
                 else
                 {
-                    meshletBounds.sphere = desc.bounds;
+                    meshletBounds.sphere = clusterCullHeader.bounds;
                 }
                 meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, viewMatrix);
                 meshletCenterWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
@@ -3725,6 +3915,8 @@ void ClusterCullBody(
                 survives =
                     !CLodWorkGraphFrustumCullingEnabled() ||
                     replaySource ||
+                    meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK ||
+                    meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK ||
                     !SphereOutsideFrustumViewSpace(meshletCenterViewSpace, meshletRadiusWorld, frustumPlanes);
                 
                 if (!survives) {

@@ -1147,24 +1147,28 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
         return false;
     }
 
-    ByteAddressBuffer pageSlab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDesc)];
-    const uint4 hdr0 = pageSlab.Load4(pageSlabOff + 0u);
-    const uint4 hdr1 = pageSlab.Load4(pageSlabOff + 16u);
-    const uint hdrTriangleStreamOffset = pageSlab.Load(pageSlabOff + 48u);
+    const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDesc, pageSlabOff);
+    if (pageHeader.formatAndKind != CLOD_TRIANGLE_PAGE_MAGIC ||
+        pageHeader.descriptorOffset == 0u)
+    {
+        failureReason = CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS;
+        return false;
+    }
 
     // meshletIndex is now page-local
-    if (setup.meshletIndex >= hdr0.x)
+    if (setup.meshletIndex >= pageHeader.meshletCount)
     {
         failureReason = CLOD_RASTER_INIT_FAILURE_MESHLET_OOB;
         return false;
     }
 
-    const uint descAddr = pageSlabOff + hdr1.x + setup.meshletIndex * CLOD_MESHLET_DESCRIPTOR_STRIDE;
-    const uint4 desc0 = pageSlab.Load4(descAddr + 0u);
-    const uint descBitsAndVertexCount = pageSlab.Load(descAddr + 28u);
-    const uint2 descTriCountAndBoneCount = pageSlab.Load2(descAddr + 32u);
+    const CLodMeshletDescriptor descriptor = LoadMeshletDescriptor(
+        pageSlabDesc,
+        pageSlabOff,
+        pageHeader.descriptorOffset,
+        setup.meshletIndex);
 #if CLOD_ENABLE_SOURCE_GROUP_VALIDATION
-    const uint descSourceGroupLocalIndex = pageSlab.Load(descAddr + 40u);
+    const uint descSourceGroupLocalIndex = descriptor.sourceGroupLocalIndex;
     const uint expectedGroupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
     foundSourceGroupLocalIndex = descSourceGroupLocalIndex;
     sourceGroupMismatch =
@@ -1174,8 +1178,8 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
 #endif
 
     setup.meshlet = (Meshlet)0;
-    setup.vertCount = (descBitsAndVertexCount >> 24u) & 0xFFu;
-    setup.triCount = descTriCountAndBoneCount.x & 0xFFFFu;
+    setup.vertCount = CLodDescVertexCount(descriptor);
+    setup.triCount = CLodDescTriangleCount(descriptor);
     if (!HasValidMeshShaderOutputCounts(setup.vertCount, setup.triCount))
     {
         failureReason = CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS;
@@ -1184,41 +1188,45 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
     setup.vertOffset = 0;
 
     // Per-meshlet page stream addressing from descriptor
-    setup.positionBitOffset = desc0.x;
-    setup.vertexAttributeOffset = desc0.y;
-    setup.triangleByteOffset = desc0.z;
-    setup.boneCount = descTriCountAndBoneCount.y;
-    setup.pageAttributeMask = hdr0.z;
-    setup.uvSetCount = hdr0.w;
+    setup.bitsX = CLodDescBitsX(descriptor);
+    setup.bitsY = CLodDescBitsY(descriptor);
+    setup.bitsZ = CLodDescBitsZ(descriptor);
+    setup.minQ = int3(descriptor.minQx, descriptor.minQy, descriptor.minQz);
+    setup.positionBitOffset = descriptor.positionBitOffset;
+    setup.vertexAttributeOffset = descriptor.vertexAttributeOffset;
+    setup.triangleByteOffset = descriptor.triangleByteOffset;
+    setup.boneListOffset = descriptor.boneListOffset;
+    setup.boneCount = CLodDescBoneCount(descriptor);
+    setup.pageAttributeMask = pageHeader.attributeMask;
+    setup.uvSetCount = pageHeader.uvSetCount;
 
     // Page-level stream base offsets (absolute in slab)
     setup.pageByteOffset = pageSlabOff;
-    setup.positionBitstreamBase = pageSlabOff + hdr1.z;
+    setup.positionBitstreamBase = pageSlabOff + pageHeader.positionBitstreamOffset;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
-    setup.normalArrayBase = pageSlabOff + hdr1.w;
+    setup.normalArrayBase = pageSlabOff + pageHeader.normalArrayOffset;
 #endif
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
-    const uint4 hdr2 = pageSlab.Load4(pageSlabOff + 32u);
-    setup.colorArrayBase = pageSlabOff + hdr2.x;
-    setup.jointArrayBase = pageSlabOff + hdr2.y;
-    setup.weightArrayBase = pageSlabOff + hdr2.z;
-    setup.uvBitstreamDirectoryBase = pageSlabOff + hdr2.w;
+    setup.colorArrayBase = pageSlabOff + pageHeader.colorArrayOffset;
+    setup.jointArrayBase = pageSlabOff + pageHeader.jointArrayOffset;
+    setup.weightArrayBase = pageSlabOff + pageHeader.weightArrayOffset;
+    setup.uvBitstreamDirectoryBase = pageSlabOff + pageHeader.uvBitstreamDirectoryOffset;
 #elif defined(PSO_SKINNED) || defined(PSO_ALPHA_TEST) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
-    const uint4 hdr2 = pageSlab.Load4(pageSlabOff + 32u);
 #if defined(PSO_SKINNED)
-    setup.jointArrayBase = pageSlabOff + hdr2.y;
-    setup.weightArrayBase = pageSlabOff + hdr2.z;
+    setup.jointArrayBase = pageSlabOff + pageHeader.jointArrayOffset;
+    setup.weightArrayBase = pageSlabOff + pageHeader.weightArrayOffset;
 #endif
 #if defined(PSO_ALPHA_TEST) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
-    setup.uvBitstreamDirectoryBase = pageSlabOff + hdr2.w;
+    setup.uvBitstreamDirectoryBase = pageSlabOff + pageHeader.uvBitstreamDirectoryOffset;
 #endif
 #endif
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) || (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
-    setup.uvDescriptorBase = pageSlabOff + hdr1.y;
+    setup.uvDescriptorBase = pageSlabOff + pageHeader.uvDescriptorOffset;
 #endif
-    setup.triangleStreamBase = pageSlabOff + hdrTriangleStreamOffset;
+    setup.triangleStreamBase = pageSlabOff + pageHeader.triangleStreamOffset;
+    setup.boneIndexStreamBase = pageSlabOff + pageHeader.boneIndexStreamOffset;
 
-    setup.compressedPositionQuantExp = hdr0.y;
+    setup.compressedPositionQuantExp = pageHeader.compressedPositionQuantExp;
     setup.pagePoolSlabDescriptorIndex = pageSlabDesc;
 
     // Non-CLod fields unused

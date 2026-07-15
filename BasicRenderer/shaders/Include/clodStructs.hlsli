@@ -80,49 +80,85 @@ static const uint CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME = 1u << 4;
 static const uint CLOD_POSITION_FORMAT_FLOAT3 = 1u;
 static const uint CLOD_POSITION_FORMAT_FLOAT3_STRIDE_BYTES = 12u;
 
+static const uint CLOD_CLUSTER_KIND_TRIANGLE = 0u;
+static const uint CLOD_CLUSTER_KIND_VOXEL = 1u;
+static const uint CLOD_CLUSTER_CULL_FLAG_ANIMATED = 1u << 0;
+static const uint CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW = 1u << 1;
+static const uint CLOD_CLUSTER_CULL_FLAG_RIGID_COMPONENT = 1u << 2;
+static const uint CLOD_TRIANGLE_PAGE_MAGIC = 0x4C435254u;
+
+struct CLodClusterCullHeader
+{
+    float4 bounds;
+    uint payloadBase;
+    uint primitiveCountAndRefinedGroup;
+    uint boneListOffset;
+    uint kindFlagsAndBoneCount; // kind:8 | flags:8 | boneCount:16
+};
+
+struct CLodClusterPagePrefix
+{
+    uint formatAndKind;
+    uint clusterCount;
+    uint descriptorOffset;
+    uint boneIndexStreamOffset;
+};
+
+CLodClusterPagePrefix CLodLoadClusterPagePrefix(uint slabDescriptorIndex, uint pageByteOffset)
+{
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
+    const uint4 words = slab.Load4(pageByteOffset);
+    CLodClusterPagePrefix prefix;
+    prefix.formatAndKind = words.x;
+    prefix.clusterCount = words.y;
+    prefix.descriptorOffset = words.z;
+    prefix.boneIndexStreamOffset = words.w;
+    return prefix;
+}
+
+uint CLodClusterCullKind(CLodClusterCullHeader header) { return header.kindFlagsAndBoneCount & 0xFFu; }
+uint CLodClusterCullFlags(CLodClusterCullHeader header) { return (header.kindFlagsAndBoneCount >> 8u) & 0xFFu; }
+uint CLodClusterCullBoneCount(CLodClusterCullHeader header) { return header.kindFlagsAndBoneCount >> 16u; }
+
 // Embedded at byte 0 of each page-tile. Simplified header.
 // 16 x uint32 = 64 bytes.
 struct CLodPageHeader
 {
-    uint meshletCount;                // [0]
-    uint compressedPositionQuantExp;  // [1] CLOD_POSITION_FORMAT_* value
-    uint attributeMask;               // [2] page-wide optional non-UV attribute mask
-    uint uvSetCount;                  // [3] UV set count packed into this page
-
-    uint descriptorOffset;            // [4] byte offset to CLodMeshletDescriptor array
-    uint uvDescriptorOffset;          // [5] byte offset to CLodMeshletUvDescriptor table
-    uint positionBitstreamOffset;     // [6] byte offset to native position stream
-    uint normalArrayOffset;           // [7] byte offset to normal array
-    uint colorArrayOffset;            // [8] byte offset to RGBA8_UNORM color array per vertex
-    uint jointArrayOffset;            // [9] byte offset to two-uint4 joint array per vertex
-    uint weightArrayOffset;           // [10] byte offset to two-float4 weight array per vertex
-    uint uvBitstreamDirectoryOffset;  // [11] byte offset to UV bitstream offset table
-    uint triangleStreamOffset;        // [12] byte offset to triangle byte stream
-    uint boneIndexStreamOffset;       // [13] byte offset to page-local bone-index stream
-    uint tangentFrameArrayOffset;     // [14] byte offset to tangent-frame angle/sign array
-    uint reserved1;
+    uint formatAndKind;                // [0] common page magic/kind
+    uint meshletCount;                 // [1] common cluster count
+    uint descriptorOffset;             // [2] common descriptor offset
+    uint boneIndexStreamOffset;        // [3] common bone stream offset
+    uint compressedPositionQuantExp;   // [4]
+    uint attributeMask;                // [5]
+    uint uvSetCount;                   // [6]
+    uint uvDescriptorOffset;           // [7]
+    uint positionBitstreamOffset;      // [8]
+    uint normalArrayOffset;            // [9]
+    uint colorArrayOffset;             // [10]
+    uint jointArrayOffset;             // [11]
+    uint weightArrayOffset;            // [12]
+    uint uvBitstreamDirectoryOffset;   // [13]
+    uint triangleStreamOffset;         // [14]
+    uint tangentFrameArrayOffset;      // [15]
 };
 
 // Per-meshlet descriptor. Self-contained stream offsets, bounds, and LOD metadata.
 // 16 x uint32 = 64 bytes = 4 x Load4.
 struct CLodMeshletDescriptor
 {
-    uint positionBitOffset;           // [0] byte offset into page native position stream
-    uint vertexAttributeOffset;       // [1] element offset into page vertex-attribute arrays
-    uint triangleByteOffset;          // [2] byte offset into page triangle stream
-    uint boneListOffset;              // [3] uint offset into page bone-index stream
-
-    int  minQx;                       // [4] reserved for future compact position formats
-    int  minQy;                       // [5] reserved for future compact position formats
-    int  minQz;                       // [6] reserved for future compact position formats
-
-    uint bitsAndVertexCount;          // [7] reserved:24 | vertexCount:8
-    uint triangleCountAndRefinedGroup; // [8] triangleCount:16 | (refinedGroupId+1):16
-    uint boneCount;                   // [9]
-    uint sourceGroupLocalIndex;       // [10] temporary diagnostic source group tag
-    float terrainRvtLocalSkyrimXYRadius; // [11] local terrain XY footprint radius for cluster request mips
-
-    float4 bounds;                    // [12-15] bounding sphere {cx, cy, cz, radius}
+    float4 bounds;                    // [0-3] common culling sphere
+    uint positionBitOffset;           // [4] common payload base
+    uint triangleCountAndRefinedGroup;// [5] common primitive count/refined group
+    uint boneListOffset;              // [6] common bone-list offset
+    uint boneCount;                   // [7] common bounded bone count
+    uint vertexAttributeOffset;       // [8] triangle payload tail
+    uint triangleByteOffset;          // [9]
+    int  minQx;                       // [10]
+    int  minQy;                       // [11]
+    int  minQz;                       // [12]
+    uint bitsAndVertexCount;          // [13]
+    uint sourceGroupLocalIndex;       // [14]
+    float terrainRvtLocalSkyrimXYRadius; // [15]
 };
 
 // Per-(meshlet, uv-set) descriptor. 8 x uint32 = 32 bytes = 2 x Load4.
@@ -145,7 +181,17 @@ uint CLodDescBitsZ(CLodMeshletDescriptor desc) { return (desc.bitsAndVertexCount
 uint CLodDescVertexCount(CLodMeshletDescriptor desc) { return (desc.bitsAndVertexCount >> 24u) & 0xFFu; }
 uint CLodDescTriangleCount(CLodMeshletDescriptor desc) { return desc.triangleCountAndRefinedGroup & 0xFFFFu; }
 int  CLodDescRefinedGroupId(CLodMeshletDescriptor desc) { return (int)(desc.triangleCountAndRefinedGroup >> 16u) - 1; }
-uint CLodDescBoneCount(CLodMeshletDescriptor desc) { return desc.boneCount; }
+uint CLodDescBoneCount(CLodMeshletDescriptor desc) { return desc.boneCount >> 16u; }
+CLodClusterCullHeader CLodMeshletCullHeader(CLodMeshletDescriptor desc)
+{
+    CLodClusterCullHeader header;
+    header.bounds = desc.bounds;
+    header.payloadBase = desc.positionBitOffset;
+    header.primitiveCountAndRefinedGroup = desc.triangleCountAndRefinedGroup;
+    header.boneListOffset = desc.boneListOffset;
+    header.kindFlagsAndBoneCount = desc.boneCount;
+    return header;
+}
 uint CLodUvDescBitsU(CLodMeshletUvDescriptor desc) { return desc.uvBits & 0xFFu; }
 uint CLodUvDescBitsV(CLodMeshletUvDescriptor desc) { return (desc.uvBits >> 8u) & 0xFFu; }
 
@@ -270,19 +316,20 @@ static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
-static const uint CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES = 1u << 0;
+static const uint CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES =
+    CLOD_CLUSTER_CULL_FLAG_ANIMATED << 8u;
 
 struct CLodVoxelClusterRecord
 {
+    float4 bounds;
     uint firstCube;
     uint cubeCount;
-    int refinedGroup;
+    uint reserved2;
     uint flags;
-    float4 bounds;
     float4 aabbMinAndVoxelWidth;
     uint resolution;
     float2 uvDensity;
-    uint reserved2;
+    int refinedGroup;
 };
 
 struct CLodVoxelCubeRecord
@@ -349,20 +396,20 @@ static const uint CLOD_VOXEL_ATTRIBUTE_SAMPLES_COMPACT = 0u;
 struct CLodVoxelPageHeader
 {
     uint magic;
-    uint firstCluster;
     uint clusterCount;
-    uint firstCube;
-    uint cubeCount;
-    uint reservedPage0;
-    uint reserved0;
-    uint reserved1;
     uint clusterRecordsOffset;
+    uint boneIndexStreamOffset;
+    uint cubeCount;
     uint cubeRecordsOffset;
     uint attributeSamplesOffset;
     uint attributeSamplesPerCube;
     uint clusterRecordStride;
     uint cubeRecordStride;
     uint attributeSampleStride;
+    uint firstCluster;
+    uint firstCube;
+    uint reserved0;
+    uint reserved1;
     uint reserved2;
 };
 
@@ -381,20 +428,20 @@ CLodVoxelPageHeader CLodLoadVoxelPageHeader(uint slabDescriptorIndex, uint pageB
     uint4 d3 = slab.Load4(pageByteOffset + 48u);
     CLodVoxelPageHeader header;
     header.magic = d0.x;
-    header.firstCluster = d0.y;
-    header.clusterCount = d0.z;
-    header.firstCube = d0.w;
+    header.clusterCount = d0.y;
+    header.clusterRecordsOffset = d0.z;
+    header.boneIndexStreamOffset = d0.w;
     header.cubeCount = d1.x;
-    header.reservedPage0 = d1.y;
-    header.reserved0 = d1.z;
-    header.reserved1 = d1.w;
-    header.clusterRecordsOffset = d2.x;
-    header.cubeRecordsOffset = d2.y;
-    header.attributeSamplesOffset = d2.z;
-    header.attributeSamplesPerCube = d2.w;
-    header.clusterRecordStride = d3.x;
-    header.cubeRecordStride = d3.y;
-    header.attributeSampleStride = d3.z;
+    header.cubeRecordsOffset = d1.y;
+    header.attributeSamplesOffset = d1.z;
+    header.attributeSamplesPerCube = d1.w;
+    header.clusterRecordStride = d2.x;
+    header.cubeRecordStride = d2.y;
+    header.attributeSampleStride = d2.z;
+    header.firstCluster = d2.w;
+    header.firstCube = d3.x;
+    header.reserved0 = d3.y;
+    header.reserved1 = d3.z;
     header.reserved2 = d3.w;
     return header;
 }
@@ -408,15 +455,15 @@ CLodVoxelClusterRecord CLodLoadVoxelClusterFromPage(uint slabDescriptorIndex, ui
     uint4 d2 = slab.Load4(addr + 32u);
     uint4 d3 = slab.Load4(addr + 48u);
     CLodVoxelClusterRecord cluster;
-    cluster.firstCube = d0.x;
-    cluster.cubeCount = d0.y;
-    cluster.refinedGroup = asint(d0.z);
-    cluster.flags = d0.w;
-    cluster.bounds = asfloat(d1);
+    cluster.bounds = asfloat(d0);
+    cluster.firstCube = d1.x;
+    cluster.cubeCount = d1.y;
+    cluster.reserved2 = d1.z;
+    cluster.flags = d1.w;
     cluster.aabbMinAndVoxelWidth = asfloat(d2);
     cluster.resolution = d3.x;
     cluster.uvDensity = asfloat(d3.yz);
-    cluster.reserved2 = d3.w;
+    cluster.refinedGroup = asint(d3.w);
     return cluster;
 }
 
@@ -440,6 +487,18 @@ CLodVoxelCubeRecord CLodLoadVoxelCubeFromPage(uint slabDescriptorIndex, uint pag
 bool CLodVoxelClusterHasSkinnedCubes(CLodVoxelClusterRecord cluster)
 {
     return (cluster.flags & CLOD_VOXEL_CLUSTER_FLAG_HAS_SKINNED_CUBES) != 0u;
+}
+
+CLodClusterCullHeader CLodVoxelCullHeader(CLodVoxelClusterRecord cluster)
+{
+    CLodClusterCullHeader header;
+    header.bounds = cluster.bounds;
+    header.payloadBase = cluster.firstCube;
+    header.primitiveCountAndRefinedGroup =
+        (cluster.cubeCount & 0xFFFFu) | ((uint(cluster.refinedGroup + 1) & 0xFFFFu) << 16u);
+    header.boneListOffset = cluster.reserved2;
+    header.kindFlagsAndBoneCount = cluster.flags;
+    return header;
 }
 
 bool CLodTryLoadVoxelPageForSegment(
