@@ -323,6 +323,20 @@ const PipelineState& GetOrCreatePipelineState(
     return it->second;
 }
 
+std::string MakePSOKeyId(std::string_view family, const PSOKey& key)
+{
+    return std::string(family) + ".flags=" + std::to_string(key.psoFlags) +
+        ".material=" + std::to_string(static_cast<uint64_t>(key.materialCompileFlags)) +
+        ".wire=" + (key.wireframe ? "1" : "0");
+}
+
+std::string MakeRasterPSOKeyId(std::string_view family, const RasterPSOKey& key)
+{
+    return std::string(family) + ".material=" +
+        std::to_string(static_cast<uint64_t>(key.materialRasterFlags)) +
+        ".wire=" + (key.wireframe ? "1" : "0");
+}
+
 void AppendBundleBlob(
     shadercache::CacheData& cacheData,
     shadercache::BlobKind kind,
@@ -475,7 +489,7 @@ void PSOManager::initializeShaderCompiler() {
 }
 
 void PSOManager::Cleanup() {
-    std::scoped_lock lock(m_cacheMutex);
+    std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
     m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_psoCache.clear();
     m_PPLLPSOCache.clear();
@@ -507,6 +521,11 @@ void PSOManager::Cleanup() {
     m_pendingClusterLODAVBOITShadePSOs.clear();
     m_pendingClusterLODSoftwareRasterPSOs.clear();
     m_pendingMaterialEvalPSOs.clear();
+    m_livePipelines.clear();
+    m_liveJobs.clear();
+    m_pendingLivePublications.clear();
+    m_pendingLiveActivations.clear();
+    m_retiredLivePayloads.clear();
 
     debugPSO.Reset();
     environmentConversionPSO.Reset();
@@ -522,7 +541,14 @@ const PipelineState& PSOManager::GetPSO(UINT psoFlags, MaterialCompileFlags mate
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_psoCache, key, [&]() {
-        return CreatePSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreatePSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.Forward", key),
+            "Material.Forward",
+            LivePipelineKind::Graphics,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreatePSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -530,7 +556,14 @@ const PipelineState& PSOManager::GetShadowPSO(UINT psoFlags, MaterialCompileFlag
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_shadowPSOCache, key, [&]() {
-        return CreateShadowPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateShadowPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.Shadow", key),
+            "Material.Shadow",
+            LivePipelineKind::Graphics,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateShadowPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -538,7 +571,14 @@ const PipelineState& PSOManager::GetShadowMeshPSO(UINT psoFlags, MaterialCompile
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_shadowMeshPSOCache, key, [&]() {
-        return CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.ShadowMesh", key),
+            "Material.ShadowMesh",
+            LivePipelineKind::Mesh,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateShadowMeshPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -546,7 +586,14 @@ const PipelineState& PSOManager::GetPrePassPSO(UINT psoFlags, MaterialCompileFla
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_prePassPSOCache, key, [&]() {
-        return CreatePrePassPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreatePrePassPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.PrePass", key),
+            "Material.PrePass",
+            LivePipelineKind::Graphics,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreatePrePassPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -554,7 +601,14 @@ const PipelineState& PSOManager::GetMeshPrePassPSO(UINT psoFlags, MaterialCompil
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_meshPrePassPSOCache, key, [&]() {
-        return CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.MeshPrePass", key),
+            "Material.MeshPrePass",
+            LivePipelineKind::Mesh,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateMeshPrePassPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -562,7 +616,14 @@ const PipelineState& PSOManager::GetPPLLPSO(UINT psoFlags, MaterialCompileFlags 
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_PPLLPSOCache, key, [&]() {
-        return CreatePPLLPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreatePPLLPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.PPLL", key),
+            "Material.PPLL",
+            LivePipelineKind::Graphics,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreatePPLLPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -570,7 +631,14 @@ const PipelineState& PSOManager::GetMeshPSO(UINT psoFlags, MaterialCompileFlags 
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_meshPSOCache, key, [&]() {
-        return CreateMeshPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateMeshPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.Mesh", key),
+            "Material.Mesh",
+            LivePipelineKind::Mesh,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateMeshPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -578,7 +646,14 @@ const PipelineState& PSOManager::GetMeshPPLLPSO(UINT psoFlags, MaterialCompileFl
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_meshPPLLPSOCache, key, [&]() {
-        return CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.MeshPPLL", key),
+            "Material.MeshPPLL",
+            LivePipelineKind::Mesh,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateMeshPPLLPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -586,7 +661,14 @@ const PipelineState& PSOManager::GetVisibilityBufferPSO(UINT psoFlags, MaterialC
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_visibilityBufferPSOCache, key, [&]() {
-        return CreateVisibilityBufferPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateVisibilityBufferPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.Visibility", key),
+            "Material.Visibility",
+            LivePipelineKind::Graphics,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateVisibilityBufferPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -594,7 +676,14 @@ const PipelineState& PSOManager::GetVisibilityBufferMeshPSO(UINT psoFlags, Mater
     PSOKey key(psoFlags, materialCompileFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_visibilityBufferMeshPSOCache, key, [&]() {
-        return CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe);
+        return RegisterPipeline(
+            CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe),
+            MakePSOKeyId("Material.VisibilityMesh", key),
+            "Material.VisibilityMesh",
+            LivePipelineKind::Mesh,
+            [this, psoFlags, materialCompileFlags, wireframe] {
+                return CreateVisibilityBufferMeshPSO(psoFlags, materialCompileFlags, wireframe);
+            });
     });
 }
 
@@ -602,7 +691,14 @@ const PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags mate
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODRasterPSOCache, key, [&]() {
-        return CreateClusterLODRasterPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODRasterPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.Raster", key),
+            "CLod.Raster",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODRasterPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -610,7 +706,14 @@ const PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(MaterialRas
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODVirtualShadowRasterPSOCache, key, [&]() {
-        return CreateClusterLODVirtualShadowRasterPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODVirtualShadowRasterPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.VirtualShadowRaster", key),
+            "CLod.VirtualShadowRaster",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODVirtualShadowRasterPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -618,7 +721,14 @@ const PipelineState& PSOManager::GetClusterLODVirtualShadowReyesRasterPSO(Materi
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODVirtualShadowReyesRasterPSOCache, key, [&]() {
-        return CreateClusterLODVirtualShadowReyesRasterPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODVirtualShadowReyesRasterPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.VirtualShadowReyesRaster", key),
+            "CLod.VirtualShadowReyesRaster",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODVirtualShadowReyesRasterPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -626,7 +736,14 @@ const PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(MaterialRa
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODDeepVisibilityRasterPSOCache, key, [&]() {
-        return CreateClusterLODDeepVisibilityRasterPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODDeepVisibilityRasterPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.DeepVisibilityRaster", key),
+            "CLod.DeepVisibilityRaster",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODDeepVisibilityRasterPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -634,7 +751,14 @@ const PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRasterF
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODAVBOITOccupancyPSOCache, key, [&]() {
-        return CreateClusterLODAVBOITOccupancyPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODAVBOITOccupancyPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.AVBOITOccupancy", key),
+            "CLod.AVBOITOccupancy",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODAVBOITOccupancyPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -642,7 +766,14 @@ const PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlag
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODAVBOITRasterPSOCache, key, [&]() {
-        return CreateClusterLODAVBOITRasterPSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODAVBOITRasterPSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.AVBOITRaster", key),
+            "CLod.AVBOITRaster",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODAVBOITRasterPSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -650,7 +781,14 @@ const PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags
     RasterPSOKey key(materialRasterFlags, wireframe);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODAVBOITShadePSOCache, key, [&]() {
-        return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe);
+        return RegisterPipeline(
+            CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe),
+            MakeRasterPSOKeyId("CLod.AVBOITShade", key),
+            "CLod.AVBOITShade",
+            LivePipelineKind::Mesh,
+            [this, materialRasterFlags, wireframe] {
+                return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe);
+            });
     });
 }
 
@@ -666,7 +804,14 @@ const PipelineState& PSOManager::GetClusterLODSoftwareRasterPSO(MaterialRasterFl
 const PipelineState& PSOManager::GetDeferredPSO(UINT psoFlags) {
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_deferredPSOCache, psoFlags, [&]() {
-        return CreateDeferredPSO(psoFlags);
+        return RegisterPipeline(
+            CreateDeferredPSO(psoFlags),
+            "Material.Deferred.flags=" + std::to_string(psoFlags),
+            "Material.Deferred",
+            LivePipelineKind::Graphics,
+            [this, psoFlags] {
+                return CreateDeferredPSO(psoFlags);
+            });
     });
 }
 
@@ -1953,13 +2098,51 @@ PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
     std::vector<DxcDefine> defines,
     const char* debugName)
 {
+    ComputeRecipe recipe;
+    recipe.layout = layout;
+    recipe.shaderPath = shaderPath;
+    recipe.entryPoint = entryPoint;
+    recipe.debugName = debugName ? debugName : ws2s(entryPoint);
+    recipe.defines.reserve(defines.size());
+    for (const DxcDefine& define : defines) {
+        recipe.defines.push_back({
+            define.Name ? define.Name : L"",
+            define.Value ? define.Value : L""
+        });
+    }
+    PipelineState pipeline = BuildComputePipeline(recipe);
+    return RegisterComputePipeline(std::move(pipeline), std::move(recipe));
+}
+
+PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe, const RecompileOptions* options)
+{
+    std::vector<OwnedDefine> ownedDefines = recipe.defines;
+    if (options) {
+        for (const auto& [name, value] : options->defineOverrides) {
+            auto existing = std::ranges::find_if(ownedDefines, [&](const OwnedDefine& define) {
+                return define.name == name;
+            });
+            if (existing == ownedDefines.end()) {
+                ownedDefines.push_back({ name, value });
+            } else {
+                existing->value = value;
+            }
+        }
+    }
+
+    std::vector<DxcDefine> defines;
+    defines.reserve(ownedDefines.size());
+    for (const OwnedDefine& define : ownedDefines) {
+        defines.push_back({ define.name.c_str(), define.value.c_str() });
+    }
+
     ShaderInfoBundle sib;
-    sib.computeShader = { shaderPath, entryPoint, L"cs_6_6" };
-    sib.defines = std::vector<DxcDefine>(defines.begin(), defines.end());
+    sib.computeShader = { recipe.shaderPath, recipe.entryPoint, L"cs_6_6" };
+    sib.defines = defines;
     auto compiled = CompileShaders(sib);
 
-    rhi::SubobjLayout soLayout{ layout };
-    rhi::SubobjShader soCS{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), ws2s(entryPoint) };
+    rhi::SubobjLayout soLayout{ recipe.layout };
+    rhi::SubobjShader soCS{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), ws2s(recipe.entryPoint) };
 
     const rhi::PipelineStreamItem items[] = {
         rhi::Make(soLayout),
@@ -1972,14 +2155,104 @@ PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
     if (Failed(result)) {
         throw std::runtime_error("Failed to create compute PSO (RHI)");
     }
-    if (debugName) pso->SetName(debugName);
+    if (!recipe.debugName.empty()) {
+        pso->SetName(recipe.debugName.c_str());
+    }
 
     PipelineState out{
         std::move(pso),
         compiled.resourceIDsHash,
         compiled.resourceDescriptorSlots
     };
+    auto payload = out.GetPayload();
+    payload->bytecodeHash = HashBytesStable(
+        compiled.computeShader->GetBufferPointer(),
+        compiled.computeShader->GetBufferSize());
+    uint64_t sourceHash = HashStringStable(ws2s(recipe.shaderPath));
+    util::hash_combine_u64(sourceHash, HashStringStable(ws2s(recipe.entryPoint)));
+    for (const OwnedDefine& define : ownedDefines) {
+        util::hash_combine_u64(sourceHash, HashStringStable(ws2s(define.name)));
+        util::hash_combine_u64(sourceHash, HashStringStable(ws2s(define.value)));
+    }
+    payload->sourceHash = sourceHash;
+    payload->label = options && !options->label.empty() ? options->label : "initial";
     return out;
+}
+
+PipelineState PSOManager::RegisterComputePipeline(PipelineState state, ComputeRecipe recipe)
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    std::string id = recipe.debugName.empty() ? ws2s(recipe.entryPoint) : recipe.debugName;
+    if (const auto existing = m_livePipelines.find(id); existing != m_livePipelines.end()) {
+        const ComputeRecipe& registered = existing->second.computeRecipe;
+        const bool sameRecipe =
+            registered.layout.index == recipe.layout.index &&
+            registered.layout.generation == recipe.layout.generation &&
+            registered.shaderPath == recipe.shaderPath &&
+            registered.entryPoint == recipe.entryPoint &&
+            registered.defines.size() == recipe.defines.size() &&
+            std::ranges::equal(
+                registered.defines,
+                recipe.defines,
+                {},
+                [](const OwnedDefine& define) {
+                    return std::pair{ define.name, define.value };
+                },
+                [](const OwnedDefine& define) {
+                    return std::pair{ define.name, define.value };
+                });
+        if (sameRecipe) {
+            return existing->second.state;
+        }
+        const std::string baseId = id;
+        uint32_t suffix = 2;
+        while (m_livePipelines.contains(id)) {
+            id = baseId + "#" + std::to_string(suffix++);
+        }
+    }
+
+    auto payload = state.GetPayload();
+    LivePipelineEntry entry;
+    entry.id = id;
+    entry.displayName = recipe.debugName;
+    entry.kind = LivePipelineKind::Compute;
+    entry.state = state;
+    entry.shaderPaths.push_back(ws2s(recipe.shaderPath));
+    entry.supportsDefineOverrides = true;
+    entry.computeRecipe = std::move(recipe);
+    entry.generations.push_back(std::move(payload));
+    m_livePipelines.emplace(id, std::move(entry));
+    return state;
+}
+
+PipelineState PSOManager::RegisterPipeline(
+    PipelineState state,
+    std::string id,
+    std::string displayName,
+    LivePipelineKind kind,
+    std::function<PipelineState()> rebuild)
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    const auto slot = state.GetSlot();
+    for (const auto& [_, existing] : m_livePipelines) {
+        if (existing.state.GetSlot() == slot) {
+            return state;
+        }
+    }
+    const std::string baseId = id;
+    uint32_t suffix = 2;
+    while (m_livePipelines.contains(id)) {
+        id = baseId + "#" + std::to_string(suffix++);
+    }
+    LivePipelineEntry entry;
+    entry.id = id;
+    entry.displayName = std::move(displayName);
+    entry.kind = kind;
+    entry.state = state;
+    entry.rebuild = std::move(rebuild);
+    entry.generations.push_back(state.GetPayload());
+    m_livePipelines.emplace(id, std::move(entry));
+    return state;
 }
 
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
@@ -3029,7 +3302,7 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature() {
 }
 
 void PSOManager::ReloadShaders() {
-    std::scoped_lock lock(m_cacheMutex);
+    std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
     m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_psoCache.clear();
 	m_meshPSOCache.clear();
@@ -3059,6 +3332,291 @@ void PSOManager::ReloadShaders() {
     m_pendingClusterLODAVBOITShadePSOs.clear();
     m_pendingClusterLODSoftwareRasterPSOs.clear();
     m_pendingMaterialEvalPSOs.clear();
+    m_livePipelines.clear();
+    m_liveJobs.clear();
+    m_pendingLivePublications.clear();
+    m_pendingLiveActivations.clear();
+    m_retiredLivePayloads.clear();
+    m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::vector<PSOManager::LivePipelineInfo> PSOManager::ListPipelines() const
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    std::vector<LivePipelineInfo> result;
+    result.reserve(m_livePipelines.size());
+    for (const auto& [_, entry] : m_livePipelines) {
+        const auto payload = entry.state.GetPayload();
+        LivePipelineInfo info;
+        info.id = entry.id;
+        info.displayName = entry.displayName;
+        info.kind = entry.kind;
+        info.shaderPaths = entry.shaderPaths;
+        info.activeGeneration = payload ? payload->generation : 0;
+        info.sourceHash = payload ? payload->sourceHash : 0;
+        info.bytecodeHash = payload ? payload->bytecodeHash : 0;
+        info.label = payload ? payload->label : std::string{};
+        if (payload) {
+            if (const auto definesIt = entry.generationDefineOverrides.find(payload->generation);
+                definesIt != entry.generationDefineOverrides.end()) {
+                info.defineOverrides = definesIt->second;
+            }
+        }
+        info.compiling = entry.compiling;
+        result.push_back(std::move(info));
+    }
+    std::ranges::sort(result, {}, &LivePipelineInfo::id);
+    return result;
+}
+
+std::optional<PSOManager::LiveJobInfo> PSOManager::GetLiveJob(uint64_t jobId) const
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    const auto it = m_liveJobs.find(jobId);
+    return it == m_liveJobs.end() ? std::nullopt : std::optional<LiveJobInfo>{ it->second };
+}
+
+uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, RecompileOptions options)
+{
+    ComputeRecipe recipe;
+    std::function<PipelineState()> rebuild;
+    bool supportsDefineOverrides = false;
+    const uint64_t jobId = m_nextLiveJobId.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::scoped_lock lock(m_livePipelineMutex);
+        auto entryIt = m_livePipelines.find(pipelineId);
+        if (entryIt == m_livePipelines.end()) {
+            throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+        }
+        if (entryIt->second.compiling) {
+            throw std::runtime_error("Pipeline '" + pipelineId + "' already has a live compile in progress");
+        }
+        entryIt->second.compiling = true;
+        recipe = entryIt->second.computeRecipe;
+        rebuild = entryIt->second.rebuild;
+        supportsDefineOverrides = entryIt->second.supportsDefineOverrides;
+        if (!supportsDefineOverrides && !options.defineOverrides.empty()) {
+            entryIt->second.compiling = false;
+            throw std::runtime_error("Define overrides are only supported for directly registered compute pipelines");
+        }
+        m_liveJobs.emplace(jobId, LiveJobInfo{
+            .id = jobId,
+            .pipelineId = pipelineId,
+            .state = LiveJobState::Queued
+        });
+    }
+
+    TaskSchedulerManager::GetInstance().QueueShaderCompileTask(
+        "PSOManager::LiveRecompile::" + pipelineId,
+        [this,
+            pipelineId,
+            jobId,
+            recipe = std::move(recipe),
+            rebuild = std::move(rebuild),
+            supportsDefineOverrides,
+            options = std::move(options)]() mutable {
+            {
+                std::scoped_lock lock(m_livePipelineMutex);
+                if (auto it = m_liveJobs.find(jobId); it != m_liveJobs.end()) {
+                    it->second.state = LiveJobState::Compiling;
+                }
+            }
+            try {
+                PipelineState candidate = supportsDefineOverrides
+                    ? BuildComputePipeline(recipe, &options)
+                    : rebuild();
+                auto payload = candidate.GetPayload();
+                if (!options.label.empty()) {
+                    payload->label = options.label;
+                }
+                std::scoped_lock lock(m_livePipelineMutex);
+                auto entryIt = m_livePipelines.find(pipelineId);
+                if (entryIt == m_livePipelines.end()) {
+                    throw std::runtime_error("Pipeline was removed while recompiling");
+                }
+                uint64_t nextGeneration = 1;
+                for (const auto& generation : entryIt->second.generations) {
+                    nextGeneration = std::max(nextGeneration, generation->generation + 1);
+                }
+                payload->generation = nextGeneration;
+                payload->label = options.label.empty()
+                    ? "generation-" + std::to_string(nextGeneration)
+                    : options.label;
+                std::map<std::string, std::string> defineOverrides;
+                for (const auto& [name, value] : options.defineOverrides) {
+                    defineOverrides.emplace(ws2s(name), ws2s(value));
+                }
+                m_pendingLivePublications.push_back(
+                    { jobId, pipelineId, std::move(payload), std::move(defineOverrides) });
+                auto& job = m_liveJobs.at(jobId);
+                job.state = LiveJobState::ReadyToPublish;
+                job.generation = nextGeneration;
+            } catch (const std::exception& exception) {
+                std::scoped_lock lock(m_livePipelineMutex);
+                if (auto entryIt = m_livePipelines.find(pipelineId); entryIt != m_livePipelines.end()) {
+                    entryIt->second.compiling = false;
+                }
+                auto& job = m_liveJobs.at(jobId);
+                job.state = LiveJobState::Failed;
+                job.error = exception.what();
+            } catch (...) {
+                std::scoped_lock lock(m_livePipelineMutex);
+                if (auto entryIt = m_livePipelines.find(pipelineId); entryIt != m_livePipelines.end()) {
+                    entryIt->second.compiling = false;
+                }
+                auto& job = m_liveJobs.at(jobId);
+                job.state = LiveJobState::Failed;
+                job.error = "Unknown shader compilation failure";
+            }
+        });
+    return jobId;
+}
+
+uint64_t PSOManager::RequestActivation(const std::string& pipelineId, uint64_t generation)
+{
+    const uint64_t jobId = m_nextLiveJobId.fetch_add(1, std::memory_order_relaxed);
+    std::scoped_lock lock(m_livePipelineMutex);
+    const auto entryIt = m_livePipelines.find(pipelineId);
+    if (entryIt == m_livePipelines.end()) {
+        throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
+    }
+    if (entryIt->second.compiling) {
+        throw std::runtime_error("Pipeline '" + pipelineId + "' has a live compile in progress");
+    }
+    const bool found = std::ranges::any_of(entryIt->second.generations, [generation](const auto& payload) {
+        return payload->generation == generation;
+    });
+    if (!found) {
+        throw std::runtime_error(
+            "Pipeline '" + pipelineId + "' has no retained generation " + std::to_string(generation));
+    }
+    m_liveJobs.emplace(jobId, LiveJobInfo{
+        .id = jobId,
+        .pipelineId = pipelineId,
+        .state = LiveJobState::ReadyToPublish,
+        .generation = generation
+    });
+    m_pendingLiveActivations.push_back({ jobId, pipelineId, generation });
+    return jobId;
+}
+
+namespace {
+bool PipelineResourcesMatch(const PipelineResources& left, const PipelineResources& right)
+{
+    return left.mandatoryResourceDescriptorSlots == right.mandatoryResourceDescriptorSlots &&
+        left.optionalResourceDescriptorSlots == right.optionalResourceDescriptorSlots;
+}
+}
+
+void PSOManager::PublishPendingLivePipelines(uint64_t retirementFenceValue)
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    while (!m_pendingLivePublications.empty()) {
+        PendingPublication publication = std::move(m_pendingLivePublications.front());
+        m_pendingLivePublications.pop_front();
+        auto entryIt = m_livePipelines.find(publication.pipelineId);
+        if (entryIt == m_livePipelines.end()) {
+            continue;
+        }
+        LivePipelineEntry& entry = entryIt->second;
+        const auto active = entry.state.GetPayload();
+        auto& job = m_liveJobs.at(publication.jobId);
+        if (!active ||
+            active->resourceIDsHash != publication.payload->resourceIDsHash ||
+            !PipelineResourcesMatch(active->pipelineResources, publication.payload->pipelineResources)) {
+            entry.compiling = false;
+            job.state = LiveJobState::Failed;
+            job.error = "Shader resource interface changed; use structural shader reload";
+            continue;
+        }
+
+        auto retired = entry.state.ReplacePayload(publication.payload);
+        if (retired) {
+            m_retiredLivePayloads.push_back({ retirementFenceValue, std::move(retired) });
+        }
+        entry.generations.push_back(publication.payload);
+        entry.generationDefineOverrides[publication.payload->generation] =
+            std::move(publication.defineOverrides);
+        while (entry.generations.size() > 8) {
+            const auto activePayload = entry.state.GetPayload();
+            const auto evictionIt = std::ranges::find_if(
+                entry.generations,
+                [&activePayload](const auto& generation) {
+                    return generation != activePayload;
+                });
+            if (evictionIt == entry.generations.end()) {
+                break;
+            }
+            entry.generationDefineOverrides.erase((*evictionIt)->generation);
+            entry.generations.erase(evictionIt);
+        }
+        entry.compiling = false;
+        job.state = LiveJobState::Published;
+        m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
+        spdlog::info(
+            "PSOManager: published live pipeline '{}' generation={} label='{}'",
+            publication.pipelineId,
+            publication.payload->generation,
+            publication.payload->label);
+    }
+
+    while (!m_pendingLiveActivations.empty()) {
+        PendingActivation activation = std::move(m_pendingLiveActivations.front());
+        m_pendingLiveActivations.pop_front();
+        auto entryIt = m_livePipelines.find(activation.pipelineId);
+        if (entryIt == m_livePipelines.end()) {
+            continue;
+        }
+        auto generationIt = std::ranges::find_if(
+            entryIt->second.generations,
+            [generation = activation.generation](const auto& payload) {
+                return payload->generation == generation;
+            });
+        auto& job = m_liveJobs.at(activation.jobId);
+        if (generationIt == entryIt->second.generations.end()) {
+            job.state = LiveJobState::Failed;
+            job.error = "Requested generation is no longer retained";
+            continue;
+        }
+        auto retired = entryIt->second.state.ReplacePayload(*generationIt);
+        if (retired && retired != *generationIt) {
+            m_retiredLivePayloads.push_back({ retirementFenceValue, std::move(retired) });
+        }
+        job.state = LiveJobState::Published;
+        m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
+        spdlog::info(
+            "PSOManager: activated live pipeline '{}' generation={}",
+            activation.pipelineId,
+            activation.generation);
+    }
+}
+
+void PSOManager::CollectRetiredLivePipelines(uint64_t completedFenceValue)
+{
+    std::scoped_lock lock(m_livePipelineMutex);
+    std::erase_if(m_retiredLivePayloads, [completedFenceValue](const RetiredPayload& retired) {
+        return retired.fenceValue <= completedFenceValue;
+    });
+}
+
+uint64_t PSOManager::GetPipelineEpoch() const
+{
+    return m_pipelineEpoch.load(std::memory_order_acquire);
+}
+
+PSOManager::PipelineGenerationSnapshot PSOManager::GetPipelineGenerationSnapshot() const
+{
+    PipelineGenerationSnapshot snapshot;
+    snapshot.epoch = GetPipelineEpoch();
+    snapshot.pipelines = ListPipelines();
+    uint64_t digest = 14695981039346656037ull;
+    for (const LivePipelineInfo& pipeline : snapshot.pipelines) {
+        util::hash_combine_u64(digest, HashStringStable(pipeline.id));
+        util::hash_combine_u64(digest, pipeline.activeGeneration);
+        util::hash_combine_u64(digest, pipeline.bytecodeHash);
+    }
+    snapshot.digest = digest;
+    return snapshot;
 }
 
 rhi::BlendState PSOManager::GetBlendDesc(MaterialCompileFlags materialCompileFlags) {

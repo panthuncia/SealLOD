@@ -2451,6 +2451,11 @@ void Renderer::Update(float elapsedSeconds) {
     ZoneScopedN("Renderer::Update");
     BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
+    PSOManager::GetInstance().PublishPendingLivePipelines(m_currentFrameFenceValue);
+    if (m_frameFence) {
+        PSOManager::GetInstance().CollectRetiredLivePipelines(m_frameFence->GetCompletedValue());
+    }
+
     BeginFrameTaskGraphCapture();
 
     const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {

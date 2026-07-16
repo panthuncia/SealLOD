@@ -48,17 +48,23 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
 {
     auto& psoManager = PSOManager::GetInstance();
     const auto computeLayout = psoManager.GetComputeRootSignature().GetHandle();
+    const std::string pipelineSuffix =
+        outputKind == CLodRasterOutputKind::VirtualShadow ? ".VirtualShadow" : "";
+    const auto pipelineId = [&pipelineSuffix](std::string_view base) {
+        return std::string(base) + pipelineSuffix;
+    };
     std::vector<DxcDefine> defines = {
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
         { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
-        { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"16" },
+        { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"8" },
     };
+    const std::string buildArgsPipelineId = pipelineId("CLod.VoxelRaster.BuildDispatchArgs");
     m_buildArgsPso = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
         L"VoxelRasterBuildDispatchArgsCS",
         defines,
-        "CLod.VoxelRaster.BuildDispatchArgs");
+        buildArgsPipelineId.c_str());
 
     auto skinnedDefines = defines;
     skinnedDefines.push_back({ L"PSO_SKINNED", L"1" });
@@ -67,30 +73,34 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     auto skinnedTelemetryDefines = skinnedDefines;
     skinnedTelemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
 
+    const std::string rigidPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Rigid");
+    const std::string skinnedPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Skinned");
+    const std::string rigidTelemetryPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Rigid.Telemetry");
+    const std::string skinnedTelemetryPipelineId = pipelineId("CLod.VoxelRaster.Rasterize.Skinned.Telemetry");
     m_rigidRasterPso = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
         L"VoxelRasterCS",
         defines,
-        "CLod.VoxelRaster.Rasterize.Rigid");
+        rigidPipelineId.c_str());
     m_skinnedRasterPso = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
         L"VoxelRasterCS",
         skinnedDefines,
-        "CLod.VoxelRaster.Rasterize.Skinned");
+        skinnedPipelineId.c_str());
     m_rigidTelemetryRasterPso = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
         L"VoxelRasterCS",
         telemetryDefines,
-        "CLod.VoxelRaster.Rasterize.Rigid.Telemetry");
+        rigidTelemetryPipelineId.c_str());
     m_skinnedTelemetryRasterPso = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
         L"VoxelRasterCS",
         skinnedTelemetryDefines,
-        "CLod.VoxelRaster.Rasterize.Skinned.Telemetry");
+        skinnedTelemetryPipelineId.c_str());
 
     rhi::IndirectArg args[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }

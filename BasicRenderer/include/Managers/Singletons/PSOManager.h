@@ -9,6 +9,10 @@
 #include <optional>
 #include <mutex>
 #include <atomic>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
 #include <boost/container_hash/hash.hpp>
 
 #include <rhi.h>
@@ -123,6 +127,52 @@ struct ShaderLibraryBundle {
 
 class PSOManager {
 public:
+    enum class LivePipelineKind : uint8_t {
+        Compute,
+        Graphics,
+        Mesh,
+        RayTracing
+    };
+
+    enum class LiveJobState : uint8_t {
+        Queued,
+        Compiling,
+        ReadyToPublish,
+        Published,
+        Failed
+    };
+
+    struct LivePipelineInfo {
+        std::string id;
+        std::string displayName;
+        LivePipelineKind kind = LivePipelineKind::Compute;
+        std::vector<std::string> shaderPaths;
+        uint64_t activeGeneration = 0;
+        uint64_t sourceHash = 0;
+        uint64_t bytecodeHash = 0;
+        std::string label;
+        std::map<std::string, std::string> defineOverrides;
+        bool compiling = false;
+    };
+
+    struct LiveJobInfo {
+        uint64_t id = 0;
+        std::string pipelineId;
+        LiveJobState state = LiveJobState::Queued;
+        uint64_t generation = 0;
+        std::string error;
+    };
+
+    struct RecompileOptions {
+        std::string label;
+        std::map<std::wstring, std::wstring> defineOverrides;
+    };
+
+    struct PipelineGenerationSnapshot {
+        uint64_t epoch = 0;
+        std::vector<LivePipelineInfo> pipelines;
+        uint64_t digest = 0;
+    };
 
     static PSOManager& GetInstance();
 
@@ -177,6 +227,14 @@ public:
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
     void ReloadShaders();
+    std::vector<LivePipelineInfo> ListPipelines() const;
+    std::optional<LiveJobInfo> GetLiveJob(uint64_t jobId) const;
+    uint64_t RequestRecompile(const std::string& pipelineId, RecompileOptions options = {});
+    uint64_t RequestActivation(const std::string& pipelineId, uint64_t generation);
+    void PublishPendingLivePipelines(uint64_t retirementFenceValue);
+    void CollectRetiredLivePipelines(uint64_t completedFenceValue);
+    uint64_t GetPipelineEpoch() const;
+    PipelineGenerationSnapshot GetPipelineGenerationSnapshot() const;
     std::vector<DxcDefine> GetShaderDefines(UINT psoFlags, MaterialCompileFlags materialFlags);
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
@@ -191,6 +249,51 @@ public:
         Microsoft::WRL::ComPtr<ID3DBlob>& outBlob);
 
 private:
+    struct OwnedDefine {
+        std::wstring name;
+        std::wstring value;
+    };
+
+    struct ComputeRecipe {
+        rhi::PipelineLayoutHandle layout{};
+        std::wstring shaderPath;
+        std::wstring entryPoint;
+        std::vector<OwnedDefine> defines;
+        std::string debugName;
+    };
+
+    struct LivePipelineEntry {
+        std::string id;
+        std::string displayName;
+        LivePipelineKind kind = LivePipelineKind::Compute;
+        PipelineState state;
+        ComputeRecipe computeRecipe;
+        std::function<PipelineState()> rebuild;
+        std::vector<std::string> shaderPaths;
+        bool supportsDefineOverrides = false;
+        std::deque<std::shared_ptr<PipelineStatePayload>> generations;
+        std::map<uint64_t, std::map<std::string, std::string>> generationDefineOverrides;
+        bool compiling = false;
+    };
+
+    struct PendingPublication {
+        uint64_t jobId = 0;
+        std::string pipelineId;
+        std::shared_ptr<PipelineStatePayload> payload;
+        std::map<std::string, std::string> defineOverrides;
+    };
+
+    struct PendingActivation {
+        uint64_t jobId = 0;
+        std::string pipelineId;
+        uint64_t generation = 0;
+    };
+
+    struct RetiredPayload {
+        uint64_t fenceValue = 0;
+        std::shared_ptr<PipelineStatePayload> payload;
+    };
+
     struct ShaderCompileOptions
     {
         std::wstring entryPoint;
@@ -255,6 +358,14 @@ private:
     ComPtr<ID3D12PipelineState> environmentConversionPSO;
     mutable std::mutex m_cacheMutex;
     std::atomic<uint64_t> m_asyncPSOGeneration = 0;
+    mutable std::mutex m_livePipelineMutex;
+    std::unordered_map<std::string, LivePipelineEntry> m_livePipelines;
+    std::unordered_map<uint64_t, LiveJobInfo> m_liveJobs;
+    std::deque<PendingPublication> m_pendingLivePublications;
+    std::deque<PendingActivation> m_pendingLiveActivations;
+    std::deque<RetiredPayload> m_retiredLivePayloads;
+    std::atomic<uint64_t> m_nextLiveJobId = 1;
+    std::atomic<uint64_t> m_pipelineEpoch = 1;
 
     PipelineState CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
     PipelineState CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
@@ -282,6 +393,14 @@ private:
     PipelineState CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
 
     PipelineState CreateDeferredPSO(UINT psoFlags);
+    PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const RecompileOptions* options = nullptr);
+    PipelineState RegisterComputePipeline(PipelineState state, ComputeRecipe recipe);
+    PipelineState RegisterPipeline(
+        PipelineState state,
+        std::string id,
+        std::string displayName,
+        LivePipelineKind kind,
+        std::function<PipelineState()> rebuild);
 
     template <typename TCache, typename TPending, typename TKey, typename TFactory>
     const PipelineState* TryGetOrRequestPipelineState(
@@ -306,11 +425,26 @@ private:
         }
 
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
+        const std::string queueTaskName = taskName;
         TaskSchedulerManager::GetInstance().QueueShaderCompileTask(
-            taskName,
-            [this, cacheMember, pendingMember, key, generation, factory = std::forward<TFactory>(factory)]() mutable {
+            queueTaskName,
+            [this,
+                cacheMember,
+                pendingMember,
+                key,
+                generation,
+                taskName = std::move(taskName),
+                factory = std::forward<TFactory>(factory)]() mutable {
                 try {
                     PipelineState pipelineState = factory();
+                    pipelineState = RegisterPipeline(
+                        std::move(pipelineState),
+                        taskName + ".key=" + std::to_string(std::hash<TKey>{}(key)),
+                        taskName,
+                        LivePipelineKind::Graphics,
+                        [factory]() mutable {
+                            return factory();
+                        });
                     std::scoped_lock lock(m_cacheMutex);
                     if (generation != m_asyncPSOGeneration.load(std::memory_order_acquire)) {
                         return;
