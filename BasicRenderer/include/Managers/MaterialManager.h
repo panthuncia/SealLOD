@@ -35,6 +35,7 @@ public:
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
 	void ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory);
 	void RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService);
+	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }
@@ -89,6 +90,7 @@ private:
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
+	bool m_textureStreamingFeedbackSuppressed = false;
 	std::unordered_map <MaterialCompileFlags, unsigned int> m_compileFlagsSlotMapping;
 	std::atomic<unsigned int> m_nextCompileFlagsSlot{ 1 };
 	std::vector<unsigned int> m_freeCompileFlagsSlots;

@@ -56,13 +56,26 @@ bool SarpClodImportDebugLoggingEnabled()
     return enabled;
 }
 
-bool NvPerfCaptureSuppressesCLodStreaming()
+bool NvPerfCaptureSuppressesCLodService()
 {
     static bool logged = false;
     const bool suppressed = br::telemetry::nvperf::CaptureActive();
     if (suppressed && !logged) {
         logged = true;
-        spdlog::info("CLod streaming: suspending streaming service/readbacks while NVPerf capture is active");
+        spdlog::info("CLod streaming: suspending streaming service while NVPerf capture is active");
+    }
+    return suppressed;
+}
+
+bool NvPerfCaptureSuppressesCLodReadback()
+{
+    static bool logged = false;
+    const bool suppressed =
+        br::telemetry::nvperf::CaptureActive() ||
+        br::telemetry::nvperf::StreamingSuppressed();
+    if (suppressed && !logged) {
+        logged = true;
+        spdlog::info("CLod streaming: suppressing new streaming feedback readbacks for deterministic sampling");
     }
     return suppressed;
 }
@@ -1268,7 +1281,7 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
     uint64_t afterPollMs = serviceStartMs;
     uint64_t afterProcessMs = serviceStartMs;
     uint64_t afterBitsMs = serviceStartMs;
-    if (NvPerfCaptureSuppressesCLodStreaming()) {
+    if (NvPerfCaptureSuppressesCLodService()) {
         return;
     }
 
@@ -1595,7 +1608,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
 
     auto readbackPass = std::make_shared<CLodStructuralStreamingReadbackCopyPass>(
         [this](CLodStreamingReadbackSnapshot& snapshot) -> bool {
-            if (NvPerfCaptureSuppressesCLodStreaming()) {
+            if (NvPerfCaptureSuppressesCLodReadback()) {
                 return false;
             }
             if (!m_streamingReadbackFenceHandle.IsValid() || m_readbackStagingSlots.empty()) {

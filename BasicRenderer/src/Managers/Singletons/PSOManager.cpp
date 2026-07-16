@@ -2744,6 +2744,13 @@ std::vector<LPCWSTR> PSOManager::BuildArguments(
     // always include shaders folder
     args.push_back(L"-I");
     args.push_back(shaderDir.c_str());
+    // DXC's default include handler does not reliably preserve the including
+    // file's directory for nested includes through an MO2 virtual path.
+    // Make the shared include directory explicit so cbuffers.hlsli can resolve
+    // siblings such as structs.hlsli.
+    ownedArgs.push_back((shaderDir / L"include").wstring());
+    args.push_back(L"-I");
+    args.push_back(ownedArgs.back().c_str());
 
     return args;
 }

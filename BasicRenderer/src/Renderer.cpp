@@ -749,6 +749,51 @@ ObjectManager::Stats Renderer::GetObjectManagerStats() const {
     return m_pObjectManager ? m_pObjectManager->GetStats() : ObjectManager::Stats{};
 }
 
+Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() const {
+    SamplingReadinessSnapshot snapshot;
+    const auto sceneStatus = GetSceneOverlapStatus();
+    snapshot.sceneTaskInFlight = sceneStatus.taskInFlight;
+    snapshot.hasCommittedSceneSnapshot = sceneStatus.hasCommittedSnapshot;
+    snapshot.committedSceneSnapshotSequence = sceneStatus.committedSnapshotSequence;
+    snapshot.pendingSceneSnapshotSequence = sceneStatus.pendingSnapshotSequence;
+
+    if (m_pMaterialManager) {
+        const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingStats();
+        snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
+        snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
+    }
+    if (m_pMeshManager) {
+        const auto clodStats = m_pMeshManager->GetCLodStreamingDebugStats();
+        snapshot.residentClodGroups = clodStats.residentGroups;
+        snapshot.queuedClodRequests = clodStats.queuedRequests;
+        snapshot.inFlightClodGroups = clodStats.queuedOrInFlightGroups + clodStats.dispatchedOrInFlightGroups;
+        snapshot.completedClodResults = clodStats.completedResults;
+        snapshot.pendingDirectStorageLaunches = clodStats.pendingDirectStorageLaunches;
+        snapshot.pendingDirectStorageUploads = clodStats.pendingDirectStorageUploads;
+    }
+    const auto taskStats = TaskSchedulerManager::GetInstance().GetQueueStats();
+    snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
+    snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
+    snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;
+    if (m_pObjectManager) {
+        const auto objectStats = m_pObjectManager->GetStats();
+        snapshot.deferredRetireQueueDepth = objectStats.deferredRetireQueueDepth;
+        snapshot.drawRecordsAllocated = objectStats.instanceDrawRecordsAllocated;
+    }
+    return snapshot;
+}
+
+void Renderer::SetDeterministicSamplingMode(bool enabled) {
+    m_deterministicSamplingMode = enabled;
+    if (m_pMaterialManager) {
+        m_pMaterialManager->SetTextureStreamingFeedbackSuppressed(enabled);
+    }
+    if (enabled) {
+        m_jitter = false;
+        movementState = {};
+    }
+}
+
 void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapshot& snapshot) {
     if (!m_pMeshManager || !m_pMaterialManager || !m_pIndirectCommandBufferManager) {
         return;
@@ -826,6 +871,9 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
 }
 
 void Renderer::ApplyPrimaryCameraInput(float elapsedSeconds) {
+    if (m_deterministicSamplingMode) {
+        return;
+    }
     if (!currentScene || !currentScene->HasUsablePrimaryCamera()) {
         return;
     }
@@ -2397,6 +2445,9 @@ void Renderer::WaitForFrame(uint8_t currentFrameIndex) {
 }
 
 void Renderer::Update(float elapsedSeconds) {
+    if (m_deterministicSamplingMode) {
+        elapsedSeconds = 0.0f;
+    }
     ZoneScopedN("Renderer::Update");
     BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
@@ -3214,6 +3265,9 @@ void Renderer::Render() {
     };
 
     auto deltaTime = m_frameTimer.tick();
+    if (m_deterministicSamplingMode) {
+        deltaTime = 0.0f;
+    }
     if (!IsSceneReadyForFrame()) {
         return;
     }

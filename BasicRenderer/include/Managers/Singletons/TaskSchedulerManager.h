@@ -22,6 +22,15 @@ namespace br {
 
 class TaskSchedulerManager {
 public:
+    struct QueueStats {
+        uint32_t ioQueued = 0;
+        uint32_t ioActive = 0;
+        uint32_t backgroundQueued = 0;
+        uint32_t backgroundActive = 0;
+        uint32_t shaderCompileQueued = 0;
+        uint32_t shaderCompileActive = 0;
+    };
+
     static TaskSchedulerManager& GetInstance();
 
     void Initialize(uint32_t ioThreadCount = 2, uint32_t backgroundThreadCount = 0);
@@ -55,6 +64,8 @@ public:
         return static_cast<uint32_t>(m_shaderCompileThreads.size());
     }
 
+    QueueStats GetQueueStats() const;
+
     template <typename Func>
     void ParallelFor(size_t itemCount, Func&& func) {
         ParallelFor({}, itemCount, std::forward<Func>(func));
@@ -87,13 +98,16 @@ private:
     std::deque<std::function<void()>> m_ioTasks;
     std::deque<std::function<void()>> m_backgroundTasks;
     std::deque<std::function<void()>> m_shaderCompileTasks;
-    std::mutex m_ioMutex;
-    std::mutex m_backgroundMutex;
-    std::mutex m_shaderCompileMutex;
+    mutable std::mutex m_ioMutex;
+    mutable std::mutex m_backgroundMutex;
+    mutable std::mutex m_shaderCompileMutex;
     std::condition_variable m_ioCv;
     std::condition_variable m_backgroundCv;
     std::condition_variable m_shaderCompileCv;
     std::atomic<uint32_t> m_ioRoundRobin = 0;
+    std::atomic<uint32_t> m_ioActive = 0;
+    std::atomic<uint32_t> m_backgroundActive = 0;
+    std::atomic<uint32_t> m_shaderCompileActive = 0;
     std::atomic<bool> m_ioShutdownRequested = false;
     std::atomic<bool> m_backgroundShutdownRequested = false;
     std::atomic<bool> m_shaderCompileShutdownRequested = false;

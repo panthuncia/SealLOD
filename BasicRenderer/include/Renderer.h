@@ -77,6 +77,26 @@ private:
 
 class Renderer {
 public:
+    struct SamplingReadinessSnapshot {
+        bool sceneTaskInFlight = false;
+        bool hasCommittedSceneSnapshot = false;
+        uint64_t committedSceneSnapshotSequence = 0;
+        uint64_t pendingSceneSnapshotSequence = 0;
+        uint32_t pendingTextureReloads = 0;
+        uint32_t fullResolutionTextures = 0;
+        uint32_t residentClodGroups = 0;
+        uint32_t queuedClodRequests = 0;
+        uint32_t inFlightClodGroups = 0;
+        uint32_t completedClodResults = 0;
+        uint32_t pendingDirectStorageLaunches = 0;
+        uint32_t pendingDirectStorageUploads = 0;
+        uint32_t ioTasks = 0;
+        uint32_t backgroundTasks = 0;
+        uint32_t shaderCompileTasks = 0;
+        uint64_t deferredRetireQueueDepth = 0;
+        uint64_t drawRecordsAllocated = 0;
+    };
+
     Renderer() = default;
 
     void Initialize(HWND hwnd, UINT x_res, UINT y_res);
@@ -97,6 +117,9 @@ public:
     void SetSceneRenderOverlapEnabled(bool enabled);
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
     ObjectManager::Stats GetObjectManagerStats() const;
+    SamplingReadinessSnapshot GetSamplingReadinessSnapshot() const;
+    void SetDeterministicSamplingMode(bool enabled);
+    bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
     ManagerInterface& GetManagerInterface() { return m_managerInterface; }
     const ManagerInterface& GetManagerInterface() const { return m_managerInterface; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
@@ -106,6 +129,7 @@ public:
 
 private:
 	bool m_isInitialized = false;
+    bool m_deterministicSamplingMode = false;
     HWND m_hwnd = nullptr;
     rhi::Device m_device;
 

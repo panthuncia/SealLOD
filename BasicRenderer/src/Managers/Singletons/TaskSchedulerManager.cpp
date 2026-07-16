@@ -121,6 +121,26 @@ TaskSchedulerManager& TaskSchedulerManager::GetInstance() {
     return instance;
 }
 
+TaskSchedulerManager::QueueStats TaskSchedulerManager::GetQueueStats() const {
+    QueueStats stats;
+    {
+        std::lock_guard<std::mutex> lock(m_ioMutex);
+        stats.ioQueued = static_cast<uint32_t>(m_ioTasks.size());
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_backgroundMutex);
+        stats.backgroundQueued = static_cast<uint32_t>(m_backgroundTasks.size());
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_shaderCompileMutex);
+        stats.shaderCompileQueued = static_cast<uint32_t>(m_shaderCompileTasks.size());
+    }
+    stats.ioActive = m_ioActive.load(std::memory_order_acquire);
+    stats.backgroundActive = m_backgroundActive.load(std::memory_order_acquire);
+    stats.shaderCompileActive = m_shaderCompileActive.load(std::memory_order_acquire);
+    return stats;
+}
+
 void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroundThreadCount) {
     if (m_initialized) {
         return;
@@ -579,7 +599,9 @@ void TaskSchedulerManager::IoWorkerLoop() {
             PlotIoQueueDepth(m_ioTasks.size());
         }
 
+        m_ioActive.fetch_add(1, std::memory_order_acq_rel);
         task();
+        m_ioActive.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     g_isIoWorkerThread = false;
@@ -615,7 +637,9 @@ void TaskSchedulerManager::BackgroundWorkerLoop() {
             PlotBackgroundQueueDepth(m_backgroundTasks.size());
         }
 
+        m_backgroundActive.fetch_add(1, std::memory_order_acq_rel);
         task();
+        m_backgroundActive.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     g_isBackgroundWorkerThread = false;
@@ -651,7 +675,9 @@ void TaskSchedulerManager::ShaderCompileWorkerLoop() {
             PlotShaderCompileQueueDepth(m_shaderCompileTasks.size());
         }
 
+        m_shaderCompileActive.fetch_add(1, std::memory_order_acq_rel);
         task();
+        m_shaderCompileActive.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     g_isShaderCompileWorkerThread = false;

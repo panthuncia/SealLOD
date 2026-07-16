@@ -1,5 +1,7 @@
 #include "Telemetry/NvPerfIntegration.h"
 
+#include <atomic>
+
 #include <spdlog/spdlog.h>
 
 #if BASICRENDERER_ENABLE_NVPERF
@@ -32,6 +34,8 @@
 
 namespace br::telemetry::nvperf {
 namespace {
+
+std::atomic<bool> g_streamingSuppressed{ false };
 
 #if BASICRENDERER_ENABLE_NVPERF
 bool InitializeNvPerf();
@@ -108,10 +112,14 @@ std::string CsvEscape(std::string_view text)
 }
 
 struct MetricSpec {
-    const char* name = nullptr;
+    std::string name;
     uint8_t metricType = NVPW_METRIC_TYPE_COUNTER;
     uint8_t rollupOp = NVPW_ROLLUP_OP_SUM;
     uint16_t submetric = NVPW_SUBMETRIC_NONE;
+    std::string outputName;
+    std::string id;
+    std::string unit;
+    bool required = true;
 };
 
 struct SelectedMetric {
@@ -119,7 +127,7 @@ struct SelectedMetric {
     NVPW_MetricEvalRequest request{};
 };
 
-constexpr std::array<MetricSpec, 34> kDefaultMetrics{ {
+const std::array<MetricSpec, 50> kDefaultMetrics{ {
     { "gpu__time_duration", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
     { "sm__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
     { "smsp__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
@@ -154,6 +162,22 @@ constexpr std::array<MetricSpec, 34> kDefaultMetrics{ {
     { "dram__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
     { "tensor__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
     { "rtcore__throughput", NVPW_METRIC_TYPE_THROUGHPUT, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED },
+    { "tpc__warps_launched", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "tpc__warps_launched_shader_cs", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "tpc__warps_launched_shader_ps", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_NONE },
+    { "tpc__warp_launch_cycles_stalled_shader_cs_reason_barrier_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_cs_barrier_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_cs_reason_cta_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_cs_cta_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_cs_reason_register_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_cs_register_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_cs_reason_shmem_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_cs_shmem_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_cs_reason_warp_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_cs_warp_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_ps", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_ps_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_ps_reason_ooo_warp_completion", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_ps_ooo_warp_completion_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_ps_reason_register_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_ps_register_allocation_pct" },
+    { "tpc__warp_launch_cycles_stalled_shader_ps_reason_warp_allocation", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__warp_launch_stalled_ps_warp_allocation_pct" },
+    { "tpc__warps_inactive_sm_active_realtime", NVPW_METRIC_TYPE_COUNTER, NVPW_ROLLUP_OP_SUM, NVPW_SUBMETRIC_PCT_OF_PEAK_SUSTAINED_ELAPSED, "tpc__idle_warp_slots_on_active_sms_pct" },
+    { "tpc__average_registers_per_thread_shader_cs", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "tpc__average_registers_per_thread_shader_ps", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
+    { "tpc__average_sharedmem_bytes_per_cta", NVPW_METRIC_TYPE_RATIO, NVPW_ROLLUP_OP_AVG, NVPW_SUBMETRIC_RATIO },
 } };
 
 struct QueueCapture {
@@ -176,15 +200,22 @@ struct QueueCapture {
 struct D3D12PassProfiler {
     bool envChecked = false;
     bool requested = false;
+    bool programmaticConfigured = false;
+    bool armed = false;
     bool initialized = false;
     bool failed = false;
     bool finished = false;
     bool csvHeaderWritten = false;
     uint64_t captureStartFrame = 0;
+    uint64_t captureEndFrame = 0;
+    uint64_t sampleId = 0;
     std::string chipName;
     std::string controllerQueueName = "Graphics";
     ID3D12Device* nativeDevice = nullptr;
     std::filesystem::path csvPath;
+    std::vector<MetricSpec> requestedMetrics;
+    std::vector<MetricRequest> unsupportedMetrics;
+    std::vector<PassFilter> passFilters;
     std::vector<SelectedMetric> metrics;
     std::vector<uint8_t> configImage;
     std::vector<uint8_t> counterDataPrefix;
@@ -194,6 +225,10 @@ struct D3D12PassProfiler {
     size_t captureStartDelayFrames = 120;
     size_t traceBufferCount = 0;
     uint32_t syncTimeoutMs = 10000;
+    uint64_t droppedRanges = 0;
+    uint64_t droppedTraceBytes = 0;
+    std::string error;
+    std::optional<CaptureResult> result;
     std::mutex mutex;
     std::unordered_map<ID3D12CommandQueue*, QueueCapture> queues;
     std::unordered_map<ID3D12GraphicsCommandList*, uint32_t> activeCommandListRanges;
@@ -345,7 +380,7 @@ std::optional<size_t> FindMetricIndex(NVPW_MetricsEvaluator* evaluator, const Me
 
     for (size_t i = 0; i < names.numMetrics; ++i) {
         const char* metricName = names.pMetricNames + names.pMetricNameBeginIndices[i];
-        if (metricName && std::strcmp(metricName, spec.name) == 0) {
+        if (metricName && spec.name == metricName) {
             return i;
         }
     }
@@ -355,6 +390,7 @@ std::optional<size_t> FindMetricIndex(NVPW_MetricsEvaluator* evaluator, const Me
 bool BuildD3D12ProfilerConfig(D3D12PassProfiler& profiler, const char* chipName, const uint8_t* counterAvailability, size_t counterAvailabilitySize)
 {
     profiler.metrics.clear();
+    profiler.unsupportedMetrics.clear();
     profiler.configImage.clear();
     profiler.counterDataPrefix.clear();
 
@@ -377,10 +413,23 @@ bool BuildD3D12ProfilerConfig(D3D12PassProfiler& profiler, const char* chipName,
     std::vector<NVPW_RawCounterRequest> rawCounterRequests;
     std::unordered_set<std::string> rawCounterNames;
 
-    for (const MetricSpec& spec : kDefaultMetrics) {
+    const auto& requestedMetrics = profiler.requestedMetrics.empty()
+        ? std::vector<MetricSpec>(kDefaultMetrics.begin(), kDefaultMetrics.end())
+        : profiler.requestedMetrics;
+    for (const MetricSpec& spec : requestedMetrics) {
         const auto metricIndex = FindMetricIndex(evaluator, spec);
         if (!metricIndex) {
             spdlog::warn("NVPerf: metric '{}' is unavailable on chip '{}'", spec.name, chipName);
+            profiler.unsupportedMetrics.push_back({
+                spec.id.empty() ? spec.name : spec.id,
+                spec.name,
+                spec.outputName,
+                spec.unit,
+                spec.metricType,
+                spec.rollupOp,
+                spec.submetric,
+                spec.required
+            });
             continue;
         }
 
@@ -754,23 +803,25 @@ bool AppendQueueCsvRows(D3D12PassProfiler& profiler, const QueueCapture& queueCa
     }
     NVPW_MetricsEvaluator* evaluator = evalInit.pMetricsEvaluator;
 
-    const std::filesystem::path parentPath = profiler.csvPath.parent_path();
-    if (!parentPath.empty()) {
-        std::filesystem::create_directories(parentPath);
-    }
-    const bool writeHeader = !std::filesystem::exists(profiler.csvPath) || std::filesystem::file_size(profiler.csvPath) == 0;
-    std::ofstream out(profiler.csvPath, std::ios::app);
-    if (!out) {
-        spdlog::warn("NVPerf: failed to open CSV '{}'", profiler.csvPath.string());
-        return false;
-    }
-
-    if (writeHeader) {
-        out << "capture_start_frame,queue,range_index,pass_name";
-        for (const auto& metric : profiler.metrics) {
-            out << ',' << CsvEscape(metric.spec.name);
+    std::ofstream out;
+    if (!profiler.csvPath.empty()) {
+        const std::filesystem::path parentPath = profiler.csvPath.parent_path();
+        if (!parentPath.empty()) {
+            std::filesystem::create_directories(parentPath);
         }
-        out << '\n';
+        const bool writeHeader = !std::filesystem::exists(profiler.csvPath) || std::filesystem::file_size(profiler.csvPath) == 0;
+        out.open(profiler.csvPath, std::ios::app);
+        if (!out) {
+            spdlog::warn("NVPerf: failed to open CSV '{}'", profiler.csvPath.string());
+            return false;
+        }
+        if (writeHeader) {
+            out << "capture_start_frame,queue,range_index,pass_name";
+            for (const auto& metric : profiler.metrics) {
+                out << ',' << CsvEscape(metric.spec.outputName.empty() ? metric.spec.name : metric.spec.outputName);
+            }
+            out << '\n';
+        }
     }
 
     std::vector<NVPW_MetricEvalRequest> requests;
@@ -780,6 +831,7 @@ bool AppendQueueCsvRows(D3D12PassProfiler& profiler, const QueueCapture& queueCa
     }
     std::vector<double> values(requests.size(), 0.0);
 
+    std::unordered_map<std::string, uint32_t> occurrences;
     for (size_t rangeIndex = 0; rangeIndex < numRanges.numRanges; ++rangeIndex) {
         std::fill(values.begin(), values.end(), 0.0);
         NVPW_MetricsEvaluator_EvaluateToGpuValues_Params eval{ NVPW_MetricsEvaluator_EvaluateToGpuValues_Params_STRUCT_SIZE };
@@ -797,14 +849,29 @@ bool AppendQueueCsvRows(D3D12PassProfiler& profiler, const QueueCapture& queueCa
         }
 
         const std::string rangeName = GetRangeName(queueCapture.counterDataImage, rangeIndex);
-        out << profiler.captureStartFrame
-            << ',' << CsvEscape(queueCapture.queueName)
-            << ',' << rangeIndex
-            << ',' << CsvEscape(rangeName.empty() ? "<unnamed>" : rangeName);
-        for (double value : values) {
-            out << ',' << value;
+        const std::string resolvedRangeName = rangeName.empty() ? "<unnamed>" : rangeName;
+        const std::string occurrenceKey = queueCapture.queueName + "\n" + resolvedRangeName;
+        RangeResult result;
+        result.queue = queueCapture.queueName;
+        result.passName = resolvedRangeName;
+        result.occurrence = occurrences[occurrenceKey]++;
+        result.rangeIndex = static_cast<uint32_t>(rangeIndex);
+        result.values = values;
+        if (!profiler.result) {
+            profiler.result.emplace();
         }
-        out << '\n';
+        profiler.result->ranges.push_back(std::move(result));
+
+        if (out) {
+            out << profiler.captureStartFrame
+                << ',' << CsvEscape(queueCapture.queueName)
+                << ',' << rangeIndex
+                << ',' << CsvEscape(resolvedRangeName);
+            for (double value : values) {
+                out << ',' << value;
+            }
+            out << '\n';
+        }
     }
 
     NVPW_MetricsEvaluator_Destroy_Params destroy{ NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
@@ -815,7 +882,7 @@ bool AppendQueueCsvRows(D3D12PassProfiler& profiler, const QueueCapture& queueCa
         "NVPerf: wrote {} pass metric rows for queue '{}' to '{}'",
         numRanges.numRanges,
         queueCapture.queueName,
-        profiler.csvPath.string());
+        profiler.csvPath.empty() ? "<structured result>" : profiler.csvPath.string());
     return true;
 }
 
@@ -834,6 +901,8 @@ bool DecodeQueueCapture(D3D12PassProfiler& profiler, QueueCapture& queueCapture)
         }
 
         if (decode.numRangesDropped > 0 || decode.numTraceBytesDropped > 0) {
+            profiler.droppedRanges += decode.numRangesDropped;
+            profiler.droppedTraceBytes += decode.numTraceBytesDropped;
             spdlog::warn(
                 "NVPerf: queue '{}' decode dropped ranges={} traceBytes={}",
                 queueCapture.queueName,
@@ -870,7 +939,10 @@ bool PrepareProfilerIfRequested(rhi::Backend backend, rhi::Device device, rhi::Q
     auto& profiler = Profiler();
     if (!profiler.envChecked) {
         profiler.envChecked = true;
-        profiler.requested = IsTruthyEnv("BASICRENDERER_NVPERF_CAPTURE");
+        if (!profiler.programmaticConfigured) {
+            profiler.requested = IsTruthyEnv("BASICRENDERER_NVPERF_CAPTURE");
+            profiler.armed = profiler.requested;
+        }
         std::string queueOverride = ReadEnvString("BASICRENDERER_NVPERF_QUEUE");
         std::transform(queueOverride.begin(), queueOverride.end(), queueOverride.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (queueOverride == "compute" || queueOverride == "async_compute" || queueOverride == "async-compute") {
@@ -888,10 +960,10 @@ bool PrepareProfilerIfRequested(rhi::Backend backend, rhi::Device device, rhi::Q
             : std::filesystem::path(csvOverride);
     }
 
-    if (!profiler.requested || profiler.failed || profiler.finished) {
+    if (!profiler.requested || !profiler.armed || profiler.failed || profiler.finished) {
         return false;
     }
-    if (frameNumber < profiler.captureStartDelayFrames) {
+    if (!profiler.programmaticConfigured && frameNumber < profiler.captureStartDelayFrames) {
         return false;
     }
     if (backend != rhi::Backend::D3D12) {
@@ -965,11 +1037,19 @@ bool PrepareProfilerIfRequested(rhi::Backend backend, rhi::Device device, rhi::Q
 
     if (!BuildD3D12ProfilerConfig(profiler, profiler.chipName.c_str(), counterAvailabilityImage, counterAvailabilityImageSize)) {
         profiler.failed = true;
+        profiler.error = "failed to build NVPerf metric configuration";
         return false;
+    }
+    for (const auto& unsupported : profiler.unsupportedMetrics) {
+        if (unsupported.required) {
+            profiler.failed = true;
+            profiler.error = "required NVPerf metric is unavailable: " + unsupported.name;
+            return false;
+        }
     }
 
     profiler.captureStartFrame = frameNumber;
-    profiler.traceBufferCount = std::max<size_t>(profiler.traceBufferCount, 5);
+    profiler.traceBufferCount = std::max({ profiler.traceBufferCount, profiler.configPassCount, size_t{ 5 } });
     profiler.initialized = true;
     spdlog::info(
         "NVPerf: pass metric capture armed at frame {} queue='{}' traceBuffers={} output='{}'",
@@ -1228,6 +1308,198 @@ void LogStartupProbe(rhi::Backend backend, rhi::Device device, rhi::Queue graphi
 #endif
 }
 
+bool ConfigureCapture(const CaptureConfiguration& configuration, std::string& error)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    const bool sessionActive = std::ranges::any_of(profiler.queues, [](const auto& entry) {
+        return entry.second.sessionActive || entry.second.passActive;
+    });
+    if (profiler.armed || sessionActive) {
+        error = "NVPerf capture is active";
+        return false;
+    }
+    if (configuration.metrics.empty()) {
+        error = "at least one NVPerf metric is required";
+        return false;
+    }
+
+    profiler.programmaticConfigured = true;
+    profiler.envChecked = true;
+    profiler.requested = false;
+    profiler.armed = false;
+    profiler.initialized = false;
+    profiler.failed = false;
+    profiler.finished = false;
+    profiler.result.reset();
+    profiler.requestedMetrics.clear();
+    profiler.passFilters = configuration.passes;
+    profiler.controllerQueueName = configuration.controllerQueue.empty() ? "Graphics" : configuration.controllerQueue;
+    profiler.syncTimeoutMs = configuration.syncTimeoutMs;
+    profiler.csvPath.clear();
+    for (const auto& metric : configuration.metrics) {
+        if (metric.name.empty()) {
+            error = "NVPerf metric name cannot be empty";
+            return false;
+        }
+        profiler.requestedMetrics.push_back({
+            metric.name,
+            metric.metricType,
+            metric.rollupOp,
+            metric.submetric,
+            metric.outputName,
+            metric.id,
+            metric.unit,
+            metric.required
+        });
+    }
+    return true;
+#else
+    (void)configuration;
+    error = "BasicRenderer was built without NVPerf support";
+    return false;
+#endif
+}
+
+bool ArmCapture(uint64_t sampleId, std::string& error)
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (!profiler.programmaticConfigured) {
+        error = "NVPerf capture has not been configured";
+        return false;
+    }
+    if (profiler.armed && !profiler.finished && !profiler.failed) {
+        error = "NVPerf capture is already armed";
+        return false;
+    }
+    for (auto& [_, queueCapture] : profiler.queues) {
+        ReleaseQueueSyncObjects(queueCapture);
+    }
+    profiler.queues.clear();
+    profiler.activeCommandListRanges.clear();
+    profiler.requested = true;
+    profiler.armed = true;
+    profiler.initialized = false;
+    profiler.failed = false;
+    profiler.finished = false;
+    profiler.sampleId = sampleId;
+    profiler.captureStartFrame = 0;
+    profiler.captureEndFrame = 0;
+    profiler.droppedRanges = 0;
+    profiler.droppedTraceBytes = 0;
+    profiler.error.clear();
+    profiler.result.emplace();
+    profiler.result->sampleId = sampleId;
+    return true;
+#else
+    (void)sampleId;
+    error = "BasicRenderer was built without NVPerf support";
+    return false;
+#endif
+}
+
+bool CaptureConfigured()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    return profiler.programmaticConfigured;
+#else
+    return false;
+#endif
+}
+
+bool CaptureComplete()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    return profiler.armed && (profiler.finished || profiler.failed);
+#else
+    return false;
+#endif
+}
+
+size_t ScheduledPassCount()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    return profiler.configPassCount;
+#else
+    return 0;
+#endif
+}
+
+std::optional<CaptureResult> TakeCaptureResult()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    if (!profiler.armed || (!profiler.finished && !profiler.failed)) {
+        return std::nullopt;
+    }
+    if (!profiler.result) {
+        profiler.result.emplace();
+    }
+    profiler.result->sampleId = profiler.sampleId;
+    profiler.result->startFrame = profiler.captureStartFrame;
+    profiler.result->endFrame = profiler.captureEndFrame;
+    profiler.result->scheduledPasses = profiler.configPassCount;
+    profiler.result->chipName = profiler.chipName;
+    profiler.result->droppedRanges = profiler.droppedRanges;
+    profiler.result->droppedTraceBytes = profiler.droppedTraceBytes;
+    if (profiler.failed) {
+        profiler.result->success = false;
+        profiler.result->error = profiler.error.empty() ? "NVPerf capture failed" : profiler.error;
+        profiler.result->unsupportedMetrics = profiler.unsupportedMetrics;
+    }
+    auto result = std::move(profiler.result);
+    profiler.result.reset();
+    profiler.armed = false;
+    profiler.requested = false;
+    return result;
+#else
+    return std::nullopt;
+#endif
+}
+
+void ResetCaptureConfiguration()
+{
+#if BASICRENDERER_ENABLE_NVPERF
+    auto& profiler = Profiler();
+    std::lock_guard<std::mutex> lock(profiler.mutex);
+    for (auto& [_, queueCapture] : profiler.queues) {
+        ReleaseQueueSyncObjects(queueCapture);
+    }
+    profiler.queues.clear();
+    profiler.activeCommandListRanges.clear();
+    profiler.requestedMetrics.clear();
+    profiler.passFilters.clear();
+    profiler.programmaticConfigured = false;
+    profiler.requested = false;
+    profiler.armed = false;
+    profiler.initialized = false;
+    profiler.failed = false;
+    profiler.finished = false;
+    profiler.result.reset();
+#endif
+    g_streamingSuppressed.store(false, std::memory_order_release);
+}
+
+void SetStreamingSuppressed(bool suppressed)
+{
+    g_streamingSuppressed.store(suppressed, std::memory_order_release);
+}
+
+bool StreamingSuppressed()
+{
+    return g_streamingSuppressed.load(std::memory_order_acquire);
+}
+
 bool CaptureRequestedByEnvironment()
 {
 #if BASICRENDERER_ENABLE_NVPERF
@@ -1281,6 +1553,18 @@ bool ServicePendingGpuOperations()
     return false;
 #endif
 }
+
+#if BASICRENDERER_ENABLE_NVPERF
+bool PassIsSelected(const D3D12PassProfiler& profiler, std::string_view queueName, std::string_view passName)
+{
+    if (profiler.passFilters.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(profiler.passFilters, [&](const PassFilter& filter) {
+        return filter.name == passName && (filter.queue.empty() || filter.queue == queueName);
+    });
+}
+#endif
 
 void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue, uint64_t frameNumber)
 {
@@ -1373,6 +1657,33 @@ void EndFrameCapture(rhi::Backend backend, rhi::Queue graphicsQueue, uint64_t fr
 
     profiler.finished = allDecoded;
     if (profiler.finished) {
+        profiler.captureEndFrame = frameNumber;
+        if (!profiler.result) {
+            profiler.result.emplace();
+        }
+        profiler.result->sampleId = profiler.sampleId;
+        profiler.result->startFrame = profiler.captureStartFrame;
+        profiler.result->endFrame = frameNumber;
+        profiler.result->scheduledPasses = profiler.configPassCount;
+        profiler.result->droppedRanges = profiler.droppedRanges;
+        profiler.result->droppedTraceBytes = profiler.droppedTraceBytes;
+        profiler.result->success = profiler.droppedRanges == 0 && profiler.droppedTraceBytes == 0;
+        profiler.result->error = profiler.result->success ? std::string{} : "NVPerf dropped counter data";
+        profiler.result->chipName = profiler.chipName;
+        profiler.result->unsupportedMetrics = profiler.unsupportedMetrics;
+        profiler.result->metrics.clear();
+        for (const auto& metric : profiler.metrics) {
+            profiler.result->metrics.push_back({
+                metric.spec.id.empty() ? metric.spec.name : metric.spec.id,
+                metric.spec.name,
+                metric.spec.outputName,
+                metric.spec.unit,
+                metric.spec.metricType,
+                metric.spec.rollupOp,
+                metric.spec.submetric,
+                metric.spec.required
+            });
+        }
         spdlog::info(
             "NVPerf: pass metric capture complete startFrame={} endFrame={} output='{}'",
             profiler.captureStartFrame,
@@ -1399,6 +1710,10 @@ void BeginPassRange(rhi::Backend backend, rhi::CommandList commandList, rhi::Que
     if (std::strcmp(resolvedQueueName, profiler.controllerQueueName.c_str()) != 0) {
         return;
     }
+    const char* resolvedPassName = passName && passName[0] != '\0' ? passName : "<unnamed>";
+    if (!PassIsSelected(profiler, resolvedQueueName, resolvedPassName)) {
+        return;
+    }
 
     ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(queue);
     ID3D12GraphicsCommandList* nativeCommandList = rhi::dx12::get_cmd_list(commandList);
@@ -1419,7 +1734,7 @@ void BeginPassRange(rhi::Backend backend, rhi::CommandList commandList, rhi::Que
 
     NVPW_D3D12_Profiler_CommandList_PushRange_Params push{ NVPW_D3D12_Profiler_CommandList_PushRange_Params_STRUCT_SIZE };
     push.pCommandList = nativeCommandList;
-    push.pRangeName = passName && passName[0] != '\0' ? passName : "<unnamed>";
+    push.pRangeName = resolvedPassName;
     push.rangeNameLength = std::strlen(push.pRangeName);
     if (!LogIfFailed(NVPW_D3D12_Profiler_CommandList_PushRange(&push), "NVPW_D3D12_Profiler_CommandList_PushRange")) {
         ++profiler.activeCommandListRanges[nativeCommandList];

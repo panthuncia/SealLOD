@@ -351,7 +351,7 @@ void MaterialManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex) {
 	(void)frameIndex;
 }
 void MaterialManager::RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService) {
-	if (m_textureStreamingManager) {
+	if (m_textureStreamingManager && !m_textureStreamingFeedbackSuppressed) {
 		m_textureStreamingManager->RequestTextureStreamingFeedbackReadback(readbackService);
 	}
 }
