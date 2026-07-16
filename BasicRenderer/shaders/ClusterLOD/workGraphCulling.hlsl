@@ -431,6 +431,8 @@ static const uint WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED = 53;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_CLIPMAP_MISSES = 54;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_REGION_HITS = 55;
 static const uint WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM = 56;
+static const uint WG_COUNTER_OBJECT_CULL_REJECTED_OCCLUSION = 57;
+static const uint WG_COUNTER_OBJECT_REPLAY_REJECTED_OCCLUSION = 58;
 static const uint WG_COUNTER_OBJECT_CULL_INVALID_BOUNDS = 63;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES = 64;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES_CLIPPED = 65;
@@ -2090,6 +2092,62 @@ float3 ToViewSpace(float3 objectCenter, row_major matrix objectModelMatrix, row_
     return mul(worldSpaceCenter, viewMatrix).xyz;
 }
 
+bool CLodReplayRootOccluded(
+    TraverseNodeRecord rec,
+    CLodMeshMetadata clodMeshMetadata,
+    InstanceDrawRecordBuffer drawRecord,
+    PerMeshInstanceBuffer instanceData,
+    PerObjectBuffer instanceTransform,
+    Camera cullCamera)
+{
+    if (UnpackSourceTag(rec.nodeIdPacked) != CLOD_RECORD_SOURCE_REPLAY ||
+        rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
+        UnpackNodeId(rec.nodeIdPacked) != CLodResolveTraversalRootNode(clodMeshMetadata) ||
+        !CLodWorkGraphOcclusionEnabled() ||
+        cullCamera.isOrtho)
+    {
+        return false;
+    }
+
+    StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
+        ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+    const uint depthMapDescriptorIndex =
+        viewDepthSRVIndices[rec.viewId].linearDepthSRVIndex;
+    if (depthMapDescriptorIndex == 0u)
+    {
+        return false;
+    }
+
+    float coarseBoundsScale = 1.0f;
+    const BoundingSphere coarseBounds =
+        LoadCoarseCullBoundsForDrawRecord(drawRecord, instanceData, coarseBoundsScale);
+    const row_major matrix modelMatrix = instanceTransform.model;
+    const float3 viewSpaceCenter =
+        ToViewSpace(coarseBounds.sphere.xyz, modelMatrix, cullCamera.view);
+    const float worldRadius = coarseBounds.sphere.w * coarseBoundsScale *
+        MaxAxisScale_RowVector(modelMatrix);
+    if (any(isnan(viewSpaceCenter)) || any(isinf(viewSpaceCenter)) ||
+        isnan(worldRadius) || isinf(worldRadius))
+    {
+        return false;
+    }
+
+    bool occlusionCulled = false;
+    OcclusionCullingPerspectiveTexture2D(
+        occlusionCulled,
+        cullCamera,
+        viewSpaceCenter,
+        -viewSpaceCenter.z,
+        worldRadius,
+        depthMapDescriptorIndex,
+        cullCamera.projection);
+    if (occlusionCulled)
+    {
+        WGTelemetryAdd(WG_COUNTER_OBJECT_REPLAY_REJECTED_OCCLUSION, 1u);
+    }
+    return occlusionCulled;
+}
+
 bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera camera)
 {
     [unroll]
@@ -2816,6 +2874,7 @@ void WG_ObjectCull(
                         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
         const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
+        const uint rootNodeId = CLodResolveTraversalRootNode(clodMeshMetadata);
         const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
         if (voxelRootCandidate)
         {
@@ -2866,9 +2925,42 @@ void WG_ObjectCull(
             }
         }
         if (!culled) {
+            bool occlusionCulled = false;
+            if (CLodWorkGraphOcclusionEnabled() && !camera.isOrtho) {
+                StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
+                    ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+                const uint depthMapDescriptorIndex =
+                    viewDepthSRVIndices[hdr.viewDataIndex].linearDepthSRVIndex;
+                if (depthMapDescriptorIndex != 0u) {
+                    const row_major matrix prevModelMatrix = instanceTransform.prevModel;
+                    const float3 prevViewSpaceCenter =
+                        ToViewSpace(objectSpaceCenter, prevModelMatrix, camera.prevView);
+                    const float prevWorldRadius = coarseBounds.sphere.w * coarseBoundsScale *
+                        MaxAxisScale_RowVector(prevModelMatrix);
+                    OcclusionCullingPerspectiveTexture2D(
+                        occlusionCulled,
+                        camera,
+                        prevViewSpaceCenter,
+                        -prevViewSpaceCenter.z,
+                        prevWorldRadius,
+                        depthMapDescriptorIndex,
+                        camera.prevUnjitteredProjection);
+                }
+            }
+            if (occlusionCulled) {
+                WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_OCCLUSION, 1u);
+                ReplayTryAppendNode(
+                    drawRecordIndex,
+                    hdr.viewDataIndex,
+                    rootNodeId,
+                    CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
+                entryVisible = false;
+            }
+        }
+        if (!culled && entryVisible) {
             outRecord.viewId = hdr.viewDataIndex;
             outRecord.instanceIndex = drawRecordIndex;
-            outRecord.nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
+            outRecord.nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u);
             outRecord.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
             outCount = 1;
 
@@ -2968,6 +3060,13 @@ void WG_TraverseNodes(
         const uint cullViewId = rec.viewId;
         const uint lodViewId = CLodResolveLodViewId(cullViewId);
         const Camera cullCamera = cameras[cullViewId];
+        const bool replayRootOcclusionCulled = CLodReplayRootOccluded(
+            rec,
+            clodMeshMetadata,
+            drawRecord,
+            instanceData,
+            instanceTransform,
+            cullCamera);
         StructuredBuffer<CullingCameraInfo> cameraInfos =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
         const CullingCameraInfo lodCam = cameraInfos[lodViewId];
@@ -3026,15 +3125,16 @@ void WG_TraverseNodes(
         const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
         const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
         const bool nodeCulled =
-            CLodWorkGraphFrustumCullingEnabled() &&
-            !replaySource &&
-            CLodNodeBoundsOutsideFrustum(
-                nodeCullClassification,
-                node.metric.cullCenterAndRadius,
-                nodeCullBounds,
-                objectModelMatrix,
-                cullUniformScale,
-                cullCamera);
+            replayRootOcclusionCulled ||
+            (CLodWorkGraphFrustumCullingEnabled() &&
+             !replaySource &&
+             CLodNodeBoundsOutsideFrustum(
+                 nodeCullClassification,
+                 node.metric.cullCenterAndRadius,
+                 nodeCullBounds,
+                 objectModelMatrix,
+                 cullUniformScale,
+                 cullCamera));
     #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
         const bool dirtyPageCullingEnabled =

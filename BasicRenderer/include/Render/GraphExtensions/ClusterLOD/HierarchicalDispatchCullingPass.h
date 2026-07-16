@@ -84,6 +84,7 @@ private:
     PipelineState m_pureComputeReplayNodesPipelineState;
     PipelineState m_pureComputeReplayClustersPipelineState;
     PipelineState m_pureComputeTraversePipelineState;
+    PipelineState m_pureComputeLeafPipelineState;
     PipelineState m_pureComputeClusterPipelineState;
     PipelineState m_pureComputeDenseClusterPipelineState;
     rhi::CommandSignaturePtr m_pureComputeDispatchCommandSignature;

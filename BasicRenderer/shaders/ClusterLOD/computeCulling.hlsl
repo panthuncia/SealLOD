@@ -84,9 +84,6 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
 
     const uint count = min(replayState[0].nodeWriteCount, min(CLOD_WG_VISIBLE_CLUSTERS_CAPACITY, CLOD_NODE_REPLAY_CAPACITY));
     const uint index = dispatchThreadID.x;
-    if (index == 0u) {
-        outCounter[0] = count;
-    }
     if (index >= count) {
         return;
     }
@@ -99,7 +96,39 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     record.nodeIdPacked = header.y;
     record.viewId = header.z;
     record.assemblyTransformIndex = header.w;
-    outFrontier[index] = record;
+
+    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
+    StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+    const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
+    const CLodMeshMetadata clodMeshMetadata =
+        clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
+    const PerMeshInstanceBuffer instanceData =
+        LoadMeshTemplateForDraw(record.instanceIndex);
+    const PerObjectBuffer instanceTransform =
+        LoadInstanceTransformForDrawRecordWithAssemblyTransform(
+            drawRecord,
+            record.assemblyTransformIndex);
+    StructuredBuffer<Camera> cameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    const Camera cullCamera = cameras[record.viewId];
+    if (CLodReplayRootOccluded(
+        record,
+        clodMeshMetadata,
+        drawRecord,
+        instanceData,
+        instanceTransform,
+        cullCamera))
+    {
+        return;
+    }
+
+    uint outputIndex = 0u;
+    InterlockedAdd(outCounter[0], 1u, outputIndex);
+    if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
+    {
+        outFrontier[outputIndex] = record;
+    }
 }
 
 [numthreads(32, 1, 1)]
@@ -218,6 +247,39 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
+    const uint rootNodeId = CLodResolveTraversalRootNode(clodMeshMetadata);
+    bool occlusionCulled = false;
+    if (CLodWorkGraphOcclusionEnabled() && !camera.isOrtho) {
+        StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
+            ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+        const uint depthMapDescriptorIndex =
+            viewDepthSRVIndices[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX].linearDepthSRVIndex;
+        if (depthMapDescriptorIndex != 0u) {
+            const row_major matrix prevModelMatrix = instanceTransform.prevModel;
+            const float3 prevViewSpaceCenter =
+                ToViewSpace(objectSpaceCenter, prevModelMatrix, camera.prevView);
+            const float prevWorldRadius = coarseBounds.sphere.w * coarseBoundsScale *
+                MaxAxisScale_RowVector(prevModelMatrix);
+            OcclusionCullingPerspectiveTexture2D(
+                occlusionCulled,
+                camera,
+                prevViewSpaceCenter,
+                -prevViewSpaceCenter.z,
+                prevWorldRadius,
+                depthMapDescriptorIndex,
+                camera.prevUnjitteredProjection);
+        }
+    }
+    if (occlusionCulled) {
+        WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_OCCLUSION, 1u);
+        ReplayTryAppendNode(
+            drawRecordIndex,
+            CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX,
+            rootNodeId,
+            CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
+        return;
+    }
+
     RWStructuredBuffer<TraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
@@ -229,7 +291,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     outFrontier[outputIndex].viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
     outFrontier[outputIndex].instanceIndex = drawRecordIndex;
-    outFrontier[outputIndex].nodeIdPacked = PackTraverseNodeId(CLodResolveTraversalRootNode(clodMeshMetadata), CLOD_RECORD_SOURCE_PASS1, 1u);
+    outFrontier[outputIndex].nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u);
     outFrontier[outputIndex].assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
@@ -241,15 +303,21 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     }
 }
 
+#ifndef CLOD_PC_LEAF_ONLY
+#define CLOD_PC_LEAF_ONLY 0
+#endif
+
 [numthreads(64, 1, 1)]
 void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     StructuredBuffer<TraverseNodeRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
+#if !CLOD_PC_LEAF_ONLY
     RWStructuredBuffer<TraverseNodeRecord> nextFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<TraverseNodeRecord> nextLeafFrontier = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextLeafCounter = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX];
+#endif
     RWStructuredBuffer<CLodClusterRunRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> clusterCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
@@ -299,10 +367,12 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     CLodTelemetryTraverseWaveClassification(
         node.range.isLeaf == CLOD_NODE_INTERNAL,
         isSkinned);
+#if !CLOD_PC_LEAF_ONLY
     const bool skinnedAssemblyPortal =
         node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT &&
         isSkinned &&
         clodMeshMetadata.assemblyInstanceCount != 0u;
+#endif
     const bool assemblyPortalTraversal = rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
     if (assemblyPortalTraversal)
     {
@@ -318,12 +388,16 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             1);
     }
 
+#if CLOD_PC_LEAF_ONLY
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_LEAF_NODE_RECORDS, 1);
+#else
     if (node.range.isLeaf == CLOD_NODE_INTERNAL) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_INTERNAL_NODE_RECORDS, 1);
     }
     else {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_LEAF_NODE_RECORDS, 1);
     }
+#endif
 
     const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
     const float cullUniformScale = objectUniformScale;
@@ -366,6 +440,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         return;
     }
 
+#if !CLOD_PC_LEAF_ONLY
     if (node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT) {
         WGTelemetryAdd(WG_COUNTER_ASSEMBLY_INSTANCE_ROOT_RECORDS, 1);
         if (rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
@@ -421,8 +496,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         }
         return;
     }
+#endif
 
+#if !CLOD_PC_LEAF_ONLY
     if (node.range.isLeaf != CLOD_NODE_INTERNAL) {
+#endif
         bool nodeTouchesDirtyPages = true;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         if (dirtyPageCullingEnabled) {
@@ -607,6 +685,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             remainingMeshlets -= chunkCount;
         }
         return;
+#if !CLOD_PC_LEAF_ONLY
     }
 
     const float3 lodCheckWorldCenter = mul(float4(nodeLodCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
@@ -768,6 +847,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     }
     WGTelemetryAdd(WG_COUNTER_TRAVERSE_ACTIVE_CHILD_THREADS, emittedChildCount);
     WGTelemetryAdd(WG_COUNTER_TRAVERSE_CHILD_RECORDS_EMITTED, emittedChildCount);
+#endif
 }
 
 [numthreads(32, 1, 1)]

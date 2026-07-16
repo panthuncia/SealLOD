@@ -316,6 +316,8 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     if (enableComputePageJobDescriptorBuffer) {
         pureComputeDefines.push_back({ L"CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID", pageJobDescriptorResourceIdDefine.c_str() });
     }
+    std::vector<DxcDefine> pureComputeLeafDefines = pureComputeDefines;
+    pureComputeLeafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });
 
     auto& psoManager = PSOManager::GetInstance();
     const auto computeLayout = psoManager.GetComputeRootSignature().GetHandle();
@@ -379,6 +381,12 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         L"PureComputeTraverseFrontierCS",
         pureComputeDefines,
         "CLod.PureCompute.Traverse");
+    m_pureComputeLeafPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"PureComputeTraverseFrontierCS",
+        pureComputeLeafDefines,
+        "CLod.PureCompute.Leaf");
     m_pureComputeClusterPipelineState = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/computeCulling.hlsl",
@@ -1256,6 +1264,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             m_pureComputeClusterFrontierBuffer,
             m_pureComputeClusterCounterBuffer,
         });
+        BindResourceDescriptorIndices(commandList, m_pureComputeLeafPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeLeafPipelineState.GetAPIPipelineState().GetHandle());
         dispatchNodeFrontier(currentLeafFrontier, currentLeafCounter, m_pureComputeLeafDispatchArgsBuffer);
         nodeDispatchArgsNeedReuseBarrier = true;
         leafDispatchArgsNeedReuseBarrier = true;

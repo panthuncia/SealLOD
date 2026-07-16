@@ -74,8 +74,8 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     ClusterCullShadowDirtyRegionHits,
 
     ObjectCullRejectedFrustum,
-    ReservedObjectCullRejectedPlaneLeft,
-    ReservedObjectCullRejectedPlaneRight,
+    ObjectCullRejectedOcclusion,
+    ObjectReplayRejectedOcclusion,
     ReservedObjectCullRejectedPlaneBottom,
     ReservedObjectCullRejectedPlaneTop,
     ReservedObjectCullRejectedPlaneNear,
