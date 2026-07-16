@@ -259,6 +259,12 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
     m_pureComputeNextNodeFrontierBuffer->SetName("CLod Pure Compute Next Node Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeCurrentLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeCurrentLeafFrontierBuffer->SetName("CLod Pure Compute Current Leaf Frontier");
+    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
+    m_pureComputeNextLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeNextLeafFrontierBuffer->SetName("CLod Pure Compute Next Leaf Frontier");
+    rg::memory::SetResourceUsageHint(*m_pureComputeNextLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodClusterRunRecordStrideBytes, true, false, false, true);
     m_pureComputeClusterFrontierBuffer->SetName("CLod Pure Compute Cluster Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
@@ -268,12 +274,21 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_pureComputeNextNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeNextNodeCounterBuffer->SetName("CLod Pure Compute Next Node Counter");
     rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeCounterBuffer, "Cluster LOD pure compute");
+    m_pureComputeCurrentLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
+    m_pureComputeCurrentLeafCounterBuffer->SetName("CLod Pure Compute Current Leaf Counter");
+    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafCounterBuffer, "Cluster LOD pure compute");
+    m_pureComputeNextLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
+    m_pureComputeNextLeafCounterBuffer->SetName("CLod Pure Compute Next Leaf Counter");
+    rg::memory::SetResourceUsageHint(*m_pureComputeNextLeafCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeClusterCounterBuffer->SetName("CLod Pure Compute Cluster Counter");
     rg::memory::SetResourceUsageHint(*m_pureComputeClusterCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNodeDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeNodeDispatchArgsBuffer->SetName("CLod Pure Compute Node Dispatch Args");
     rg::memory::SetResourceUsageHint(*m_pureComputeNodeDispatchArgsBuffer, "Cluster LOD pure compute");
+    m_pureComputeLeafDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
+    m_pureComputeLeafDispatchArgsBuffer->SetName("CLod Pure Compute Leaf Dispatch Args");
+    rg::memory::SetResourceUsageHint(*m_pureComputeLeafDispatchArgsBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeClusterDispatchArgsBuffer->SetName("CLod Pure Compute Cluster Dispatch Args");
     rg::memory::SetResourceUsageHint(*m_pureComputeClusterDispatchArgsBuffer, "Cluster LOD pure compute");
@@ -322,6 +337,18 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         L"BuildPureComputeDispatchArgsCS",
         pureComputeDefines,
         "CLod.PureCompute.BuildDispatchArgs");
+    m_pureComputeBuildDualDispatchArgsPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"BuildPureComputeDualDispatchArgsCS",
+        pureComputeDefines,
+        "CLod.PureCompute.BuildDualDispatchArgs");
+    m_pureComputeClearTraversalCountersPipelineState = psoManager.MakeComputePipeline(
+        computeLayout,
+        L"shaders/ClusterLOD/computeCulling.hlsl",
+        L"ClearPureComputeTraversalCountersCS",
+        pureComputeDefines,
+        "CLod.PureCompute.ClearTraversalCounters");
     m_pureComputeBuildReplayDispatchArgsPipelineState = psoManager.MakeComputePipeline(
         computeLayout,
         L"shaders/ClusterLOD/computeCulling.hlsl",
@@ -416,11 +443,16 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             m_occlusionNodeGpuInputsBuffer,
             m_pureComputeCurrentNodeFrontierBuffer,
             m_pureComputeNextNodeFrontierBuffer,
+            m_pureComputeCurrentLeafFrontierBuffer,
+            m_pureComputeNextLeafFrontierBuffer,
             m_pureComputeClusterFrontierBuffer,
             m_pureComputeCurrentNodeCounterBuffer,
             m_pureComputeNextNodeCounterBuffer,
+            m_pureComputeCurrentLeafCounterBuffer,
+            m_pureComputeNextLeafCounterBuffer,
             m_pureComputeClusterCounterBuffer,
             m_pureComputeNodeDispatchArgsBuffer,
+            m_pureComputeLeafDispatchArgsBuffer,
             m_pureComputeClusterDispatchArgsBuffer,
             Builtin::CLod::StreamingLoadRequestKeys,
             Builtin::CLod::StreamingLoadRequests,
@@ -465,16 +497,21 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         .WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
         .WithInternalTransition(m_occlusionReplayStateBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentNodeFrontierBuffer, computeReadState)
-        .WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState);
+        .WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState)
+        .WithInternalTransition(m_pureComputeCurrentLeafFrontierBuffer, computeReadState)
+        .WithInternalTransition(m_pureComputeCurrentLeafCounterBuffer, computeReadState);
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     if (!m_isFirstPass || traversalLevelCount > 0u) {
         builder->WithInternalTransition(m_pureComputeNodeDispatchArgsBuffer, indirectState)
+            .WithInternalTransition(m_pureComputeLeafDispatchArgsBuffer, indirectState)
             .WithInternalTransition(m_pureComputeClusterDispatchArgsBuffer, indirectState);
     }
     if (traversalLevelCount > 0u) {
         builder->WithInternalTransition(m_pureComputeNextNodeFrontierBuffer, computeReadState)
-            .WithInternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState);
+            .WithInternalTransition(m_pureComputeNextNodeCounterBuffer, computeReadState)
+            .WithInternalTransition(m_pureComputeNextLeafFrontierBuffer, computeReadState)
+            .WithInternalTransition(m_pureComputeNextLeafCounterBuffer, computeReadState);
     }
 
     if (UsesSWClassification(m_workGraphMode) && m_swVisibleClustersCounterBuffer) {
@@ -794,6 +831,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     uavBarrier({ m_voxelRasterWorkCounterBuffer, m_skinnedVoxelRasterWorkCounterBuffer });
 
     bool nodeDispatchArgsNeedReuseBarrier = false;
+    bool leafDispatchArgsNeedReuseBarrier = false;
     bool clusterDispatchArgsNeedReuseBarrier = false;
 
     auto buildDispatchArgs = [&](const std::shared_ptr<Buffer>& counterBuffer, const std::shared_ptr<Buffer>& argsBuffer, uint32_t threadsPerGroup) {
@@ -814,6 +852,51 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             0,
             NumMiscUintRootConstants,
             dispatchRootConstants);
+        commandList.Dispatch(1u, 1u, 1u);
+    };
+
+    auto buildDualDispatchArgs = [&](const std::shared_ptr<Buffer>& firstCounterBuffer,
+                                     const std::shared_ptr<Buffer>& firstArgsBuffer,
+                                     const std::shared_ptr<Buffer>& secondCounterBuffer,
+                                     const std::shared_ptr<Buffer>& secondArgsBuffer,
+                                     uint32_t threadsPerGroup) {
+        BindResourceDescriptorIndices(commandList, m_pureComputeBuildDualDispatchArgsPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeBuildDualDispatchArgsPipelineState.GetAPIPipelineState().GetHandle());
+        uint32_t dispatchRootConstants[NumMiscUintRootConstants] = {};
+        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(dispatchRootConstants));
+        dispatchRootConstants[CLOD_PC_DISPATCH_COUNTER_DESCRIPTOR_INDEX] = firstCounterBuffer->GetSRVInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_DISPATCH_ARGS_DESCRIPTOR_INDEX] = firstArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_DISPATCH_THREADS_PER_GROUP] = threadsPerGroup;
+        dispatchRootConstants[CLOD_PC_DISPATCH_COUNT_LIMIT] = static_cast<uint32_t>(m_maxVisibleClusters);
+        dispatchRootConstants[CLOD_PC_SECOND_DISPATCH_COUNTER_DESCRIPTOR_INDEX] = secondCounterBuffer->GetSRVInfo(0).slot.index;
+        dispatchRootConstants[CLOD_PC_SECOND_DISPATCH_ARGS_DESCRIPTOR_INDEX] = secondArgsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            dispatchRootConstants);
+        commandList.Dispatch(1u, 1u, 1u);
+    };
+
+    auto clearTraversalCounters = [&](const std::shared_ptr<Buffer>& nodeCounter,
+                                      const std::shared_ptr<Buffer>& leafCounter,
+                                      const std::shared_ptr<Buffer>& clusterCounter) {
+        BindResourceDescriptorIndices(commandList, m_pureComputeClearTraversalCountersPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_pureComputeClearTraversalCountersPipelineState.GetAPIPipelineState().GetHandle());
+        uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
+        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(clearRootConstants));
+        clearRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX] = leafCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = clusterCounter->GetUAVShaderVisibleInfo(0).slot.index;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            clearRootConstants);
         commandList.Dispatch(1u, 1u, 1u);
     };
 
@@ -935,8 +1018,16 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
     clearCounter(m_pureComputeCurrentNodeCounterBuffer);
     clearCounter(m_pureComputeNextNodeCounterBuffer);
+    clearCounter(m_pureComputeCurrentLeafCounterBuffer);
+    clearCounter(m_pureComputeNextLeafCounterBuffer);
     clearCounter(m_pureComputeClusterCounterBuffer);
-    uavBarrier({ m_pureComputeCurrentNodeCounterBuffer, m_pureComputeNextNodeCounterBuffer, m_pureComputeClusterCounterBuffer });
+    uavBarrier({
+        m_pureComputeCurrentNodeCounterBuffer,
+        m_pureComputeNextNodeCounterBuffer,
+        m_pureComputeCurrentLeafCounterBuffer,
+        m_pureComputeNextLeafCounterBuffer,
+        m_pureComputeClusterCounterBuffer,
+    });
 
     if (m_isFirstPass) {
         std::vector<ObjectCullRecord> cullRecords;
@@ -1076,6 +1167,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     uavToComputeReadBarrier({
         m_pureComputeCurrentNodeFrontierBuffer,
         m_pureComputeCurrentNodeCounterBuffer,
+        m_pureComputeCurrentLeafFrontierBuffer,
+        m_pureComputeCurrentLeafCounterBuffer,
     });
     uavBarrier({
         m_visibleClustersCounterBuffer,
@@ -1087,52 +1180,91 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     auto currentNodeCounter = m_pureComputeCurrentNodeCounterBuffer;
     auto nextNodeFrontier = m_pureComputeNextNodeFrontierBuffer;
     auto nextNodeCounter = m_pureComputeNextNodeCounterBuffer;
+    auto currentLeafFrontier = m_pureComputeCurrentLeafFrontierBuffer;
+    auto currentLeafCounter = m_pureComputeCurrentLeafCounterBuffer;
+    auto nextLeafFrontier = m_pureComputeNextLeafFrontierBuffer;
+    auto nextLeafCounter = m_pureComputeNextLeafCounterBuffer;
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     for (uint32_t level = 0; level < traversalLevelCount; ++level) {
         if (level > 0u) {
-            computeReadToUavBarrier({ nextNodeFrontier, nextNodeCounter });
+            computeReadToUavBarrier({
+                nextNodeFrontier,
+                nextNodeCounter,
+                nextLeafFrontier,
+                nextLeafCounter,
+            });
         }
-        clearCounter(nextNodeCounter);
-        clearCounter(m_pureComputeClusterCounterBuffer);
-        uavBarrier({ nextNodeCounter, m_pureComputeClusterCounterBuffer });
+        clearTraversalCounters(nextNodeCounter, nextLeafCounter, m_pureComputeClusterCounterBuffer);
+        uavBarrier({ nextNodeCounter, nextLeafCounter, m_pureComputeClusterCounterBuffer });
 
         if (nodeDispatchArgsNeedReuseBarrier) {
             indirectArgsToUavBarrier({ m_pureComputeNodeDispatchArgsBuffer });
             nodeDispatchArgsNeedReuseBarrier = false;
         }
-        buildDispatchArgs(currentNodeCounter, m_pureComputeNodeDispatchArgsBuffer, kPureComputeTraverseThreadsPerGroup);
-        uavToIndirectArgsBarrier({ m_pureComputeNodeDispatchArgsBuffer });
+        if (leafDispatchArgsNeedReuseBarrier) {
+            indirectArgsToUavBarrier({ m_pureComputeLeafDispatchArgsBuffer });
+            leafDispatchArgsNeedReuseBarrier = false;
+        }
+        buildDualDispatchArgs(
+            currentNodeCounter,
+            m_pureComputeNodeDispatchArgsBuffer,
+            currentLeafCounter,
+            m_pureComputeLeafDispatchArgsBuffer,
+            kPureComputeTraverseThreadsPerGroup);
+        uavToIndirectArgsBarrier({
+            m_pureComputeNodeDispatchArgsBuffer,
+            m_pureComputeLeafDispatchArgsBuffer,
+        });
 
         BindResourceDescriptorIndices(commandList, m_pureComputeTraversePipelineState.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_pureComputeTraversePipelineState.GetAPIPipelineState().GetHandle());
-        uint32_t traverseRootConstants[NumMiscUintRootConstants] = {};
-        std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(traverseRootConstants));
-        traverseRootConstants[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX] = currentNodeFrontier->GetSRVInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX] = currentNodeCounter->GetSRVInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = nextNodeFrontier->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextNodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX] = m_pureComputeClusterFrontierBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = m_pureComputeClusterCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        commandList.PushConstants(
-            rhi::ShaderStage::Compute,
-            0,
-            MiscUintRootSignatureIndex,
-            0,
-            NumMiscUintRootConstants,
-            traverseRootConstants);
-        commandList.ExecuteIndirect(
-            m_pureComputeDispatchCommandSignature->GetHandle(),
-            m_pureComputeNodeDispatchArgsBuffer->GetAPIResource().GetHandle(),
-            0,
-            {},
-            0,
-            1);
+        auto dispatchNodeFrontier = [&](const std::shared_ptr<Buffer>& inputFrontier,
+                                       const std::shared_ptr<Buffer>& inputCounter,
+                                       const std::shared_ptr<Buffer>& dispatchArgs) {
+            uint32_t traverseRootConstants[NumMiscUintRootConstants] = {};
+            std::copy(std::begin(sharedRootConstants), std::end(sharedRootConstants), std::begin(traverseRootConstants));
+            traverseRootConstants[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX] = inputFrontier->GetSRVInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX] = inputCounter->GetSRVInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = nextNodeFrontier->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextNodeCounter->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX] = m_pureComputeClusterFrontierBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = m_pureComputeClusterCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX] = nextLeafFrontier->GetUAVShaderVisibleInfo(0).slot.index;
+            traverseRootConstants[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX] = nextLeafCounter->GetUAVShaderVisibleInfo(0).slot.index;
+            commandList.PushConstants(
+                rhi::ShaderStage::Compute,
+                0,
+                MiscUintRootSignatureIndex,
+                0,
+                NumMiscUintRootConstants,
+                traverseRootConstants);
+            commandList.ExecuteIndirect(
+                m_pureComputeDispatchCommandSignature->GetHandle(),
+                dispatchArgs->GetAPIResource().GetHandle(),
+                0,
+                {},
+                0,
+                1);
+        };
+        dispatchNodeFrontier(currentNodeFrontier, currentNodeCounter, m_pureComputeNodeDispatchArgsBuffer);
+        uavBarrier({
+            nextNodeFrontier,
+            nextNodeCounter,
+            nextLeafFrontier,
+            nextLeafCounter,
+            m_pureComputeClusterFrontierBuffer,
+            m_pureComputeClusterCounterBuffer,
+        });
+        dispatchNodeFrontier(currentLeafFrontier, currentLeafCounter, m_pureComputeLeafDispatchArgsBuffer);
         nodeDispatchArgsNeedReuseBarrier = true;
+        leafDispatchArgsNeedReuseBarrier = true;
 
         uavToComputeReadBarrier({
             nextNodeFrontier,
             nextNodeCounter,
+            nextLeafFrontier,
+            nextLeafCounter,
             m_pureComputeClusterFrontierBuffer,
             m_pureComputeClusterCounterBuffer,
         });
@@ -1156,6 +1288,8 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
 
         std::swap(currentNodeFrontier, nextNodeFrontier);
         std::swap(currentNodeCounter, nextNodeCounter);
+        std::swap(currentLeafFrontier, nextLeafFrontier);
+        std::swap(currentLeafCounter, nextLeafCounter);
     }
 
     uavToComputeReadBarrier({ m_visibleClustersCounterBuffer, m_occlusionReplayStateBuffer });
@@ -1245,11 +1379,16 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         m_sizedPureComputeFrontierCapacity = frontierCapacity;
         m_pureComputeCurrentNodeFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeNextNodeFrontierBuffer->ResizeStructured(frontierCapacity);
+        m_pureComputeCurrentLeafFrontierBuffer->ResizeStructured(frontierCapacity);
+        m_pureComputeNextLeafFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeClusterFrontierBuffer->ResizeStructured(frontierCapacity);
         m_pureComputeCurrentNodeCounterBuffer->ResizeStructured(1u);
         m_pureComputeNextNodeCounterBuffer->ResizeStructured(1u);
+        m_pureComputeCurrentLeafCounterBuffer->ResizeStructured(1u);
+        m_pureComputeNextLeafCounterBuffer->ResizeStructured(1u);
         m_pureComputeClusterCounterBuffer->ResizeStructured(1u);
         m_pureComputeNodeDispatchArgsBuffer->ResizeStructured(1u);
+        m_pureComputeLeafDispatchArgsBuffer->ResizeStructured(1u);
         m_pureComputeClusterDispatchArgsBuffer->ResizeStructured(1u);
     }
 
@@ -1257,6 +1396,8 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadPureComputeCounterResets");
         BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeCurrentNodeCounterBuffer), 0);
         BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeNextNodeCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeCurrentLeafCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeNextLeafCounterBuffer), 0);
         BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeClusterCounterBuffer), 0);
     }
 

@@ -77,6 +77,8 @@ private:
     PipelineState m_clearPipelineState;
     PipelineState m_createCommandPipelineState;
     PipelineState m_pureComputeBuildDispatchArgsPipelineState;
+    PipelineState m_pureComputeBuildDualDispatchArgsPipelineState;
+    PipelineState m_pureComputeClearTraversalCountersPipelineState;
     PipelineState m_pureComputeBuildReplayDispatchArgsPipelineState;
     PipelineState m_pureComputeObjectCullPipelineState;
     PipelineState m_pureComputeReplayNodesPipelineState;
@@ -118,11 +120,16 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_pureComputeCurrentNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeNextNodeFrontierBuffer;
+    std::shared_ptr<Buffer> m_pureComputeCurrentLeafFrontierBuffer;
+    std::shared_ptr<Buffer> m_pureComputeNextLeafFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeClusterFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeCurrentNodeCounterBuffer;
     std::shared_ptr<Buffer> m_pureComputeNextNodeCounterBuffer;
+    std::shared_ptr<Buffer> m_pureComputeCurrentLeafCounterBuffer;
+    std::shared_ptr<Buffer> m_pureComputeNextLeafCounterBuffer;
     std::shared_ptr<Buffer> m_pureComputeClusterCounterBuffer;
     std::shared_ptr<Buffer> m_pureComputeNodeDispatchArgsBuffer;
+    std::shared_ptr<Buffer> m_pureComputeLeafDispatchArgsBuffer;
     std::shared_ptr<Buffer> m_pureComputeClusterDispatchArgsBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     std::vector<uint64_t> m_declaredDrawSetResourceIds;

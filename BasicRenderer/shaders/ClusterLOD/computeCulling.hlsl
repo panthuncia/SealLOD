@@ -26,6 +26,38 @@ void BuildPureComputeDispatchArgsCS()
 }
 
 [numthreads(1, 1, 1)]
+void BuildPureComputeDualDispatchArgsCS()
+{
+    StructuredBuffer<uint> firstCounterBuffer = ResourceDescriptorHeap[CLOD_PC_DISPATCH_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint3> firstDispatchArgs = ResourceDescriptorHeap[CLOD_PC_DISPATCH_ARGS_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> secondCounterBuffer = ResourceDescriptorHeap[CLOD_PC_SECOND_DISPATCH_COUNTER_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint3> secondDispatchArgs = ResourceDescriptorHeap[CLOD_PC_SECOND_DISPATCH_ARGS_DESCRIPTOR_INDEX];
+    const uint countLimit = max(1u, CLOD_PC_DISPATCH_COUNT_LIMIT);
+    const uint threadsPerGroup = max(1u, CLOD_PC_DISPATCH_THREADS_PER_GROUP);
+    const uint firstCount = min(firstCounterBuffer[0], countLimit);
+    const uint secondCount = min(secondCounterBuffer[0], countLimit);
+    firstDispatchArgs[0] = uint3(
+        firstCount == 0u ? 1u : ((firstCount + threadsPerGroup - 1u) / threadsPerGroup),
+        1u,
+        1u);
+    secondDispatchArgs[0] = uint3(
+        secondCount == 0u ? 1u : ((secondCount + threadsPerGroup - 1u) / threadsPerGroup),
+        1u,
+        1u);
+}
+
+[numthreads(1, 1, 1)]
+void ClearPureComputeTraversalCountersCS()
+{
+    RWStructuredBuffer<uint> nodeCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> leafCounter = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> clusterCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
+    nodeCounter[0] = 0u;
+    leafCounter[0] = 0u;
+    clusterCounter[0] = 0u;
+}
+
+[numthreads(1, 1, 1)]
 void BuildPureComputeReplayDispatchArgsCS()
 {
     RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
@@ -216,6 +248,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<TraverseNodeRecord> nextFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<TraverseNodeRecord> nextLeafFrontier = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> nextLeafCounter = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodClusterRunRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> clusterCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
@@ -704,8 +738,16 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #endif
         }
 
+        const bool childIsLeaf =
+            child.range.isLeaf != CLOD_NODE_INTERNAL &&
+            child.range.isLeaf != CLOD_NODE_INSTANCE_ROOT;
         uint outputIndex = 0u;
-        InterlockedAdd(nextCounter[0], 1u, outputIndex);
+        if (childIsLeaf) {
+            InterlockedAdd(nextLeafCounter[0], 1u, outputIndex);
+        }
+        else {
+            InterlockedAdd(nextCounter[0], 1u, outputIndex);
+        }
         if (outputIndex >= CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
             continue;
         }
@@ -715,7 +757,12 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         childRecord.viewId = rec.viewId;
         childRecord.nodeIdPacked = PackTraverseNodeId(childNodeId, sourceTag, 1u);
         childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
-        nextFrontier[outputIndex] = childRecord;
+        if (childIsLeaf) {
+            nextLeafFrontier[outputIndex] = childRecord;
+        }
+        else {
+            nextFrontier[outputIndex] = childRecord;
+        }
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
         emittedChildCount++;
     }
