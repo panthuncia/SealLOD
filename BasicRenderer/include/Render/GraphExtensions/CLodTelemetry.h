@@ -218,8 +218,10 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     VoxelRasterSkinnedWorkGroups,
     VoxelRasterPreparedCubeCandidates,
     VoxelRasterSkinBoneGroups,
+    VoxelRasterDistributionBinBase,
+    VoxelRasterDistributionBinEnd = VoxelRasterDistributionBinBase + 48,
 
-    Count
+    Count = VoxelRasterDistributionBinEnd
 };
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =

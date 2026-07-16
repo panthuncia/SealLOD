@@ -2885,6 +2885,12 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             auto counter = [&](CLodWorkGraphCounterIndex idx) -> uint32_t {
                 return decoded.counters[static_cast<size_t>(idx)];
             };
+            auto distributionCounter = [&](uint32_t depthBin, uint32_t footprintBin) -> uint32_t {
+                constexpr uint32_t footprintBinCount = 6u;
+                const auto index = static_cast<size_t>(CLodWorkGraphCounterIndex::VoxelRasterDistributionBinBase) +
+                    depthBin * footprintBinCount + footprintBin;
+                return decoded.counters[index];
+            };
 
 			spdlog::info(
 				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} rigid={} skinned={} cube_candidates={} skin_bone_groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
@@ -2955,6 +2961,24 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionVoxelSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionReyesSkipped),
                 counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted));
+
+            for (uint32_t depthBin = 0u; depthBin < 8u; ++depthBin) {
+                constexpr std::array<uint32_t, 9> depthEdges = {
+                    0u, 4096u, 8192u, 16384u, 32768u, 65536u, 131072u, 262144u, UINT32_MAX
+                };
+                spdlog::info(
+                    "SARP CLOD voxel distribution: frame={} depth_bin={} depth_range=[{},{}) occupied_voxels_by_projected_px(<0.5,0.5-1,1-2,2-4,4-8,>=8)=[{},{},{},{},{},{}]",
+                    requestedFrame,
+                    depthBin,
+                    depthEdges[depthBin],
+                    depthEdges[depthBin + 1u],
+                    distributionCounter(depthBin, 0u),
+                    distributionCounter(depthBin, 1u),
+                    distributionCounter(depthBin, 2u),
+                    distributionCounter(depthBin, 3u),
+                    distributionCounter(depthBin, 4u),
+                    distributionCounter(depthBin, 5u));
+            }
             spdlog::info(
                 "SARP CLOD assembly traversal telemetry: frame={} instance_roots={} part_instance_roots={} assembly_part(traverse={} voxel_leaves={} voxel_raster={} triangle_buckets={}) assembly_voxel(leaves={} rejected_error={} suppressed_by_child={} nonresident={} raster_work={})",
                 requestedFrame,

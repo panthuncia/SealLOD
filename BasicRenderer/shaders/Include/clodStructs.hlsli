@@ -376,9 +376,17 @@ struct CLodVoxelRasterWorkRecord
     uint visibleClusterIndex;
     uint instanceIndex;
     uint viewId;
-    uint localGroupId;
-    uint localPageIndex;
-    uint pageLocalClusterIndex;
+    uint assemblyTransformIndex;
+    uint skinningInstanceSlot;
+    uint slabDescriptorIndex;
+    uint slabByteOffset;
+    uint cubeRecordsOffset;
+    uint firstCube;
+    uint cubeCount;
+    uint assemblyTransformBase;
+    uint assemblyBoneRemapBase;
+    uint assemblyBoneRemapCount;
+    float4 aabbMinAndVoxelWidth;
 };
 
 struct CLodVoxelRasterDispatchCommand

@@ -53,6 +53,24 @@
 #define CLOD_VOXEL_RASTER_SHARE_SKIN_TRANSFORMS 0
 #endif
 
+#ifndef CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM
+#define CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM 1
+#endif
+
+#ifndef CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS
+#define CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS 1
+#endif
+
+#ifndef CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
+#define CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST 1
+#endif
+
+#if PSO_SKINNED && CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE && !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST && !CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS && !CLOD_VOXEL_RASTER_SHARE_SKIN_TRANSFORMS && CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS
+#define CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE 1
+#else
+#define CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE 0
+#endif
+
 #if CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
 #ifndef CLOD_VOXEL_RASTER_THREADS_PER_GROUP
 #define CLOD_VOXEL_RASTER_THREADS_PER_GROUP 32u
@@ -98,6 +116,9 @@ static const uint WG_COUNTER_VOXEL_RASTER_RIGID_WORK_GROUPS = 188u;
 static const uint WG_COUNTER_VOXEL_RASTER_SKINNED_WORK_GROUPS = 189u;
 static const uint WG_COUNTER_VOXEL_RASTER_PREPARED_CUBE_CANDIDATES = 190u;
 static const uint WG_COUNTER_VOXEL_RASTER_SKIN_BONE_GROUPS = 191u;
+static const uint WG_COUNTER_VOXEL_RASTER_DISTRIBUTION_BASE = 192u;
+static const uint VOXEL_RASTER_DISTRIBUTION_DEPTH_BIN_COUNT = 8u;
+static const uint VOXEL_RASTER_DISTRIBUTION_FOOTPRINT_BIN_COUNT = 6u;
 static const uint VOXEL_RASTER_TRACE_HIT = 0u;
 static const uint VOXEL_RASTER_TRACE_DDA_MISS = 1u;
 static const uint VOXEL_RASTER_TRACE_NON_POSITIVE_DEPTH = 2u;
@@ -107,10 +128,6 @@ static const uint VOXEL_RASTER_PROJECT_SCISSOR_REJECTED = 2u;
 static const uint VOXEL_RASTER_PROJECT_FOOTPRINT_REJECTED = 3u;
 static const uint VOXEL_RASTER_PROJECT_NO_VALID_CLIP = 4u;
 static const uint VOXEL_RASTER_PROJECT_NON_POSITIVE_DEPTH = 5u;
-
-#ifndef CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST
-#define CLOD_VOXEL_RASTER_ENABLE_DEPTH_PRETEST 1
-#endif
 
 #if CLOD_VOXEL_RASTER_USE_PIXEL_QUEUE
 groupshared uint gs_voxelRasterPixelQueue[VOXEL_RASTER_PIXEL_QUEUE_CAPACITY];
@@ -164,6 +181,30 @@ void VoxelRasterTelemetryAdd(uint counterIndex, uint value)
 
     RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
     InterlockedAdd(telemetryCounters[counterIndex], value);
+#endif
+}
+
+void VoxelRasterTelemetryRecordDistribution(float viewDepth, float projectedPixelsPerVoxel, uint occupiedVoxelCount)
+{
+#if CLOD_VOXEL_RASTER_TELEMETRY
+    uint depthBin = 0u;
+    depthBin += viewDepth >= 4096.0f;
+    depthBin += viewDepth >= 8192.0f;
+    depthBin += viewDepth >= 16384.0f;
+    depthBin += viewDepth >= 32768.0f;
+    depthBin += viewDepth >= 65536.0f;
+    depthBin += viewDepth >= 131072.0f;
+    depthBin += viewDepth >= 262144.0f;
+
+    uint footprintBin = 0u;
+    footprintBin += projectedPixelsPerVoxel >= 0.5f;
+    footprintBin += projectedPixelsPerVoxel >= 1.0f;
+    footprintBin += projectedPixelsPerVoxel >= 2.0f;
+    footprintBin += projectedPixelsPerVoxel >= 4.0f;
+    footprintBin += projectedPixelsPerVoxel >= 8.0f;
+
+    const uint binKey = depthBin * VOXEL_RASTER_DISTRIBUTION_FOOTPRINT_BIN_COUNT + footprintBin;
+    VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_DISTRIBUTION_BASE + binKey, occupiedVoxelCount);
 #endif
 }
 
@@ -383,26 +424,48 @@ struct VoxelRasterVoxelSetup
     float invVoxelWidth;
 };
 
+struct VoxelRasterObjectInputs
+{
+    row_major matrix model;
+    row_major matrix modelInverse;
+};
+
+struct VoxelRasterCameraInputs
+{
+    float4 positionWorldSpace;
+    float projX;
+    float projY;
+    uint isOrtho;
+    uint pad0;
+    float4 viewRightWorld;
+    float4 viewUpWorld;
+    float4 viewForwardWorld;
+    float4 viewZ;
+    row_major matrix viewInverse;
+    row_major matrix projectionInverse;
+};
+
+struct VoxelRasterViewInputs
+{
+    uint visibilityUAVDescriptorIndex;
+    uint scissorMinX;
+    uint scissorMinY;
+    uint scissorMaxX;
+    uint scissorMaxY;
+};
+
 // Every lane in a raster group consumes the same work record and setup data.
 // Load it once instead of repeating the descriptor, metadata, transform, page,
 // and cluster reads for every lane in the wave.
 groupshared uint gs_voxelRasterWorkInputsValid;
 groupshared CLodVoxelRasterWorkRecord gs_voxelRasterWork;
-#if PSO_SKINNED
-groupshared PerMeshInstanceBuffer gs_voxelRasterMeshInstance;
-#if CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS
+#if PSO_SKINNED && CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS
 groupshared row_major matrix gs_voxelRasterViewToObject;
 groupshared float4 gs_voxelRasterObjectViewZ;
 #endif
-#endif
-groupshared PerObjectBuffer gs_voxelRasterObjectData;
-groupshared CLodMeshMetadata gs_voxelRasterMetadata;
-groupshared uint gs_voxelRasterAssemblyTransformIndex;
-groupshared CullingCameraInfo gs_voxelRasterCamera;
-groupshared ClodViewRasterInfo gs_voxelRasterInfo;
-groupshared GroupPageMapEntry gs_voxelRasterPageEntry;
-groupshared CLodVoxelPageHeader gs_voxelRasterPageHeader;
-groupshared CLodVoxelClusterRecord gs_voxelRasterCluster;
+groupshared VoxelRasterObjectInputs gs_voxelRasterObjectData;
+groupshared VoxelRasterCameraInputs gs_voxelRasterCamera;
+groupshared VoxelRasterViewInputs gs_voxelRasterInfo;
 
 struct VoxelRasterRayProjectionSetup
 {
@@ -909,16 +972,23 @@ uint VoxelRasterPrepareCube(
     }
 #else
     row_major matrix localToWorld = objectData.model;
+#if !CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM
     row_major matrix worldToLocal = objectData.modelInverse;
+#endif
+    uint expandedBoneIndex = dominantBoneIndex;
     if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
     {
-        const uint expandedBoneIndex = ResolveAssemblyBoneIndex(dominantBoneIndex, metadata, assemblyTransformIndex);
+        expandedBoneIndex = ResolveAssemblyBoneIndex(dominantBoneIndex, metadata, assemblyTransformIndex);
         const float4x4 skinMatrix = LoadAssemblyLocalBoneSkinMatrix(
             meshInstance.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+#if !CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM
         const float4x4 inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
             meshInstance.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+#endif
         localToWorld = mul(skinMatrix, objectData.model);
+#if !CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM
         worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
+#endif
     }
 #endif
 #endif
@@ -975,6 +1045,16 @@ uint VoxelRasterPrepareCube(
         return projectResult;
     }
 
+#if PSO_SKINNED && !CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS && !CLOD_VOXEL_RASTER_SHARE_SKIN_TRANSFORMS && CLOD_VOXEL_RASTER_DEFER_INVERSE_SKIN_TRANSFORM && !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+    row_major matrix worldToLocal = objectData.modelInverse;
+    if (dominantBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+    {
+        const float4x4 inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
+            meshInstance.skinningInstanceSlot, expandedBoneIndex, assemblyTransformIndex);
+        worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
+    }
+#endif
+
 #if CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT
 #if PSO_SKINNED
 #if CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS
@@ -987,6 +1067,13 @@ uint VoxelRasterPrepareCube(
 #endif
 #endif
 #if PSO_SKINNED
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+    preparedCube.traceBasis.viewToLocalX = 0.0f;
+    preparedCube.traceBasis.viewToLocalX.x = asfloat(expandedBoneIndex);
+    preparedCube.traceBasis.viewToLocalY = 0.0f;
+    preparedCube.traceBasis.viewToLocalZ = 0.0f;
+    preparedCube.traceBasis.localViewZAndRayOriginViewZ = localViewZ;
+#else
 #if CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS && CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT
     float4 viewToLocalX;
     float4 viewToLocalY;
@@ -1003,17 +1090,32 @@ uint VoxelRasterPrepareCube(
     const row_major matrix viewToLocal = mul(camera.viewInverse, worldToLocal);
 #endif
     const float rayOriginViewZ = dot(float4(cameraOriginLocal, 1.0f), localViewZ);
+#endif
 #else
     const float rayOriginViewZ = rigidSetup.rayOriginViewZ;
 #endif
     const uint pixelWidth = uint(projected.maxPx.x - projected.minPx.x + 1);
     const uint pixelHeight = uint(projected.maxPx.y - projected.minPx.y + 1);
+#if CLOD_VOXEL_RASTER_TELEMETRY
+    const uint3 activeCellSpan = activeMaxCell - activeMinCell + 1u;
+    const uint maxActiveCellSpan = max(activeCellSpan.x, max(activeCellSpan.y, activeCellSpan.z));
+#if CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT
+    const float distributionViewDepth = projected.minLinearDepth + sphereRadius;
+#else
+    const float distributionViewDepth = projected.minLinearDepth;
+#endif
+    VoxelRasterTelemetryRecordDistribution(
+        distributionViewDepth,
+        float(max(pixelWidth, pixelHeight)) / float(max(maxActiveCellSpan, 1u)),
+        countbits(occupancyMask.x) + countbits(occupancyMask.y));
+#endif
 
     preparedCube.packedMinPx = VoxelRasterPackMinPx(projected.minPx);
     preparedCube.packedPixelDims = VoxelRasterPackPixelDims(pixelWidth, pixelWidth * pixelHeight);
     preparedCube.minDepthBits = asuint(projected.minLinearDepth) >> 1u;
     preparedCube.cubeCoordPacked = cubeCoordPacked;
 #if PSO_SKINNED
+#if !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
     preparedCube.traceBasis.localViewZAndRayOriginViewZ = float4(localViewZ.xyz, rayOriginViewZ);
 #if CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS && CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT
     preparedCube.traceBasis.viewToLocalX = viewToLocalX;
@@ -1023,6 +1125,7 @@ uint VoxelRasterPrepareCube(
     preparedCube.traceBasis.viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
     preparedCube.traceBasis.viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
     preparedCube.traceBasis.viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
+#endif
 #endif
 #endif
     return VOXEL_RASTER_PROJECT_OK;
@@ -1116,30 +1219,14 @@ bool VoxelRasterTryLoadWorkInputs(
     uint workIndex,
     uint GI,
     out CLodVoxelRasterWorkRecord work,
-#if PSO_SKINNED
-    out PerMeshInstanceBuffer meshInstance,
-#endif
-    out PerObjectBuffer objectData,
-    out CLodMeshMetadata metadata,
-    out uint visibleClusterAssemblyTransformIndex,
-    out CullingCameraInfo camera,
-    out ClodViewRasterInfo rasterInfo,
-    out GroupPageMapEntry pageEntry,
-    out CLodVoxelPageHeader pageHeader,
-    out CLodVoxelClusterRecord voxelCluster)
+    out VoxelRasterObjectInputs objectInputs,
+    out VoxelRasterCameraInputs cameraInputs,
+    out VoxelRasterViewInputs viewInputs)
 {
     work = (CLodVoxelRasterWorkRecord)0;
-#if PSO_SKINNED
-    meshInstance = (PerMeshInstanceBuffer)0;
-#endif
-    metadata = (CLodMeshMetadata)0;
-    visibleClusterAssemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
-    objectData = (PerObjectBuffer)0;
-    camera = (CullingCameraInfo)0;
-    rasterInfo = (ClodViewRasterInfo)0;
-    pageEntry = (GroupPageMapEntry)0;
-    pageHeader = (CLodVoxelPageHeader)0;
-    voxelCluster = (CLodVoxelClusterRecord)0;
+    objectInputs = (VoxelRasterObjectInputs)0;
+    cameraInputs = (VoxelRasterCameraInputs)0;
+    viewInputs = (VoxelRasterViewInputs)0;
 
     StructuredBuffer<CLodVoxelRasterWorkRecord> workRecords = ResourceDescriptorHeap[CLOD_RASTER_VOXEL_WORK_RECORDS_DESCRIPTOR_INDEX];
     work = workRecords[workIndex];
@@ -1153,86 +1240,30 @@ bool VoxelRasterTryLoadWorkInputs(
 #endif
     }
 
-    StructuredBuffer<CLodMeshMetadata> metadataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     StructuredBuffer<CullingCameraInfo> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
-
-    const uint instanceIndex = work.instanceIndex;
-    const uint viewId = work.viewId;
-    const uint localGroupId = work.localGroupId;
-    const uint localPageIndex = work.localPageIndex;
-    const uint pageLocalClusterIndex = work.pageLocalClusterIndex;
-
-#if PSO_SKINNED
-    meshInstance = LoadMeshTemplateForDraw(instanceIndex);
-    // Procedural wind palettes are frame-transient and indexed by the draw
-    // record's instance transform. The mesh template retains the source slot,
-    // which is bind pose for these assembly instances.
-    meshInstance.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
-        instanceIndex, meshInstance.skinningInstanceSlot);
-#endif
-    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceIndex);
-    metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
-    camera = cameras[viewId];
-    rasterInfo = viewRasterInfoBuffer[viewId];
-
-    StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
-    if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
-        localPageIndex < group.pageMapBase ||
-        localPageIndex >= group.pageMapBase + group.pageCount)
-    {
-        if (GI == 0u)
-        {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER, 1u);
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
-        }
-        return false;
-    }
-
-    StructuredBuffer<uint> visibleClusterTransformIndices =
-        ResourceDescriptorHeap[CLOD_RASTER_VOXEL_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    visibleClusterAssemblyTransformIndex = visibleClusterTransformIndices[work.visibleClusterIndex];
-    objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
-        instanceIndex,
-        visibleClusterAssemblyTransformIndex);
-
-    pageEntry = CLodLoadVoxelPageMapEntry(metadata, group, localPageIndex);
-    pageHeader = CLodLoadVoxelPageHeader(pageEntry.slabDescriptorIndex, pageEntry.slabByteOffset);
-    if (pageHeader.formatAndKind != CLOD_VOXEL_PAGE_MAGIC ||
-        pageLocalClusterIndex >= pageHeader.clusterCount)
-    {
-        if (GI == 0u)
-        {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER, 1u);
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
-        }
-        return false;
-    }
-
-    voxelCluster = CLodLoadVoxelClusterFromPage(
-        pageEntry.slabDescriptorIndex,
-        pageEntry.slabByteOffset,
-        pageHeader.descriptorOffset,
-        pageLocalClusterIndex);
-    if (voxelCluster.cubeCount == 0u || voxelCluster.cubeCount > CLOD_VOXEL_MAX_CUBES_PER_CLUSTER)
-    {
-        if (GI == 0u)
-        {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_CLUSTER, 1u);
-        }
-        return false;
-    }
-
-    const float voxelWidth = voxelCluster.aabbMinAndVoxelWidth.w;
-    if (voxelWidth <= 0.0f)
-    {
-        if (GI == 0u)
-        {
-            VoxelRasterTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_VOXEL_WIDTH, 1u);
-        }
-        return false;
-    }
+    const CullingCameraInfo camera = cameras[work.viewId];
+    const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[work.viewId];
+    const PerObjectBuffer objectData = LoadInstanceTransformForDrawWithAssemblyTransform(
+        work.instanceIndex,
+        work.assemblyTransformIndex);
+    objectInputs.model = objectData.model;
+    objectInputs.modelInverse = objectData.modelInverse;
+    cameraInputs.positionWorldSpace = camera.positionWorldSpace;
+    cameraInputs.projX = camera.projX;
+    cameraInputs.projY = camera.projY;
+    cameraInputs.isOrtho = camera.isOrtho;
+    cameraInputs.viewRightWorld = camera.viewRightWorld;
+    cameraInputs.viewUpWorld = camera.viewUpWorld;
+    cameraInputs.viewForwardWorld = camera.viewForwardWorld;
+    cameraInputs.viewZ = camera.viewZ;
+    cameraInputs.viewInverse = camera.viewInverse;
+    cameraInputs.projectionInverse = camera.projectionInverse;
+    viewInputs.visibilityUAVDescriptorIndex = rasterInfo.visibilityUAVDescriptorIndex;
+    viewInputs.scissorMinX = rasterInfo.scissorMinX;
+    viewInputs.scissorMinY = rasterInfo.scissorMinY;
+    viewInputs.scissorMaxX = rasterInfo.scissorMaxX;
+    viewInputs.scissorMaxY = rasterInfo.scissorMaxY;
 
     return true;
 }
@@ -1725,6 +1756,7 @@ bool VoxelRasterQueuePassesDepthPretest(
 void VoxelRasterQueuePushDecodedTaskCandidate(
     uint queueBase,
     inout uint queuedPixelCount,
+    inout uint queuedCubeMask,
     uint cubeSlot,
     uint pixelLinear
     VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_PARAM)
@@ -1750,6 +1782,12 @@ void VoxelRasterQueuePushDecodedTaskCandidate(
     enqueuePixel = VoxelRasterQueuePassesDepthPretest(enqueuePixel, pixel, minDepthBits, visibilityBuffer);
 #endif
 
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+    if (enqueuePixel)
+    {
+        queuedCubeMask |= 1u << cubeSlot;
+    }
+#endif
     VoxelRasterQueuePushPixelCoords(queueBase, queuedPixelCount, enqueuePixel, cubeSlot, localPixel);
 }
 
@@ -1760,11 +1798,16 @@ void VoxelRasterQueueBatchPixels(
     float batchMaxPixelCountInv,
     uint taskBase,
     uint taskEnd,
-    out uint queuedPixelCount
+    out uint queuedPixelCount,
+    out uint queuedCubeMask
     VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_PARAM
     )
 {
     queuedPixelCount = 0u;
+    uint laneQueuedCubeMask = 0u;
+#if !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+    queuedCubeMask = 0u;
+#endif
 
     if (batchMaxPixelCount == VOXEL_RASTER_THREADS_PER_GROUP)
     {
@@ -1775,6 +1818,7 @@ void VoxelRasterQueueBatchPixels(
             VoxelRasterQueuePushDecodedTaskCandidate(
                 queueBase,
                 queuedPixelCount,
+                laneQueuedCubeMask,
                 cubeSlot,
                 pixelLinear
                 VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_ARG
@@ -1785,6 +1829,7 @@ void VoxelRasterQueueBatchPixels(
                 VoxelRasterQueuePushDecodedTaskCandidate(
                     queueBase,
                     queuedPixelCount,
+                    laneQueuedCubeMask,
                     cubeSlot,
                     pixelLinear
                     VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_ARG
@@ -1792,6 +1837,9 @@ void VoxelRasterQueueBatchPixels(
                 ++cubeSlot;
             }
         }
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+        queuedCubeMask = WaveActiveBitOr(laneQueuedCubeMask);
+#endif
         return;
     }
 
@@ -1807,6 +1855,7 @@ void VoxelRasterQueueBatchPixels(
         VoxelRasterQueuePushDecodedTaskCandidate(
             queueBase,
             queuedPixelCount,
+            laneQueuedCubeMask,
             cubeSlot,
             pixelLinear
             VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_ARG
@@ -1818,6 +1867,7 @@ void VoxelRasterQueueBatchPixels(
             VoxelRasterQueuePushDecodedTaskCandidate(
                 queueBase,
                 queuedPixelCount,
+                laneQueuedCubeMask,
                 cubeSlot,
                 pixelLinear
                 VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_ARG
@@ -1825,7 +1875,50 @@ void VoxelRasterQueueBatchPixels(
             VoxelRasterQueueAdvanceTaskPixel(taskPixelStepCube, taskPixelStepRemainder, batchMaxPixelCount, cubeSlot, pixelLinear);
         }
     }
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+    queuedCubeMask = WaveActiveBitOr(laneQueuedCubeMask);
+#endif
 }
+
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+void VoxelRasterBuildDeferredTraceBases(
+    uint GI,
+    uint batchCubeCount,
+    uint cubeMask,
+    PerMeshInstanceBuffer meshInstance,
+    PerObjectBuffer objectData,
+    uint assemblyTransformIndex,
+    CullingCameraInfo camera)
+{
+    if (GI < batchCubeCount && (cubeMask & (1u << GI)) != 0u)
+    {
+        const float4 deferredLocalViewZ = gs_voxelRasterPreparedCubes[GI].traceBasis.localViewZAndRayOriginViewZ;
+        const uint expandedBoneIndex = asuint(gs_voxelRasterPreparedCubes[GI].traceBasis.viewToLocalX.x);
+        row_major matrix worldToLocal = objectData.modelInverse;
+        if (expandedBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
+        {
+            const float4x4 inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
+                meshInstance.skinningInstanceSlot,
+                expandedBoneIndex,
+                assemblyTransformIndex);
+            worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
+        }
+
+        const row_major matrix viewToLocal = mul(camera.viewInverse, worldToLocal);
+        const float3 cameraOriginLocal = mul(float4(camera.positionWorldSpace.xyz, 1.0f), worldToLocal).xyz;
+        VoxelRasterSkinnedTraceBasis traceBasis;
+        traceBasis.viewToLocalX = VoxelRasterViewToLocalX(viewToLocal);
+        traceBasis.viewToLocalY = VoxelRasterViewToLocalY(viewToLocal);
+        traceBasis.viewToLocalZ = VoxelRasterViewToLocalZ(viewToLocal);
+        traceBasis.localViewZAndRayOriginViewZ = float4(
+            deferredLocalViewZ.xyz,
+            dot(float4(cameraOriginLocal, 1.0f), deferredLocalViewZ));
+        gs_voxelRasterPreparedCubes[GI].traceBasis = traceBasis;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+}
+#endif
 
 void VoxelRasterTraceQueuedPixels(
     uint waveLane,
@@ -1981,10 +2074,14 @@ void VoxelRasterRasterizeClusterQueued(
 
         const uint batchTaskCount = batchQueuedCubeCount * batchMaxPixelCount;
         const float batchMaxPixelCountInv = rcp(max(float(batchMaxPixelCount), 1.0f));
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+        uint preparedTraceCubeMask = 0u;
+#endif
         for (uint taskBase = 0u; taskBase < batchTaskCount; taskBase += VOXEL_RASTER_PIXEL_QUEUE_CAPACITY)
         {
             const uint taskEnd = min(taskBase + VOXEL_RASTER_PIXEL_QUEUE_CAPACITY, batchTaskCount);
             uint queuedPixelCount = 0u;
+            uint queuedCubeMask = 0u;
             VoxelRasterQueueBatchPixels(
                 GI,
                 waveQueueBase,
@@ -1992,9 +2089,26 @@ void VoxelRasterRasterizeClusterQueued(
                 batchMaxPixelCountInv,
                 taskBase,
                 taskEnd,
-                queuedPixelCount
+                queuedPixelCount,
+                queuedCubeMask
                 VOXEL_RASTER_DEPTH_PRETEST_VISIBILITY_ARG
                 );
+
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+            const uint newTraceCubeMask = queuedCubeMask & ~preparedTraceCubeMask;
+            if (newTraceCubeMask != 0u)
+            {
+                VoxelRasterBuildDeferredTraceBases(
+                    GI,
+                    batchCubeCount,
+                    newTraceCubeMask,
+                    meshInstance,
+                    objectData,
+                    assemblyTransformIndex,
+                    camera);
+                preparedTraceCubeMask |= newTraceCubeMask;
+            }
+#endif
 
             VoxelRasterTraceQueuedPixels(
                 waveLane,
@@ -2050,17 +2164,9 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
             workIndex,
             GI,
             gs_voxelRasterWork,
-#if PSO_SKINNED
-            gs_voxelRasterMeshInstance,
-#endif
             gs_voxelRasterObjectData,
-            gs_voxelRasterMetadata,
-            gs_voxelRasterAssemblyTransformIndex,
             gs_voxelRasterCamera,
-            gs_voxelRasterInfo,
-            gs_voxelRasterPageEntry,
-            gs_voxelRasterPageHeader,
-            gs_voxelRasterCluster)
+            gs_voxelRasterInfo)
             ? 1u
             : 0u;
 #if PSO_SKINNED && CLOD_VOXEL_RASTER_FACTORED_SKIN_TRANSFORMS
@@ -2083,16 +2189,43 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 
     const CLodVoxelRasterWorkRecord work = gs_voxelRasterWork;
 #if PSO_SKINNED
-    const PerMeshInstanceBuffer meshInstance = gs_voxelRasterMeshInstance;
+    PerMeshInstanceBuffer meshInstance = (PerMeshInstanceBuffer)0;
+    meshInstance.skinningInstanceSlot = work.skinningInstanceSlot;
 #endif
-    const PerObjectBuffer objectData = gs_voxelRasterObjectData;
-    const CLodMeshMetadata metadata = gs_voxelRasterMetadata;
-    const uint visibleClusterAssemblyTransformIndex = gs_voxelRasterAssemblyTransformIndex;
-    const CullingCameraInfo camera = gs_voxelRasterCamera;
-    const ClodViewRasterInfo rasterInfo = gs_voxelRasterInfo;
-    const GroupPageMapEntry pageEntry = gs_voxelRasterPageEntry;
-    const CLodVoxelPageHeader pageHeader = gs_voxelRasterPageHeader;
-    const CLodVoxelClusterRecord voxelCluster = gs_voxelRasterCluster;
+    PerObjectBuffer objectData = (PerObjectBuffer)0;
+    objectData.model = gs_voxelRasterObjectData.model;
+    objectData.modelInverse = gs_voxelRasterObjectData.modelInverse;
+    CLodMeshMetadata metadata = (CLodMeshMetadata)0;
+    metadata.assemblyTransformBase = work.assemblyTransformBase;
+    metadata.assemblyBoneRemapBase = work.assemblyBoneRemapBase;
+    metadata.assemblyBoneRemapCount = work.assemblyBoneRemapCount;
+    const uint visibleClusterAssemblyTransformIndex = work.assemblyTransformIndex;
+    CullingCameraInfo camera = (CullingCameraInfo)0;
+    camera.positionWorldSpace = gs_voxelRasterCamera.positionWorldSpace;
+    camera.projX = gs_voxelRasterCamera.projX;
+    camera.projY = gs_voxelRasterCamera.projY;
+    camera.isOrtho = gs_voxelRasterCamera.isOrtho;
+    camera.viewRightWorld = gs_voxelRasterCamera.viewRightWorld;
+    camera.viewUpWorld = gs_voxelRasterCamera.viewUpWorld;
+    camera.viewForwardWorld = gs_voxelRasterCamera.viewForwardWorld;
+    camera.viewZ = gs_voxelRasterCamera.viewZ;
+    camera.viewInverse = gs_voxelRasterCamera.viewInverse;
+    camera.projectionInverse = gs_voxelRasterCamera.projectionInverse;
+    ClodViewRasterInfo rasterInfo = (ClodViewRasterInfo)0;
+    rasterInfo.visibilityUAVDescriptorIndex = gs_voxelRasterInfo.visibilityUAVDescriptorIndex;
+    rasterInfo.scissorMinX = gs_voxelRasterInfo.scissorMinX;
+    rasterInfo.scissorMinY = gs_voxelRasterInfo.scissorMinY;
+    rasterInfo.scissorMaxX = gs_voxelRasterInfo.scissorMaxX;
+    rasterInfo.scissorMaxY = gs_voxelRasterInfo.scissorMaxY;
+    GroupPageMapEntry pageEntry = (GroupPageMapEntry)0;
+    pageEntry.slabDescriptorIndex = work.slabDescriptorIndex;
+    pageEntry.slabByteOffset = work.slabByteOffset;
+    CLodVoxelPageHeader pageHeader = (CLodVoxelPageHeader)0;
+    pageHeader.cubeRecordsOffset = work.cubeRecordsOffset;
+    CLodVoxelClusterRecord voxelCluster = (CLodVoxelClusterRecord)0;
+    voxelCluster.firstCube = work.firstCube;
+    voxelCluster.cubeCount = work.cubeCount;
+    voxelCluster.aabbMinAndVoxelWidth = work.aabbMinAndVoxelWidth;
 
     const float voxelWidth = voxelCluster.aabbMinAndVoxelWidth.w;
 

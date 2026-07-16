@@ -1479,9 +1479,17 @@ void CLodAppendVoxelRasterClusterWork(
         record.visibleClusterIndex = visibleClusterIndex;
         record.instanceIndex = instanceIndex;
         record.viewId = viewId;
-        record.localGroupId = localGroupId;
-        record.localPageIndex = voxelSegment.pageIndex;
-        record.pageLocalClusterIndex = pageLocalClusterIndex;
+        record.assemblyTransformIndex = assemblyTransformIndex;
+        record.skinningInstanceSlot = voxelSkinningInstanceSlot;
+        record.slabDescriptorIndex = voxelPageEntry.slabDescriptorIndex;
+        record.slabByteOffset = voxelPageEntry.slabByteOffset;
+        record.cubeRecordsOffset = voxelPageHeader.cubeRecordsOffset;
+        record.firstCube = voxelCluster.firstCube;
+        record.cubeCount = voxelCluster.cubeCount;
+        record.assemblyTransformBase = clodMeshMetadata.assemblyTransformBase;
+        record.assemblyBoneRemapBase = clodMeshMetadata.assemblyBoneRemapBase;
+        record.assemblyBoneRemapCount = clodMeshMetadata.assemblyBoneRemapCount;
+        record.aabbMinAndVoxelWidth = voxelCluster.aabbMinAndVoxelWidth;
         if (clusterHasSkinnedCubes)
         {
             skinnedWorkRecords[baseSlot] = record;

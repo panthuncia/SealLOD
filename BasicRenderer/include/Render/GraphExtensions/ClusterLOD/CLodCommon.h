@@ -307,12 +307,20 @@ struct CLodVoxelRasterWorkRecord
     uint32_t visibleClusterIndex = 0u;
     uint32_t instanceIndex = 0u;
     uint32_t viewId = 0u;
-    uint32_t localGroupId = 0u;
-    uint32_t localPageIndex = 0u;
-    uint32_t pageLocalClusterIndex = 0u;
+    uint32_t assemblyTransformIndex = 0xFFFFFFFFu;
+    uint32_t skinningInstanceSlot = 0xFFFFFFFFu;
+    uint32_t slabDescriptorIndex = 0u;
+    uint32_t slabByteOffset = 0u;
+    uint32_t cubeRecordsOffset = 0u;
+    uint32_t firstCube = 0u;
+    uint32_t cubeCount = 0u;
+    uint32_t assemblyTransformBase = 0u;
+    uint32_t assemblyBoneRemapBase = 0u;
+    uint32_t assemblyBoneRemapCount = 0u;
+    std::array<float, 4> aabbMinAndVoxelWidth{};
 };
 
-static_assert(sizeof(CLodVoxelRasterWorkRecord) == 24u, "CLodVoxelRasterWorkRecord size must match HLSL");
+static_assert(sizeof(CLodVoxelRasterWorkRecord) == 68u, "CLodVoxelRasterWorkRecord size must match HLSL");
 
 struct CLodVoxelRasterDispatchCommand
 {
