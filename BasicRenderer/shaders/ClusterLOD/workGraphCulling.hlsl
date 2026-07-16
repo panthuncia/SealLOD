@@ -2092,6 +2092,17 @@ float3 ToViewSpace(float3 objectCenter, row_major matrix objectModelMatrix, row_
     return mul(worldSpaceCenter, viewMatrix).xyz;
 }
 
+bool CLodReplayRootOcclusionCandidate(
+    TraverseNodeRecord rec,
+    CLodMeshMetadata clodMeshMetadata)
+{
+    return
+        UnpackSourceTag(rec.nodeIdPacked) == CLOD_RECORD_SOURCE_REPLAY &&
+        rec.assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL &&
+        UnpackNodeId(rec.nodeIdPacked) == CLodResolveTraversalRootNode(clodMeshMetadata) &&
+        CLodWorkGraphOcclusionEnabled();
+}
+
 bool CLodReplayRootOccluded(
     TraverseNodeRecord rec,
     CLodMeshMetadata clodMeshMetadata,
@@ -2100,11 +2111,7 @@ bool CLodReplayRootOccluded(
     PerObjectBuffer instanceTransform,
     Camera cullCamera)
 {
-    if (UnpackSourceTag(rec.nodeIdPacked) != CLOD_RECORD_SOURCE_REPLAY ||
-        rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
-        UnpackNodeId(rec.nodeIdPacked) != CLodResolveTraversalRootNode(clodMeshMetadata) ||
-        !CLodWorkGraphOcclusionEnabled() ||
-        cullCamera.isOrtho)
+    if (!CLodReplayRootOcclusionCandidate(rec, clodMeshMetadata) || cullCamera.isOrtho)
     {
         return false;
     }

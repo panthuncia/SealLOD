@@ -103,24 +103,27 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata =
         clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
-    const PerMeshInstanceBuffer instanceData =
-        LoadMeshTemplateForDraw(record.instanceIndex);
-    const PerObjectBuffer instanceTransform =
-        LoadInstanceTransformForDrawRecordWithAssemblyTransform(
-            drawRecord,
-            record.assemblyTransformIndex);
-    StructuredBuffer<Camera> cameras =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-    const Camera cullCamera = cameras[record.viewId];
-    if (CLodReplayRootOccluded(
-        record,
-        clodMeshMetadata,
-        drawRecord,
-        instanceData,
-        instanceTransform,
-        cullCamera))
+    if (CLodReplayRootOcclusionCandidate(record, clodMeshMetadata))
     {
-        return;
+        const PerMeshInstanceBuffer instanceData =
+            LoadMeshTemplateForDraw(record.instanceIndex);
+        const PerObjectBuffer instanceTransform =
+            LoadInstanceTransformForDrawRecordWithAssemblyTransform(
+                drawRecord,
+                record.assemblyTransformIndex);
+        StructuredBuffer<Camera> cameras =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+        const Camera cullCamera = cameras[record.viewId];
+        if (CLodReplayRootOccluded(
+            record,
+            clodMeshMetadata,
+            drawRecord,
+            instanceData,
+            instanceTransform,
+            cullCamera))
+        {
+            return;
+        }
     }
 
     uint outputIndex = 0u;
