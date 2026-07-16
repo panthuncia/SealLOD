@@ -222,6 +222,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const uint inputCount = inputCountBuffer[0];
     const uint index = dispatchThreadID.x;
     WGTelemetryAdd(WG_COUNTER_TRAVERSE_THREADS, 1);
+    CLodTelemetryTraverseWaveLaunch(index < inputCount);
     if (index >= inputCount) {
         return;
     }
@@ -252,15 +253,18 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const uint cullViewId = rec.viewId;
     const uint lodViewId = CLodResolveLodViewId(cullViewId);
     const Camera cullCamera = cameras[cullViewId];
-    const Camera lodCamera = cameras[lodViewId];
     StructuredBuffer<CullingCameraInfo> cameraInfos =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     const CullingCameraInfo lodCam = cameraInfos[lodViewId];
+    const bool lodCameraIsOrtho = lodCam.isOrtho != 0u;
     StructuredBuffer<ClusterLODNode> lodNodes =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
     const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
     const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+    CLodTelemetryTraverseWaveClassification(
+        node.range.isLeaf == CLOD_NODE_INTERNAL,
+        isSkinned);
     const bool skinnedAssemblyPortal =
         node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT &&
         isSkinned &&
@@ -290,12 +294,12 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
     const float cullUniformScale = objectUniformScale;
     const float lodUniformScale = objectUniformScale;
-    const uint nodeSkinningInstanceSlot = ResolveProceduralWindSkinningSlot(rec.instanceIndex, instanceData.skinningInstanceSlot);
     BoundingSphere nodeCullBounds = { node.metric.cullCenterAndRadius };
     const uint nodeCullClassification = isSkinned
         ? CLodResolveAnimatedNodeCullSphere(
             nodeLocalId, node.metric.cullCenterAndRadius, clodMeshMetadata,
-            nodeSkinningInstanceSlot, rec.assemblyTransformIndex, nodeCullBounds)
+            rec.instanceIndex, instanceData.skinningInstanceSlot,
+            rec.assemblyTransformIndex, nodeCullBounds)
         : CLOD_NODE_CULL_STATIC_BIND_POSE;
     CLodTelemetryNodeCullClassification(nodeCullClassification);
     const float3 nodeCullCenterObjectSpace = nodeCullBounds.sphere.xyz;
@@ -344,7 +348,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             objectModelMatrix,
             lodUniformScale,
             lodCam,
-            lodCamera.isOrtho,
+            lodCameraIsOrtho,
             forceLodDecision,
             rec.instanceIndex,
             instanceData.perMeshBufferIndex,
@@ -401,7 +405,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             objectModelMatrix,
             lodUniformScale,
             lodCam,
-            lodCamera.isOrtho,
+            lodCameraIsOrtho,
             nodeTouchesDirtyPages,
             forceLodDecision,
             rec.instanceIndex,
@@ -427,7 +431,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             objectModelMatrix,
             lodUniformScale,
             lodCam,
-            lodCamera.isOrtho,
+            lodCameraIsOrtho,
             rec.instanceIndex,
             instanceData.perMeshBufferIndex,
             rec.viewId,
@@ -580,7 +584,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
-        lodCamera.isOrtho);
+        lodCameraIsOrtho);
     const bool nodeWantsTraversal =
         forceLodDecision ||
         (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
@@ -640,38 +644,17 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     const uint childCount = min(node.range.countMinusOne + 1u, BVH_MAX_CHILDREN);
     const uint sourceTag = UnpackSourceTag(rec.nodeIdPacked);
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_CHILD_LOOP_NODES, 1u);
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_CHILD_LOOP_SLOTS, childCount);
+    uint emittedChildCount = 0u;
 
     [loop]
     for (uint childIndex = 0; childIndex < childCount; ++childIndex) {
         const uint childNodeId = node.range.indexOrOffset + childIndex;
         const ClusterLODNode child = lodNodes[clodMeshMetadata.lodNodesBase + childNodeId];
 
-        BoundingSphere childCullBounds = { child.metric.cullCenterAndRadius };
-        const uint childCullClassification = isSkinned
-            ? CLodResolveAnimatedNodeCullSphere(
-                childNodeId, child.metric.cullCenterAndRadius, clodMeshMetadata,
-                nodeSkinningInstanceSlot, rec.assemblyTransformIndex, childCullBounds)
-            : CLOD_NODE_CULL_STATIC_BIND_POSE;
-        CLodTelemetryNodeCullClassification(childCullClassification);
-        const float3 childCullCenterOS = childCullBounds.sphere.xyz;
-        const float childCullRadiusOS = childCullBounds.sphere.w;
-        const float3 childCenterVS = ToViewSpace(childCullCenterOS, objectModelMatrix, cullCamera.view);
-        const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-        if (CLodWorkGraphFrustumCullingEnabled() &&
-            !replaySource &&
-            CLodNodeBoundsOutsideFrustum(
-                childCullClassification,
-                child.metric.cullCenterAndRadius,
-                childCullBounds,
-                objectModelMatrix,
-                cullUniformScale,
-                cullCamera)) {
-            if (childCullClassification == CLOD_NODE_CULL_EXPLICIT_LIVE_BOUNDS)
-                WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_EXPLICIT_FRUSTUM_REJECTED, 1u);
-            WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
-            continue;
-        }
-
+        // Reject internal children by their cheap hierarchy LOD bound before
+        // doing any visibility-bound work.
         if (!forceLodDecision && child.range.isLeaf == CLOD_NODE_INTERNAL) {
             const float3 childWorldCenter = mul(float4(child.metric.lodCenterAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
             const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
@@ -679,22 +662,47 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 childWorldCenter, childLodRadiusWorld,
                 child.metric.maxQuadricError, lodUniformScale,
                 lodCam.viewZ, lodCam.zNear,
-                lodCamera.isOrtho);
+                lodCameraIsOrtho);
             if (childEOD < lodCam.errorOverDistanceThreshold) {
                 WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED, 1);
                 continue;
             }
         }
 
-#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        if (dirtyPageCullingEnabled) {
-            const float3 childCullCenterWorld = mul(float4(childCullCenterOS, 1.0f), objectModelMatrix).xyz;
-            if (!CLodVirtualShadowBoundsTouchDirtyPages(childCullCenterWorld, childRadiusWorld, rec.viewId)) {
-                WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
+        // A skinned child resolves this same live sphere when it consumes the
+        // emitted frontier record. Defer its frustum test to that thread rather
+        // than evaluating every animated child twice. Static bind bounds remain
+        // cheap enough to prefilter here.
+        if (!isSkinned) {
+            BoundingSphere childCullBounds = { child.metric.cullCenterAndRadius };
+            const uint childCullClassification = CLOD_NODE_CULL_STATIC_BIND_POSE;
+            CLodTelemetryNodeCullClassification(childCullClassification);
+            const float3 childCullCenterOS = childCullBounds.sphere.xyz;
+            const float childCullRadiusOS = childCullBounds.sphere.w;
+            const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
+            if (CLodWorkGraphFrustumCullingEnabled() &&
+                !replaySource &&
+                CLodNodeBoundsOutsideFrustum(
+                    childCullClassification,
+                    child.metric.cullCenterAndRadius,
+                    childCullBounds,
+                    objectModelMatrix,
+                    cullUniformScale,
+                    cullCamera)) {
+                WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_FRUSTUM_CULLED, 1);
                 continue;
             }
-        }
+
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+            if (dirtyPageCullingEnabled) {
+                const float3 childCullCenterWorld = mul(float4(childCullCenterOS, 1.0f), objectModelMatrix).xyz;
+                if (!CLodVirtualShadowBoundsTouchDirtyPages(childCullCenterWorld, childRadiusWorld, rec.viewId)) {
+                    WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
+                    continue;
+                }
+            }
 #endif
+        }
 
         uint outputIndex = 0u;
         InterlockedAdd(nextCounter[0], 1u, outputIndex);
@@ -709,7 +717,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
         nextFrontier[outputIndex] = childRecord;
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
+        emittedChildCount++;
     }
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_ACTIVE_CHILD_THREADS, emittedChildCount);
+    WGTelemetryAdd(WG_COUNTER_TRAVERSE_CHILD_RECORDS_EMITTED, emittedChildCount);
 }
 
 [numthreads(32, 1, 1)]

@@ -427,7 +427,9 @@ struct VoxelRasterVoxelSetup
 struct VoxelRasterObjectInputs
 {
     row_major matrix model;
+#if !PSO_SKINNED || !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
     row_major matrix modelInverse;
+#endif
 };
 
 struct VoxelRasterCameraInputs
@@ -466,6 +468,9 @@ groupshared float4 gs_voxelRasterObjectViewZ;
 groupshared VoxelRasterObjectInputs gs_voxelRasterObjectData;
 groupshared VoxelRasterCameraInputs gs_voxelRasterCamera;
 groupshared VoxelRasterViewInputs gs_voxelRasterInfo;
+#if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
+groupshared row_major matrix gs_voxelRasterDeferredModelInverse;
+#endif
 
 struct VoxelRasterRayProjectionSetup
 {
@@ -1248,7 +1253,9 @@ bool VoxelRasterTryLoadWorkInputs(
         work.instanceIndex,
         work.assemblyTransformIndex);
     objectInputs.model = objectData.model;
+#if !PSO_SKINNED || !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
     objectInputs.modelInverse = objectData.modelInverse;
+#endif
     cameraInputs.positionWorldSpace = camera.positionWorldSpace;
     cameraInputs.projX = camera.projX;
     cameraInputs.projY = camera.projY;
@@ -1885,23 +1892,33 @@ void VoxelRasterBuildDeferredTraceBases(
     uint GI,
     uint batchCubeCount,
     uint cubeMask,
+    bool loadDeferredObjectInputs,
+    uint instanceIndex,
     PerMeshInstanceBuffer meshInstance,
-    PerObjectBuffer objectData,
     uint assemblyTransformIndex,
     CullingCameraInfo camera)
 {
+    if (loadDeferredObjectInputs && GI == 0u)
+    {
+        gs_voxelRasterDeferredModelInverse =
+            LoadInstanceTransformForDrawWithAssemblyTransform(
+                instanceIndex,
+                assemblyTransformIndex).modelInverse;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
     if (GI < batchCubeCount && (cubeMask & (1u << GI)) != 0u)
     {
         const float4 deferredLocalViewZ = gs_voxelRasterPreparedCubes[GI].traceBasis.localViewZAndRayOriginViewZ;
         const uint expandedBoneIndex = asuint(gs_voxelRasterPreparedCubes[GI].traceBasis.viewToLocalX.x);
-        row_major matrix worldToLocal = objectData.modelInverse;
+        row_major matrix worldToLocal = gs_voxelRasterDeferredModelInverse;
         if (expandedBoneIndex != CLOD_VOXEL_STATIC_BONE_INDEX)
         {
             const float4x4 inverseSkinMatrix = LoadAssemblyLocalBoneInverseSkinMatrix(
                 meshInstance.skinningInstanceSlot,
                 expandedBoneIndex,
                 assemblyTransformIndex);
-            worldToLocal = mul(objectData.modelInverse, inverseSkinMatrix);
+            worldToLocal = mul(gs_voxelRasterDeferredModelInverse, inverseSkinMatrix);
         }
 
         const row_major matrix viewToLocal = mul(camera.viewInverse, worldToLocal);
@@ -2017,6 +2034,7 @@ void VoxelRasterRasterizeClusterQueued(
     CLodVoxelClusterRecord voxelCluster,
     VoxelRasterVoxelSetup voxelSetup,
 #if PSO_SKINNED
+    uint instanceIndex,
     PerMeshInstanceBuffer meshInstance,
     PerObjectBuffer objectData,
     CLodMeshMetadata metadata,
@@ -2076,6 +2094,7 @@ void VoxelRasterRasterizeClusterQueued(
         const float batchMaxPixelCountInv = rcp(max(float(batchMaxPixelCount), 1.0f));
 #if CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
         uint preparedTraceCubeMask = 0u;
+        bool deferredObjectInputsLoaded = false;
 #endif
         for (uint taskBase = 0u; taskBase < batchTaskCount; taskBase += VOXEL_RASTER_PIXEL_QUEUE_CAPACITY)
         {
@@ -2102,10 +2121,12 @@ void VoxelRasterRasterizeClusterQueued(
                     GI,
                     batchCubeCount,
                     newTraceCubeMask,
+                    !deferredObjectInputsLoaded,
+                    instanceIndex,
                     meshInstance,
-                    objectData,
                     assemblyTransformIndex,
                     camera);
+                deferredObjectInputsLoaded = true;
                 preparedTraceCubeMask |= newTraceCubeMask;
             }
 #endif
@@ -2194,7 +2215,9 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
 #endif
     PerObjectBuffer objectData = (PerObjectBuffer)0;
     objectData.model = gs_voxelRasterObjectData.model;
+#if !PSO_SKINNED || !CLOD_VOXEL_RASTER_DEFER_TRACE_BASIS_ACTIVE
     objectData.modelInverse = gs_voxelRasterObjectData.modelInverse;
+#endif
     CLodMeshMetadata metadata = (CLodMeshMetadata)0;
     metadata.assemblyTransformBase = work.assemblyTransformBase;
     metadata.assemblyBoneRemapBase = work.assemblyBoneRemapBase;
@@ -2310,6 +2333,7 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         voxelCluster,
         voxelSetup,
 #if PSO_SKINNED
+        work.instanceIndex,
         meshInstance,
         objectData,
         metadata,

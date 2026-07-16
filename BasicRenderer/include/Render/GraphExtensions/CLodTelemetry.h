@@ -221,7 +221,27 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     VoxelRasterDistributionBinBase,
     VoxelRasterDistributionBinEnd = VoxelRasterDistributionBinBase + 48,
 
-    Count = VoxelRasterDistributionBinEnd
+    TraverseWaves = VoxelRasterDistributionBinEnd,
+    TraverseActiveLanes,
+    TraverseRigidLanes,
+    TraverseSkinnedLanes,
+    TraverseInternalOnlyWaves,
+    TraverseLeafOnlyWaves,
+    TraverseMixedNodeTypeWaves,
+    TraverseRigidOnlyWaves,
+    TraverseSkinnedOnlyWaves,
+    TraverseMixedSkinningWaves,
+    TraverseChildLoopNodes,
+    TraverseChildLoopSlots,
+    TraverseChildRecordsEmitted,
+    NodeBoundsExplicitBoneCount,
+    NodeBoundsExplicitBoneCount1,
+    NodeBoundsExplicitBoneCount2,
+    NodeBoundsExplicitBoneCount3To4,
+    NodeBoundsExplicitBoneCount5To8,
+    NodeBoundsExplicitBoneCount9Plus,
+
+    Count
 };
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =

@@ -1629,7 +1629,7 @@ void Renderer::SetSettings() {
         settingsManager.registerSetting<std::vector<float>>("directionalLightCascadeSplits", calculateCascadeSplits(numDirectionalCascades, 0.1f, maxShadowDistance, maxShadowDistance));
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);
-	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 1.0f);
+	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 0.0f);
 	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
 		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);
@@ -3001,6 +3001,44 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::NodeBoundsOverflowFallbacks),
 				counter(CLodWorkGraphCounterIndex::NodeBoundsAssemblyFallbacks),
 				counter(CLodWorkGraphCounterIndex::NodeBoundsInvalidFallbacks));
+            spdlog::info(
+                "SARP CLOD traversal divergence: frame={} waves={} active_lanes={} avg_active={:.2f} node_type_waves(internal_only={} leaf_only={} mixed={}) skinning(lanes_rigid={} lanes_skinned={} waves_rigid_only={} waves_skinned_only={} waves_mixed={}) child_loops(nodes={} slots={} emitted={} avg_slots={:.2f} survival={:.3f}) explicit_bounds(total_bones={} avg_bones={:.2f} hist_1={} hist_2={} hist_3_4={} hist_5_8={} hist_9_plus={})",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::TraverseWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseActiveLanes),
+                counter(CLodWorkGraphCounterIndex::TraverseWaves) != 0u
+                    ? static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseActiveLanes)) /
+                        static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseWaves))
+                    : 0.0,
+                counter(CLodWorkGraphCounterIndex::TraverseInternalOnlyWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseLeafOnlyWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseMixedNodeTypeWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseRigidLanes),
+                counter(CLodWorkGraphCounterIndex::TraverseSkinnedLanes),
+                counter(CLodWorkGraphCounterIndex::TraverseRigidOnlyWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseSkinnedOnlyWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseMixedSkinningWaves),
+                counter(CLodWorkGraphCounterIndex::TraverseChildLoopNodes),
+                counter(CLodWorkGraphCounterIndex::TraverseChildLoopSlots),
+                counter(CLodWorkGraphCounterIndex::TraverseChildRecordsEmitted),
+                counter(CLodWorkGraphCounterIndex::TraverseChildLoopNodes) != 0u
+                    ? static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseChildLoopSlots)) /
+                        static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseChildLoopNodes))
+                    : 0.0,
+                counter(CLodWorkGraphCounterIndex::TraverseChildLoopSlots) != 0u
+                    ? static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseChildRecordsEmitted)) /
+                        static_cast<double>(counter(CLodWorkGraphCounterIndex::TraverseChildLoopSlots))
+                    : 0.0,
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount),
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitEvaluations) != 0u
+                    ? static_cast<double>(counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount)) /
+                        static_cast<double>(counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitEvaluations))
+                    : 0.0,
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount1),
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount2),
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount3To4),
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount5To8),
+                counter(CLodWorkGraphCounterIndex::NodeBoundsExplicitBoneCount9Plus));
 			spdlog::info(
 				"SARP CLOD animated meshlet bounds: frame={} live_evaluations={} invalid_slot_fallbacks={} no_valid_bone_fallbacks={} fallback_frustum_rejections={}",
 				requestedFrame,
