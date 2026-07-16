@@ -3057,10 +3057,17 @@ void WG_TraverseNodes(
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
-        StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-        const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
-        const bool isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+        // Mesh upload creates one node-skinning sidecar entry per CLOD node for
+        // skinned meshes and none for rigid meshes. Keep the original source for
+        // telemetry so live PSO replacement retains the same resource interface.
+        bool isSkinned = clodMeshMetadata.nodeSkinningInfoCount != 0u;
+        if (CLodWorkGraphTelemetryEnabled())
+        {
+            StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+            const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
+            isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+        }
         const row_major matrix objectModelMatrix = instanceTransform.model;
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -3642,10 +3649,17 @@ void WG_LeafNodes(
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
-        StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-        const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
-        const bool isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+        // Mesh upload creates one node-skinning sidecar entry per CLOD node for
+        // skinned meshes and none for rigid meshes. Keep the original source for
+        // telemetry so live PSO replacement retains the same resource interface.
+        bool isSkinned = clodMeshMetadata.nodeSkinningInfoCount != 0u;
+        if (CLodWorkGraphTelemetryEnabled())
+        {
+            StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+            const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
+            isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+        }
         const row_major matrix objectModelMatrix = instanceTransform.model;
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
