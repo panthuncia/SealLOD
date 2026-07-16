@@ -48,6 +48,16 @@ cbuffer MiscUintRootConstants : register(b4) { // Used for pass-specific one-off
 	uint UintRootConstant35;
 	uint UintRootConstant36;
 	uint UintRootConstant37;
+	uint UintRootConstant38;
+	uint UintRootConstant39;
+	uint UintRootConstant40;
+	uint UintRootConstant41;
+	uint UintRootConstant42;
+	uint UintRootConstant43;
+	uint UintRootConstant44;
+	uint UintRootConstant45;
+	uint UintRootConstant46;
+	uint UintRootConstant47;
 }
 
 cbuffer ResourceDescriptorIndices : register(b5) {

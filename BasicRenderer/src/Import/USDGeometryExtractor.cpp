@@ -16,7 +16,9 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <map>
+#include <thread>
 
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usdGeom/imageable.h>
@@ -57,6 +59,71 @@ namespace {
 
 constexpr size_t kMaxSkinInfluences = 8u;
 constexpr const char* kSkinningPayloadAbiSuffix = "#skinning_payloads=3";
+
+class ScopedCLodBuildHeartbeat
+{
+public:
+	ScopedCLodBuildHeartbeat(
+		std::string source,
+		std::string prim,
+		std::string subset,
+		size_t vertexCount,
+		size_t triangleCount) :
+		_source(std::move(source)),
+		_prim(std::move(prim)),
+		_subset(std::move(subset)),
+		_vertexCount(vertexCount),
+		_triangleCount(triangleCount),
+		_started(std::chrono::steady_clock::now()),
+		_thread([this] { Run(); })
+	{}
+
+	ScopedCLodBuildHeartbeat(const ScopedCLodBuildHeartbeat&) = delete;
+	ScopedCLodBuildHeartbeat& operator=(const ScopedCLodBuildHeartbeat&) = delete;
+
+	~ScopedCLodBuildHeartbeat()
+	{
+		{
+			std::lock_guard lock(_mutex);
+			_done = true;
+		}
+		_wake.notify_all();
+		if (_thread.joinable()) {
+			_thread.join();
+		}
+	}
+
+private:
+	void Run()
+	{
+		std::unique_lock lock(_mutex);
+		while (!_wake.wait_for(lock, std::chrono::seconds(10), [this] { return _done; })) {
+			const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+				std::chrono::steady_clock::now() - _started).count();
+			lock.unlock();
+			spdlog::info(
+				"    CLod build active: elapsed={}s source='{}' prim='{}' subset='{}' vertices={} triangles={}",
+				elapsed,
+				_source,
+				_prim,
+				_subset,
+				_vertexCount,
+				_triangleCount);
+			lock.lock();
+		}
+	}
+
+	std::string _source;
+	std::string _prim;
+	std::string _subset;
+	size_t _vertexCount = 0;
+	size_t _triangleCount = 0;
+	std::chrono::steady_clock::time_point _started;
+	std::mutex _mutex;
+	std::condition_variable _wake;
+	bool _done = false;
+	std::thread _thread;
+};
 
 std::mutex& GetClusterLODCacheBuildMutex(const CLodCacheLoader::MeshCacheIdentity& identity)
 {
@@ -1880,23 +1947,60 @@ MeshPreprocessResult ExtractSubMeshGroup(
 	// Build CLod cache if needed. Assembly construction can request retained
 	// artifacts even on cache hits because it needs page blobs, not metadata only.
 	if (!prebuiltData.has_value() || options.retainClusterLODArtifacts) {
-		spdlog::info("    Building CLod artifacts...");
+		spdlog::info(
+			"    Building CLod artifacts: source='{}' prim='{}' subset='{}' vertices={} triangles={} reason={}.",
+			cacheIdentity.sourceIdentifier,
+			cacheIdentity.primPath,
+			subsetName,
+			vertexCount,
+			indices.size() / 3u,
+			prebuiltData.has_value() ? "assembly-retained-artifacts" : "cache-miss");
 		const auto clodBuildBegin = std::chrono::steady_clock::now();
-		ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+		ClusterLODPrebuildArtifacts artifacts;
+		{
+			ScopedCLodBuildHeartbeat heartbeat(
+				cacheIdentity.sourceIdentifier,
+				cacheIdentity.primPath,
+				subsetName,
+				vertexCount,
+				indices.size() / 3u);
+			artifacts = ingest.BuildClusterLODArtifacts();
+		}
 		builtClusterLODArtifacts = true;
 		AddMs(g_benchmarkStats.clodBuildMs, clodBuildBegin);
 		ClusterLODPrebuiltData savedPrebuiltData;
-		spdlog::info("    CLod artifacts built: {} groups, {} nodes",
-			artifacts.prebuiltData.groups.size(), artifacts.prebuiltData.nodes.size());
+		const auto clodBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - clodBuildBegin).count();
+		spdlog::info(
+			"    CLod artifacts built: source='{}' prim='{}' subset='{}' elapsed_ms={} groups={} nodes={} triangle_pages={} voxel_pages={} mesh_pages={}.",
+			cacheIdentity.sourceIdentifier,
+			cacheIdentity.primPath,
+			subsetName,
+			clodBuildMs,
+			artifacts.prebuiltData.groups.size(),
+			artifacts.prebuiltData.nodes.size(),
+			artifacts.prebuiltData.trianglePageCount,
+			artifacts.prebuiltData.voxelPageCount,
+			artifacts.cacheBuildData.meshPageBlobs.size());
 
 		if (!prebuiltData.has_value()) {
-		spdlog::info("    Saving cache to disk...");
+			spdlog::info(
+				"    Saving CLod cache: source='{}' prim='{}' subset='{}'.",
+				cacheIdentity.sourceIdentifier,
+				cacheIdentity.primPath,
+				subsetName);
 		const auto clodSaveBegin = std::chrono::steady_clock::now();
 		if (CLodCacheLoader::SavePrebuiltLocked(cacheIdentity, artifacts.prebuiltData,
 			artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData))
 		{
 			AddMs(g_benchmarkStats.clodSaveMs, clodSaveBegin);
-			spdlog::info("    Cache SAVED successfully.");
+				spdlog::info(
+					"    CLod cache saved: source='{}' prim='{}' subset='{}' elapsed_ms={}.",
+					cacheIdentity.sourceIdentifier,
+					cacheIdentity.primPath,
+					subsetName,
+					std::chrono::duration_cast<std::chrono::milliseconds>(
+						std::chrono::steady_clock::now() - clodSaveBegin).count());
 			const auto clodReloadBegin = std::chrono::steady_clock::now();
 			auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
 			AddMs(g_benchmarkStats.clodReloadMs, clodReloadBegin);

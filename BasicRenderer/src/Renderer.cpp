@@ -1582,14 +1582,18 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);
 	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 1.0f);
-	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodThresholdsSettingName, { 512.0f, 256.0f, 128.0f, 64.0f, 32.0f, 12.0f });
+	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
+		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
+	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);
+	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodCapacityTargetSettingName, 0.95f);
+	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
 	int32_t forcedSkeletonLod = -1;
 	if (const char* value = std::getenv("SARP_PROCEDURAL_WIND_FORCE_LOD")) {
 		char* end = nullptr;
 		const long parsed = std::strtol(value, &end, 10);
 		if (end != value && *end == '\0') {
-			forcedSkeletonLod = std::clamp(static_cast<int32_t>(parsed), -1, 6);
+			forcedSkeletonLod = std::clamp(static_cast<int32_t>(parsed), -1, 15);
 		}
 	}
 	settingsManager.registerSetting<int32_t>(ProceduralWindForcedSkeletonLodSettingName, forcedSkeletonLod);

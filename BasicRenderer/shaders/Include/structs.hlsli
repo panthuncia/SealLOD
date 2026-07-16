@@ -861,6 +861,7 @@ struct InstanceDrawRecordBuffer {
     uint instanceTransformIndex;
     uint clodOffsetIndex;
     uint skinnedAssemblyPlacementIndex;
+    uint skinningTypeSlot;
 };
 
 struct SkinnedAssemblyPlacementBuffer {

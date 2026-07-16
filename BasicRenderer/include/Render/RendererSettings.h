@@ -7,7 +7,10 @@
 
 inline constexpr const char* WindowResolutionPresetSettingName = "windowResolutionPreset";
 inline constexpr const char* ProceduralWindDisplacementScaleSettingName = "proceduralWindDisplacementScale";
-inline constexpr const char* ProceduralWindSkeletonLodThresholdsSettingName = "proceduralWindSkeletonLodThresholds";
+inline constexpr const char* ProceduralWindSkeletonLodQualityCurveSettingName = "proceduralWindSkeletonLodQualityCurve";
+inline constexpr const char* ProceduralWindSkeletonLodStaticCutoffSettingName = "proceduralWindSkeletonLodStaticCutoff";
+inline constexpr const char* ProceduralWindSkeletonLodCapacityTargetSettingName = "proceduralWindSkeletonLodCapacityTarget";
+inline constexpr const char* ProceduralWindSkeletonLodLateReserveSettingName = "proceduralWindSkeletonLodLateReserve";
 inline constexpr const char* ProceduralWindSkeletonLodHysteresisSettingName = "proceduralWindSkeletonLodHysteresis";
 inline constexpr const char* ProceduralWindForcedSkeletonLodSettingName = "proceduralWindForcedSkeletonLod";
 

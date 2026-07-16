@@ -268,14 +268,14 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_WIND_Y asfloat(UintRootConstant27)
 #define WT_STRENGTH asfloat(UintRootConstant28)
 #define WT_GUST asfloat(UintRootConstant29)
-#define WT_LOD0 asfloat(UintRootConstant30)
-#define WT_LOD1 asfloat(UintRootConstant31)
-#define WT_LOD2 asfloat(UintRootConstant32)
-#define WT_LOD3 asfloat(UintRootConstant33)
-#define WT_LOD4 asfloat(UintRootConstant34)
-#define WT_LOD5 asfloat(UintRootConstant35)
-#define WT_LOD_HYSTERESIS asfloat(UintRootConstant36)
-#define WT_FORCE_LOD asint(UintRootConstant37)
+#define WT_CURVE_SCREEN0 asfloat(UintRootConstant30)
+#define WT_CURVE_QUALITY0 asfloat(UintRootConstant36)
+#define WT_STATIC_CUTOFF asfloat(UintRootConstant42)
+#define WT_LOD_HYSTERESIS asfloat(UintRootConstant43)
+#define WT_FORCE_LOD asint(UintRootConstant44)
+#define WT_CAPACITY_TARGET asfloat(UintRootConstant45)
+#define WT_LATE_RESERVE asfloat(UintRootConstant46)
+#define WT_ALLOCATION_RECORDS UintRootConstant47
 
 static const uint WindTransientSlotBase = 65536u;
 static const uint WindTypeFlag = 2u;
@@ -290,6 +290,8 @@ struct WindTypeGPU {
     uint deferredEntriesDescriptor, processedTypeCountsDescriptor;
 	uint remapDescriptor, remapOffset, sourceBoneCount, lodLevel;
 	uint baseTypeLookupDescriptor, baseTypeLookupCount;
+	uint variantCount;
+	float normalizedQuality, collapseError, qualityBias;
 };
 struct SkinnedAssemblyPlacementGPU {
     uint instanceTransformIndex, skinningTypeSlot, stableSceneId, generation;
@@ -297,8 +299,21 @@ struct SkinnedAssemblyPlacementGPU {
     float boundsScale;
     uint3 pad;
 };
-struct WindActiveInstanceGPU { uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices; };
+struct WindActiveInstanceGPU {
+	uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices;
+	float screenFraction;
+	uint priorityKey;
+};
 struct WindIndirectCommandGPU { uint typeId, pad0, pad1; uint3 dispatch; };
+struct WindAllocationRecordGPU {
+	uint processedCount, previousAcceptedCount, acceptedCount, typeMatrixBase, baseTypeId;
+};
+
+bool WindCandidateHigherPriority(WindActiveInstanceGPU left, WindActiveInstanceGPU right)
+{
+	return left.priorityKey > right.priorityKey ||
+		(left.priorityKey == right.priorityKey && left.stableSceneId < right.stableSceneId);
+}
 
 [numthreads(64,1,1)]
 void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
@@ -324,7 +339,7 @@ void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
         processedTypeCounts[tid.x] = 0u;
     }
     if (tid.x < 15u) counters[tid.x] = 0u;
-    if (tid.x < 64u) {
+	if (tid.x < 112u) {
         RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
         diagnostics[tid.x] = 0u;
     }
@@ -370,6 +385,25 @@ bool WindHZBOccluded(
     return sampledMaxDepth < sphereNearDepth;
 }
 
+float WindDesiredSkeletonQuality(float screenFraction)
+{
+	const float screen[6] = {
+		asfloat(UintRootConstant30), asfloat(UintRootConstant31), asfloat(UintRootConstant32),
+		asfloat(UintRootConstant33), asfloat(UintRootConstant34), asfloat(UintRootConstant35) };
+	const float quality[6] = {
+		asfloat(UintRootConstant36), asfloat(UintRootConstant37), asfloat(UintRootConstant38),
+		asfloat(UintRootConstant39), asfloat(UintRootConstant40), asfloat(UintRootConstant41) };
+	if (screenFraction >= screen[0]) return quality[0];
+	[unroll] for (uint i = 1u; i < 6u; ++i) {
+		if (screenFraction >= screen[i]) {
+			const float denominator = max(1.0e-6f, screen[i - 1u] - screen[i]);
+			const float t = saturate((screenFraction - screen[i]) / denominator);
+			return lerp(quality[i], quality[i - 1u], t);
+		}
+	}
+	return quality[5];
+}
+
 [numthreads(64,1,1)]
 void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 {
@@ -404,24 +438,42 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 	float3 centerWS = mul(float4(placement.localBoundingSphere.xyz, 1.0f), objectData.model).xyz;
 	float radiusWS = placement.localBoundingSphere.w * placement.boundsScale * WindMaxAxisScale(objectData.model);
 	float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
-	ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-	const float projectedDiameterPixels = radiusWS * max(abs(camera.projection._11), abs(camera.projection._22)) *
-		max((float)perFrame.screenResX, (float)perFrame.screenResY) / max(abs(centerVS.z), radiusWS + 1.0e-3f);
-	uint lodLevel = projectedDiameterPixels >= WT_LOD0 ? 0u : projectedDiameterPixels >= WT_LOD1 ? 1u :
-		projectedDiameterPixels >= WT_LOD2 ? 2u : projectedDiameterPixels >= WT_LOD3 ? 3u :
-		projectedDiameterPixels >= WT_LOD4 ? 4u : projectedDiameterPixels >= WT_LOD5 ? 5u : 6u;
-	if (WT_FORCE_LOD >= 0) lodLevel = min((uint)WT_FORCE_LOD, 6u);
+	const float screenFraction = radiusWS * abs(camera.projection._22) /
+		max(abs(centerVS.z), radiusWS + 1.0e-3f);
+	if (placement.skinningTypeSlot >= control.baseTypeLookupCount) return;
+	StructuredBuffer<uint> baseTypeLookup = ResourceDescriptorHeap[control.baseTypeLookupDescriptor];
+	const uint firstVariant = baseTypeLookup[placement.skinningTypeSlot];
+	if (firstVariant >= WT_TYPE_COUNT) return;
+	const uint variantCount = min(types[firstVariant].variantCount, 16u);
+	if (variantCount == 0u) return;
+	const float desiredQuality = saturate(WindDesiredSkeletonQuality(screenFraction) * types[firstVariant].qualityBias);
+	uint lodLevel = variantCount - 1u;
+	[loop] for (int candidate = (int)variantCount - 1; candidate >= 0; --candidate) {
+		if (types[firstVariant + candidate].normalizedQuality + 1.0e-6f >= desiredQuality) {
+			lodLevel = (uint)candidate;
+			break;
+		}
+	}
+	if (WT_FORCE_LOD >= 0) lodLevel = min((uint)WT_FORCE_LOD, variantCount - 1u);
 	const uint historySlot = WindTransientSlotBase + placement.instanceTransformIndex;
 	SkinningInstanceGPUInfo oldLod = infos[historySlot];
-	if (oldLod.stableSceneId == placement.stableSceneId && oldLod.skeletonLodVariant < 6u) {
-		const float thresholds[6] = { WT_LOD0, WT_LOD1, WT_LOD2, WT_LOD3, WT_LOD4, WT_LOD5 };
+	if (WT_FORCE_LOD < 0 && oldLod.stableSceneId == placement.stableSceneId && oldLod.pad0 == firstVariant && oldLod.skeletonLodVariant < variantCount) {
 		const uint previousLod = oldLod.skeletonLodVariant;
-		if (WT_FORCE_LOD < 0 && lodLevel > previousLod && projectedDiameterPixels >= thresholds[previousLod] * (1.0f - WT_LOD_HYSTERESIS)) lodLevel = previousLod;
-		else if (WT_FORCE_LOD < 0 && lodLevel < previousLod && projectedDiameterPixels <= thresholds[lodLevel] * (1.0f + WT_LOD_HYSTERESIS)) lodLevel = previousLod;
+		if (lodLevel > previousLod) {
+			// Moving coarser crosses the quality of the next coarser variant. Keep
+			// the previous variant only inside the lower side of that boundary.
+			const float coarserBoundary = types[firstVariant + min(previousLod + 1u, variantCount - 1u)].normalizedQuality;
+			if (desiredQuality >= coarserBoundary * (1.0f - WT_LOD_HYSTERESIS)) lodLevel = previousLod;
+		}
+		else if (lodLevel < previousLod) {
+			// Moving finer crosses the previous (coarser) variant's quality. The
+			// old comparison used the selected finer quality, which selection
+			// guarantees is >= desiredQuality and therefore locked upgrades out.
+			const float finerBoundary = types[firstVariant + previousLod].normalizedQuality;
+			if (desiredQuality <= finerBoundary * (1.0f + WT_LOD_HYSTERESIS)) lodLevel = previousLod;
+		}
 	}
     [unroll] for (uint p=0u; p<6u; ++p) if (dot(camera.clippingPlanes[p].plane.xyz, centerVS) + camera.clippingPlanes[p].plane.w < -radiusWS) { InterlockedAdd(counters[7], 1u); return; }
-    if (distance(centerWS, camera.positionWorldSpace.xyz) > 32768.0f + radiusWS) { InterlockedAdd(counters[8], 1u); return; }
-
     bool occlusionCulled = false;
     if (depthMapDescriptorIndex != 0u) {
         if (latePhase) {
@@ -456,31 +508,20 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
         return;
     }
 	RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
-	InterlockedAdd(lodDiagnostics[32u + min(lodLevel, 6u)], 1u);
-	if (lodLevel >= 6u) {
-		InterlockedAdd(lodDiagnostics[31], 1u);
+	InterlockedAdd(lodDiagnostics[40u + min(lodLevel, 15u)], 1u);
+	if (screenFraction < WT_STATIC_CUTOFF) {
+		InterlockedAdd(lodDiagnostics[56], 1u);
 		oldLod.stableSceneId = placement.stableSceneId;
-		oldLod.skeletonLodVariant = 6u;
+		oldLod.skeletonLodVariant = 16u;
 		oldLod.boneCount = 0u;
 		infos[historySlot] = oldLod;
 		return;
 	}
-	const uint baseTypeCount = WT_TYPE_COUNT / 6u;
-	if (placement.skinningTypeSlot >= control.baseTypeLookupCount) {
-		InterlockedAdd(lodDiagnostics[46], 1u);
-		return;
-	}
-	StructuredBuffer<uint> baseTypeLookup = ResourceDescriptorHeap[control.baseTypeLookupDescriptor];
-	const uint baseTypeIndex = baseTypeLookup[placement.skinningTypeSlot];
-	if (baseTypeIndex >= baseTypeCount) {
-		InterlockedAdd(lodDiagnostics[46], 1u);
-		return;
-	}
-	const uint typeId = lodLevel * baseTypeCount + baseTypeIndex;
+	const uint typeId = firstVariant + lodLevel;
 	if (typeId >= WT_TYPE_COUNT) return;
 	WindTypeGPU type = types[typeId];
 	if (type.boneCount == 0u) {
-		InterlockedAdd(lodDiagnostics[43], 1u);
+		InterlockedAdd(lodDiagnostics[63], 1u);
 		return;
 	}
     RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
@@ -492,6 +533,18 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     active.stableSceneId = placement.stableSceneId;
     active.transformOffsetMatrices = 0u;
     active.inverseSkinOffsetMatrices = 0u;
+	active.screenFraction = screenFraction;
+	const WindTypeGPU selectedType = types[typeId];
+	float marginalValue = screenFraction * screenFraction;
+	if (lodLevel + 1u < variantCount) {
+		const WindTypeGPU coarser = types[typeId + 1u];
+		const float benefit = max(1.0e-6f, coarser.collapseError - selectedType.collapseError);
+		const float cost = max(1.0f, (float)(selectedType.boneCount - coarser.boneCount));
+		marginalValue *= benefit / cost;
+	}
+	if (oldLod.stableSceneId == placement.stableSceneId && oldLod.pad0 == firstVariant &&
+		oldLod.skeletonLodVariant == lodLevel) marginalValue *= 1.10f;
+	active.priorityKey = asuint(max(0.0f, marginalValue));
     RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
     activeInstances[type.bucketBase + localIndex] = active;
     if (latePhase) InterlockedAdd(counters[13], 1u);
@@ -518,45 +571,112 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<WindIndirectCommandGPU> commands = ResourceDescriptorHeap[WT_COMMANDS];
     RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
     RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
+    RWStructuredBuffer<WindAllocationRecordGPU> allocationRecords = ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
     RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[types[0].processedTypeCountsDescriptor];
     const bool latePhase = (WT_PHASE_DEPTH & WindLatePhaseBit) != 0u;
 
     // A single thread walks types in stable order. This makes matrix allocation exact and
     // deterministic without a global CAS loop or an atomic-add/refund race.
-    uint allocatedBones = latePhase ? counters[0] : 0u;
+	uint allocatedBones = latePhase ? counters[0] : 0u;
+	const uint targetCapacity = (uint)((float)WT_MATRIX_CAPACITY * saturate(WT_CAPACITY_TARGET));
+	const uint phaseCapacity = latePhase ? targetCapacity : (uint)((float)targetCapacity * (1.0f - saturate(WT_LATE_RESERVE)));
     uint allocatedAssemblies = latePhase ? counters[4] : 0u;
     uint commandCount = 0u;
     uint capacityRejects = latePhase ? counters[2] : 0u;
     for (uint typeId = 0u; typeId < WT_TYPE_COUNT; ++typeId) {
         WindTypeGPU type = types[typeId];
+		WindAllocationRecordGPU allocationRecord = (WindAllocationRecordGPU)0;
         const uint candidateCount = min(typeCounters[typeId], type.bucketCapacity);
         const uint previousTypeState = latePhase ? processedTypeCounts[typeId] : 0u;
         const uint processedCount = min(previousTypeState & 0xffffu, candidateCount);
         const uint previousAcceptedCount = previousTypeState >> 16u;
-        const uint newCandidateCount = candidateCount - processedCount;
+		const uint newCandidateCount = candidateCount - processedCount;
         if (type.boneCount == 0u || newCandidateCount == 0u) {
+			allocationRecords[typeId] = allocationRecord;
             if (latePhase && type.boneCount != 0u && previousAcceptedCount != 0u) {
                 WindIndirectCommandGPU existingCommand;
                 existingCommand.typeId = typeId;
-                existingCommand.pad0 = existingCommand.pad1 = 0u;
+				existingCommand.pad0 = previousAcceptedCount;
+				existingCommand.pad1 = 0u;
                 existingCommand.dispatch = uint3((type.boneCount + 63u) / 64u, previousAcceptedCount, 1u);
                 commands[commandCount++] = existingCommand;
             }
             continue;
         }
 
-        const uint remainingBones = allocatedBones < WT_MATRIX_CAPACITY
-            ? WT_MATRIX_CAPACITY - allocatedBones
+		const uint remainingBones = allocatedBones < phaseCapacity
+			? phaseCapacity - allocatedBones
             : 0u;
-		const uint acceptedCount = min(newCandidateCount, remainingBones / type.boneCount);
+		// Preserve a cheapest-animated baseline for every candidate that has not
+		// yet been assigned. Finer variants may only spend the bones left after
+		// that reservation, so early high-detail bands cannot starve distant trees.
+		uint baselineBonesRequired = 0u;
+		for (uint pendingTypeId = typeId; pendingTypeId < WT_TYPE_COUNT; ++pendingTypeId) {
+			const WindTypeGPU pendingType = types[pendingTypeId];
+			const uint pendingCandidateCount = min(typeCounters[pendingTypeId], pendingType.bucketCapacity);
+			const uint pendingState = latePhase ? processedTypeCounts[pendingTypeId] : 0u;
+			const uint pendingProcessed = min(pendingState & 0xffffu, pendingCandidateCount);
+			const uint pendingCount = pendingCandidateCount - pendingProcessed;
+			const uint pendingBaseTypeId = pendingTypeId - pendingType.lodLevel;
+			const uint pendingCheapestTypeId = pendingBaseTypeId + pendingType.variantCount - 1u;
+			const uint pendingCheapestBones = types[pendingCheapestTypeId].boneCount;
+			baselineBonesRequired += pendingCount * pendingCheapestBones;
+		}
+		const uint baseTypeId = typeId - type.lodLevel;
+		const uint cheapestTypeId = baseTypeId + type.variantCount - 1u;
+		const uint cheapestBoneCount = types[cheapestTypeId].boneCount;
+		uint acceptedCount = 0u;
+		if (type.boneCount == cheapestBoneCount) {
+			const uint futureBaseline = baselineBonesRequired - newCandidateCount * cheapestBoneCount;
+			acceptedCount = remainingBones > futureBaseline
+				? min(newCandidateCount, (remainingBones - futureBaseline) / cheapestBoneCount)
+				: 0u;
+		}
+		else if (remainingBones >= baselineBonesRequired) {
+			const uint upgradeBoneCount = type.boneCount - cheapestBoneCount;
+			acceptedCount = min(newCandidateCount, (remainingBones - baselineBonesRequired) / upgradeBoneCount);
+		}
+		// Partition the accepted top-K candidates in place. The former repeated
+		// maximum search was O(K*N) on one lane and became catastrophically slow
+		// under pressure. Quickselect preserves the exact priority/stable-ID cutoff
+		// without fully sorting either side.
+		if (acceptedCount != 0u && acceptedCount < newCandidateCount) {
+			int left = 0;
+			int right = (int)newCandidateCount - 1;
+			const int target = (int)acceptedCount - 1;
+			[loop] while (left < right) {
+				const WindActiveInstanceGPU pivot = activeInstances[
+					type.bucketBase + processedCount + (uint)((left + right) / 2)];
+				int i = left;
+				int j = right;
+				[loop] while (i <= j) {
+					[loop] while (i <= right && WindCandidateHigherPriority(
+						activeInstances[type.bucketBase + processedCount + (uint)i], pivot)) ++i;
+					[loop] while (j >= left && WindCandidateHigherPriority(
+						pivot, activeInstances[type.bucketBase + processedCount + (uint)j])) --j;
+					if (i <= j) {
+						const uint iAddress = type.bucketBase + processedCount + (uint)i;
+						const uint jAddress = type.bucketBase + processedCount + (uint)j;
+						const WindActiveInstanceGPU swapValue = activeInstances[iAddress];
+						activeInstances[iAddress] = activeInstances[jAddress];
+						activeInstances[jAddress] = swapValue;
+						++i;
+						--j;
+					}
+				}
+				if (target <= j) right = j;
+				else if (target >= i) left = i;
+				else break;
+			}
+		}
 		if (acceptedCount != 0u) {
 			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
-			InterlockedAdd(lodDiagnostics[24u + min(type.lodLevel, 5u)], acceptedCount);
+			InterlockedAdd(lodDiagnostics[24u + min(type.lodLevel, 15u)], acceptedCount);
 		}
 		const uint demotedCount = newCandidateCount - acceptedCount;
 		capacityRejects += demotedCount;
-		if (demotedCount != 0u && type.lodLevel < 5u && typeId + WT_TYPE_COUNT / 6u < WT_TYPE_COUNT) {
-			const uint fallbackTypeId = typeId + WT_TYPE_COUNT / 6u;
+		if (demotedCount != 0u && type.lodLevel + 1u < type.variantCount && typeId + 1u < WT_TYPE_COUNT) {
+			const uint fallbackTypeId = typeId + 1u;
 			const WindTypeGPU fallbackType = types[fallbackTypeId];
 			if (fallbackType.sourceSkinningSlot == type.sourceSkinningSlot && fallbackType.boneCount != 0u) {
 				const uint fallbackStart = typeCounters[fallbackTypeId];
@@ -568,80 +688,44 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 		}
 		else if (demotedCount != 0u) {
 			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
-			InterlockedAdd(lodDiagnostics[31], demotedCount);
+			InterlockedAdd(lodDiagnostics[58], demotedCount);
 			for (uint i = 0u; i < demotedCount; ++i) {
 				const WindActiveInstanceGPU rejected = activeInstances[type.bucketBase + processedCount + acceptedCount + i];
 				const uint transientSlot = WindTransientSlotBase + rejected.instanceTransformIndex;
 				SkinningInstanceGPUInfo staticInfo = infos[transientSlot];
 				staticInfo.boneCount = 0u;
 				staticInfo.stableSceneId = rejected.stableSceneId;
-				staticInfo.skeletonLodVariant = 6u;
+				staticInfo.skeletonLodVariant = 16u;
 				infos[transientSlot] = staticInfo;
 			}
 		}
         const uint totalAcceptedCount = previousAcceptedCount + acceptedCount;
         processedTypeCounts[typeId] = (candidateCount & 0xffffu) | (totalAcceptedCount << 16u);
         if (acceptedCount == 0u) {
+			allocationRecords[typeId] = allocationRecord;
             if (latePhase && previousAcceptedCount != 0u) {
                 WindIndirectCommandGPU existingCommand;
                 existingCommand.typeId = typeId;
-                existingCommand.pad0 = existingCommand.pad1 = 0u;
+				existingCommand.pad0 = previousAcceptedCount;
+				existingCommand.pad1 = 0u;
                 existingCommand.dispatch = uint3((type.boneCount + 63u) / 64u, previousAcceptedCount, 1u);
                 commands[commandCount++] = existingCommand;
             }
             continue;
         }
 
-        const uint typeMatrixBase = allocatedBones;
-        SkinningInstanceGPUInfo source = infos[type.sourceSkinningSlot];
-        for (uint newInstanceIndex = 0u; newInstanceIndex < acceptedCount; ++newInstanceIndex) {
-            const uint instanceIndex = processedCount + newInstanceIndex;
-            const uint bucketIndex = type.bucketBase + instanceIndex;
-            WindActiveInstanceGPU active = activeInstances[bucketIndex];
-            const uint matrixOffset = typeMatrixBase + newInstanceIndex * type.boneCount;
-            active.transformOffsetMatrices = WT_TRANSFORM_BASE + matrixOffset;
-            active.inverseSkinOffsetMatrices = WT_INVERSE_BASE + matrixOffset;
-            activeInstances[bucketIndex] = active;
-
-            const uint transientSlot = WindTransientSlotBase + active.instanceTransformIndex;
-            const SkinningInstanceGPUInfo oldInfo = infos[transientSlot];
-			if (oldInfo.boneCount != 0u && oldInfo.stableSceneId == active.stableSceneId) {
-				RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
-				InterlockedAdd(lodDiagnostics[39], 1u);
-				lodDiagnostics[40] = active.stableSceneId;
-				lodDiagnostics[41] = (oldInfo.skeletonLodVariant & 0xffffu) | ((type.lodLevel & 0xffffu) << 16u);
-				lodDiagnostics[42] = active.instanceTransformIndex;
-			}
-            const bool hasMatchingHistory =
-                (oldInfo.flags & WindHistoryValidFlag) != 0u &&
-                oldInfo.pad0 == type.sourceSkinningSlot &&
-				oldInfo.stableSceneId == active.stableSceneId &&
-				oldInfo.skeletonLodVariant == type.lodLevel;
-			if ((oldInfo.flags & WindHistoryValidFlag) != 0u && oldInfo.stableSceneId == active.stableSceneId &&
-				oldInfo.skeletonLodVariant != type.lodLevel) {
-				RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
-				InterlockedAdd(lodDiagnostics[30], 1u);
-			}
-
-            SkinningInstanceGPUInfo transientInfo = source;
-            transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
-            transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
-            transientInfo.boneCount = type.boneCount;
-			transientInfo.boneRemapDescriptor = type.remapDescriptor;
-			transientInfo.boneRemapOffset = type.remapOffset;
-			transientInfo.sourceBoneCount = type.sourceBoneCount;
-			transientInfo.skeletonLodVariant = type.lodLevel;
-            transientInfo.flags |= WindRowVectorSkinMatrix;
-            transientInfo.previousTransformOffsetMatrices = hasMatchingHistory
-                ? oldInfo.transformOffsetMatrices
-                : active.transformOffsetMatrices;
-            transientInfo.stableSceneId = active.stableSceneId;
-            infos[transientSlot] = transientInfo;
-        }
+		const uint typeMatrixBase = allocatedBones;
+		allocationRecord.processedCount = processedCount;
+		allocationRecord.previousAcceptedCount = previousAcceptedCount;
+		allocationRecord.acceptedCount = acceptedCount;
+		allocationRecord.typeMatrixBase = typeMatrixBase;
+		allocationRecord.baseTypeId = baseTypeId;
+		allocationRecords[typeId] = allocationRecord;
 
         WindIndirectCommandGPU command;
         command.typeId = typeId;
-        command.pad0 = command.pad1 = 0u;
+		command.pad0 = previousAcceptedCount;
+		command.pad1 = 0u;
         command.dispatch = uint3((type.boneCount + 63u) / 64u, totalAcceptedCount, 1u);
         commands[commandCount++] = command;
         allocatedBones += acceptedCount * type.boneCount;
@@ -652,6 +736,66 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
     counters[1] = commandCount;
     counters[2] = capacityRejects;
     counters[4] = allocatedAssemblies;
+}
+
+[numthreads(64,1,1)]
+void FinalizeWindAllocationsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+	StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
+	RWStructuredBuffer<WindAllocationRecordGPU> allocationRecords = ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
+	RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
+	RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
+	const uint newInstanceIndex = dispatchThreadId.x;
+	[loop] for (uint typeId = 0u; typeId < WT_TYPE_COUNT; ++typeId) {
+	const WindTypeGPU type = types[typeId];
+	const WindAllocationRecordGPU allocation = allocationRecords[typeId];
+	if (newInstanceIndex >= allocation.acceptedCount) continue;
+
+	const uint sourceBucketIndex = type.bucketBase + allocation.processedCount + newInstanceIndex;
+	const uint destinationBucketIndex = type.bucketBase + allocation.previousAcceptedCount + newInstanceIndex;
+	WindActiveInstanceGPU active = activeInstances[sourceBucketIndex];
+	const uint matrixOffset = allocation.typeMatrixBase + newInstanceIndex * type.boneCount;
+	active.transformOffsetMatrices = WT_TRANSFORM_BASE + matrixOffset;
+	active.inverseSkinOffsetMatrices = WT_INVERSE_BASE + matrixOffset;
+	activeInstances[destinationBucketIndex] = active;
+
+	const SkinningInstanceGPUInfo source = infos[type.sourceSkinningSlot];
+	const uint transientSlot = WindTransientSlotBase + active.instanceTransformIndex;
+	const SkinningInstanceGPUInfo oldInfo = infos[transientSlot];
+	if (oldInfo.boneCount != 0u && oldInfo.stableSceneId == active.stableSceneId) {
+		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+		InterlockedAdd(lodDiagnostics[59], 1u);
+		lodDiagnostics[60] = active.stableSceneId;
+		lodDiagnostics[61] = (oldInfo.skeletonLodVariant & 0xffffu) | ((type.lodLevel & 0xffffu) << 16u);
+		lodDiagnostics[62] = active.instanceTransformIndex;
+	}
+	const bool hasMatchingHistory =
+		(oldInfo.flags & WindHistoryValidFlag) != 0u &&
+		oldInfo.pad0 == allocation.baseTypeId &&
+		oldInfo.stableSceneId == active.stableSceneId &&
+		oldInfo.skeletonLodVariant == type.lodLevel;
+	if ((oldInfo.flags & WindHistoryValidFlag) != 0u && oldInfo.stableSceneId == active.stableSceneId &&
+		oldInfo.skeletonLodVariant != type.lodLevel) {
+		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+		InterlockedAdd(lodDiagnostics[57], 1u);
+	}
+
+	SkinningInstanceGPUInfo transientInfo = source;
+	transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
+	transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
+	transientInfo.boneCount = type.boneCount;
+	transientInfo.boneRemapDescriptor = type.remapDescriptor;
+	transientInfo.boneRemapOffset = type.remapOffset;
+	transientInfo.sourceBoneCount = type.sourceBoneCount;
+	transientInfo.skeletonLodVariant = type.lodLevel;
+	transientInfo.pad0 = allocation.baseTypeId;
+	transientInfo.flags |= WindRowVectorSkinMatrix;
+	transientInfo.previousTransformOffsetMatrices = hasMatchingHistory
+		? oldInfo.transformOffsetMatrices
+		: active.transformOffsetMatrices;
+	transientInfo.stableSceneId = active.stableSceneId;
+	infos[transientSlot] = transientInfo;
+	}
 }
 
 float3 SampleTransientLevel0(float3 position)
@@ -723,8 +867,10 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     }
     uint typeId=IndirectCommandSignatureRootConstant0;
     StructuredBuffer<WindTypeGPU> types=ResourceDescriptorHeap[WT_TYPES]; WindTypeGPU type=types[typeId];
+	const uint previouslySimulatedCount = IndirectCommandSignatureRootConstant1;
+	if ((WT_PHASE_DEPTH & WindLatePhaseBit) != 0u && tid.y < previouslySimulatedCount) return;
     if(tid.x>=type.boneCount) return;
-    StructuredBuffer<WindActiveInstanceGPU> instances=ResourceDescriptorHeap[WT_ACTIVE]; WindActiveInstanceGPU inst=instances[type.bucketBase+tid.y];
+    RWStructuredBuffer<WindActiveInstanceGPU> instances=ResourceDescriptorHeap[WT_ACTIVE]; WindActiveInstanceGPU inst=instances[type.bucketBase+tid.y];
     StructuredBuffer<WindBoneGPU> bones=ResourceDescriptorHeap[WT_BONES]; WindBoneGPU target=bones[type.firstBone+tid.x];
     StructuredBuffer<SkinningInstanceGPUInfo> infos=ResourceDescriptorHeap[WT_SKIN_INFO]; SkinningInstanceGPUInfo source=infos[type.sourceSkinningSlot];
     WindMatrix targetInv=target.inverseBind;
@@ -819,6 +965,12 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     InterlockedAdd(diagnostics[finiteResult ? 12u : 13u], 1u);
     if (target.simulationGroup != WindInvalidIndex) InterlockedAdd(diagnostics[14], 1u);
     if (appliedWind) InterlockedAdd(diagnostics[15], 1u);
+	if (appliedWind) {
+		uint previousPriorityFlags;
+		InterlockedOr(instances[type.bucketBase + tid.y].priorityKey, 0x80000000u, previousPriorityFlags);
+		if ((previousPriorityFlags & 0x80000000u) == 0u)
+			InterlockedAdd(diagnostics[96u + min(type.lodLevel, 15u)], 1u);
+	}
     InterlockedMax(diagnostics[16], asuint(maximumForcing));
     InterlockedMax(diagnostics[17], asuint(maximumBendAngle));
     InterlockedMax(diagnostics[18], asuint(maximumTorsionAngle));
@@ -832,17 +984,24 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     InterlockedMax(diagnostics[22], asuint(bindIdentityError));
     const float3 mappedBindOrigin = mul(float4(bindPose[3].xyz, 1.0f), result).xyz;
     InterlockedMax(diagnostics[23], asuint(length(mappedBindOrigin - pose[3].xyz)));
-	InterlockedAdd(diagnostics[48u + min(type.lodLevel, 5u)], 1u);
-	InterlockedMax(diagnostics[54], simulationDepth);
+	InterlockedAdd(diagnostics[72u + min(type.lodLevel, 15u)], 1u);
+	InterlockedMax(diagnostics[88], simulationDepth);
 	const uint absolutePaletteIndex = inst.transformOffsetMatrices + tid.x;
+	if (tid.x == 0u && tid.y == 0u) {
+		diagnostics[66] = WT_TRANSFORM_BASE;
+		diagnostics[68] = WT_MATRIX_CAPACITY;
+		diagnostics[69] = absolutePaletteIndex;
+		diagnostics[70] = inst.transformOffsetMatrices;
+		diagnostics[71] = typeId;
+	}
 	if (absolutePaletteIndex < WT_TRANSFORM_BASE || absolutePaletteIndex >= WT_TRANSFORM_BASE + WT_MATRIX_CAPACITY)
-		InterlockedAdd(diagnostics[47], 1u);
+		InterlockedAdd(diagnostics[67], 1u);
 	else
-		InterlockedMax(diagnostics[55], absolutePaletteIndex - WT_TRANSFORM_BASE);
-	if (target.jointIndex >= type.sourceBoneCount) InterlockedAdd(diagnostics[44], 1u);
+		InterlockedMax(diagnostics[89], absolutePaletteIndex - WT_TRANSFORM_BASE);
+	if (target.jointIndex >= type.sourceBoneCount) InterlockedAdd(diagnostics[64], 1u);
 	if (target.parentEntry != WindInvalidIndex &&
 		(target.parentEntry < type.firstBone || target.parentEntry >= type.firstBone + type.boneCount))
-		InterlockedAdd(diagnostics[45], 1u);
+		InterlockedAdd(diagnostics[65], 1u);
     if (tid.x == 0u && tid.y == 0u && typeId == 0u) {
         diagnostics[8]=asuint(result[3].x); diagnostics[9]=asuint(result[3].y); diagnostics[10]=asuint(result[3].z); diagnostics[11]=finiteResult ? 1u : 0u;
     }

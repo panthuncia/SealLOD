@@ -2438,6 +2438,32 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     for (const auto& part : payload->parts) {
         for (const auto& mesh : part.meshes) {
             collectMaterialFlags(mesh);
+			if (!mesh || !mesh->material) {
+				continue;
+			}
+			PreprocessResult::MaterialMetadata metadata;
+			metadata.description = mesh->material->ToCacheDescription();
+			metadata.compileFlags = static_cast<std::uint64_t>(mesh->material->Technique().compileFlags);
+			metadata.partName = part.name;
+			metadata.skinnedShapeIndex = part.skinnedShapeIndex;
+			auto clearTexture = [](TextureAndConstant& binding) {
+				binding.texture.reset();
+			};
+			clearTexture(metadata.description.baseColor);
+			clearTexture(metadata.description.metallic);
+			clearTexture(metadata.description.roughness);
+			clearTexture(metadata.description.emissive);
+			clearTexture(metadata.description.opacity);
+			clearTexture(metadata.description.aoMap);
+			clearTexture(metadata.description.heightMap);
+			clearTexture(metadata.description.normal);
+			clearTexture(metadata.description.openPBRTextures.coatColor);
+			clearTexture(metadata.description.openPBRTextures.coatWeight);
+			clearTexture(metadata.description.openPBRTextures.coatRoughness);
+			clearTexture(metadata.description.openPBRTextures.fuzzColor);
+			clearTexture(metadata.description.openPBRTextures.fuzzWeight);
+			clearTexture(metadata.description.openPBRTextures.fuzzRoughness);
+			result.materials.push_back(std::move(metadata));
         }
     }
     result.materialCompileFlags.assign(materialCompileFlags.begin(), materialCompileFlags.end());

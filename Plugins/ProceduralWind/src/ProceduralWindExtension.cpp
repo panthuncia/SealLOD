@@ -38,7 +38,7 @@ namespace br::wind {
 namespace {
 
 constexpr std::uint32_t kThreadsPerGroup = 64u;
-constexpr std::uint32_t kWindLodVariantCount = 6u;
+constexpr std::uint32_t kMaximumWindLodVariants = 16u;
 constexpr std::uint32_t kTransientBoneCapacity = 1048576;
 constexpr std::uint32_t kLatePhaseBit = 0x80000000u;
 constexpr std::uint32_t kDepthDescriptorMask = 0x7fffffffu;
@@ -131,6 +131,10 @@ struct WindTypeGPU {
 	std::uint32_t lodLevel = 0u;
 	std::uint32_t baseTypeLookupDescriptor = 0u;
 	std::uint32_t baseTypeLookupCount = 0u;
+	std::uint32_t variantCount = 0u;
+	float normalizedQuality = 0.0f;
+	float collapseError = 0.0f;
+	float qualityBias = 1.0f;
 };
 
 struct WindActiveInstanceGPU {
@@ -138,6 +142,8 @@ struct WindActiveInstanceGPU {
     std::uint32_t stableSceneId = 0u;
     std::uint32_t transformOffsetMatrices = 0u;
     std::uint32_t inverseSkinOffsetMatrices = 0u;
+	float screenFraction = 0.0f;
+	std::uint32_t priorityKey = 0u;
 };
 
 struct WindIndirectCommand {
@@ -145,6 +151,14 @@ struct WindIndirectCommand {
     std::uint32_t pad0 = 0u;
     std::uint32_t pad1 = 0u;
     D3D12_DISPATCH_ARGUMENTS dispatch{};
+};
+
+struct WindAllocationRecordGPU {
+	std::uint32_t processedCount = 0u;
+	std::uint32_t previousAcceptedCount = 0u;
+	std::uint32_t acceptedCount = 0u;
+	std::uint32_t typeMatrixBase = 0u;
+	std::uint32_t baseTypeId = 0u;
 };
 
 struct WindTransientConstants {
@@ -157,13 +171,18 @@ struct WindTransientConstants {
     float fieldCellSize, fieldOriginX, fieldOriginY;
     float fieldInterpolation, elapsedSeconds, windX, windY;
     float strength, gustStrength;
-	std::array<float, 6> lodThresholds;
+	std::array<float, 6> qualityCurveScreen;
+	std::array<float, 6> qualityCurveValue;
+	float staticCutoff;
 	float lodHysteresis;
 	std::int32_t forcedLod;
+	float capacityTarget;
+	float lateReserve;
+	std::uint32_t allocationRecords;
 };
 
 static_assert(sizeof(WindBoneGPU) == 256u);
-static_assert(sizeof(WindTypeGPU) == 64u);
+static_assert(sizeof(WindTypeGPU) == 80u);
 static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
@@ -181,8 +200,9 @@ struct WindSharedResources {
         , processedTypeCounts(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.ProcessedTypeCounts", true))
         , deferredEntries(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.DeferredEntries", true))
         , allocationCounters(DynamicStructuredBuffer<std::uint32_t>::CreateShared(15u, "ProceduralWind.AllocationCounters", true))
-		, diagnostics(DynamicStructuredBuffer<std::uint32_t>::CreateShared(64u, "ProceduralWind.Diagnostics", true))
+		, diagnostics(DynamicStructuredBuffer<std::uint32_t>::CreateShared(112u, "ProceduralWind.Diagnostics", true))
 		, indirectCommands(DynamicStructuredBuffer<WindIndirectCommand>::CreateShared(1u, "ProceduralWind.IndirectCommands", true))
+		, allocationRecords(DynamicStructuredBuffer<WindAllocationRecordGPU>::CreateShared(1u, "ProceduralWind.AllocationRecords", true))
     {
 		static std::once_flag resetTelemetry;
 		std::call_once(resetTelemetry, [] {
@@ -208,8 +228,8 @@ struct WindSharedResources {
         const float currentStrength = state.strength;
         readbackService->RequestReadbackCapture("ProceduralWind::SimulateInstancesPhase2", diagnostics.get(), {},
             [currentScale, currentStrength](ReadbackCaptureResult&& result) {
-				if (result.data.size() < 64u * sizeof(std::uint32_t)) return;
-				std::array<std::uint32_t, 64> d{};
+				if (result.data.size() < 112u * sizeof(std::uint32_t)) return;
+				std::array<std::uint32_t, 112> d{};
                 std::memcpy(d.data(), result.data.data(), (std::min)(result.data.size(), sizeof(d)));
                 const auto asFloat = [&d](std::size_t index) {
                     float value = 0.0f;
@@ -225,14 +245,21 @@ struct WindSharedResources {
                     currentScale, currentStrength, currentScale * currentStrength,
                     d[14], d[15], d[21], d[12], d[13],
 					asFloat(16), asFloat(17), asFloat(18), asFloat(19), asFloat(20), asFloat(22), asFloat(23)));
+				std::ostringstream desired, actual, simulated, animatedInstances;
+				for (std::size_t lod = 0; lod < 16u; ++lod) {
+					if (lod != 0u) { desired << ','; actual << ','; simulated << ','; animatedInstances << ','; }
+					desired << d[40u + lod]; actual << d[24u + lod]; simulated << d[72u + lod];
+					animatedInstances << d[96u + lod];
+				}
 				EmitWindTelemetry(fmt::format(
-					"ProceduralWind skeleton LOD telemetry: desired=[{},{},{},{},{},{},static={}] actual=[{},{},{},{},{},{}] "
-					"transitions={} staticFallbacks={} duplicateAllocations={} duplicateStableId={} duplicateLods={}->{} duplicateTransform={} "
-					"missingVariant={} invalidSourceJoint={} invalidParent={} invalidBaseTypeLookup={} invalidPaletteWrites={} simulatedWrites=[{},{},{},{},{},{}] maxDriverDepth={} maxPaletteOffset={}.",
-					d[32], d[33], d[34], d[35], d[36], d[37], d[38],
-					d[24], d[25], d[26], d[27], d[28], d[29], d[30], d[31],
-					d[39], d[40], d[41] & 0xffffu, d[41] >> 16u, d[42], d[43], d[44], d[45], d[46], d[47],
-					d[48], d[49], d[50], d[51], d[52], d[53], d[54], d[55]));
+					"ProceduralWind skeleton LOD telemetry: desired=[{},static={}] actual=[{}] simulatedWrites=[{}] animatedInstances=[{}] "
+					"transitions={} staticFallbacks={} duplicateAllocations={} duplicateStableId={} duplicateLods={}->{} "
+					"duplicateTransform={} missingVariant={} invalidSourceJoint={} invalidParent={} invalidPaletteWrites={} "
+					"maxDriverDepth={} maxPaletteOffset={} transformBase={} matrixCapacity={} sampledPaletteIndex={} "
+					"sampledInstanceOffset={} sampledType={}.",
+					desired.str(), d[56], actual.str(), simulated.str(), animatedInstances.str(), d[57], d[58], d[59], d[60],
+					d[61] & 0xffffu, d[61] >> 16u, d[62], d[63], d[64], d[65], d[67], d[88], d[89],
+					d[66], d[68], d[69], d[70], d[71]));
             }, QueueKind::Copy);
     }
 
@@ -276,33 +303,43 @@ struct WindSharedResources {
 		const std::uint32_t placementCapacity = (std::max)(1u, activeSkinnedPlacements
 			? static_cast<std::uint32_t>(activeSkinnedPlacements->ResidentSize()) : 0u);
 		const auto activeInstancesView = update->skeletonManager->GetActiveInstanceViews();
-		std::uint32_t baseTypeCount = 0u;
 		std::uint32_t lookupCount = 0u;
 		for (const auto& instance : activeInstancesView) if (instance.skeleton && instance.skeleton->HasWindSimulationGroups()) {
-			++baseTypeCount;
 			lookupCount = (std::max)(lookupCount, instance.instanceSlot + 1u);
 		}
 		std::vector<std::uint32_t> sourceSlotToBaseType((std::max)(1u, lookupCount), 0xFFFFFFFFu);
-		types.resize(baseTypeCount * kWindLodVariantCount);
-		std::uint32_t baseTypeIndex = 0u;
+		std::unordered_map<const Skeleton*, std::uint32_t> firstVariantByBaseSkeleton;
 		for (const auto& instance : activeInstancesView) {
             if (!instance.skeleton || !instance.skeleton->HasWindSimulationGroups()) continue;
-			sourceSlotToBaseType[instance.instanceSlot] = baseTypeIndex;
-            const auto& authoredWind = instance.skeleton->GetDynamicWindMetadata();
-            const auto profile = runtime->ResolveProfile(instance.skeleton->GetWindProfileIdentity());
-			const auto lodVariants = instance.skeleton->GetSkeletonLodVariants();
-			const std::uint32_t availableVariants = lodVariants.empty() ? 1u : (std::min)(kWindLodVariantCount, static_cast<std::uint32_t>(lodVariants.size()));
-			layoutSummary << " slot=" << instance.instanceSlot << " source=" << instance.boneCount << " lods=[";
+			auto baseSkeletonOwner = instance.skeleton->GetBaseSkeletonShared();
+			const Skeleton* typeSkeleton = baseSkeletonOwner.get();
+			if (!typeSkeleton) continue;
+			if (const auto existing = firstVariantByBaseSkeleton.find(typeSkeleton);
+				existing != firstVariantByBaseSkeleton.end()) {
+				sourceSlotToBaseType[instance.instanceSlot] = existing->second;
+				continue;
+			}
+			const std::uint32_t firstVariant = static_cast<std::uint32_t>(types.size());
+			firstVariantByBaseSkeleton.emplace(typeSkeleton, firstVariant);
+			sourceSlotToBaseType[instance.instanceSlot] = firstVariant;
+			const auto& authoredWind = typeSkeleton->GetDynamicWindMetadata();
+			const auto profile = runtime->ResolveProfile(typeSkeleton->GetWindProfileIdentity());
+			const auto lodVariants = typeSkeleton->GetSkeletonLodVariants();
+			const std::uint32_t sourceBoneCount = typeSkeleton->GetBoneCount();
+			const std::uint32_t availableVariants = lodVariants.empty() ? 1u : (std::min)(kMaximumWindLodVariants, static_cast<std::uint32_t>(lodVariants.size()));
+			layoutSummary << " slot=" << instance.instanceSlot << " source=" << sourceBoneCount << " lods=[";
 			for (std::uint32_t lod = 0u; lod < availableVariants; ++lod) {
 				const SkeletonLodVariant* variant = lodVariants.empty() ? nullptr : &lodVariants[lod];
-				const auto baseGroups = instance.skeleton->GetWindSimulationGroupIndices();
-				const auto baseParents = instance.skeleton->GetParentIndices();
-				const auto baseInvariants = instance.skeleton->GetWindBoneInvariants();
-				const auto baseBindGlobals = instance.skeleton->GetBindGlobalMatrices();
-				const auto baseInverseBinds = instance.skeleton->GetInverseBindMatrices();
-				const std::uint32_t boneCount = variant ? static_cast<std::uint32_t>(variant->lodToBaseBone.size()) : instance.boneCount;
+				const auto baseGroups = typeSkeleton->GetWindSimulationGroupIndices();
+				const auto baseParents = typeSkeleton->GetParentIndices();
+				const auto baseInvariants = typeSkeleton->GetWindBoneInvariants();
+				const auto baseBindGlobals = typeSkeleton->GetBindGlobalMatrices();
+				const auto baseInverseBinds = typeSkeleton->GetInverseBindMatrices();
+				const std::uint32_t boneCount = variant ? static_cast<std::uint32_t>(variant->lodToBaseBone.size()) : sourceBoneCount;
 				if (lod != 0u) layoutSummary << ',';
 				layoutSummary << boneCount;
+				if (variant) layoutSummary << "@q" << fmt::format("{:.3f}", variant->normalizedQuality)
+					<< "/e" << fmt::format("{:.3f}", variant->collapseError);
 				if (variant) {
 					std::uint32_t invalidRemaps = 0u;
 					std::uint32_t invalidParents = 0u;
@@ -311,17 +348,18 @@ struct WindSharedResources {
 						const auto parent = variant->parentIndices[compact];
 						invalidParents += parent >= 0 && static_cast<std::uint32_t>(parent) >= compact ? 1u : 0u;
 					}
-					const bool aligned = variant->level == lod && variant->baseToLodBone.size() == instance.boneCount &&
+					const bool aligned = variant->level == lod && variant->baseToLodBone.size() == sourceBoneCount &&
 						variant->parentIndices.size() == boneCount && variant->inverseBindMatrices.size() == boneCount &&
 						variant->bindGlobalMatrices.size() == boneCount && variant->windSimulationGroupIndices.size() == boneCount;
 					if (!aligned || invalidRemaps != 0u || invalidParents != 0u) {
 						spdlog::error(
 							"ProceduralWind invalid skeleton LOD: slot={} lod={} sourceBones={} compactBones={} aligned={} invalidRemaps={} invalidParents={}.",
-							instance.instanceSlot, lod, instance.boneCount, boneCount, aligned, invalidRemaps, invalidParents);
+							instance.instanceSlot, lod, sourceBoneCount, boneCount, aligned, invalidRemaps, invalidParents);
 					}
 				}
-				const std::uint32_t typeId = lod * baseTypeCount + baseTypeIndex;
-				auto& type = types[typeId];
+				const std::uint32_t typeId = static_cast<std::uint32_t>(types.size());
+				types.emplace_back();
+				auto& type = types.back();
 				type.firstBone = static_cast<std::uint32_t>(next.size());
 				type.boneCount = boneCount;
 				type.sourceSkinningSlot = instance.instanceSlot;
@@ -333,10 +371,14 @@ struct WindSharedResources {
 				type.deferredEntriesDescriptor = deferredEntries->GetUAVShaderVisibleInfo(0).slot.index;
 				type.processedTypeCountsDescriptor = processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
 				type.remapOffset = static_cast<std::uint32_t>(nextRemaps.size());
-				type.sourceBoneCount = instance.boneCount;
+				type.sourceBoneCount = sourceBoneCount;
 				type.lodLevel = lod;
+				type.variantCount = availableVariants;
+				type.normalizedQuality = variant ? variant->normalizedQuality : 1.0f;
+				type.collapseError = variant ? variant->collapseError : 0.0f;
+				type.qualityBias = authoredWind.skeletonLodQualityBias;
 				if (variant) nextRemaps.insert(nextRemaps.end(), variant->baseToLodBone.begin(), variant->baseToLodBone.end());
-				else for (std::uint32_t bone = 0; bone < instance.boneCount; ++bone) nextRemaps.push_back(bone);
+				else for (std::uint32_t bone = 0; bone < sourceBoneCount; ++bone) nextRemaps.push_back(bone);
 				++registeredTypes;
 				for (std::uint32_t joint = 0u; joint < boneCount; ++joint) {
                 WindBoneGPU entry{};
@@ -353,7 +395,7 @@ struct WindSharedResources {
 				std::uint32_t phaseJoint = sourceJoint;
                 if (authoredWind.enabled && sourceJoint < authoredWind.bones.size()) {
                     const std::uint32_t chainOrigin = authoredWind.bones[sourceJoint].chainOriginBoneIndex;
-                    if (chainOrigin != 0xFFFFFFFFu && chainOrigin < instance.boneCount) {
+					if (chainOrigin != 0xFFFFFFFFu && chainOrigin < sourceBoneCount) {
                         phaseJoint = chainOrigin;
 					}
 				}
@@ -426,7 +468,6 @@ struct WindSharedResources {
 				}
 			}
 			layoutSummary << ']';
-			++baseTypeIndex;
         }
         if (!types.empty()) {
             // Shaders use slot zero as shared control metadata even when the first
@@ -466,13 +507,14 @@ struct WindSharedResources {
         processedTypeCounts->EnsureSize(std::max(1u, typeCount));
         deferredEntries->EnsureSize(std::max(1u, residentPlacementCount));
         indirectCommands->EnsureSize(std::max(1u, typeCount));
+		allocationRecords->EnsureSize(std::max(1u, typeCount));
 		activeInstances->EnsureSize((std::max)(1u, typeCount * placementCapacity));
         activeBoneCount = std::min(requestedBoneCount, boneEntries->ResidentCapacity());
         TracyPlot("ProceduralWind.CandidatePlacements", static_cast<std::int64_t>(residentPlacementCount));
         TracyPlot("ProceduralWind.RegisteredTypes", static_cast<std::int64_t>(registeredTypes));
         if (registeredTypes != lastLoggedRegisteredTypes || residentPlacementCount != lastLoggedPlacementCount) {
 			EmitWindTelemetry(fmt::format(
-				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketCapacityPerVariant={} distance=32768",
+				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketCapacityPerVariant={} distance=unbounded",
                 registeredTypes, typeCount, activeBoneCount, residentPlacementCount,
 				transientRegion.capacityMatrices, placementCapacity));
             lastLoggedRegisteredTypes = registeredTypes;
@@ -510,6 +552,7 @@ struct WindSharedResources {
     std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> skinnedPlacements;
     std::shared_ptr<SortedUnsignedIntBuffer> activeSkinnedPlacements;
     std::shared_ptr<DynamicStructuredBuffer<WindIndirectCommand>> indirectCommands;
+	std::shared_ptr<DynamicStructuredBuffer<WindAllocationRecordGPU>> allocationRecords;
     std::uint64_t fieldRevision = 0u;
     bool fieldReady = false;
     std::uint32_t activeBoneCount = 0u;
@@ -578,6 +621,7 @@ WindTransientConstants MakeTransientConstants(WindSharedResources& resources, Gl
     c.forwardSkin = forward->GetUAVShaderVisibleInfo(0).slot.index;
     c.inverseSkin = inverse->GetUAVShaderVisibleInfo(0).slot.index;
     c.inverseBind = inverseBind->GetSRVInfo(0).slot.index;
+	c.allocationRecords = resources.allocationRecords->GetUAVShaderVisibleInfo(0).slot.index;
     c.placementCount = resources.residentPlacementCount;
     c.typeCount = resources.typeCount;
     c.transformBase = resources.transientRegion.transformBaseMatrices;
@@ -597,14 +641,22 @@ WindTransientConstants MakeTransientConstants(WindSharedResources& resources, Gl
     c.windY = resources.state.directionToWS.y;
     c.strength = resources.state.strength * resources.displacementScale;
     c.gustStrength = resources.state.gustStrength;
-	const auto thresholds = SettingsManager::GetInstance().getSettingGetter<std::vector<float>>(ProceduralWindSkeletonLodThresholdsSettingName)();
-	const std::array<float, 6> defaults{ 512.0f, 256.0f, 128.0f, 64.0f, 32.0f, 12.0f };
-	for (std::size_t i = 0; i < c.lodThresholds.size(); ++i)
-		c.lodThresholds[i] = i < thresholds.size() ? (std::max)(0.0f, thresholds[i]) : defaults[i];
+	const auto curve = SettingsManager::GetInstance().getSettingGetter<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName)();
+	const std::array<float, 12> defaults{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f };
+	for (std::size_t i = 0; i < c.qualityCurveScreen.size(); ++i) {
+		c.qualityCurveScreen[i] = (std::max)(0.0f, curve.size() > i * 2u ? curve[i * 2u] : defaults[i * 2u]);
+		c.qualityCurveValue[i] = std::clamp(curve.size() > i * 2u + 1u ? curve[i * 2u + 1u] : defaults[i * 2u + 1u], 0.0f, 1.0f);
+	}
+	c.staticCutoff = (std::max)(0.0f,
+		SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindSkeletonLodStaticCutoffSettingName)());
 	c.lodHysteresis = std::clamp(
 		SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindSkeletonLodHysteresisSettingName)(), 0.0f, 0.49f);
 	c.forcedLod = std::clamp(
-		SettingsManager::GetInstance().getSettingGetter<int32_t>(ProceduralWindForcedSkeletonLodSettingName)(), -1, 6);
+		SettingsManager::GetInstance().getSettingGetter<int32_t>(ProceduralWindForcedSkeletonLodSettingName)(), -1, 15);
+	c.capacityTarget = std::clamp(
+		SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindSkeletonLodCapacityTargetSettingName)(), 0.1f, 1.0f);
+	c.lateReserve = std::clamp(
+		SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindSkeletonLodLateReserveSettingName)(), 0.0f, 0.5f);
     return c;
 }
 
@@ -727,7 +779,7 @@ public:
         m_pso = PSOManager::GetInstance().MakeComputePipeline(PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS", {}, "ProceduralWind.BuildCommands");
     }
-    void DeclareResourceUsages(ComputePassBuilder* b) override { b->WithShaderResource(m_resources->windTypes, m_resources->typeCounters, Builtin::SkeletonResources::InverseBindMatrices).WithUnorderedAccess(m_resources->processedTypeCounts, m_resources->activeInstances, m_resources->allocationCounters, m_resources->indirectCommands, Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseSkinMatrices); }
+    void DeclareResourceUsages(ComputePassBuilder* b) override { b->WithShaderResource(m_resources->windTypes, m_resources->typeCounters, Builtin::SkeletonResources::InverseBindMatrices).WithUnorderedAccess(m_resources->processedTypeCounts, m_resources->activeInstances, m_resources->allocationCounters, m_resources->indirectCommands, m_resources->allocationRecords, Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseSkinMatrices); }
     void Setup() override {} void Update(const UpdateExecutionContext&) override {}
     PassReturn Execute(PassExecutionContext& context) override {
         if (!m_resources->typeCount) return {};
@@ -745,6 +797,46 @@ public:
 private: std::shared_ptr<WindSharedResources> m_resources; PipelineState m_pso; bool m_latePhase = false;
 };
 
+class WindFinalizeAllocationsPass final : public ComputePass {
+public:
+	explicit WindFinalizeAllocationsPass(std::shared_ptr<WindSharedResources> resources)
+		: m_resources(std::move(resources)) {
+		m_pso = PSOManager::GetInstance().MakeComputePipeline(
+			PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+			L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS", {},
+			"ProceduralWind.FinalizeAllocations");
+	}
+	void DeclareResourceUsages(ComputePassBuilder* builder) override {
+		builder->WithShaderResource(m_resources->windTypes, Builtin::SkeletonResources::InverseBindMatrices)
+			.WithUnorderedAccess(m_resources->allocationRecords, m_resources->activeInstances,
+				Builtin::SkeletonResources::SkinningInstanceInfo,
+				Builtin::SkeletonResources::BoneTransforms,
+				Builtin::SkeletonResources::InverseSkinMatrices,
+				m_resources->diagnostics);
+	}
+	void Setup() override {}
+	void Update(const UpdateExecutionContext&) override {}
+	PassReturn Execute(PassExecutionContext& context) override {
+		if (!m_resources->typeCount || !m_resources->residentPlacementCount) return {};
+		auto constants = MakeTransientConstants(*m_resources,
+			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),
+			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
+			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
+			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
+		PrepareTransient(context, m_pso, constants);
+		BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
+		context.commandList.Dispatch(
+			(m_resources->residentPlacementCount + kThreadsPerGroup - 1u) / kThreadsPerGroup,
+			1u,
+			1u);
+		return {};
+	}
+	void Cleanup() override {}
+private:
+	std::shared_ptr<WindSharedResources> m_resources;
+	PipelineState m_pso;
+};
+
 class WindIndirectSimulatePass final : public ComputePass {
 public:
     WindIndirectSimulatePass(std::shared_ptr<WindSharedResources> r, bool latePhase = false)
@@ -753,7 +845,7 @@ public:
         rhi::IndirectArg args[] = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
         DeviceManager::GetInstance().GetDevice().CreateCommandSignature({rhi::Span<rhi::IndirectArg>(args,2),sizeof(WindIndirectCommand)}, PSOManager::GetInstance().GetComputeRootSignature().GetHandle(), m_signature);
     }
-    void DeclareResourceUsages(ComputePassBuilder* b) override { b->WithShaderResource(m_resources->windTypes,m_resources->boneEntries,m_resources->activeInstances,m_resources->fieldSlices[0],m_resources->fieldSlices[1],Builtin::InstanceDrawRecordBuffer,Builtin::PerInstanceTransformBuffer,Builtin::SkeletonResources::InverseBindMatrices).WithUnorderedAccess(m_resources->diagnostics,Builtin::SkeletonResources::SkinningInstanceInfo,Builtin::SkeletonResources::BoneTransforms,Builtin::SkeletonResources::InverseSkinMatrices).WithIndirectArguments(m_resources->indirectCommands,m_resources->allocationCounters); }
+    void DeclareResourceUsages(ComputePassBuilder* b) override { b->WithShaderResource(m_resources->windTypes,m_resources->boneEntries,m_resources->fieldSlices[0],m_resources->fieldSlices[1],Builtin::InstanceDrawRecordBuffer,Builtin::PerInstanceTransformBuffer,Builtin::SkeletonResources::InverseBindMatrices).WithUnorderedAccess(m_resources->activeInstances,m_resources->diagnostics,Builtin::SkeletonResources::SkinningInstanceInfo,Builtin::SkeletonResources::BoneTransforms,Builtin::SkeletonResources::InverseSkinMatrices).WithIndirectArguments(m_resources->indirectCommands,m_resources->allocationCounters); }
     void Setup() override {} void Update(const UpdateExecutionContext&) override {}
     PassReturn Execute(PassExecutionContext& context) override {
         if (!m_resources->typeCount) return {};
@@ -894,12 +986,14 @@ void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vecto
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase1", std::make_shared<WindActivatePass>(resources, false)).At(earlyInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase1", std::make_shared<WindBuildCommandsPass>(resources, false)).At(earlyInsertion));
+	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase1", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(earlyInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase1", std::make_shared<WindIndirectSimulatePass>(resources)).At(earlyInsertion));
 
     auto lateInsertion = RenderGraph::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
     lateInsertion.AlsoBefore("CLodOpaque::HierarchicalCullingPass2");
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
+	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Render("ProceduralWind::DebugActiveSkeletons", std::make_shared<WindSkeletonDebugPass>(resources))
         .At(RenderGraph::ExternalInsertPoint::After("TonemappingPass")));

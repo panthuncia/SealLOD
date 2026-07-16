@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr std::array<char, 8> kMagic{ 'B', 'R', 'S', 'K', 'E', 'L', '0', '3' };
+constexpr auto kMagic = SKELETON_ARTIFACT_MAGIC;
 constexpr std::uint32_t kInvalidGroup = 0xFFFFFFFFu;
 constexpr std::uint32_t kWindFlagTrunk = 1u << 0u;
 constexpr std::size_t kArtifactSectionCount = 13u;
@@ -114,6 +114,11 @@ void WriteLodVariants(std::vector<std::byte>& out, const std::vector<SkeletonLod
 	WritePod(out, static_cast<std::uint64_t>(variants.size()));
 	for (const auto& variant : variants) {
 		WritePod(out, variant.level);
+		WritePod(out, variant.targetBoneCount);
+		WritePod(out, variant.animatedBoneCount);
+		WritePod(out, variant.normalizedQuality);
+		WritePod(out, variant.collapseError);
+		WritePod(out, variant.semanticBoneCounts);
 		WriteVector(out, variant.parentIndices);
 		WriteVector(out, variant.evaluationOrder);
 		WriteVector(out, variant.restLocalMatrices);
@@ -134,7 +139,10 @@ bool ReadLodVariants(const std::vector<std::byte>& in, std::size_t& offset, std:
 	if (!ReadPod(in, offset, count) || count > 16u) return false;
 	variants.resize(static_cast<std::size_t>(count));
 	for (auto& variant : variants) {
-		if (!ReadPod(in, offset, variant.level) || !ReadVector(in, offset, variant.parentIndices) ||
+		if (!ReadPod(in, offset, variant.level) || !ReadPod(in, offset, variant.targetBoneCount) ||
+			!ReadPod(in, offset, variant.animatedBoneCount) || !ReadPod(in, offset, variant.normalizedQuality) ||
+			!ReadPod(in, offset, variant.collapseError) || !ReadPod(in, offset, variant.semanticBoneCounts) ||
+			!ReadVector(in, offset, variant.parentIndices) ||
 			!ReadVector(in, offset, variant.evaluationOrder) || !ReadVector(in, offset, variant.restLocalMatrices) ||
 			!ReadVector(in, offset, variant.inverseBindMatrices) || !ReadVector(in, offset, variant.bindGlobalMatrices) ||
 			!ReadVector(in, offset, variant.windSimulationGroupIndices) || !ReadVector(in, offset, variant.windBoneInvariants) ||
@@ -251,10 +259,28 @@ SkeletonLodVariant BuildLodVariant(const SkeletonArtifactData& source, std::uint
 		result.windBones.push_back(windBone);
 		result.windResponseScales[compact] = static_cast<float>((std::max)(1u, contributorCounts[compact]));
 	}
+	result.targetBoneCount = static_cast<std::uint32_t>(result.lodToBaseBone.size());
+	for (const auto base : result.lodToBaseBone) {
+		const auto groupIndex = source.windSimulationGroupIndices[base];
+		if (groupIndex == kInvalidGroup || groupIndex >= source.dynamicWindMetadata.groups.size()) continue;
+		++result.animatedBoneCount;
+		const auto role = static_cast<std::uint32_t>(source.dynamicWindMetadata.groups[groupIndex].role);
+		if (role < result.semanticBoneCounts.size()) ++result.semanticBoneCounts[role];
+	}
+	for (std::uint32_t base = 0; base < count; ++base) {
+		const auto compact = result.baseToLodBone[base];
+		if (compact >= result.lodToBaseBone.size()) continue;
+		const auto retained = result.lodToBaseBone[compact];
+		const auto& a = source.bindGlobalMatrices[base];
+		const auto& b = source.bindGlobalMatrices[retained];
+		const float dx = a._41 - b._41, dy = a._42 - b._42, dz = a._43 - b._43;
+		result.collapseError = (std::max)(result.collapseError, std::sqrt(dx * dx + dy * dy + dz * dz));
+	}
 	return result;
 }
 
-void BuildSkeletonLods(SkeletonArtifactData& data)
+#if 0 // Replaced by the variable-length, error-ranked generator below.
+void BuildSkeletonLodsLegacy(SkeletonArtifactData& data)
 {
 	const std::uint32_t count = static_cast<std::uint32_t>(data.jointNames.size());
 	if (count == 0u) return;
@@ -361,6 +387,158 @@ void BuildSkeletonLods(SkeletonArtifactData& data)
 	data.lodVariants.push_back(BuildLodVariant(data, 3u, lod3));
 	data.lodVariants.push_back(BuildLodVariant(data, 4u, lod4));
 	data.lodVariants.push_back(BuildLodVariant(data, 5u, lod5));
+}
+#endif
+
+float BoneReductionScore(const SkeletonArtifactData& data, std::uint32_t bone)
+{
+	const auto parent = data.parentIndices[bone];
+	if (parent < 0) return (std::numeric_limits<float>::max)();
+	const auto& position = data.bindGlobalMatrices[bone];
+	const auto& parentPosition = data.bindGlobalMatrices[static_cast<std::uint32_t>(parent)];
+	const std::array<float, 3> incoming{ position._41 - parentPosition._41, position._42 - parentPosition._42, position._43 - parentPosition._43 };
+	float segmentLength = std::sqrt(LengthSquared(incoming));
+	float curvature = 0.0f;
+	std::uint32_t childCount = 0u;
+	for (std::uint32_t child = 0; child < data.parentIndices.size(); ++child) if (data.parentIndices[child] == static_cast<std::int32_t>(bone)) {
+		++childCount;
+		const auto& childPosition = data.bindGlobalMatrices[child];
+		const std::array<float, 3> outgoing{ childPosition._41 - position._41, childPosition._42 - position._42, childPosition._43 - position._43 };
+		segmentLength += std::sqrt(LengthSquared(outgoing));
+		const auto inDirection = Normalize(incoming, { 1.0f, 0.0f, 0.0f });
+		const auto outDirection = Normalize(outgoing, inDirection);
+		curvature = (std::max)(curvature, 1.0f - std::clamp(
+			inDirection[0] * outDirection[0] + inDirection[1] * outDirection[1] + inDirection[2] * outDirection[2], -1.0f, 1.0f));
+	}
+	const auto groupIndex = data.windSimulationGroupIndices[bone];
+	const float priority = groupIndex < data.dynamicWindMetadata.groups.size()
+		? (std::max)(0.01f, data.dynamicWindMetadata.groups[groupIndex].reductionPriority) : 1.0f;
+	// Branch points sort first and therefore survive until the end of a phase.
+	return priority * (segmentLength * (1.0f + 4.0f * curvature) + (childCount != 1u ? 1.0e12f : 0.0f));
+}
+
+std::vector<std::uint32_t> MakeGeometricTargets(
+	std::uint32_t high,
+	std::uint32_t low,
+	float maximumRatio,
+	std::span<const std::uint32_t> explicitTargets)
+{
+	std::vector<std::uint32_t> targets{ high };
+	if (high <= low) return targets;
+	const auto steps = (std::max)(1u, static_cast<std::uint32_t>(std::ceil(
+		std::log(static_cast<float>(high) / static_cast<float>((std::max)(1u, low))) / std::log(maximumRatio))));
+	for (std::uint32_t step = 1; step < steps; ++step) {
+		const float t = static_cast<float>(step) / static_cast<float>(steps);
+		targets.push_back(static_cast<std::uint32_t>(std::lround(
+			std::exp(std::lerp(std::log(static_cast<float>(high)), std::log(static_cast<float>(low)), t)))));
+	}
+	for (const auto target : explicitTargets) if (target < high && target > low) targets.push_back(target);
+	targets.push_back(low);
+	std::ranges::sort(targets, std::greater{});
+	targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+	return targets;
+}
+
+void BuildSkeletonLods(SkeletonArtifactData& data)
+{
+	const std::uint32_t count = static_cast<std::uint32_t>(data.jointNames.size());
+	if (count == 0u) return;
+	for (std::uint32_t groupIndex = 0; groupIndex < data.dynamicWindMetadata.groups.size(); ++groupIndex) {
+		auto& group = data.dynamicWindMetadata.groups[groupIndex];
+		if (group.profileGroupId == kInvalidGroup) group.profileGroupId = groupIndex;
+		if (group.role == DynamicWindSimulationGroupRole::Unassigned)
+			group.role = (group.flags & DynamicWindMetadata::GroupFlagTrunk) != 0u
+				? DynamicWindSimulationGroupRole::Trunk : DynamicWindSimulationGroupRole::DetailBranch;
+		if (!(group.reductionPriority > 0.0f)) group.reductionPriority =
+			group.role == DynamicWindSimulationGroupRole::Trunk ? 4.0f :
+			group.role == DynamicWindSimulationGroupRole::DetailBranch ? 2.0f : 1.0f;
+		if (group.role == DynamicWindSimulationGroupRole::Trunk)
+			group.minimumDriverCount = (std::max)(2u, group.minimumDriverCount);
+	}
+	const auto roleForBone = [&](std::uint32_t bone) {
+		const auto group = data.windSimulationGroupIndices[bone];
+		return group < data.dynamicWindMetadata.groups.size()
+			? data.dynamicWindMetadata.groups[group].role : DynamicWindSimulationGroupRole::Unassigned;
+	};
+
+	std::vector<bool> full(count, true), authored(count, true), trunk(count, false), minimum(count, false);
+	for (std::uint32_t bone = 0; bone < count; ++bone) {
+		const auto role = roleForBone(bone);
+		authored[bone] = role != DynamicWindSimulationGroupRole::AttachedBranch;
+		trunk[bone] = data.parentIndices[bone] < 0 || role == DynamicWindSimulationGroupRole::Trunk;
+		if (data.parentIndices[bone] < 0) minimum[bone] = true;
+	}
+	std::vector<std::uint32_t> trunkBones;
+	for (const auto bone : data.evaluationOrder) if (roleForBone(bone) == DynamicWindSimulationGroupRole::Trunk) trunkBones.push_back(bone);
+	if (!trunkBones.empty()) {
+		minimum[trunkBones.front()] = true;
+		std::vector<float> arc(count, 0.0f);
+		float maximumArc = 0.0f;
+		for (const auto bone : data.evaluationOrder) if (roleForBone(bone) == DynamicWindSimulationGroupRole::Trunk) {
+			const auto parent = data.parentIndices[bone];
+			if (parent >= 0 && roleForBone(static_cast<std::uint32_t>(parent)) == DynamicWindSimulationGroupRole::Trunk) {
+				const auto& a = data.bindGlobalMatrices[bone]; const auto& b = data.bindGlobalMatrices[static_cast<std::uint32_t>(parent)];
+				const float dx = a._41 - b._41, dy = a._42 - b._42, dz = a._43 - b._43;
+				arc[bone] = arc[static_cast<std::uint32_t>(parent)] + std::sqrt(dx * dx + dy * dy + dz * dz);
+			}
+			maximumArc = (std::max)(maximumArc, arc[bone]);
+		}
+		const auto crown = (std::min_element)(trunkBones.begin(), trunkBones.end(), [&](auto a, auto b) {
+			return std::abs(arc[a] - maximumArc * 0.75f) < std::abs(arc[b] - maximumArc * 0.75f);
+		});
+		minimum[*crown] = true;
+	}
+
+	struct Phase { const std::vector<bool>* high; const std::vector<bool>* low; };
+	const std::array phases{ Phase{ &full, &authored }, Phase{ &authored, &trunk }, Phase{ &trunk, &minimum } };
+	std::vector<std::vector<bool>> retainedSets;
+	for (const auto& phase : phases) {
+		const auto highCount = static_cast<std::uint32_t>(std::ranges::count(*phase.high, true));
+		const auto lowCount = static_cast<std::uint32_t>(std::ranges::count(*phase.low, true));
+		auto targets = MakeGeometricTargets(highCount, lowCount,
+			std::clamp(data.dynamicWindMetadata.maximumAdjacentBoneRatio, 1.05f, 8.0f),
+			data.dynamicWindMetadata.skeletonLodTargetBoneCounts);
+		std::vector<std::uint32_t> optional;
+		for (std::uint32_t bone = 0; bone < count; ++bone) if ((*phase.high)[bone] && !(*phase.low)[bone]) optional.push_back(bone);
+		std::ranges::sort(optional, [&](auto a, auto b) {
+			const float left = BoneReductionScore(data, a), right = BoneReductionScore(data, b);
+			return left != right ? left > right : a < b;
+		});
+		for (const auto target : targets) {
+			std::vector<bool> keep = *phase.low;
+			const auto desiredOptional = target > lowCount ? (std::min)(target - lowCount, static_cast<std::uint32_t>(optional.size())) : 0u;
+			for (std::uint32_t i = 0; i < desiredOptional; ++i) keep[optional[i]] = true;
+			if (retainedSets.empty() || keep != retainedSets.back()) retainedSets.push_back(std::move(keep));
+		}
+	}
+	const auto maximumVariants = std::clamp(data.dynamicWindMetadata.maximumLodVariants, 2u, 16u);
+	const std::array mandatoryCounts{
+		static_cast<std::uint32_t>(std::ranges::count(full, true)),
+		static_cast<std::uint32_t>(std::ranges::count(authored, true)),
+		static_cast<std::uint32_t>(std::ranges::count(trunk, true)),
+		static_cast<std::uint32_t>(std::ranges::count(minimum, true)) };
+	while (retainedSets.size() > maximumVariants) {
+		// Mandatory phase endpoints have exact semantic counts; discard the least useful
+		// intermediate transition while retaining both ends and the ordering.
+		std::size_t remove = 1u;
+		float smallestLogGap = (std::numeric_limits<float>::max)();
+		for (std::size_t i = 1; i + 1 < retainedSets.size(); ++i) {
+			const auto candidateCount = static_cast<std::uint32_t>(std::ranges::count(retainedSets[i], true));
+			if (std::ranges::find(mandatoryCounts, candidateCount) != mandatoryCounts.end()) continue;
+			const float previous = static_cast<float>(std::ranges::count(retainedSets[i - 1], true));
+			const float next = static_cast<float>(std::ranges::count(retainedSets[i + 1], true));
+			const float gap = std::log(previous / next);
+			if (gap < smallestLogGap) { smallestLogGap = gap; remove = i; }
+		}
+		retainedSets.erase(retainedSets.begin() + static_cast<std::ptrdiff_t>(remove));
+	}
+	data.lodVariants.clear();
+	for (std::uint32_t level = 0; level < retainedSets.size(); ++level)
+		data.lodVariants.push_back(BuildLodVariant(data, level, retainedSets[level]));
+	const float minimumLog = std::log(static_cast<float>((std::max)(1u, data.lodVariants.back().targetBoneCount)));
+	const float range = (std::max)(1.0e-6f, std::log(static_cast<float>(data.lodVariants.front().targetBoneCount)) - minimumLog);
+	for (auto& variant : data.lodVariants)
+		variant.normalizedQuality = std::clamp((std::log(static_cast<float>(variant.targetBoneCount)) - minimumLog) / range, 0.0f, 1.0f);
 }
 
 bool BuildArtifact(const ClusterLODAssemblySkeletonData& source, SkeletonArtifactData& out, std::string& error)
@@ -503,6 +681,10 @@ std::vector<std::byte> Serialize(
 	WritePod(out, data.dynamicWindMetadata.groundCover);
 	WritePod(out, data.dynamicWindMetadata.gustAttenuation);
 	WritePod(out, data.dynamicWindMetadata.attachedBranchProfileGroupId);
+	WritePod(out, data.dynamicWindMetadata.maximumLodVariants);
+	WritePod(out, data.dynamicWindMetadata.maximumAdjacentBoneRatio);
+	WritePod(out, data.dynamicWindMetadata.skeletonLodQualityBias);
+	WriteVector(out, data.dynamicWindMetadata.skeletonLodTargetBoneCounts);
 	beginSection();
 	WriteVector(out, data.dynamicWindMetadata.groups);
 	beginSection();
@@ -532,6 +714,10 @@ bool Deserialize(
 		ReadVector(bytes, offset, data.windBoneInvariants) && ReadString(bytes, offset, data.windProfileIdentity) &&
 		ReadPod(bytes, offset, data.dynamicWindMetadata.enabled) && ReadPod(bytes, offset, data.dynamicWindMetadata.groundCover) &&
 		ReadPod(bytes, offset, data.dynamicWindMetadata.gustAttenuation) && ReadPod(bytes, offset, data.dynamicWindMetadata.attachedBranchProfileGroupId) &&
+		ReadPod(bytes, offset, data.dynamicWindMetadata.maximumLodVariants) &&
+		ReadPod(bytes, offset, data.dynamicWindMetadata.maximumAdjacentBoneRatio) &&
+		ReadPod(bytes, offset, data.dynamicWindMetadata.skeletonLodQualityBias) &&
+		ReadVector(bytes, offset, data.dynamicWindMetadata.skeletonLodTargetBoneCounts) &&
 		ReadVector(bytes, offset, data.dynamicWindMetadata.groups) &&
 		ReadVector(bytes, offset, data.dynamicWindMetadata.bones) &&
 		ReadLodVariants(bytes, offset, data.lodVariants) && ReadPod(bytes, offset, data.maximumHierarchyDepth) &&

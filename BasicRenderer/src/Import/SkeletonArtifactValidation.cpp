@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr std::array<char, 8> kMagic{ 'B', 'R', 'S', 'K', 'E', 'L', '0', '3' };
+constexpr auto kMagic = SKELETON_ARTIFACT_MAGIC;
 constexpr std::size_t kArtifactSectionCount = 13u;
 
 struct ArtifactHeader

@@ -60,6 +60,11 @@ struct SkeletonWindBoneInvariant
 struct SkeletonLodVariant
 {
 	std::uint32_t level = 0;
+	std::uint32_t targetBoneCount = 0;
+	std::uint32_t animatedBoneCount = 0;
+	float normalizedQuality = 1.0f;
+	float collapseError = 0.0f;
+	std::array<std::uint32_t, 4> semanticBoneCounts{};
 	std::vector<std::int32_t> parentIndices;
 	std::vector<std::uint32_t> evaluationOrder;
 	std::vector<DirectX::XMFLOAT4X4> restLocalMatrices;
@@ -91,7 +96,14 @@ struct SkeletonArtifactData
 	std::uint32_t validationFlags = 0;
 };
 
-inline constexpr std::uint32_t SKELETON_ARTIFACT_SCHEMA_VERSION = 3;
+inline constexpr std::uint32_t SKELETON_ARTIFACT_SCHEMA_VERSION = 4;
+static_assert(SKELETON_ARTIFACT_SCHEMA_VERSION <= 99u,
+	"The fixed-width skeleton artifact magic supports two decimal schema digits.");
+inline constexpr std::array<char, 8> SKELETON_ARTIFACT_MAGIC{
+	'B', 'R', 'S', 'K', 'E', 'L',
+	static_cast<char>('0' + (SKELETON_ARTIFACT_SCHEMA_VERSION / 10u)),
+	static_cast<char>('0' + (SKELETON_ARTIFACT_SCHEMA_VERSION % 10u))
+};
 inline constexpr std::uint32_t SKELETON_ARTIFACT_VALID_FINITE = 1u << 0u;
 inline constexpr std::uint32_t SKELETON_ARTIFACT_VALID_HIERARCHY = 1u << 1u;
 inline constexpr std::uint32_t SKELETON_ARTIFACT_VALID_WIND = 1u << 2u;

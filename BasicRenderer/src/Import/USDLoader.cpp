@@ -4824,6 +4824,11 @@ namespace USDLoader {
 					wind.groundCover = root.value("bIsGroundCover", false);
 					wind.gustAttenuation = root.value("gustAttenuation", 0.0f);
 					wind.attachedBranchProfileGroupId = root.value("attachedBranchProfileGroupId", 1u);
+					wind.maximumLodVariants = std::clamp(root.value("skeletonLodMaxVariants", 16u), 2u, 16u);
+					wind.maximumAdjacentBoneRatio = std::clamp(root.value("skeletonLodMaximumBoneRatio", 1.75f), 1.05f, 8.0f);
+					wind.skeletonLodQualityBias = std::clamp(root.value("skeletonLodQualityBias", 1.0f), 0.0f, 4.0f);
+					if (const auto it = root.find("skeletonLodTargetBoneCounts"); it != root.end() && it->is_array())
+						for (const auto& value : *it) if (value.is_number_unsigned()) wind.skeletonLodTargetBoneCounts.push_back(value.get<std::uint32_t>());
 					if (const auto it = root.find("simulationGroups"); it != root.end() && it->is_array()) {
 						for (const auto& entry : *it) {
 							DynamicWindSimulationGroupData group;
@@ -4833,9 +4838,12 @@ namespace USDLoader {
 								? DynamicWindSimulationGroupRole::Trunk
 								: DynamicWindSimulationGroupRole::DetailBranch;
 							group.profileGroupId = entry.value("profileGroupId", static_cast<std::uint32_t>(wind.groups.size()));
-							group.lastAnimatedLod = entry.value(
-								"lastAnimatedLod",
-								group.role == DynamicWindSimulationGroupRole::Trunk ? 5u : 1u);
+							group.reductionPriority = entry.value(
+								"skeletonLodReductionPriority",
+								group.role == DynamicWindSimulationGroupRole::Trunk ? 4.0f : 2.0f);
+							group.minimumDriverCount = entry.value(
+								"skeletonLodMinimumDriverCount",
+								group.role == DynamicWindSimulationGroupRole::Trunk ? 2u : 0u);
 							const std::string role = entry.value("skeletonLodRole", std::string{});
 							if (role == "trunk") group.role = DynamicWindSimulationGroupRole::Trunk;
 							else if (role == "detailBranch") group.role = DynamicWindSimulationGroupRole::DetailBranch;
@@ -5749,7 +5757,7 @@ namespace USDLoader {
 				return false;
 			}
 			auto prebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
-			if (!prebuilt || prebuilt->groups.empty()) {
+			if (!prebuilt || prebuilt->groups.empty() || prebuilt->assemblyInstances.empty()) {
 				meshes.clear();
 				return false;
 			}
@@ -5788,11 +5796,18 @@ namespace USDLoader {
 		const std::string& sourceIdentifier,
 		UsdTimeCode geomTimeCode,
 		const std::vector<AssetAssemblyBucketInfo>& buckets,
-		std::vector<std::shared_ptr<Mesh>>& meshes)
+		std::vector<std::shared_ptr<Mesh>>& meshes,
+		std::string* outFailureReason = nullptr)
 	{
 		ZoneScopedN("USDLoader::LoadModelFromStage::BuildAssetAssemblyCache");
 		meshes.clear();
 		meshes.reserve(buckets.size());
+		if (outFailureReason) outFailureReason->clear();
+		auto fail = [&](std::string reason) {
+			if (outFailureReason) *outFailureReason = std::move(reason);
+			meshes.clear();
+			return false;
+		};
 
 		struct BuildBucket {
 			const AssetAssemblyBucketInfo* info = nullptr;
@@ -5816,8 +5831,7 @@ namespace USDLoader {
 
 		auto addResultInstance = [&](BuildBucket& bucket, const MeshPreprocessResult& result, const GfMatrix4d& transform, std::string_view bindJoint) -> bool {
 			if (!result.transientArtifacts) {
-				spdlog::debug("USD whole-asset CLod assembly missing retained CLod artifacts for '{}'.", result.sourcePrimPath);
-				return false;
+				return fail("missing retained CLod artifacts for '" + result.sourcePrimPath + "'");
 			}
 			uint32_t partIndex = 0u;
 			const auto existing = bucket.partByResult.find(&result);
@@ -5862,13 +5876,13 @@ namespace USDLoader {
 						skipped->second);
 					return true;
 				}
-				spdlog::warn("USD whole-asset CLod assembly unexpectedly missing preprocessed mesh '{}'.", meshPath);
-				return false;
+				return fail("unexpectedly missing preprocessed mesh '" + meshPath + "'");
 			}
 			for (const PreprocessedMeshSubset& subset : recordIt->second.subsets) {
 				auto key = ClassifyAssetAssemblyMesh(mesh, subset.material, localSkelCache, stage, UsdGeomGetStageMetersPerUnit(stage), ignoredSkeletons, &ignoredReason);
 				if (!key) {
-					return ignoredReason.empty();
+					if (ignoredReason.empty()) return true;
+					return fail("mesh '" + mesh.GetPrim().GetPath().GetString() + "' is not assembly-compatible: " + ignoredReason);
 				}
 				const auto bucketIt = bucketIndexByKey.find(*key);
 				if (bucketIt == bucketIndexByKey.end()) {
@@ -5900,7 +5914,9 @@ namespace USDLoader {
 			const GfMatrix4d correctedTransform =
 				meshInstance.localToStage * GfMatrix4d(stageContext.upRot, GfVec3d(0.0));
 			if (!addMeshInstances(meshInstance.mesh, correctedTransform, meshInstance.assemblyBindJoint)) {
-				return false;
+				return fail(outFailureReason && !outFailureReason->empty()
+					? *outFailureReason
+					: "failed to add an enumerated mesh instance");
 			}
 		}
 
@@ -5957,7 +5973,8 @@ namespace USDLoader {
 				const auto& sourceGroup = metadata.dynamicWindMetadata.groups[localGroup];
 				auto found = std::ranges::find_if(expandedAssemblySkeleton.dynamicWindMetadata.groups, [&](const auto& candidate) {
 					return candidate.role == sourceGroup.role && candidate.profileGroupId == sourceGroup.profileGroupId &&
-						candidate.flags == sourceGroup.flags && candidate.lastAnimatedLod == sourceGroup.lastAnimatedLod;
+						candidate.flags == sourceGroup.flags && candidate.reductionPriority == sourceGroup.reductionPriority &&
+						candidate.minimumDriverCount == sourceGroup.minimumDriverCount;
 				});
 				if (found == expandedAssemblySkeleton.dynamicWindMetadata.groups.end()) {
 					assemblyGroupByLocal[localGroup] = static_cast<uint32_t>(expandedAssemblySkeleton.dynamicWindMetadata.groups.size());
@@ -5976,7 +5993,8 @@ namespace USDLoader {
 				group.flags &= ~DynamicWindMetadata::GroupFlagTrunk;
 				group.role = DynamicWindSimulationGroupRole::AttachedBranch;
 				group.profileGroupId = expandedAssemblySkeleton.dynamicWindMetadata.attachedBranchProfileGroupId;
-				group.lastAnimatedLod = 0u;
+				group.reductionPriority = 1.0f;
+				group.minimumDriverCount = 0u;
 				const uint32_t index = static_cast<uint32_t>(expandedAssemblySkeleton.dynamicWindMetadata.groups.size());
 				expandedAssemblySkeleton.dynamicWindMetadata.groups.push_back(group);
 				return index;
@@ -6173,7 +6191,7 @@ namespace USDLoader {
 			auto savedArtifact = SkeletonArtifactCache::Save(expandedAssemblySkeleton, &artifactError);
 			if (!savedArtifact) {
 				spdlog::error("USD CLod assembly skeleton artifact save failed: {}", artifactError);
-				return false;
+				return fail("skeleton artifact save failed: " + artifactError);
 			}
 			expandedSkeletonArtifact = *savedArtifact;
 		}
@@ -6184,7 +6202,7 @@ namespace USDLoader {
 					"USD whole-asset CLod assembly bucket produced no instances: skinned={}, domain={}.",
 					bucket.info && bucket.info->key.skinned,
 					bucket.info ? std::to_string(bucket.info->key.skinDomain) : std::string("<none>"));
-				return false;
+				return fail("material bucket produced no parts or instances");
 			}
 			try {
 				ClusterLODBuilderSettings assemblySettings = GetDefaultBuilderSettings(sourceIdentifier);
@@ -6204,21 +6222,19 @@ namespace USDLoader {
 
 				auto identity = BuildAssetAssemblyIdentity(stage, sourceIdentifier, geomTimeCode, *bucket.info);
 				if (!identity) {
-					return false;
+					return fail("could not derive the material-bucket cache identity");
 				}
 				ClusterLODPrebuiltData savedPrebuiltData;
-				std::optional<ClusterLODPrebuiltData> prebuiltData;
-				if (CLodCacheLoader::SavePrebuiltLocked(
+				if (!CLodCacheLoader::SavePrebuiltLocked(
 					*identity,
 					assemblyArtifacts.prebuiltData,
 					assemblyArtifacts.cacheBuildData.AsPayload(),
 					&savedPrebuiltData)) {
-					auto diskBackedPrebuilt = CLodCacheLoader::TryLoadPrebuilt(*identity);
-					prebuiltData = diskBackedPrebuilt ? std::move(*diskBackedPrebuilt) : std::make_optional(std::move(savedPrebuiltData));
+					return fail("material-bucket cache save failed");
 				}
-				else {
-					spdlog::warn("USD whole-asset CLod assembly cache save failed; using in-memory assembly for this import.");
-					prebuiltData = std::move(assemblyArtifacts.prebuiltData);
+				auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(*identity);
+				if (!prebuiltData || prebuiltData->assemblyInstances.empty()) {
+					return fail("material-bucket cache could not be reopened after save or contained no assembly instances");
 				}
 
 				std::shared_ptr<Material> material = Material::GetDefaultMaterial();
@@ -6244,13 +6260,12 @@ namespace USDLoader {
 							: bucket.staticTextureOverrideSourceName);
 				}
 				auto mesh = BuildMeshFromAssetAssemblyPrebuilt(std::move(prebuiltData), material);
-				if (mesh) {
-					meshes.push_back(std::move(mesh));
-				}
+				if (!mesh) return fail("published material-bucket cache could not create a mesh");
+				meshes.push_back(std::move(mesh));
 			}
 			catch (const std::exception& e) {
 				spdlog::warn("USD whole-asset CLod assembly build failed: {}", e.what());
-				return false;
+				return fail(std::string("assembly builder exception: ") + e.what());
 			}
 		}
 
@@ -6970,6 +6985,7 @@ namespace USDLoader {
 
 		{
 			ZoneScopedN("USDLoader::LoadModelFromStage::BuildOrFallback");
+			std::string assemblyBuildFailureReason;
 			if (!assetAssemblyFallbackReason.empty()) {
 				spdlog::debug("USD whole-asset CLod assembly fallback: {}", assetAssemblyFallbackReason);
 			}
@@ -6998,7 +7014,8 @@ namespace USDLoader {
 					options.sourceIdentifier,
 					geomTimeCode,
 					assetAssemblyBuckets,
-					assetAssemblyMeshes)) {
+					assetAssemblyMeshes,
+					&assemblyBuildFailureReason)) {
 				spdlog::info(
 					"USD whole-asset CLod assembly built after cache miss: buckets={}, renderables={}.",
 					assetAssemblyBuckets.size(),
@@ -7011,7 +7028,9 @@ namespace USDLoader {
 				return scene;
 			}
 
-			spdlog::warn("USD whole-asset CLod assembly build failed; using expanded hierarchy fallback.");
+			spdlog::warn(
+				"USD whole-asset CLod assembly build failed; using expanded hierarchy fallback: {}.",
+				assemblyBuildFailureReason.empty() ? "builder produced no renderables" : assemblyBuildFailureReason);
 			auto scene = std::make_shared<Scene>();
 			ParseNodeHierarchy(scene, stage, stageContext.metersPerUnit, stageContext.upRot, stageContext.directory, skelCache, stageContext.isUSDZ);
 			loadingCache.Clear();
@@ -7056,6 +7075,14 @@ namespace USDLoader {
 			options,
 			importSettings,
 			&assemblyFallbackReason);
+		if (assemblyBuckets.empty() && options.requireWholeAssetAssembly) {
+			spdlog::error(
+				"Required USD whole-asset CLod assembly could not be discovered for '{}': {}.",
+				options.sourceIdentifier,
+				assemblyFallbackReason.empty() ? "no assembly-compatible material buckets" : assemblyFallbackReason);
+			loadingCache.Clear();
+			return std::nullopt;
+		}
 		if (!assemblyBuckets.empty()) {
 			auto makeAssemblyPayload = [&](std::vector<std::shared_ptr<Mesh>> assemblyMeshes,
 				std::string_view source) -> std::optional<ImportedAssetPayload> {
@@ -7084,10 +7111,19 @@ namespace USDLoader {
 				if (payload.meshes.empty()) {
 					return std::nullopt;
 				}
-				payload.parts.push_back(std::move(part));
-				if (manifest.size() == payload.meshes.size()) {
-					USDMaterialCache::SaveAssemblyMaterialManifest(options.sourceIdentifier, manifest);
+				if (manifest.size() != payload.meshes.size()) {
+					spdlog::error(
+						"USD payload whole-asset assembly could not derive identities for every material bucket: source='{}' identities={} renderables={}.",
+						options.sourceIdentifier, manifest.size(), payload.meshes.size());
+					return std::nullopt;
 				}
+				if (!USDMaterialCache::SaveAssemblyMaterialManifest(options.sourceIdentifier, manifest)) {
+					spdlog::error(
+						"USD payload whole-asset assembly manifest save failed for '{}'.",
+						options.sourceIdentifier);
+					return std::nullopt;
+				}
+				payload.parts.push_back(std::move(part));
 				spdlog::info(
 					"USD payload whole-asset CLod assembly {}: source='{}' buckets={} renderables={}.",
 					source, options.sourceIdentifier, assemblyBuckets.size(), payload.meshes.size());
@@ -7117,6 +7153,7 @@ namespace USDLoader {
 				options,
 				options.sourceIdentifier,
 				true);
+			std::string assemblyBuildFailureReason;
 			if (BuildAssetAssemblyMeshesFromPreprocessedData(
 				stage,
 				stageContext,
@@ -7125,13 +7162,18 @@ namespace USDLoader {
 				options.sourceIdentifier,
 				assemblyTimeCode,
 				assemblyBuckets,
-				assemblyMeshes)) {
+				assemblyMeshes,
+				&assemblyBuildFailureReason)) {
 				return makeAssemblyPayload(std::move(assemblyMeshes), "built");
 			}
-			spdlog::debug(
+			spdlog::error(
 				"USD payload whole-asset assembly build failed for '{}': {}",
 				options.sourceIdentifier,
-				assemblyFallbackReason.empty() ? "builder produced no renderables" : assemblyFallbackReason);
+				assemblyBuildFailureReason.empty() ? "builder produced no renderables" : assemblyBuildFailureReason);
+			if (options.requireWholeAssetAssembly) {
+				loadingCache.Clear();
+				return std::nullopt;
+			}
 		}
 
 		try {

@@ -22,19 +22,24 @@ uint ResolveProceduralWindSkinningSlot(uint drawRecordIndex, uint sourceSlot)
 	uint infoCount = 0u;
 	uint infoStride = 0u;
 	infos.GetDimensions(infoCount, infoStride);
-	if (sourceSlot >= infoCount) return 0xFFFFFFFFu;
-    SkinningInstanceGPUInfo source = infos[sourceSlot];
-    if ((source.flags & 2u) == 0u) return sourceSlot;
     StructuredBuffer<InstanceDrawRecordBuffer> drawRecords =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::InstanceDrawRecordBuffer)];
 	uint drawRecordCount = 0u;
 	uint drawRecordStride = 0u;
 	drawRecords.GetDimensions(drawRecordCount, drawRecordStride);
 	if (drawRecordIndex >= drawRecordCount) return 0xFFFFFFFFu;
-	const uint instanceTransformIndex = drawRecords[drawRecordIndex].instanceTransformIndex;
-	if (instanceTransformIndex > 0xFFFFFFFFu - 65536u) return 0xFFFFFFFFu;
-	const uint transientSlot = 65536u + instanceTransformIndex;
-	return transientSlot < infoCount && infos[transientSlot].boneCount != 0u ? transientSlot : 0xFFFFFFFFu;
+	const InstanceDrawRecordBuffer drawRecord = drawRecords[drawRecordIndex];
+	const uint effectiveSourceSlot = IsValidSkinningInstanceSlot(drawRecord.skinningTypeSlot)
+		? drawRecord.skinningTypeSlot
+		: sourceSlot;
+	if (effectiveSourceSlot >= infoCount) return 0xFFFFFFFFu;
+	const SkinningInstanceGPUInfo source = infos[effectiveSourceSlot];
+	if ((source.flags & 2u) == 0u) return sourceSlot;
+	if (drawRecord.instanceTransformIndex > 0xFFFFFFFFu - 65536u) return 0xFFFFFFFFu;
+	const uint transientSlot = 65536u + drawRecord.instanceTransformIndex;
+	if (transientSlot >= infoCount) return 0xFFFFFFFFu;
+	const SkinningInstanceGPUInfo transientInfo = infos[transientSlot];
+	return transientInfo.boneCount != 0u ? transientSlot : 0xFFFFFFFFu;
 }
 
 uint ResolveAssemblyBoneIndex(

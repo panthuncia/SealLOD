@@ -1155,6 +1155,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 				drawRecord.instanceTransformIndex = instanceTransformIndex;
 				drawRecord.clodOffsetIndex = perMeshInstanceBufferIndex;
 				drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+				drawRecord.skinningTypeSlot = meshInstance->GetPerMeshInstanceBufferData().skinningInstanceSlot;
 				drawRecords.push_back(drawRecord);
 				if (transformIndex == 0) {
 					drawInfo.perMeshInstanceBufferIndices.push_back(perMeshInstanceBufferIndex);
@@ -1731,6 +1732,7 @@ ObjectManager::MaterializedStaticImportTransaction ObjectManager::MaterializeSta
 					record.instanceTransformIndex = static_cast<std::uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
 					record.clodOffsetIndex = meshTemplate.clodOffsetIndex;
 					record.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+					record.skinningTypeSlot = meshTemplate.skinnedAssemblyTypeSlot;
 					if (meshTemplate.skinnedAssemblyTypeSlot != 0xFFFFFFFFu) {
 						const auto typeIt = std::ranges::find(
 							skinnedTypes,
@@ -2595,6 +2597,7 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					drawRecord.instanceTransformIndex = static_cast<uint32_t>(instanceTransformOffset / sizeof(PerInstanceTransformCB));
 					drawRecord.clodOffsetIndex = sourceRecord.clodOffsetIndex;
 					drawRecord.skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+					drawRecord.skinningTypeSlot = sourceRecord.skinnedAssemblyTypeSlot;
 					if (sourceRecord.skinnedAssemblyTypeSlot != 0xFFFFFFFFu) {
 						for (const auto placementIndex : drawInfo.skinnedAssemblyPlacementIndices) {
 							if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;

@@ -184,7 +184,12 @@ struct InstanceDrawRecordCB {
     unsigned int instanceTransformIndex;
     unsigned int clodOffsetIndex;
     unsigned int skinnedAssemblyPlacementIndex = 0xFFFFFFFFu;
+    // Authoritative expanded skeleton type for assembled draws. Keeping this
+    // on the draw record lets ordinary skinning resolve transient wind slots
+    // without introducing a placement-buffer dependency in every raster pass.
+    unsigned int skinningTypeSlot = 0xFFFFFFFFu;
 };
+static_assert(sizeof(InstanceDrawRecordCB) == 20u);
 
 struct PerMaterialCB {
     unsigned int materialFlags;
@@ -915,6 +920,15 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
 	UintRootConstant35,
 	UintRootConstant36,
 	UintRootConstant37,
+	UintRootConstant38,
+	UintRootConstant39,
+	UintRootConstant40,
+	UintRootConstant41,
+	UintRootConstant42,
+	UintRootConstant43,
+	UintRootConstant44,
+	UintRootConstant45,
+	UintRootConstant46,
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
@@ -923,7 +937,8 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscEnableShadows = UintRootConstant24,
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
-	NumMiscUintRootConstants = UintRootConstant37 + 1
+	UintRootConstant47 = UintRootConstant46 + 1,
+	NumMiscUintRootConstants = UintRootConstant47 + 1
 };
 
 enum ResourceDescriptorIndicesRootConstants { // Auto-assigned, do not set manually

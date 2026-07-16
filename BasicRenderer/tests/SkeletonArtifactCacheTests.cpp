@@ -65,10 +65,10 @@ int main()
 		!Check(data->evaluationOrder == std::vector<std::uint32_t>({ 0u, 1u }), "evaluation order was not cached") ||
 		!Check(data->windProfileIdentity == "sarpoverrideassets/trees/test.usd", "profile identity was not normalized") ||
 		!Check(data->windBoneInvariants.size() == 2u, "wind invariants were not cached") ||
-		!Check(data->lodVariants.size() == 6u, "skeleton LOD variants were not generated") ||
+		!Check(data->lodVariants.size() >= 2u && data->lodVariants.size() <= 16u, "skeleton LOD variants were not generated") ||
 		!Check(data->lodVariants[0].lodToBaseBone == std::vector<std::uint32_t>({ 0u, 1u }), "LOD0 is not identity") ||
-		!Check(data->lodVariants[2].lodToBaseBone == std::vector<std::uint32_t>({ 0u }), "detail branch was not removed at LOD2") ||
-		!Check(data->lodVariants[2].baseToLodBone == std::vector<std::uint32_t>({ 0u, 0u }), "removed branch did not map to retained ancestor")) return 1;
+		!Check(data->lodVariants.back().lodToBaseBone == std::vector<std::uint32_t>({ 0u }), "detail branch was not removed") ||
+		!Check(data->lodVariants.back().baseToLodBone == std::vector<std::uint32_t>({ 0u, 0u }), "removed branch did not map to retained ancestor")) return 1;
 	if (!Check(SkeletonArtifactValidation::Validate(*first, &error), error.c_str())) return 1;
 	const SkeletonArtifactReference wrongCount{ first->id, first->schemaVersion, first->jointCount + 1u };
 	if (!Check(!SkeletonArtifactCache::Load(wrongCount, &error), "registry accepted a mismatched joint count")) return 1;
@@ -100,7 +100,7 @@ int main()
 		!Check(skeletonA == skeletonB, "registry did not share the base skeleton") ||
 		!Check(skeletonA->GetBoneCount() == 2u, "resolved skeleton joint count is wrong") ||
 		!Check(skeletonA->GetWindBoneInvariants().size() == 2u, "resolved skeleton lost wind invariants") ||
-		!Check(skeletonA->GetSkeletonLodVariants().size() == 6u, "resolved skeleton lost LOD variants")) return 1;
+		!Check(skeletonA->GetSkeletonLodVariants().size() == data->lodVariants.size(), "resolved skeleton lost LOD variants")) return 1;
 
 	ClusterLODAssemblySkeletonData chain;
 	constexpr std::uint32_t trunkBones = 8u;
@@ -124,12 +124,15 @@ int main()
 	}
 	const auto chainRef = SkeletonArtifactCache::Save(chain, &error);
 	const auto chainData = chainRef ? SkeletonArtifactCache::Load(*chainRef, &error) : nullptr;
-	if (!Check(chainData != nullptr, error.c_str()) || !Check(chainData->lodVariants.size() == 6u, "chain LOD variants missing")) return 1;
-	const auto& half = chainData->lodVariants[3].lodToBaseBone;
-	const auto& quarter = chainData->lodVariants[4].lodToBaseBone;
-	if (!Check(std::ranges::includes(chainData->lodVariants[2].lodToBaseBone, half), "half LOD is not nested") ||
-		!Check(std::ranges::includes(half, quarter), "quarter LOD is not nested") ||
-		!Check(chainData->lodVariants[5].lodToBaseBone.size() == 3u, "far LOD is not root plus two animated segments")) return 1;
+	if (!Check(chainData != nullptr, error.c_str()) || !Check(chainData->lodVariants.size() >= 3u, "chain LOD variants missing")) return 1;
+	for (std::size_t lod = 1u; lod < chainData->lodVariants.size(); ++lod) {
+		const auto& finer = chainData->lodVariants[lod - 1u];
+		const auto& coarser = chainData->lodVariants[lod];
+		if (!Check(std::ranges::includes(finer.lodToBaseBone, coarser.lodToBaseBone), "skeleton LODs are not nested") ||
+			!Check(static_cast<float>(finer.lodToBaseBone.size()) / static_cast<float>(coarser.lodToBaseBone.size()) <= 1.75f + 1.0e-4f,
+				"adjacent skeleton LOD ratio exceeds configured maximum")) return 1;
+	}
+	if (!Check(chainData->lodVariants.back().lodToBaseBone.size() == 3u, "far LOD is not root plus two animated segments")) return 1;
 
 	std::filesystem::remove_all(cacheRoot);
 	return 0;

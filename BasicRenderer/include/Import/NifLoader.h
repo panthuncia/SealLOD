@@ -54,6 +54,13 @@ struct LoadTimingStats {
 };
 
 struct PreprocessResult {
+	struct MaterialMetadata {
+		MaterialDescription description;
+		std::uint64_t compileFlags = 0;
+		std::string partName;
+		std::uint32_t skinnedShapeIndex = static_cast<std::uint32_t>(-1);
+	};
+
 	bool success = false;
 	bool skipped = false;
 	bool cacheHit = false;
@@ -70,6 +77,7 @@ struct PreprocessResult {
 	std::uint64_t clodSaveMs = 0;
 	std::uint64_t clodReloadMs = 0;
 	std::vector<std::uint64_t> materialCompileFlags;
+	std::vector<MaterialMetadata> materials;
 };
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);

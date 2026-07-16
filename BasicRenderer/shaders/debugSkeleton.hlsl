@@ -80,6 +80,8 @@ struct WindDebugType {
     uint deferredEntriesDescriptor, processedTypeCountsDescriptor;
 	uint remapDescriptor, remapOffset, sourceBoneCount, lodLevel;
 	uint baseTypeLookupDescriptor, baseTypeLookupCount;
+	uint variantCount;
+	float normalizedQuality, collapseError, qualityBias;
 };
 struct WindDebugBone {
     uint skinningSlot, jointIndex, parentEntry, simulationGroup;
@@ -91,7 +93,11 @@ struct WindDebugBone {
     WindDebugMatrix bindGlobal;
     WindDebugMatrix inverseBind;
 };
-struct WindDebugActiveInstance { uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices; };
+struct WindDebugActiveInstance {
+	uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices;
+	float screenFraction;
+	uint priorityKey;
+};
 static const uint kWindTypes = UintRootConstant0;
 static const uint kWindBones = UintRootConstant1;
 static const uint kWindActive = UintRootConstant2;
@@ -255,6 +261,15 @@ float4 WindDebugSimulationGroupColor(uint simulationGroup)
     return float4(color, 1.0f);
 }
 
+float4 WindDebugLodColor(uint lodLevel)
+{
+	// Stable golden-ratio palette for all sixteen supported variants.
+	const float hue = frac((float(lodLevel) + 0.5f) * 0.61803398875f);
+	const float3 hueRgb = saturate(
+		abs(frac(hue + float3(0.0f, 2.0f / 3.0f, 1.0f / 3.0f)) * 6.0f - 3.0f) - 1.0f);
+	return float4(lerp(1.0f.xxx, hueRgb, 0.86f), 1.0f);
+}
+
 [outputtopology("line")]
 [numthreads(64, 1, 1)]
 void MSWindMain(
@@ -295,7 +310,7 @@ void MSWindMain(
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[kWindPerFrame];
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[kWindCameras];
     const Camera camera = cameras[perFrame.mainCameraIndex];
-    const float4 color = WindDebugSimulationGroupColor(bone.simulationGroup);
+	const float4 color = WindDebugLodColor(type.lodLevel);
     const uint vertexBase = outputIndex * 2u;
     SkeletonLineVertex startVertex;
     SkeletonLineVertex endVertex;

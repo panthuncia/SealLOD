@@ -64,6 +64,11 @@ namespace USDLoader {
 		std::vector<ObjectReyesBakedHeightMaterialEntry> objectReyesBakedHeightMaterials;
 		bool isUsdPackage = false;
 		bool requireCachedAssembly = false;
+		// Offline preprocessing requires a durable material-bucket assembly. When
+		// enabled, assembly discovery/build failures must not fall through to the
+		// ordinary expanded payload, because that would report a cache build as
+		// successful without publishing anything the runtime can reopen.
+		bool requireWholeAssetAssembly = false;
 	};
 
 	struct RenderablePartPayload {
