@@ -50,6 +50,8 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     const auto computeLayout = psoManager.GetComputeRootSignature().GetHandle();
     std::vector<DxcDefine> defines = {
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
+        { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
+        { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"16" },
     };
     m_buildArgsPso = psoManager.MakeComputePipeline(
         computeLayout,

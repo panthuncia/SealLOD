@@ -214,6 +214,10 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     MeshletBoundsSkinnedInvalidSlotFallbacks,
     MeshletBoundsSkinnedNoValidBoneFallbacks,
     MeshletBoundsSkinnedFallbackFrustumRejected,
+    VoxelRasterRigidWorkGroups,
+    VoxelRasterSkinnedWorkGroups,
+    VoxelRasterPreparedCubeCandidates,
+    VoxelRasterSkinBoneGroups,
 
     Count
 };
