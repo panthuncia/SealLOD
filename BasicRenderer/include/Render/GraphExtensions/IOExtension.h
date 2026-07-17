@@ -105,7 +105,12 @@ public:
 		}
 
 		if (m_materialManager) {
-			m_materialManager->RequestTextureStreamingFeedbackReadback(rg.GetReadbackService());
+			if (auto readback = m_materialManager->CreateTextureStreamingFeedbackReadbackPass()) {
+				outPasses.push_back(
+					RenderGraph::ExternalPassDesc::Copy("Material::TextureStreamingReadback", readback)
+						.At(RenderGraph::ExternalInsertPoint::After("MenuRenderPass"))
+						.PreferQueue(QueueKind::Copy));
+			}
 		}
 	}
 

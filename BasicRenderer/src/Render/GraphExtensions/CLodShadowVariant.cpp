@@ -138,6 +138,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     histogramIndirectCommand,
                     extension.m_occlusionReplayStateBuffer,
                     extension.m_occlusionNodeGpuInputsBuffer,
+                    extension.m_maxVisibleClusters,
                     true)));
     }
     else {
@@ -148,7 +149,8 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     visibleClustersCounterBuffer,
                     histogramIndirectCommand,
                     extension.m_occlusionReplayStateBuffer,
-                    extension.m_occlusionNodeGpuInputsBuffer)));
+                    extension.m_occlusionNodeGpuInputsBuffer,
+                    extension.m_maxVisibleClusters)));
     }
 
     if (isPhase2) {
@@ -928,7 +930,8 @@ std::string CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(
                 extension.m_reyesRasterWorkCounterBuffer,
                 extension.m_histogramIndirectCommandReyes,
                 extension.m_occlusionReplayStateBuffer,
-                extension.m_occlusionNodeGpuInputsBuffer)));
+                extension.m_occlusionNodeGpuInputsBuffer,
+                extension.m_reyesRasterWorkCapacity)));
 
     outPasses.push_back(
         RenderGraph::ExternalPassDesc::Compute(

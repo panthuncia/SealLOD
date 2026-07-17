@@ -290,32 +290,51 @@ public:
             }, m_initialStorage);
     }
 
-    PixelBuffer& Image() const { return *m_image; }
-    std::shared_ptr<PixelBuffer> ImagePtr() const { return m_image; }
+    std::shared_ptr<PixelBuffer> ImagePtr() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_publishedImage;
+    }
+    std::shared_ptr<PixelBuffer> PreparedImagePtr() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_image;
+    }
+    bool PublishPreparedImage(
+        uint64_t bindingRevision,
+        const std::shared_ptr<PixelBuffer>& image,
+        std::shared_ptr<PixelBuffer>* replacedPublishedImage = nullptr);
 
     Sampler& SamplerState() const { return *m_sampler; }
 	void SetSampler(std::shared_ptr<Sampler> sampler) {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
 		m_sampler = sampler ? std::move(sampler) : Sampler::GetDefaultSampler();
 	}
-    UINT SamplerDescriptorIndex() const { return m_sampler->GetDescriptorIndex(); }
+    UINT SamplerDescriptorIndex() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_sampler->GetDescriptorIndex(); }
 
     const TextureFileMeta& Meta() const { return m_meta; }
     TextureFileMeta& Meta() { return m_meta; }
     const TextureDescription& Description() const { return m_desc; }
+    rhi::Format Format() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_desc.format; }
 
     const TextureProcessingSettings& ProcessingSettings() const { return m_meta.processing; }
     void SetProcessingSettings(TextureProcessingSettings settings);
 
-    const TextureStreamingState& GetStreamingState() const { return m_streamingState; }
+    TextureStreamingState GetStreamingState() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_streamingState;
+    }
     uint32_t GetStreamingTextureID() const { return m_streamingState.streamingTextureID; }
-    bool IsMipStreamingEligible() const { return m_streamingState.eligible; }
-    bool IsMipStreamingEnabled() const { return m_streamingState.enabled; }
-    bool IsUsingFallbackImage() const { return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
-    bool HasUsableImage() const { return m_image && m_image->HasValidBackingResource(); }
-    bool IsResidentFinalImage() const { return HasUsableImage() && m_hasUploadedFinalImage && !m_hasUploadedPlaceholder; }
-    uint64_t GetBindingRevision() const { return m_streamingState.bindingRevision; }
-    uint64_t GetStreamingStateRevision() const { return m_streamingState.stateRevision; }
+    bool IsMipStreamingEligible() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.eligible; }
+    bool IsMipStreamingEnabled() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.enabled; }
+    bool IsUsingFallbackImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
+    bool HasUsableImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_image && m_image->HasValidBackingResource(); }
+    bool IsResidentFinalImage() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_image && m_image->HasValidBackingResource() && m_hasUploadedFinalImage && !m_hasUploadedPlaceholder;
+    }
+    uint64_t GetBindingRevision() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.bindingRevision; }
+    uint64_t GetStreamingStateRevision() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.stateRevision; }
     bool HasPendingUploadWork() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         const bool needsStreamingReload =
             m_hasUploadedFinalImage &&
             HasStreamingSourceData() &&
@@ -336,8 +355,16 @@ public:
     }
     TexturePendingDebugInfo GetPendingDebugInfo() const;
     const std::string& DebugName() const { return m_name; }
-    uint32_t GetFullMip0Width() const { return m_sourceFullWidth != 0u ? m_sourceFullWidth : GetWidth(); }
-    uint32_t GetFullMip0Height() const { return m_sourceFullHeight != 0u ? m_sourceFullHeight : GetHeight(); }
+    uint32_t GetFullMip0Width() const
+    {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_sourceFullWidth != 0u ? m_sourceFullWidth : m_desc.imageDimensions[0].width;
+    }
+    uint32_t GetFullMip0Height() const
+    {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
+        return m_sourceFullHeight != 0u ? m_sourceFullHeight : m_desc.imageDimensions[0].height;
+    }
     bool ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0, bool forceResidencyChange = false);
     void EnableMipStreaming(bool enabled);
     void SetMipStreamingSuppressed(bool suppressed);
@@ -351,6 +378,7 @@ public:
 
     void SetName(const std::string& name)
     {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
         m_name = name;
         if (HasUsableImage() && !m_hasUploadedPlaceholder) {
             m_image->SetName(name);
@@ -364,12 +392,15 @@ public:
     bool DropResidentImageForStreaming();
 
     unsigned int GetWidth() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_desc.imageDimensions[0].width;
     }
     unsigned int GetHeight() const {
+        std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_desc.imageDimensions[0].height;
     }
     void SetGenerateMipmaps(bool generate) {
+		std::scoped_lock lock(m_uploadAdvanceMutex);
 	    m_desc.generateMipMaps = generate;
     }
 
@@ -386,6 +417,7 @@ private:
         m_streamingState.streamingTextureID = NextStreamingTextureID();
         if (std::holds_alternative<std::shared_ptr<PixelBuffer>>(m_initialStorage)) { // Already initialized
             m_image = std::get<std::shared_ptr<PixelBuffer>>(m_initialStorage);
+			m_publishedImage = m_image;
 			m_hasUploadedFinalImage = true;
         }
         if (std::holds_alternative<std::string>(m_initialStorage)) { // Store path for potential re-use
@@ -404,8 +436,9 @@ private:
         }
     }
 	TextureDescription m_desc;
-	mutable std::mutex m_uploadAdvanceMutex;
+	mutable std::recursive_mutex m_uploadAdvanceMutex;
     std::shared_ptr<PixelBuffer> m_image;
+    std::shared_ptr<PixelBuffer> m_publishedImage;
     std::shared_ptr<Sampler> m_sampler;
     TextureFileMeta m_meta;
 	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;
@@ -427,6 +460,12 @@ private:
     TextureUploadPathTelemetry m_lastReportedUploadPath = TextureUploadPathTelemetry::Unknown;
 
     void RefreshStreamingStateFromDescription();
+	void SetPreparedImageLocked(std::shared_ptr<PixelBuffer> image) {
+		m_image = std::move(image);
+		if (!m_streamingState.enabled) {
+			m_publishedImage = m_image;
+		}
+	}
 	void UpdateSourceShapeFromDescription(const TextureDescription& desc, uint32_t totalMipCountHint = 0u);
     void ApplySourceShapeHint(uint32_t fullWidth, uint32_t fullHeight, uint32_t totalMipCount);
 	void ApplyStreamingBootstrapTopMip();

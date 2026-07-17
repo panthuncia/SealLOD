@@ -17,6 +17,7 @@ class IReadbackService;
 }
 
 class TextureFactory;
+class CopyPass;
 
 // Manages buffers for per-material-compile-flag work (e.g., visibility buffer per-material)
 class MaterialManager : public IResourceProvider {
@@ -32,9 +33,11 @@ public:
 
 	unsigned int IncrementMaterialUsageCount(Material& material, TextureFactory* textureFactory = nullptr, unsigned int count = 1u);
 	void DecrementMaterialUsageCount(const Material& material);
+	void InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight);
+	void ShutdownTextureStreaming();
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
-	void ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory);
-	void RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService);
+	void ProcessPendingMaterialUpdates(uint64_t frameIndex);
+	std::shared_ptr<CopyPass> CreateTextureStreamingFeedbackReadbackPass();
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);

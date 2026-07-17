@@ -473,15 +473,6 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
                 return TrackedEntityToken{};
             }
 
-            if (ecsManager.IsMainThread()) {
-                auto& world = ecsManager.GetWorld();
-                flecs::entity entity = existing;
-                if (!entity.is_alive()) {
-                    entity = world.entity();
-                }
-                return TrackedEntityToken(world, entity.id());
-            }
-
             TrackedEntityToken token = TrackedEntityToken::CreateDeferred();
             const flecs::entity_t existingId = existing.id();
             auto deferredState = token.deferredState;
@@ -499,6 +490,9 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
                     entity.id(),
                     pendingOps,
                     destroyRequested)) {
+                    if (entity.is_alive()) {
+                        entity.destruct();
+                    }
                     TrackedEntityToken::MarkDeferredStateDestroyed(deferredState);
                     return;
                 }
@@ -520,7 +514,35 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
     trackedEntityHooks.isMainThread = []() {
         return RendererECSManager::GetInstance().IsMainThread();
     };
+    trackedEntityHooks.enqueueAttachBundle = [](flecs::entity_t id, EntityComponentBundle bundle) {
+        auto& ecsManager = RendererECSManager::GetInstance();
+        if (!ecsManager.IsAlive()) {
+            return;
+        }
+
+        ecsManager.EnqueueDeferredWorldOperation([id, bundle = std::move(bundle)](flecs::world& world) mutable {
+            flecs::entity entity{ world, id };
+            if (entity.is_alive()) {
+                bundle.ApplyTo(entity);
+            }
+        });
+    };
     trackedEntityHooks.destroyEntity = [](flecs::world& world, flecs::entity_t id) {
+        auto& ecsManager = RendererECSManager::GetInstance();
+        if (!ecsManager.IsAlive()) {
+            return;
+        }
+
+        if (!ecsManager.IsMainThread()) {
+            ecsManager.EnqueueDeferredWorldOperation([id](flecs::world& deferredWorld) {
+                flecs::entity entity{ deferredWorld, id };
+                if (entity.is_alive()) {
+                    entity.destruct();
+                }
+            });
+            return;
+        }
+
         flecs::entity entity{ world, id };
         if (entity.is_alive()) {
             entity.destruct();
@@ -674,6 +696,9 @@ void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
     if (currentRenderGraph) {
         m_pTextureFactory->SetReadbackService(currentRenderGraph->GetReadbackService());
     }
+	if (m_pMaterialManager) {
+		m_pMaterialManager->InitializeTextureStreaming(*m_pTextureFactory, m_numFramesInFlight);
+	}
 
     CreateGlobalResources();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after CreateGlobalResources");
@@ -1196,12 +1221,11 @@ void Renderer::RunRenderResourceSyncStage() {
         });
     }
 
-    auto* textureFactory = m_managerInterface.GetTextureFactory();
     auto* materialManager = m_managerInterface.GetMaterialManager();
-    if (textureFactory && materialManager) {
+    if (materialManager) {
         ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingMaterialUpdates");
         const uint64_t nextFrameIndex = m_totalFramesRendered + 1u;
-        materialManager->ProcessPendingMaterialUpdates(nextFrameIndex, *textureFactory);
+        materialManager->ProcessPendingMaterialUpdates(nextFrameIndex);
     }
 
     auto* objectManager = m_managerInterface.GetObjectManager();
@@ -3654,6 +3678,9 @@ void Renderer::Cleanup() {
 	m_renderSyncLightQuery = {};
 	m_renderTransformUpdatedCleanupQuery = {};
 	m_renderSyncQueriesBuilt = false;
+	if (m_pMaterialManager) {
+		m_pMaterialManager->ShutdownTextureStreaming();
+	}
 	spdlog::info("Cleaning up resources");
     if (currentRenderGraph) {
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {

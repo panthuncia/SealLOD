@@ -53,6 +53,7 @@ public:
     void UpdateInstanceTransforms(Skeleton& skinningInstance);
     void UpdateAllDirtyInstances();
 	std::vector<ActiveInstanceView> GetActiveInstanceViews() const;
+	uint64_t GetActiveInstanceRevision() const noexcept { return m_activeInstanceRevision; }
 	TransientWindRegion ReserveTransientWindRegion(uint32_t matrixCapacity);
 	void EnsureTransientWindInstanceSlots(uint32_t drawRecordCapacity);
 
@@ -104,6 +105,7 @@ private:
 	TransientWindRegion m_transientWindRegion{};
 	uint32_t m_transientWindAllocationBaseMatrices = 0;
 	uint64_t m_lastBegunFrame = std::numeric_limits<uint64_t>::max();
+	uint64_t m_activeInstanceRevision = 0;
 
     // Resource provider map
     std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;

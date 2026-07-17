@@ -296,13 +296,50 @@ struct WindSharedResources {
             skinnedPlacements = update->objectManager->GetSkinnedAssemblyPlacements();
             activeSkinnedPlacements = update->objectManager->GetActiveSkinnedAssemblyPlacements();
         }
+		const std::uint32_t placementCapacity = (std::max)(1u, activeSkinnedPlacements
+			? static_cast<std::uint32_t>(activeSkinnedPlacements->ResidentSize()) : 0u);
+		const std::uint32_t placementCount = activeSkinnedPlacements
+			? static_cast<std::uint32_t>(activeSkinnedPlacements->ResidentSize()) : 0u;
+		const std::uint64_t instanceRevision = update->skeletonManager->GetActiveInstanceRevision();
+		const std::uint64_t profileRevision = runtime->ProfileRevision();
+		const bool structureChanged =
+			instanceRevision != lastActiveInstanceRevision ||
+			profileRevision != lastProfileRevision ||
+			transformCount != lastStructuralTransformCount ||
+			placementCapacity != lastStructuralPlacementCapacity ||
+			placementCount != lastStructuralPlacementCount ||
+			activeSkinnedPlacements.get() != lastActivePlacementsBuffer;
+		TracyPlot("ProceduralWind.StructuralRebuild", structureChanged ? 1 : 0);
+		if (registeredTypeCount != 0u) {
+			// SkeletonManager flips the current/previous transient palette halves in
+			// BeginFrame. Keep this value copy current even when the expensive type
+			// layout is unchanged, or compact LODs address the wrong half every other
+			// frame and visibly alternate between current and stale animation poses.
+			transientRegion = update->skeletonManager->ReserveTransientWindRegion(kTransientBoneCapacity);
+			update->skeletonManager->EnsureTransientWindInstanceSlots(transformCount);
+		}
+		if (!structureChanged) {
+			elapsedSeconds += context.deltaTime;
+			state = runtime->SnapshotWindState();
+			displacementScale = std::clamp(
+				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName)(),
+				0.0f,
+				100.0f);
+			RequestTelemetryReadback();
+			TracyPlot("ProceduralWind.SimulatedBones", static_cast<std::int64_t>(activeBoneCount));
+			return;
+		}
+		lastActiveInstanceRevision = instanceRevision;
+		lastProfileRevision = profileRevision;
+		lastStructuralTransformCount = transformCount;
+		lastStructuralPlacementCapacity = placementCapacity;
+		lastStructuralPlacementCount = placementCount;
+		lastActivePlacementsBuffer = activeSkinnedPlacements.get();
         std::vector<WindBoneGPU> next;
 		std::vector<std::uint32_t> nextRemaps;
         std::vector<WindTypeGPU> types;
 		std::ostringstream layoutSummary;
         std::uint32_t registeredTypes = 0u;
-		const std::uint32_t placementCapacity = (std::max)(1u, activeSkinnedPlacements
-			? static_cast<std::uint32_t>(activeSkinnedPlacements->ResidentSize()) : 0u);
 		const auto activeInstancesView = update->skeletonManager->GetActiveInstanceViews();
 		std::uint32_t lookupCount = 0u;
 		for (const auto& instance : activeInstancesView) if (instance.skeleton && instance.skeleton->HasWindSimulationGroups()) {
@@ -575,6 +612,12 @@ struct WindSharedResources {
     std::uint32_t lastLoggedRegisteredTypes = ~0u;
     std::uint32_t lastLoggedPlacementCount = ~0u;
 	std::uint32_t registeredTypeCount = 0u;
+	std::uint64_t lastActiveInstanceRevision = ~0ull;
+	std::uint64_t lastProfileRevision = ~0ull;
+	std::uint32_t lastStructuralTransformCount = ~0u;
+	std::uint32_t lastStructuralPlacementCapacity = ~0u;
+	std::uint32_t lastStructuralPlacementCount = ~0u;
+	const SortedUnsignedIntBuffer* lastActivePlacementsBuffer = nullptr;
 	std::string lastLoggedLayoutSummary;
     float nextTelemetrySeconds = 2.0f;
     float elapsedSeconds = 0.0f;

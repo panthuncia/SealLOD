@@ -8,6 +8,7 @@
 #include "Render/Runtime/IReadbackService.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_set>
@@ -15,6 +16,19 @@
 #include <tracy/Tracy.hpp>
 
 namespace {
+	bool MaterialStreamingDebugLoggingEnabled() {
+		static const bool enabled = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			const bool isSet =
+				_dupenv_s(&value, &valueLength, "SARP_GLTF_MATERIAL_LOG") == 0 &&
+				value != nullptr && value[0] != '\0' && value[0] != '0';
+			std::free(value);
+			return isSet;
+		}();
+		return enabled;
+	}
+
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
@@ -112,7 +126,8 @@ namespace {
 				return;
 			}
 
-			textureIndex = binding.texture->Image().GetSRVInfo(0).slot.index;
+			auto image = binding.texture->ImagePtr();
+			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
 			samplerIndex = binding.texture->SamplerDescriptorIndex();
 			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (binding.channels.size() > 0u) channels.x = binding.channels[0];
@@ -137,7 +152,8 @@ namespace {
 				return;
 			}
 
-			textureIndex = binding.texture->Image().GetSRVInfo(0).slot.index;
+			auto image = binding.texture->ImagePtr();
+			textureIndex = image ? image->GetSRVInfo(0).slot.index : kInvalidDescriptor;
 			samplerIndex = binding.texture->SamplerDescriptorIndex();
 			streamingTextureID = IsMaterialTextureStreamingEnabledSetting() ? binding.texture->GetStreamingTextureID() : kInvalidStreamingTextureID;
 			if (!binding.channels.empty()) {
@@ -350,10 +366,21 @@ MaterialManager::MaterialManager() {
 void MaterialManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex) {
 	(void)frameIndex;
 }
-void MaterialManager::RequestTextureStreamingFeedbackReadback(rg::runtime::IReadbackService* readbackService) {
-	if (m_textureStreamingManager && !m_textureStreamingFeedbackSuppressed) {
-		m_textureStreamingManager->RequestTextureStreamingFeedbackReadback(readbackService);
+void MaterialManager::InitializeTextureStreaming(TextureFactory& textureFactory, uint32_t framesInFlight) {
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->Initialize(textureFactory, framesInFlight);
 	}
+}
+void MaterialManager::ShutdownTextureStreaming() {
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->Shutdown();
+	}
+}
+std::shared_ptr<CopyPass> MaterialManager::CreateTextureStreamingFeedbackReadbackPass() {
+	if (!m_textureStreamingManager || m_textureStreamingFeedbackSuppressed) {
+		return {};
+	}
+	return m_textureStreamingManager->CreateTextureStreamingFeedbackReadbackPass();
 }
 
 MaterialTextureStreamingStats MaterialManager::GetMaterialTextureStreamingStats() const {
@@ -369,13 +396,14 @@ void MaterialManager::MarkMaterialDirty(Material& material) {
 	}
 }
 
-void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, TextureFactory& textureFactory) {
+void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 	ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates");
 	const auto updateStart = std::chrono::steady_clock::now();
 	const auto streamingStart = std::chrono::steady_clock::now();
 	if (m_textureStreamingManager) {
 		ZoneScopedN("MaterialManager::ProcessPendingMaterialUpdates::TextureStreaming");
-		m_textureStreamingManager->ProcessPendingTextureUpdates(frameIndex, textureFactory);
+		m_textureStreamingManager->EnqueueFrameTick(frameIndex);
+		m_textureStreamingManager->DrainPendingBindingChanges();
 	}
 	const auto streamingEnd = std::chrono::steady_clock::now();
 
@@ -400,7 +428,7 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex, Texture
 				continue;
 			}
 
-			FlushDirtyMaterial(*materialIt->second, &textureFactory);
+			FlushDirtyMaterial(*materialIt->second, nullptr);
 			++dirtyMaterialsFlushed;
 		}
 	}
@@ -511,10 +539,6 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::TrackTextureBindings");
 			TrackMaterialTextureAssets(material, 1, textureFactory);
 		}
-		{
-			ZoneScopedN("MaterialManager::FlushDirtyMaterial::EnsureTexturesUploaded");
-			material.EnsureTexturesUploaded(*textureFactory, TextureUploadAdvanceMode::NonBlocking);
-		}
 	}
 
 	PerMaterialCB materialData{};
@@ -522,6 +546,10 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 	PerMaterialOpenPBRCB openPBRData{};
 	{
 		ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs");
+		{
+			ZoneScopedN("MaterialManager::FlushDirtyMaterial::RefreshTextureBindings");
+			material.RefreshTextureBindings();
+		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::BuildMaterialCBs::Base");
 			materialData = material.GetData();
@@ -595,6 +623,20 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");
 			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
+			if (MaterialStreamingDebugLoggingEnabled() &&
+				(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
+				static std::atomic<uint32_t> loggedWrites{ 0u };
+				if (loggedWrites.fetch_add(1u, std::memory_order_relaxed) < 1024u) {
+					spdlog::info(
+						"SARPDBG material buffer write id={} slot={} baseIndex={} baseStreamingID={} normalIndex={} normalStreamingID={} metallicIndex={} roughnessIndex={} aoIndex={} heightIndex={} opacityIndex={}",
+						material.GetMaterialID(), materialSlot,
+						materialData.baseColorTextureIndex, materialData.baseColorStreamingTextureID,
+						materialData.normalTextureIndex, materialData.normalStreamingTextureID,
+						materialData.metallicTextureIndex, materialData.roughnessTextureIndex,
+						materialData.aoMapIndex, materialData.heightMapIndex,
+						materialData.opacityTextureIndex);
+				}
+			}
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Eval");
@@ -625,8 +667,7 @@ void MaterialManager::RegisterStreamingTexture(const std::shared_ptr<TextureAsse
 	}
 
 	if (m_textureStreamingManager) {
-		m_textureStreamingManager->EnsureTextureUploadAdvanced(texture, textureFactory);
-		m_textureStreamingManager->FlushDirtyTextureMetadata(texture);
+		m_textureStreamingManager->EnqueueTextureUploadAdvance(texture, "register_streaming_texture");
 	}
 }
 
@@ -714,8 +755,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 						MarkMaterialDirty(*materialIt->second);
 					}
 				},
-				"material:" + std::to_string(materialID),
-				false);
+				"material:" + std::to_string(materialID));
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
 			}

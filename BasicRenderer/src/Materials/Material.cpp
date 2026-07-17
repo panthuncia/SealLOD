@@ -444,18 +444,6 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory) {
 }
 
 void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode) {
-    const bool textureStreamingEnabled = IsMaterialTextureStreamingEnabledSetting();
-    m_materialData.baseColorStreamingTextureID = 0u;
-    m_materialData.normalStreamingTextureID = 0u;
-    m_materialData.metallicStreamingTextureID = 0u;
-    m_materialData.roughnessStreamingTextureID = 0u;
-    m_materialData.emissiveStreamingTextureID = 0u;
-    m_materialData.aoStreamingTextureID = 0u;
-    m_materialData.heightStreamingTextureID = 0u;
-    m_materialData.opacityStreamingTextureID = 0u;
-    m_materialData.heightMapIndex = 0u;
-    m_materialData.heightSamplerIndex = 0u;
-
     if (m_baseColorTexture) {
         m_baseColorTexture->SetGenerateMipmaps(true);
         m_baseColorTexture->EnsureUploaded(factory, mode);
@@ -514,6 +502,22 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
     ensureOpenPBRTexture(m_openPBRTextures.fuzzWeight.texture);
     ensureOpenPBRTexture(m_openPBRTextures.fuzzRoughness.texture);
 
+    RefreshTextureBindings();
+}
+
+void Material::RefreshTextureBindings() {
+    const bool textureStreamingEnabled = IsMaterialTextureStreamingEnabledSetting();
+    m_materialData.baseColorStreamingTextureID = 0u;
+    m_materialData.normalStreamingTextureID = 0u;
+    m_materialData.metallicStreamingTextureID = 0u;
+    m_materialData.roughnessStreamingTextureID = 0u;
+    m_materialData.emissiveStreamingTextureID = 0u;
+    m_materialData.aoStreamingTextureID = 0u;
+    m_materialData.heightStreamingTextureID = 0u;
+    m_materialData.opacityStreamingTextureID = 0u;
+    m_materialData.heightMapIndex = 0u;
+    m_materialData.heightSamplerIndex = 0u;
+
     auto annotateMaterialTexture = [](const std::shared_ptr<TextureAsset>& texture, const char* name) {
         if (!texture || texture->IsUsingFallbackImage() || !texture->HasUsableImage()) {
             return;
@@ -542,7 +546,7 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
     if (m_normalTexture != nullptr) {
         auto image = m_normalTexture->ImagePtr();
         if (image) {
-            const auto normalFormat = m_normalTexture->Description().format;
+            const auto normalFormat = m_normalTexture->Format();
             if (NormalTextureNeedsReconstructedZ(normalFormat)) {
                 if (!HasReconstructedZChannels(m_normalChannels)) {
                     spdlog::warn(
@@ -666,8 +670,12 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
         static std::atomic<uint32_t> loggedUploads{ 0u };
         const uint32_t logIndex = loggedUploads.fetch_add(1u, std::memory_order_relaxed);
         if (logIndex < 512u) {
+			auto baseImage = m_baseColorTexture ? m_baseColorTexture->ImagePtr() : nullptr;
+			const auto basePending = m_baseColorTexture
+				? m_baseColorTexture->GetPendingDebugInfo()
+				: TexturePendingDebugInfo{};
             spdlog::info(
-                "SARPDBG material upload id={} name='{}' flags=0x{:x} baseIndex={} baseSampler={} baseFallback={} baseUsable={} normalIndex={} normalFallback={} normalUsable={} mrIndex=({}, {}) aoIndex={} opacityIndex={} uv(base,normal,mr,ao)=({}, {}, {}, {}) channels(base,normal,mr,ao)=({}, {}, {}, {}; {}, {}, {}; {}, {}; {})",
+                "SARPDBG material upload id={} name='{}' flags=0x{:x} baseIndex={} baseSampler={} baseFallback={} baseUsable={} baseBackingValid={} baseStreamingID={} baseBindingRevision={} basePending={} basePlaceholder={} baseDirectStorage={} normalIndex={} normalFallback={} normalUsable={} mrIndex=({}, {}) aoIndex={} opacityIndex={} uv(base,normal,mr,ao)=({}, {}, {}, {}) channels(base,normal,mr,ao)=({}, {}, {}, {}; {}, {}, {}; {}, {}; {})",
                 m_materialID,
                 m_name,
                 m_materialData.materialFlags,
@@ -675,6 +683,12 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
                 m_materialData.baseColorSamplerIndex,
                 m_baseColorTexture ? m_baseColorTexture->IsUsingFallbackImage() : false,
                 m_baseColorTexture ? m_baseColorTexture->HasUsableImage() : false,
+				baseImage ? baseImage->HasValidBackingResource() : false,
+				m_materialData.baseColorStreamingTextureID,
+				basePending.bindingRevision,
+				m_baseColorTexture ? m_baseColorTexture->HasPendingUploadWork() : false,
+				basePending.hasPlaceholder,
+				basePending.directStorageState,
                 m_materialData.normalTextureIndex,
                 m_normalTexture ? m_normalTexture->IsUsingFallbackImage() : false,
                 m_normalTexture ? m_normalTexture->HasUsableImage() : false,

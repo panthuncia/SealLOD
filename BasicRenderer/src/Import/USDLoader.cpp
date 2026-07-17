@@ -1728,7 +1728,7 @@ namespace USDLoader {
 				textureBinding->channels.push_back(3);
 			}
 			if (name == TfToken("normal")) {
-				if (tex && NormalTextureNeedsReconstructedZ(tex->Description().format)) {
+				if (tex && NormalTextureNeedsReconstructedZ(tex->Format())) {
 					textureBinding->channels = { 0u, 1u, 4u };
 				}
 				if (tex) {
@@ -1780,7 +1780,7 @@ namespace USDLoader {
 		LoadSourcePathTextureBinding(result.openPBRTextures.fuzzRoughness, stage, TextureSemantic::Roughness, false, NormalMapConvention::DirectX);
 
 		if (result.normal.texture) {
-			if (NormalTextureNeedsReconstructedZ(result.normal.texture->Description().format)) {
+			if (NormalTextureNeedsReconstructedZ(result.normal.texture->Format())) {
 				result.normal.channels = { 0u, 1u, 4u };
 			}
 			result.negateNormals =

@@ -1885,7 +1885,9 @@ void TextureAsset::InvalidateResidentImageForStreamingRequest() {
 		return;
 	}
 
-	m_image.reset();
+	// Keep the last usable image published while the replacement is prepared.
+	// Material descriptors continue to reference it until the streaming worker
+	// produces a complete replacement and the main thread adopts that binding.
 	m_hasUploadedFinalImage = false;
 	m_hasUploadedPlaceholder = false;
 	BumpBindingRevision();
@@ -2009,6 +2011,7 @@ std::shared_ptr<TextureSourceData> TextureAsset::BuildProcessingSourceData(const
 }
 
 void TextureAsset::RecordLoadPath(TextureLoadPathTelemetry path, std::string detail) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	m_meta.loadPath = path;
 	m_meta.loadPathDetail = std::move(detail);
 	if (m_lastReportedLoadPath == path) {
@@ -2023,6 +2026,7 @@ void TextureAsset::RecordLoadPath(TextureLoadPathTelemetry path, std::string det
 }
 
 void TextureAsset::RecordUploadPath(TextureUploadPathTelemetry path, std::string detail) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	m_meta.uploadPath = path;
 	m_meta.uploadPathDetail = std::move(detail);
 	if (m_lastReportedUploadPath == path) {
@@ -2037,6 +2041,7 @@ void TextureAsset::RecordUploadPath(TextureUploadPathTelemetry path, std::string
 }
 
 void TextureAsset::SetProcessingSettings(TextureProcessingSettings settings) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const bool wasEligible = m_streamingState.eligible;
 	m_meta.processing = std::move(settings);
 	m_processingFallbackRequested = false;
@@ -2066,6 +2071,7 @@ void TextureAsset::PrimeConditionedCacheResidentUploadMetadata() const {
 }
 
 TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	TexturePendingDebugInfo info{};
 	info.label = TextureTelemetryLabel(*this);
 	info.debugName = m_name;
@@ -2109,6 +2115,7 @@ TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
 }
 
 bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex, bool forceResidencyChange) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const uint32_t clampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
 	const bool requestChanged = m_streamingState.requestedTopMip != clampedTopMip;
 	const bool frameChanged = frameIndex != 0u && m_streamingState.lastSeenFrame != frameIndex;
@@ -2164,6 +2171,7 @@ bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIn
 }
 
 void TextureAsset::EnableMipStreaming(bool enabled) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const bool newEnabled = enabled && !m_suppressMipStreaming && m_streamingState.eligible && IsMaterialTextureStreamingEnabledSetting();
 	if (m_streamingState.enabled == newEnabled) {
 		return;
@@ -2177,6 +2185,7 @@ void TextureAsset::EnableMipStreaming(bool enabled) {
 }
 
 void TextureAsset::SetMipStreamingSuppressed(bool suppressed) {
+	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	if (m_suppressMipStreaming == suppressed) {
 		return;
 	}
@@ -2238,7 +2247,7 @@ void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
 	if (image && !image->HasValidBackingResource()) {
 		image.reset();
 	}
-	m_image = std::move(image);
+	SetPreparedImageLocked(std::move(image));
 	if (m_image) {
 		m_desc = m_image->GetDescription();
 	}
@@ -2251,6 +2260,26 @@ void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
 	if (!m_name.empty() && HasUsableImage()) {
 		m_image->SetName(m_name);
 	}
+}
+
+bool TextureAsset::PublishPreparedImage(
+	uint64_t bindingRevision,
+	const std::shared_ptr<PixelBuffer>& image,
+	std::shared_ptr<PixelBuffer>* replacedPublishedImage)
+{
+	std::scoped_lock lock(m_uploadAdvanceMutex);
+	if (m_streamingState.bindingRevision != bindingRevision || m_image != image || !image ||
+		!image->HasValidBackingResource()) {
+		return false;
+	}
+	if (replacedPublishedImage) {
+		// Publication and capture of the binding being replaced must be one atomic
+		// operation.  The streaming worker's earlier view can be stale if the main
+		// thread adopted an intermediate revision while the worker prepared this one.
+		*replacedPublishedImage = m_publishedImage;
+	}
+	m_publishedImage = image;
+	return true;
 }
 
 DirectStorageAsyncRequestHandle TextureAsset::QueueInitialDirectStorageUploadIfNeeded() {
@@ -2315,6 +2344,7 @@ bool TextureAsset::DropResidentImageForStreaming() {
 	}
 
 	m_image.reset();
+	m_publishedImage.reset();
 	m_hasUploadedFinalImage = false;
 	m_hasUploadedPlaceholder = false;
 	m_directStorageReloadHandle.reset();
@@ -2376,6 +2406,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::GetSharedPlaceholderTexture");
 			m_image = GetSharedProcessingPlaceholderTexture(factory, m_meta.processing);
+			if (!m_streamingState.enabled) m_publishedImage = m_image;
 		}
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::RecordUploadPath");
@@ -2587,6 +2618,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				ShouldPreserveAlphaCoverage(m_meta, sourceDataToUpload->desc),
 				false,
 				m_meta.processing.maxMipLevels);
+			if (!m_streamingState.enabled) m_publishedImage = m_image;
 		}
 		if (!m_image || !m_image->HasValidBackingResource()) {
 			return false;
@@ -2923,6 +2955,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						ShouldPreserveAlphaCoverage(m_meta, sourceData->desc),
 						false,
 						m_meta.processing.maxMipLevels);
+					if (!m_streamingState.enabled) m_publishedImage = m_image;
 				}
 				m_hasUploadedFinalImage = true;
 				m_hasUploadedPlaceholder = false;
@@ -3221,6 +3254,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
 							false,
 							m_meta.processing.maxMipLevels);
+						if (!m_streamingState.enabled) m_publishedImage = m_image;
 						RefreshStreamingStateFromDescription();
 						SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
 						SetPendingTopMip(desiredResidentTopMip);
@@ -3265,6 +3299,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
 						false,
 						m_meta.processing.maxMipLevels);
+					if (!m_streamingState.enabled) m_publishedImage = m_image;
 				}
 				RefreshStreamingStateFromDescription();
 				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
@@ -3370,6 +3405,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc),
 				false,
 				m_meta.processing.maxMipLevels);
+			if (!m_streamingState.enabled) m_publishedImage = m_image;
 		}
 		RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture uploaded through TextureFactory without preprocessing");
 		m_hasUploadedFinalImage = true;

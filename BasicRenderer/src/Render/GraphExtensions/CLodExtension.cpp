@@ -1814,7 +1814,9 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     histogramBuffer,
                     reyesOwnershipBitsetBuffer,
                     m_workGraphTelemetryBuffer,
-                    isPhase1 ? nullptr : m_visibleClustersCounterBuffer)));
+                    isPhase1 ? nullptr : m_visibleClustersCounterBuffer,
+                    false,
+                    m_visibleClusterCapacity)));
 
         outPasses.push_back(
             RenderGraph::ExternalPassDesc::Compute(
@@ -1952,6 +1954,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     swHistogramIndirectCommand,
                     m_occlusionReplayStateBuffer,
                     m_occlusionNodeGpuInputsBuffer,
+                    m_visibleClusterCapacity,
                     true)));
 
         outPasses.push_back(

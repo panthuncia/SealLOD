@@ -289,7 +289,7 @@ namespace {
             return { 0u, 1u, 2u };
         }
 
-        switch (texture->Description().format) {
+        switch (texture->Format()) {
         case rhi::Format::BC5_UNorm:
         case rhi::Format::BC5_SNorm:
         case rhi::Format::R8G8_UNorm:

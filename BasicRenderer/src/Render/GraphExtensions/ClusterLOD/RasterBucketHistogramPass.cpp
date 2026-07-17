@@ -1,5 +1,6 @@
 #include "Render/GraphExtensions/ClusterLOD/RasterBucketHistogramPass.h"
 
+#include <stdexcept>
 #include <vector>
 
 #include "Managers/MaterialManager.h"
@@ -25,6 +26,9 @@ RasterBucketHistogramPass::RasterBucketHistogramPass(
     bool readReverse,
     uint32_t visibleClustersCapacity,
     bool runWhenComputeSWRasterEnabledOnly) {
+    if (visibleClustersCapacity == 0u) {
+        throw std::invalid_argument("RasterBucketHistogramPass requires a non-zero visible-cluster capacity");
+    }
     CreatePipelines(
         DeviceManager::GetInstance().GetDevice(),
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),

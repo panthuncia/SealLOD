@@ -326,6 +326,7 @@ public:
     std::shared_ptr<TextureAsset> GetHeightMapTexture() const { return m_heightMap; }
     void EnsureTexturesUploaded(const TextureFactory& factory);
     void EnsureTexturesUploaded(const TextureFactory& factory, TextureUploadAdvanceMode mode);
+    void RefreshTextureBindings();
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;
 private:
 	inline static std::atomic<uint32_t> globalMaterialCount;

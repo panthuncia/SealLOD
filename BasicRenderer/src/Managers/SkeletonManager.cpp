@@ -298,6 +298,7 @@ uint32_t SkeletonManager::AcquireSkinningInstance(const std::shared_ptr<Skeleton
     skinningInstance->SetSkinningInstanceSlot(rec.instanceSlot);
 
     auto [insIt, _ok] = m_instances.emplace(skinningInstance.get(), std::move(rec));
+	++m_activeInstanceRevision;
     m_iterationListDirty = true;
     return insIt->second.instanceSlot;
 }
@@ -325,6 +326,7 @@ void SkeletonManager::ReleaseSkinningInstance(Skeleton* skinningInstance) {
     skinningInstance->SetSkinningInstanceSlot(kInvalidSlot);
 
     m_instances.erase(it);
+	++m_activeInstanceRevision;
     m_iterationListDirty = true;
 }
 

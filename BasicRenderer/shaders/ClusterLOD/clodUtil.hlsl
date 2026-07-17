@@ -2673,7 +2673,10 @@ void CreateRasterBucketsHistogramCommandCSMain()
     StructuredBuffer<uint> clusterCountBuffer = ResourceDescriptorHeap[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
 
     // Given the cluster count, find dispatch dimensions that minimizes wasted threads
-    uint clusterCount = clusterCountBuffer.Load(0);
+    // Producers use monotonic counters and may report more work than fit in the
+    // destination buffer. Never turn that overflow value into an unbounded
+    // indirect dispatch.
+    uint clusterCount = min(clusterCountBuffer.Load(0), CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY);
     uint numBuckets = CLOD_CREATE_NUM_RASTER_BUCKETS;
     uint totalItems = max(clusterCount, numBuckets);
 
@@ -2737,7 +2740,16 @@ void ClusterRasterBucketsHistogramCSMain(uint3 DTid : SV_DispatchThreadID)
     uint xDimThreads = IndirectCommandSignatureRootConstant1 * CLUSTER_HISTOGRAM_GROUP_SIZE;
     uint linearizedID = DTid.x + DTid.y * xDimThreads;
     StructuredBuffer<uint> clusterCountBuffer = ResourceDescriptorHeap[CLOD_HISTOGRAM_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
-    uint clusterCount = clusterCountBuffer.Load(0);
+    uint readBase = 0u;
+    if (CLOD_HISTOGRAM_READ_BASE_COUNTER_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint> readBaseCounter = ResourceDescriptorHeap[CLOD_HISTOGRAM_READ_BASE_COUNTER_DESCRIPTOR_INDEX];
+        readBase = readBaseCounter.Load(0);
+    }
+    const uint readableCount = (readBase < CLOD_HISTOGRAM_READ_CAPACITY)
+        ? (CLOD_HISTOGRAM_READ_CAPACITY - readBase)
+        : 0u;
+    uint clusterCount = min(clusterCountBuffer.Load(0), readableCount);
     
     if (linearizedID >= clusterCount) {
         return;
@@ -2970,7 +2982,16 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
     uint linearizedID = dtid.x + dtid.y * xDimThreads;
 
     StructuredBuffer<uint> visibleClusterCountBuffer = ResourceDescriptorHeap[CLOD_COMPACTION_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
-    const uint clusterCount = visibleClusterCountBuffer.Load(0);
+    uint readBase = 0u;
+    if (CLOD_COMPACTION_READ_BASE_COUNTER_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint> readBaseCounter = ResourceDescriptorHeap[CLOD_COMPACTION_READ_BASE_COUNTER_DESCRIPTOR_INDEX];
+        readBase = readBaseCounter.Load(0);
+    }
+    const uint readableCount = (readBase < CLOD_COMPACTION_READ_CAPACITY)
+        ? (CLOD_COMPACTION_READ_CAPACITY - readBase)
+        : 0u;
+    const uint clusterCount = min(visibleClusterCountBuffer.Load(0), readableCount);
 
     StructuredBuffer<uint> histogram = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX];
     const uint numBucketsPacked = CLOD_COMPACTION_NUM_RASTER_BUCKETS;
@@ -3022,27 +3043,34 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
                 uint localOffset = 0;
                 InterlockedAdd(writeCursor[bucketIndex], 1, localOffset);
 
-                uint dst = baseClusterOffset + offsets[bucketIndex] + localOffset;
-                CLodStoreVisibleClusterPackedWordsRW(compactedClusters, dst, packedCluster);
-                compactedClusterTransformIndices[dst] = visibleClusterTransformIndices[sourceClusterIndex];
-                if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
+                const uint bucketBase = offsets[bucketIndex];
+                const uint outputOffset = bucketBase + localOffset;
+                const bool outputOffsetValid = outputOffset >= bucketBase;
+                const uint dst = baseClusterOffset + outputOffset;
+                const bool dstValid = outputOffsetValid && dst >= baseClusterOffset && dst < CLOD_COMPACTION_READ_CAPACITY;
+                if (dstValid)
                 {
-                    RWStructuredBuffer<CLodSoftwareRasterMapping> softwareRasterMapping =
-                        ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
-                    CLodSoftwareRasterMapping mapping;
-                    mapping.unsortedClusterIndex = sourceClusterIndex;
-                    mapping.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
-                        instanceID,
-                        meshInstance.skinningInstanceSlot);
-                    softwareRasterMapping[dst] = mapping;
+                    CLodStoreVisibleClusterPackedWordsRW(compactedClusters, dst, packedCluster);
+                    compactedClusterTransformIndices[dst] = visibleClusterTransformIndices[sourceClusterIndex];
+                    if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
+                    {
+                        RWStructuredBuffer<CLodSoftwareRasterMapping> softwareRasterMapping =
+                            ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
+                        CLodSoftwareRasterMapping mapping;
+                        mapping.unsortedClusterIndex = sourceClusterIndex;
+                        mapping.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+                            instanceID,
+                            meshInstance.skinningInstanceSlot);
+                        softwareRasterMapping[dst] = mapping;
+                    }
+                    else
+                    {
+                        RWStructuredBuffer<uint> sortedToUnsortedMapping =
+                            ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
+                        sortedToUnsortedMapping[dst] = sourceClusterIndex;
+                    }
+                    CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX, WG_COUNTER_RASTER_SORT_COMPACTION_TRIANGLE_EMITTED, 1u);
                 }
-                else
-                {
-                    RWStructuredBuffer<uint> sortedToUnsortedMapping =
-                        ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
-                    sortedToUnsortedMapping[dst] = sourceClusterIndex;
-                }
-                CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX, WG_COUNTER_RASTER_SORT_COMPACTION_TRIANGLE_EMITTED, 1u);
             }
         }
     }
@@ -3052,7 +3080,12 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
         StructuredBuffer<uint> offsets = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX];
         RWStructuredBuffer<RasterizeClustersCommand> outArgs = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_INDIRECT_ARGS_DESCRIPTOR_INDEX];
 
-        uint count = histogram[linearizedID];
+        const uint bucketOffset = offsets[linearizedID];
+        const uint bucketBase = baseClusterOffset + bucketOffset;
+        const uint availableCount = (bucketBase >= baseClusterOffset && bucketBase < CLOD_COMPACTION_READ_CAPACITY)
+            ? (CLOD_COMPACTION_READ_CAPACITY - bucketBase)
+            : 0u;
+        uint count = min(histogram[linearizedID], availableCount);
 
         RasterizeClustersCommand cmd = (RasterizeClustersCommand)0;
         if (count > 0)
@@ -3075,7 +3108,7 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
                 dispatchY = kMaxDim;
             }
 
-            cmd.baseClusterOffset = baseClusterOffset + offsets[linearizedID]; // base offset
+            cmd.baseClusterOffset = bucketBase; // base offset
             cmd.xDim = dispatchX;              // xDim for 2D linearization
             cmd.rasterBucketID = linearizedID;   // bucket index
 

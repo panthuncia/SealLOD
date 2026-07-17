@@ -707,7 +707,7 @@ fs::path AssetManifestPath()
 // whenever that ownership/serialization contract changes so preprocessing
 // cannot hide a stale inline-skeleton assembly behind an otherwise valid NIF
 // payload cache.
-constexpr std::uint32_t kPayloadCacheVersion = 48u;
+constexpr std::uint32_t kPayloadCacheVersion = 49u;
 
 enum class CachedSkeletonStorage : std::uint8_t
 {
@@ -1553,7 +1553,7 @@ bool ReadTextureBinding(
                 binding.texture->Meta().preferSRGB = texturePreferSRGB;
                 binding.texture->SetProcessingSettings(processing);
                 if (semantic == TextureSemantic::Normal &&
-                    NormalTextureNeedsReconstructedZ(binding.texture->Description().format)) {
+                    NormalTextureNeedsReconstructedZ(binding.texture->Format())) {
                     binding.channels = { 0u, 1u, 4u };
                 }
             }
@@ -1819,6 +1819,9 @@ void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
     writer.Pod(data.cacheSource.buildConfigHash);
     writer.WString(data.cacheSource.containerFileName);
     writer.PodVector(data.nodes);
+    writer.PodVector(data.nodeSkinningInfos);
+    writer.PodVector(data.nodeBoneIndices);
+    writer.Pod(data.nodeBoneLimit);
     writer.PodVector(data.lodNodeRanges);
     writer.PodVector(data.lodLevelRoots);
     writer.PodVector(data.assemblyTransforms);
@@ -1854,6 +1857,9 @@ bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
         reader.Pod(data.cacheSource.buildConfigHash) &&
         reader.WString(data.cacheSource.containerFileName) &&
         reader.PodVector(data.nodes) &&
+        reader.PodVector(data.nodeSkinningInfos) &&
+        reader.PodVector(data.nodeBoneIndices) &&
+        reader.Pod(data.nodeBoneLimit) &&
         reader.PodVector(data.lodNodeRanges) &&
         reader.PodVector(data.lodLevelRoots) &&
         reader.PodVector(data.assemblyTransforms) &&
@@ -2110,6 +2116,17 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                 meshIndex,
                 prebuilt.cacheSource.buildConfigHash,
                 expectedBuildConfigHash);
+            return std::nullopt;
+        }
+        if (prebuilt.nodeSkinningInfos.size() != prebuilt.nodes.size() ||
+            prebuilt.nodeBoneLimit < 1u || prebuilt.nodeBoneLimit > CLOD_NODE_BONE_LIMIT_HARD_MAX) {
+            spdlog::info(
+                "nif_asset_payload_cache: invalid CLod node skinning metadata for '{}' mesh={} nodes={} infos={} limit={}",
+                normalizedCacheKey,
+                meshIndex,
+                prebuilt.nodes.size(),
+                prebuilt.nodeSkinningInfos.size(),
+                prebuilt.nodeBoneLimit);
             return std::nullopt;
         }
         ZoneText(desc.name.data(), desc.name.size());
