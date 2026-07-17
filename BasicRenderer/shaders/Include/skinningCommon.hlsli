@@ -237,13 +237,16 @@ float4x4 BuildSkinMatrix(uint skinningInstanceSlot, SkinningInfluences skinning)
     float4x4 skinMatrix = (float4x4)0;
     float weightSum = 0.0f;
     AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.x, skinning.weights0.x);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.y, skinning.weights0.y);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.z, skinning.weights0.z);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.w, skinning.weights0.w);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.x, skinning.weights1.x);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.y, skinning.weights1.y);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.z, skinning.weights1.z);
-    AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.w, skinning.weights1.w);
+    if (any(skinning.weights0.yzw != 0.0f) || any(skinning.weights1 != 0.0f))
+    {
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.y, skinning.weights0.y);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.z, skinning.weights0.z);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints0.w, skinning.weights0.w);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.x, skinning.weights1.x);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.y, skinning.weights1.y);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.z, skinning.weights1.z);
+        AddWeightedBoneSkinMatrix(skinMatrix, weightSum, skinningInfo, skinning.joints1.w, skinning.weights1.w);
+    }
     // USD permits non-normalized weights, and some assembly geometry has no
     // authored influence at all.  An all-zero weighted matrix collapses those
     // vertices to the part origin and stretches every adjacent triangle.  A
