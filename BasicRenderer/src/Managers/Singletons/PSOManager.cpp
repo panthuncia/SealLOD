@@ -3301,43 +3301,127 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature() {
 	return m_computeRootSignature.Get();
 }
 
-void PSOManager::ReloadShaders() {
-    std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
-    m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
-    m_psoCache.clear();
-	m_meshPSOCache.clear();
-	m_deferredPSOCache.clear();
-	m_PPLLPSOCache.clear();
-	m_shadowPSOCache.clear();
-	m_meshPrePassPSOCache.clear();
-	m_prePassPSOCache.clear();
-    m_shadowMeshPSOCache.clear();
-    m_prePassPSOCache.clear();
-    m_clusterLODRasterPSOCache.clear();
-    m_clusterLODVirtualShadowRasterPSOCache.clear();
-    m_clusterLODVirtualShadowReyesRasterPSOCache.clear();
-    m_clusterLODDeepVisibilityRasterPSOCache.clear();
-    m_clusterLODSoftwareRasterPSOCache.clear();
-    m_clusterLODAVBOITOccupancyPSOCache.clear();
-    m_clusterLODAVBOITRasterPSOCache.clear();
-    m_clusterLODAVBOITShadePSOCache.clear();
-    m_clusterLODDeepVisibilityResolvePSOCache.clear();
-    m_materialEvalPSOCache.clear();
-    m_pendingClusterLODRasterPSOs.clear();
-    m_pendingClusterLODVirtualShadowRasterPSOs.clear();
-    m_pendingClusterLODVirtualShadowReyesRasterPSOs.clear();
-    m_pendingClusterLODDeepVisibilityRasterPSOs.clear();
-    m_pendingClusterLODAVBOITOccupancyPSOs.clear();
-    m_pendingClusterLODAVBOITRasterPSOs.clear();
-    m_pendingClusterLODAVBOITShadePSOs.clear();
-    m_pendingClusterLODSoftwareRasterPSOs.clear();
-    m_pendingMaterialEvalPSOs.clear();
-    m_livePipelines.clear();
-    m_liveJobs.clear();
-    m_pendingLivePublications.clear();
-    m_pendingLiveActivations.clear();
-    m_retiredLivePayloads.clear();
+bool PSOManager::RebuildAllPipelines(std::string& error) {
+    struct RebuildTarget {
+        std::string id;
+        ComputeRecipe computeRecipe;
+        std::function<PipelineState()> rebuild;
+        bool isComputeRecipe = false;
+    };
+
+    error.clear();
+    std::vector<RebuildTarget> targets;
+    {
+        std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
+        const auto busy = std::ranges::find_if(m_livePipelines, [](const auto& item) {
+            return item.second.compiling;
+        });
+        if (busy != m_livePipelines.end()) {
+            error = "pipeline '" + busy->first + "' is already compiling";
+            return false;
+        }
+
+        // Invalidate cache-fill jobs which have not published a PipelineState yet.
+        // Existing cache entries stay intact because their replaceable slots are
+        // rebuilt through m_livePipelines below.
+        m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
+        m_pendingClusterLODRasterPSOs.clear();
+        m_pendingClusterLODVirtualShadowRasterPSOs.clear();
+        m_pendingClusterLODVirtualShadowReyesRasterPSOs.clear();
+        m_pendingClusterLODDeepVisibilityRasterPSOs.clear();
+        m_pendingClusterLODAVBOITOccupancyPSOs.clear();
+        m_pendingClusterLODAVBOITRasterPSOs.clear();
+        m_pendingClusterLODAVBOITShadePSOs.clear();
+        m_pendingClusterLODSoftwareRasterPSOs.clear();
+        m_pendingMaterialEvalPSOs.clear();
+
+        targets.reserve(m_livePipelines.size());
+        for (auto& [id, entry] : m_livePipelines) {
+            entry.compiling = true;
+            targets.push_back(RebuildTarget{
+                .id = id,
+                .computeRecipe = entry.computeRecipe,
+                .rebuild = entry.rebuild,
+                .isComputeRecipe = entry.supportsDefineOverrides
+            });
+        }
+    }
+
+    std::vector<std::pair<std::string, std::shared_ptr<PipelineStatePayload>>> candidates;
+    candidates.reserve(targets.size());
+    try {
+        for (const RebuildTarget& target : targets) {
+            PipelineState candidate = target.isComputeRecipe
+                ? BuildComputePipeline(target.computeRecipe)
+                : target.rebuild();
+            auto payload = candidate.GetPayload();
+            if (!payload) {
+                throw std::runtime_error("pipeline '" + target.id + "' produced no payload");
+            }
+            candidates.emplace_back(target.id, std::move(payload));
+        }
+    } catch (const std::exception& exception) {
+        error = exception.what();
+    } catch (...) {
+        error = "unknown shader compilation failure";
+    }
+
+    std::scoped_lock lock(m_livePipelineMutex);
+    if (!error.empty()) {
+        for (const RebuildTarget& target : targets) {
+            if (auto entry = m_livePipelines.find(target.id); entry != m_livePipelines.end()) {
+                entry->second.compiling = false;
+            }
+        }
+        return false;
+    }
+
+    for (auto& [id, payload] : candidates) {
+        auto entryIt = m_livePipelines.find(id);
+        if (entryIt == m_livePipelines.end()) {
+            error = "pipeline '" + id + "' was removed during global rebuild";
+            break;
+        }
+        LivePipelineEntry& entry = entryIt->second;
+        uint64_t nextGeneration = 1;
+        for (const auto& generation : entry.generations) {
+            nextGeneration = std::max(nextGeneration, generation->generation + 1);
+        }
+        payload->generation = nextGeneration;
+        payload->label = "global-rebuild-" + std::to_string(nextGeneration);
+    }
+    if (!error.empty()) {
+        for (const RebuildTarget& target : targets) {
+            if (auto entry = m_livePipelines.find(target.id); entry != m_livePipelines.end()) {
+                entry->second.compiling = false;
+            }
+        }
+        return false;
+    }
+
+    for (auto& [id, payload] : candidates) {
+        LivePipelineEntry& entry = m_livePipelines.at(id);
+        entry.state.ReplacePayload(payload);
+        entry.generations.push_back(payload);
+        entry.generationDefineOverrides[payload->generation] = {};
+        while (entry.generations.size() > 8) {
+            const auto activePayload = entry.state.GetPayload();
+            const auto evictionIt = std::ranges::find_if(
+                entry.generations,
+                [&activePayload](const auto& generation) {
+                    return generation != activePayload;
+                });
+            if (evictionIt == entry.generations.end()) {
+                break;
+            }
+            entry.generationDefineOverrides.erase((*evictionIt)->generation);
+            entry.generations.erase(evictionIt);
+        }
+        entry.compiling = false;
+    }
     m_pipelineEpoch.fetch_add(1, std::memory_order_acq_rel);
+    spdlog::info("PSOManager: globally rebuilt {} registered pipelines", candidates.size());
+    return true;
 }
 
 std::vector<PSOManager::LivePipelineInfo> PSOManager::ListPipelines() const

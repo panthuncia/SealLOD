@@ -226,7 +226,7 @@ public:
 
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
-    void ReloadShaders();
+    bool RebuildAllPipelines(std::string& error);
     std::vector<LivePipelineInfo> ListPipelines() const;
     std::optional<LiveJobInfo> GetLiveJob(uint64_t jobId) const;
     uint64_t RequestRecompile(const std::string& pipelineId, RecompileOptions options = {});

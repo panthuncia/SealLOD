@@ -2479,8 +2479,12 @@ void Renderer::Update(float elapsedSeconds) {
             ZoneScopedN("Renderer::Update::ShaderReload");
             spdlog::info("Renderer: draining GPU work before shader reload.");
             StallPipeline();
-            PSOManager::GetInstance().ReloadShaders();
-            rebuildRenderGraph = true;
+            std::string rebuildError;
+            if (PSOManager::GetInstance().RebuildAllPipelines(rebuildError)) {
+                rebuildRenderGraph = true;
+            } else {
+                spdlog::error("Renderer: global PSO rebuild failed: {}", rebuildError);
+            }
             m_shaderReloadRequested = false;
         });
     }

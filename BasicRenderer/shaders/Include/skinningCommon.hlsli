@@ -79,14 +79,37 @@ SkinningInfluences ResolveAssemblySkinningInfluences(
     CLodMeshMetadata metadata,
     uint assemblyTransformIndex)
 {
-    skinning.joints0.x = ResolveAssemblyBoneIndex(skinning.joints0.x, metadata, assemblyTransformIndex);
-    skinning.joints0.y = ResolveAssemblyBoneIndex(skinning.joints0.y, metadata, assemblyTransformIndex);
-    skinning.joints0.z = ResolveAssemblyBoneIndex(skinning.joints0.z, metadata, assemblyTransformIndex);
-    skinning.joints0.w = ResolveAssemblyBoneIndex(skinning.joints0.w, metadata, assemblyTransformIndex);
-    skinning.joints1.x = ResolveAssemblyBoneIndex(skinning.joints1.x, metadata, assemblyTransformIndex);
-    skinning.joints1.y = ResolveAssemblyBoneIndex(skinning.joints1.y, metadata, assemblyTransformIndex);
-    skinning.joints1.z = ResolveAssemblyBoneIndex(skinning.joints1.z, metadata, assemblyTransformIndex);
-    skinning.joints1.w = ResolveAssemblyBoneIndex(skinning.joints1.w, metadata, assemblyTransformIndex);
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
+        metadata.assemblyBoneRemapCount == 0u ||
+        assemblyTransformIndex < metadata.assemblyTransformBase)
+    {
+        return skinning;
+    }
+
+    const uint localTransformIndex = assemblyTransformIndex - metadata.assemblyTransformBase;
+    if (localTransformIndex >= metadata.assemblyBoneRemapCount)
+    {
+        return skinning;
+    }
+
+    StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
+    const ClusterLODAssemblyBoneRemap remap = remaps[metadata.assemblyBoneRemapBase + localTransformIndex];
+    if (remap.remapIndexBase == CLOD_ASSEMBLY_BONE_REMAP_SENTINEL)
+    {
+        return skinning;
+    }
+
+    StructuredBuffer<uint> remapIndices =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
+    skinning.joints0.x = skinning.joints0.x < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints0.x] : skinning.joints0.x;
+    skinning.joints0.y = skinning.joints0.y < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints0.y] : skinning.joints0.y;
+    skinning.joints0.z = skinning.joints0.z < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints0.z] : skinning.joints0.z;
+    skinning.joints0.w = skinning.joints0.w < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints0.w] : skinning.joints0.w;
+    skinning.joints1.x = skinning.joints1.x < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints1.x] : skinning.joints1.x;
+    skinning.joints1.y = skinning.joints1.y < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints1.y] : skinning.joints1.y;
+    skinning.joints1.z = skinning.joints1.z < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints1.z] : skinning.joints1.z;
+    skinning.joints1.w = skinning.joints1.w < remap.remapIndexCount ? remapIndices[remap.remapIndexBase + skinning.joints1.w] : skinning.joints1.w;
     return skinning;
 }
 
