@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -399,10 +400,22 @@ struct WindSharedResources {
                         phaseJoint = chainOrigin;
 					}
 				}
-                entry.phaseSeed = instance.instanceSlot * 747796405u +
-					(phaseJoint < baseInvariants.size()
-						? baseInvariants[phaseJoint].phaseSeed
-                        : phaseJoint * 2891336453u + 277803737u);
+				// Type slots are runtime registration details and must not affect
+				// animation. A NIF may expose a different local skin palette per mesh;
+				// profile + chain-origin name keeps matching drivers phase-aligned
+				// across those palettes while remaining deterministic across runs.
+				std::uint32_t stablePhase = 2166136261u;
+				const auto hashPhaseText = [&stablePhase](std::string_view text) {
+					for (const unsigned char ch : text) {
+						stablePhase ^= static_cast<std::uint32_t>(std::tolower(ch));
+						stablePhase *= 16777619u;
+					}
+				};
+				hashPhaseText(typeSkeleton->GetWindProfileIdentity());
+				const auto boneNames = typeSkeleton->GetBoneNames();
+				if (phaseJoint < boneNames.size()) hashPhaseText(boneNames[phaseJoint]);
+				else stablePhase ^= phaseJoint * 2891336453u + 277803737u;
+				entry.phaseSeed = stablePhase;
                 entry.simulationGroup = joint < groups.size() ? groups[joint] : kInvalidSimulationGroup;
                 if (joint < parents.size() && parents[joint] >= 0)
                     entry.parentEntry = type.firstBone + static_cast<std::uint32_t>(parents[joint]);

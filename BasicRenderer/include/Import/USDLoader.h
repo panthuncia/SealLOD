@@ -28,6 +28,10 @@ namespace USDLoader {
 	struct ImportSettings {
 		bool enableDoubleSidedNameHeuristic = true;
 		bool loadMaterialTextures = true;
+		// BRNifly exposes Skyrim NIF skin metadata without authoring a UsdSkelSkeleton.
+		// TREE imports opt into synthesizing that metadata into a procedural-wind
+		// skeleton; ordinary uses of the same NIF remain static.
+		bool enableNifTreeProceduralWind = false;
 		std::uint32_t nifTessellationFactor = 1;
 		std::vector<std::string> additionalTextureSearchRoots;
 		// Optional VFS/archive resolver used by headless importers. The returned

@@ -51,6 +51,7 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
 constexpr std::string_view kObjectReyesConfigVersion = "31";
+constexpr std::string_view kNifTreeWindCacheVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
 {
@@ -580,6 +581,21 @@ bool CachedContentHashMatchesObjectReyesConfig(const std::string& contentHash, c
     return contentHash.find(marker) != std::string::npos;
 }
 
+std::string NifTreeWindContentHashMarker(const USDLoader::ImportSettings& settings)
+{
+	return "_nif_tree_wind_" + std::string(kNifTreeWindCacheVersion) +
+		(settings.enableNifTreeProceduralWind ? "_1" : "_0");
+}
+
+bool CachedContentHashMatchesNifTreeWindSettings(
+    const std::string& contentHash,
+    const USDLoader::ImportSettings& settings)
+{
+    const auto marker = NifTreeWindContentHashMarker(settings);
+    return contentHash.size() >= marker.size() &&
+        contentHash.compare(contentHash.size() - marker.size(), marker.size(), marker) == 0;
+}
+
 std::string SanitizeFileStem(std::string_view value)
 {
     std::string sanitized;
@@ -691,7 +707,7 @@ fs::path AssetManifestPath()
 // whenever that ownership/serialization contract changes so preprocessing
 // cannot hide a stale inline-skeleton assembly behind an otherwise valid NIF
 // payload cache.
-constexpr std::uint32_t kPayloadCacheVersion = 47u;
+constexpr std::uint32_t kPayloadCacheVersion = 48u;
 
 enum class CachedSkeletonStorage : std::uint8_t
 {
@@ -1853,6 +1869,39 @@ bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
         reader.Pod(data.maxTraversalDepth);
 }
 
+std::optional<SkeletonArtifactReference> SaveWindSkeletonArtifact(const Skeleton& skeleton, std::string* error)
+{
+    const auto names = skeleton.GetBoneNames();
+    const auto parents = skeleton.GetParentIndices();
+    const auto inverseBinds = skeleton.GetInverseBindMatrices();
+    const auto bindGlobals = skeleton.GetBindGlobalMatrices();
+    const auto groups = skeleton.GetWindSimulationGroupIndices();
+    if (names.empty() || parents.size() != names.size() || inverseBinds.size() != names.size() ||
+        bindGlobals.size() != names.size() || groups.size() != names.size()) {
+        if (error) *error = "wind skeleton arrays are not aligned";
+        return std::nullopt;
+    }
+    ClusterLODAssemblySkeletonData source;
+    source.jointNames.assign(names.begin(), names.end());
+    source.parentIndices.assign(parents.begin(), parents.end());
+    source.inverseBindMatrices.resize(names.size());
+    source.bindGlobalMatrices.resize(names.size());
+    source.restLocalMatrices.resize(names.size());
+    source.windSimulationGroupIndices.assign(groups.begin(), groups.end());
+    source.windProfileIdentity = std::string(skeleton.GetWindProfileIdentity());
+    source.dynamicWindMetadata = skeleton.GetDynamicWindMetadata();
+    for (std::size_t joint = 0; joint < names.size(); ++joint) {
+        DirectX::XMStoreFloat4x4(&source.inverseBindMatrices[joint], inverseBinds[joint]);
+        DirectX::XMStoreFloat4x4(&source.bindGlobalMatrices[joint], bindGlobals[joint]);
+        const auto parent = parents[joint];
+        const auto restLocal = parent >= 0
+            ? bindGlobals[joint] * DirectX::XMMatrixInverse(nullptr, bindGlobals[static_cast<std::size_t>(parent)])
+            : bindGlobals[joint];
+        DirectX::XMStoreFloat4x4(&source.restLocalMatrices[joint], restLocal);
+    }
+    return SkeletonArtifactCache::Save(source, error);
+}
+
 bool WritePayloadCache(
     const fs::path& cachePath,
     const std::string& normalizedCacheKey,
@@ -1914,7 +1963,25 @@ bool WritePayloadCache(
             materialHash = ComputeMaterialHash(*mesh->material);
         }
         WriteMaterialDescription(writer, mesh->material->ToCacheDescription());
-        const ClusterLODPrebuiltData prebuiltData = mesh->GetClusterLODPrebuiltData();
+        ClusterLODPrebuiltData prebuiltData = mesh->GetClusterLODPrebuiltData();
+        if (prebuiltData.assemblySkeletonArtifact.Empty() && mesh->HasBaseSkin() &&
+            mesh->GetBaseSkin()->HasWindSimulationGroups()) {
+            std::string artifactError;
+            if (auto artifact = SaveWindSkeletonArtifact(*mesh->GetBaseSkin(), &artifactError)) {
+                prebuiltData.assemblySkeletonArtifact = *artifact;
+                spdlog::info(
+                    "NIF TREE metadata cache linked BRSKEL: game='{}' artifact={} joints={}.",
+                    normalizedCacheKey,
+                    artifact->id.ToString(),
+                    artifact->jointCount);
+            } else {
+                spdlog::error(
+                    "NIF TREE procedural-wind cache refused to inline skeleton for '{}': {}",
+                    normalizedCacheKey,
+                    artifactError);
+                return false;
+            }
+        }
         {
             ZoneScopedN("NifLoader::WritePayloadCache::Mesh::WritePrebuilt");
             writer.Pod(materialHash);
@@ -2230,6 +2297,9 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     for (const auto& cachePath : candidates) {
         ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
         const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
+        if (!CachedContentHashMatchesNifTreeWindSettings(fileContentHash, settings)) {
+            continue;
+        }
         if (objectReyesRequiresCurrentPayload &&
             !CachedContentHashMatchesObjectReyesConfig(fileContentHash, objectReyesConfig)) {
             spdlog::debug(
@@ -2321,7 +2391,8 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
     const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
         std::string(kObjectReyesConfigVersion) + "_" + objectReyesConfig.contentHash +
-        "_texroots_" + TextureSearchRootsHash(textureSearchRoots);
+        "_texroots_" + TextureSearchRootsHash(textureSearchRoots) +
+        NifTreeWindContentHashMarker(settings);
     const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, effectiveContentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
     auto options = MakeStageOptions(
@@ -2527,7 +2598,8 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
         MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
     const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
         std::string(kObjectReyesConfigVersion) + "_" + objectReyesConfig.contentHash +
-        "_texroots_" + TextureSearchRootsHash(textureSearchRoots);
+        "_texroots_" + TextureSearchRootsHash(textureSearchRoots) +
+        NifTreeWindContentHashMarker(settings);
     const std::string stableSourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, effectiveContentHash);
     const std::string sourceDirectory = fs::path(filePath).parent_path().string();
     auto options = MakeStageOptions(

@@ -4158,6 +4158,184 @@ namespace USDLoader {
 		return outMeshes;
 	}
 
+	std::shared_ptr<Skeleton> BuildBrNiflyTreeWindSkeleton(
+		const UsdStageRefPtr& stage,
+		const Mesh& mesh,
+		std::string_view sourceIdentifier)
+	{
+		const auto jointNamesSpan = mesh.GetSkinJointNames();
+		const auto inverseBindsSpan = mesh.GetSkinInverseBindMatrices();
+		if (!stage || jointNamesSpan.empty() || inverseBindsSpan.size() != jointNamesSpan.size()) {
+			return nullptr;
+		}
+
+		const std::size_t count = jointNamesSpan.size();
+		ClusterLODAssemblySkeletonData source;
+		source.jointNames.assign(jointNamesSpan.begin(), jointNamesSpan.end());
+		source.parentIndices.assign(count, -1);
+		source.inverseBindMatrices.resize(count);
+		source.restLocalMatrices.resize(count);
+		source.bindGlobalMatrices.resize(count);
+		source.windSimulationGroupIndices.resize(count, 1u);
+		// The identity also provides a stable phase namespace. Distinct skin
+		// palettes belonging to this NIF therefore evaluate matching named bones
+		// with the same harmonic phase.
+		source.windProfileIdentity = std::string(sourceIdentifier);
+		source.dynamicWindMetadata.enabled = true;
+		source.dynamicWindMetadata.maximumLodVariants = 16u;
+		source.dynamicWindMetadata.maximumAdjacentBoneRatio = 1.75f;
+		source.dynamicWindMetadata.groups.resize(2u);
+		auto& trunkGroup = source.dynamicWindMetadata.groups[0];
+		trunkGroup.flags = DynamicWindMetadata::GroupFlagTrunk;
+		trunkGroup.role = DynamicWindSimulationGroupRole::Trunk;
+		trunkGroup.profileGroupId = 0u;
+		trunkGroup.reductionPriority = 4.0f;
+		trunkGroup.minimumDriverCount = 2u;
+		auto& branchGroup = source.dynamicWindMetadata.groups[1];
+		branchGroup.role = DynamicWindSimulationGroupRole::DetailBranch;
+		branchGroup.profileGroupId = 1u;
+		branchGroup.reductionPriority = 2.0f;
+
+		auto lower = [](std::string_view value) {
+			std::string result(value);
+			std::ranges::transform(result, result.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			return result;
+		};
+		std::unordered_map<std::string, UsdPrim> primByName;
+		for (const auto& prim : stage->Traverse()) {
+			if (prim.IsA<UsdGeomXformable>()) {
+				primByName.try_emplace(lower(prim.GetName().GetString()), prim);
+			}
+		}
+		std::unordered_map<std::string, std::uint32_t> firstJointByName;
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			firstJointByName.try_emplace(lower(source.jointNames[joint]), joint);
+			const auto inverseBind = inverseBindsSpan[joint];
+			const auto bindGlobal = DirectX::XMMatrixInverse(nullptr, inverseBind);
+			DirectX::XMStoreFloat4x4(&source.inverseBindMatrices[joint], inverseBind);
+			DirectX::XMStoreFloat4x4(&source.bindGlobalMatrices[joint], bindGlobal);
+			const auto normalizedName = lower(source.jointNames[joint]);
+			if (normalizedName.find("trunk") != std::string::npos ||
+				normalizedName.find("stem") != std::string::npos ||
+				normalizedName.find("root") != std::string::npos) {
+				source.windSimulationGroupIndices[joint] = 0u;
+			}
+		}
+
+		// BRNifly joint names refer to the exported node/Xform names. Recover the
+		// nearest skinned ancestor from that hierarchy while retaining duplicate
+		// skin slots (some vanilla NIFs reference the same node more than once).
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			const auto primIt = primByName.find(lower(source.jointNames[joint]));
+			if (primIt == primByName.end()) continue;
+			for (UsdPrim parent = primIt->second.GetParent(); parent; parent = parent.GetParent()) {
+				const auto parentIt = firstJointByName.find(lower(parent.GetName().GetString()));
+				if (parentIt != firstJointByName.end() && parentIt->second != joint) {
+					source.parentIndices[joint] = static_cast<std::int32_t>(parentIt->second);
+					break;
+				}
+			}
+		}
+		// If the asset uses unconventional names, its roots are still trunk
+		// drivers and their descendants remain branch-detail drivers.
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			if (source.parentIndices[joint] < 0) source.windSimulationGroupIndices[joint] = 0u;
+		}
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			const auto parent = source.parentIndices[joint];
+			const auto bindGlobal = DirectX::XMLoadFloat4x4(&source.bindGlobalMatrices[joint]);
+			const auto restLocal = parent >= 0
+				? bindGlobal * DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&source.bindGlobalMatrices[parent]))
+				: bindGlobal;
+			DirectX::XMStoreFloat4x4(&source.restLocalMatrices[joint], restLocal);
+		}
+
+		source.dynamicWindMetadata.bones.resize(count);
+		std::vector<std::uint32_t> chainRoots(count);
+		std::vector<std::uint32_t> chainDepth(count, 0u);
+		std::vector<float> chainArc(count, 0.0f);
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			std::uint32_t root = joint;
+			std::uint32_t depth = 0u;
+			float arc = 0.0f;
+			for (auto parent = source.parentIndices[root]; parent >= 0 &&
+				source.windSimulationGroupIndices[parent] == source.windSimulationGroupIndices[joint];
+				parent = source.parentIndices[root]) {
+				const auto& a = source.bindGlobalMatrices[root];
+				const auto& b = source.bindGlobalMatrices[parent];
+				const float dx = a._41 - b._41, dy = a._42 - b._42, dz = a._43 - b._43;
+				arc += std::sqrt(dx * dx + dy * dy + dz * dz);
+				root = static_cast<std::uint32_t>(parent);
+				++depth;
+			}
+			chainRoots[joint] = root;
+			chainDepth[joint] = depth;
+			chainArc[joint] = arc;
+		}
+		std::unordered_map<std::uint32_t, std::pair<std::uint32_t, float>> chainExtents;
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			auto& extent = chainExtents[chainRoots[joint]];
+			extent.first = (std::max)(extent.first, chainDepth[joint] + 1u);
+			extent.second = (std::max)(extent.second, chainArc[joint]);
+		}
+		for (std::uint32_t joint = 0; joint < count; ++joint) {
+			auto& bone = source.dynamicWindMetadata.bones[joint];
+			bone.chainOriginBoneIndex = chainRoots[joint];
+			bone.indexInBoneChain = chainDepth[joint];
+			bone.chainBoneCount = chainExtents[chainRoots[joint]].first;
+			bone.chainLength = chainExtents[chainRoots[joint]].second;
+		}
+
+		std::string error;
+		const auto artifact = SkeletonArtifactCache::Save(source, &error);
+		if (!artifact) {
+			spdlog::warn("NIF TREE procedural-wind skeleton generation failed for '{}': {}", sourceIdentifier, error);
+			return nullptr;
+		}
+		auto skeleton = SkeletonArtifactCache::ResolveSkeleton(*artifact, &error);
+		if (!skeleton) {
+			spdlog::warn("NIF TREE procedural-wind BRSKEL resolve failed for '{}': {}", sourceIdentifier, error);
+			return nullptr;
+		}
+		spdlog::info(
+			"NIF TREE procedural-wind skeleton cached: source='{}' artifact={} joints={} lods={}.",
+			sourceIdentifier, artifact->id.ToString(), artifact->jointCount, skeleton->GetSkeletonLodVariants().size());
+		return skeleton;
+	}
+
+	void AttachBrNiflyTreeWindSkeletons(
+		const UsdStageRefPtr& stage,
+		ImportedAssetPayload& payload,
+		std::string_view sourceIdentifier)
+	{
+		std::unordered_map<std::string, std::shared_ptr<Skeleton>> skeletonsByLayout;
+		std::uint32_t metadataMeshes = 0u;
+		std::uint32_t attachedMeshes = 0u;
+		for (auto& mesh : payload.meshes) {
+			if (!mesh || mesh->GetSkinJointNames().empty()) continue;
+			++metadataMeshes;
+			if (mesh->HasBaseSkin()) {
+				if (mesh->GetBaseSkin()->HasWindSimulationGroups()) ++attachedMeshes;
+				continue;
+			}
+			std::string layoutKey;
+			for (const auto& name : mesh->GetSkinJointNames()) {
+				layoutKey.append(name).push_back('\0');
+			}
+			auto& skeleton = skeletonsByLayout[layoutKey];
+			if (!skeleton) skeleton = BuildBrNiflyTreeWindSkeleton(stage, *mesh, sourceIdentifier);
+			if (skeleton) {
+				mesh->SetBaseSkin(skeleton);
+				++attachedMeshes;
+			}
+		}
+		spdlog::info(
+			"NIF TREE procedural-wind bridge: source='{}' renderableMeshes={} skinMetadataMeshes={} attachedWindMeshes={} layouts={}.",
+			sourceIdentifier, payload.meshes.size(), metadataMeshes, attachedMeshes, skeletonsByLayout.size());
+	}
+
 	std::shared_ptr<Skeleton> ProcessSkeleton(const UsdSkelSkeleton& skel, const VtTokenArray rawJointOrder, const UsdSkelSkeletonQuery& skelQuery, const std::shared_ptr<Scene>& scene, double metersPerUnit) {
 		if (loadingCache.skeletonMap.contains(skel.GetPrim().GetPath().GetString())) {
 			spdlog::info("Skeleton {} already processed, skipping.", skel.GetPrim().GetPath().GetString());
@@ -7067,14 +7245,21 @@ namespace USDLoader {
 		const UsdTimeCode assemblyTimeCode = GetUsdGeometrySampleTime(stage);
 		UsdSkelCache assemblySkelCache;
 		std::string assemblyFallbackReason;
-		auto assemblyBuckets = DiscoverAssetAssemblyBuckets(
-			stage,
-			assemblySkelCache,
-			stageContext.metersPerUnit,
-			assemblyTimeCode,
-			options,
-			importSettings,
-			&assemblyFallbackReason);
+		// BRNifly skin metadata is mesh-local rather than UsdSkel-authored. The
+		// generic whole-asset assembly path deliberately discards that metadata,
+		// so TREE candidates stay on the ordinary per-mesh CLod payload path where
+		// it can be promoted into a BRSKEL artifact below.
+		std::vector<AssetAssemblyBucketInfo> assemblyBuckets;
+		if (!importSettings.enableNifTreeProceduralWind) {
+			assemblyBuckets = DiscoverAssetAssemblyBuckets(
+				stage,
+				assemblySkelCache,
+				stageContext.metersPerUnit,
+				assemblyTimeCode,
+				options,
+				importSettings,
+				&assemblyFallbackReason);
+		}
 		if (assemblyBuckets.empty() && options.requireWholeAssetAssembly) {
 			spdlog::error(
 				"Required USD whole-asset CLod assembly could not be discovered for '{}': {}.",
@@ -7209,6 +7394,10 @@ namespace USDLoader {
 				}
 				return result;
 			}();
+			if (importSettings.enableNifTreeProceduralWind) {
+				ZoneScopedN("USDLoader::LoadImportedAssetFromStage::AttachBrNiflyTreeWindSkeletons");
+				AttachBrNiflyTreeWindSkeletons(stage, payload, options.sourceIdentifier);
+			}
 			{
 				ZoneScopedN("USDLoader::LoadImportedAssetFromStage::ClearLoadingCache");
 				loadingCache.Clear();
