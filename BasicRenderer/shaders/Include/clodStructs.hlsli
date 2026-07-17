@@ -661,6 +661,14 @@ struct SWRasterBatchRecord
     uint clusterIndices[SW_BATCH_MAX_CLUSTERS]; // unsorted visible cluster buffer indices
 };
 
+// Compute software-raster compaction sidecar. Kept separate from the packed
+// cluster payload so raster-only setup data does not disturb its 16-byte stride.
+struct CLodSoftwareRasterMapping
+{
+    uint unsortedClusterIndex;
+    uint skinningInstanceSlot;
+};
+
 // ---------------------------------------------------------------------------
 // Page-job VSM software rasterization records.
 // Three-node pipeline: ClusterCull → PageJobBuild → PageJobExpand → PageJobRasterPage.

@@ -96,6 +96,62 @@ groupshared float2  gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float   gs_linearDepth[SW_RASTER_MAX_VERTS];
 groupshared float   gs_invClipW[SW_RASTER_MAX_VERTS];
 groupshared float2  gs_texcoord[SW_RASTER_MAX_VERTS];
+groupshared row_major float4x4 gs_modelViewProjection;
+groupshared float4 gs_modelViewZ;
+groupshared uint gs_reverseWinding;
+groupshared CLodPageHeader gs_pageHeader;
+groupshared CLodMeshletDescriptor gs_meshletDescriptor;
+groupshared uint gs_skinningInstanceSlot;
+groupshared uint gs_materialDataIndex;
+groupshared uint gs_vertexFlags;
+groupshared uint gs_assemblyTransformBase;
+groupshared uint gs_assemblyBoneRemapBase;
+groupshared uint gs_assemblyBoneRemapCount;
+groupshared uint gs_groupFlags;
+
+uint SWResolveAssemblyBoneIndex(uint localJointId, uint assemblyTransformIndex)
+{
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
+        gs_assemblyBoneRemapCount == 0u ||
+        assemblyTransformIndex < gs_assemblyTransformBase)
+    {
+        return localJointId;
+    }
+
+    const uint localTransformIndex = assemblyTransformIndex - gs_assemblyTransformBase;
+    if (localTransformIndex >= gs_assemblyBoneRemapCount)
+    {
+        return localJointId;
+    }
+
+    StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
+    const ClusterLODAssemblyBoneRemap remap = remaps[gs_assemblyBoneRemapBase + localTransformIndex];
+    if (remap.remapIndexBase == CLOD_ASSEMBLY_BONE_REMAP_SENTINEL ||
+        localJointId >= remap.remapIndexCount)
+    {
+        return localJointId;
+    }
+
+    StructuredBuffer<uint> remapIndices =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
+    return remapIndices[remap.remapIndexBase + localJointId];
+}
+
+SkinningInfluences SWResolveAssemblySkinningInfluences(
+    SkinningInfluences skinning,
+    uint assemblyTransformIndex)
+{
+    skinning.joints0.x = SWResolveAssemblyBoneIndex(skinning.joints0.x, assemblyTransformIndex);
+    skinning.joints0.y = SWResolveAssemblyBoneIndex(skinning.joints0.y, assemblyTransformIndex);
+    skinning.joints0.z = SWResolveAssemblyBoneIndex(skinning.joints0.z, assemblyTransformIndex);
+    skinning.joints0.w = SWResolveAssemblyBoneIndex(skinning.joints0.w, assemblyTransformIndex);
+    skinning.joints1.x = SWResolveAssemblyBoneIndex(skinning.joints1.x, assemblyTransformIndex);
+    skinning.joints1.y = SWResolveAssemblyBoneIndex(skinning.joints1.y, assemblyTransformIndex);
+    skinning.joints1.z = SWResolveAssemblyBoneIndex(skinning.joints1.z, assemblyTransformIndex);
+    skinning.joints1.w = SWResolveAssemblyBoneIndex(skinning.joints1.w, assemblyTransformIndex);
+    return skinning;
+}
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
 {
@@ -294,6 +350,8 @@ void SWRasterCluster(
     uint4 packedCluster,
     uint assemblyTransformIndex,
     uint unsortedClusterIndex,
+    bool hasResolvedSkinningInstanceSlot,
+    uint resolvedSkinningInstanceSlot,
     uint GI,
     uint subGroup,
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf)
@@ -304,37 +362,8 @@ void SWRasterCluster(
     const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
 
-    // Load page header + meshlet descriptor
-    CLodPageHeader hdr = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
-    CLodMeshletDescriptor desc = LoadMeshletDescriptor(
-        pageSlabDescriptorIndex, pageSlabByteOffset,
-        hdr.descriptorOffset, localMeshletIndex);
-
-    const uint vertCount = CLodDescVertexCount(desc);
-    const uint triCount  = CLodDescTriangleCount(desc);
-
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
-    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const uint materialDataIndex = perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex;
-
-    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
-    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
     const uint groupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
-    StructuredBuffer<ClusterLODGroup> groups =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup group = groups[metadata.groupsBase + groupLocalIndex];
-
-    PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
-
-    StructuredBuffer<CullingCameraInfo> cullingCameras =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
-    CullingCameraInfo cam = cullingCameras[viewID];
 
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
@@ -343,40 +372,78 @@ void SWRasterCluster(
     const float scissorMinXf = float(rasterInfo.scissorMinX);
     const float scissorMinYf = float(rasterInfo.scissorMinY);
 
-    const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
-    row_major matrix modelViewProjection = mul(objData.model, cam.viewProjection);
-    float4 modelViewZ = mul(objData.model, cam.viewZ);
+    if (GI == 0u)
+    {
+        const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
+        gs_pageHeader = pageHeader;
+        gs_meshletDescriptor = LoadMeshletDescriptor(
+            pageSlabDescriptorIndex,
+            pageSlabByteOffset,
+            pageHeader.descriptorOffset,
+            localMeshletIndex);
+        const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
+        gs_skinningInstanceSlot = hasResolvedSkinningInstanceSlot
+            ? resolvedSkinningInstanceSlot
+            : ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+        StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+        const PerMeshBuffer meshData = perMeshBuffer[meshInst.perMeshBufferIndex];
+        gs_materialDataIndex = meshData.materialDataIndex;
+        gs_vertexFlags = meshData.vertexFlags;
+        const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+        StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+        const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+        gs_assemblyTransformBase = metadata.assemblyTransformBase;
+        gs_assemblyBoneRemapBase = metadata.assemblyBoneRemapBase;
+        gs_assemblyBoneRemapCount = metadata.assemblyBoneRemapCount;
+        StructuredBuffer<ClusterLODGroup> groups =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+        gs_groupFlags = groups[metadata.groupsBase + groupLocalIndex].flags;
+        const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
+        StructuredBuffer<CullingCameraInfo> cullingCameras =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+        const CullingCameraInfo cam = cullingCameras[viewID];
+        gs_modelViewProjection = mul(objData.model, cam.viewProjection);
+        gs_modelViewZ = mul(objData.model, cam.viewZ);
+        gs_reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? 1u : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint vertCount = CLodDescVertexCount(gs_meshletDescriptor);
+    const uint triCount = CLodDescTriangleCount(gs_meshletDescriptor);
+    const uint positionBitstreamBase = pageSlabByteOffset + gs_pageHeader.positionBitstreamOffset;
 
     for (uint v = GI; v < vertCount; v += SW_RASTER_THREADS)
     {
         float3 localPos = SWDecodeCompressedPosition(
             v,
             positionBitstreamBase,
-            desc.positionBitOffset,
-            CLodDescBitsX(desc), CLodDescBitsY(desc), CLodDescBitsZ(desc),
-            hdr.compressedPositionQuantExp,
-            int3(desc.minQx, desc.minQy, desc.minQz),
+            gs_meshletDescriptor.positionBitOffset,
+            CLodDescBitsX(gs_meshletDescriptor), CLodDescBitsY(gs_meshletDescriptor), CLodDescBitsZ(gs_meshletDescriptor),
+            gs_pageHeader.compressedPositionQuantExp,
+            int3(gs_meshletDescriptor.minQx, gs_meshletDescriptor.minQy, gs_meshletDescriptor.minQz),
             pageSlabDescriptorIndex);
 #if defined(PSO_SKINNED)
-        SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
-        skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-        skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+        SkinningInfluences skinning = SWDecodePackedJoints(v, gs_pageHeader, gs_meshletDescriptor, pageSlabByteOffset, pageSlabDescriptorIndex);
+        skinning = SWDecodePackedWeights(v, gs_pageHeader, gs_meshletDescriptor, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+        skinning = SWResolveAssemblySkinningInfluences(skinning, assemblyTransformIndex);
         localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
-            meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
+            gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
 #else
-        if ((perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags & VERTEX_SKINNED) != 0u)
+        if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
         {
-            SkinningInfluences skinning = SWDecodePackedJoints(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex);
-            skinning = SWDecodePackedWeights(v, hdr, desc, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
-            skinning = ResolveAssemblySkinningInfluences(skinning, metadata, assemblyTransformIndex);
+            SkinningInfluences skinning = SWDecodePackedJoints(v, gs_pageHeader, gs_meshletDescriptor, pageSlabByteOffset, pageSlabDescriptorIndex);
+            skinning = SWDecodePackedWeights(v, gs_pageHeader, gs_meshletDescriptor, pageSlabByteOffset, pageSlabDescriptorIndex, skinning);
+            skinning = SWResolveAssemblySkinningInfluences(skinning, assemblyTransformIndex);
             localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
-                meshInst.skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
+                gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
         }
 #endif
 
         float4 localPos4 = float4(localPos, 1.0f);
-        float4 clipPos  = mul(localPos4, modelViewProjection);
-        float viewZ = dot(localPos4, modelViewZ);
+        float4 clipPos  = mul(localPos4, gs_modelViewProjection);
+        float viewZ = dot(localPos4, gs_modelViewZ);
 
         float invW = 1.0f / clipPos.w;
         float2 ndc = clipPos.xy * invW;
@@ -393,9 +460,9 @@ void SWRasterCluster(
             0u,
             localMeshletIndex,
             pageSlabByteOffset,
-            hdr.uvSetCount,
-            hdr.uvDescriptorOffset,
-            hdr.uvBitstreamDirectoryOffset,
+            gs_pageHeader.uvSetCount,
+            gs_pageHeader.uvDescriptorOffset,
+            gs_pageHeader.uvBitstreamDirectoryOffset,
             pageSlabDescriptorIndex);
     }
 
@@ -416,7 +483,7 @@ void SWRasterCluster(
     const bool assemblyPartsDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
     const bool debugRasterMode = swRasterDebugMode || assemblyVoxelInheritanceDebugMode || assemblyPartsDebugMode;
     float3 assemblyPartDebugColor = float3(0.08f, 0.10f, 0.12f);
-    if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
+    if ((gs_groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
     {
         assemblyPartDebugColor = float3(1.0f, 0.58f, 0.08f);
     }
@@ -424,11 +491,11 @@ void SWRasterCluster(
     {
         assemblyPartDebugColor = max(HashToColor(assemblyTransformIndex + 17u), 0.18f.xxx);
     }
-    else if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
+    else if ((gs_groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u)
     {
         assemblyPartDebugColor = float3(0.82f, 0.18f, 1.0f);
     }
-    const uint directAssemblyPartId = (group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u
+    const uint directAssemblyPartId = (gs_groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u
         ? (0x40000000u ^ CLodVisibleClusterGroupID(packedCluster))
         : (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
             ? 1u
@@ -439,7 +506,7 @@ void SWRasterCluster(
             ? PackDebugFloat3(assemblyPartDebugColor)
             : PackDebugUint(directAssemblyPartId));
 
-    const bool reverseWinding = (objData.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u;
+    const bool reverseWinding = gs_reverseWinding != 0u;
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[pageSlabDescriptorIndex];
 
@@ -456,7 +523,11 @@ void SWRasterCluster(
 
     for (uint t = globalThread; t < triCount; t += totalThreads)
     {
-        uint3 tri = SWDecodeTriangle(slab, pageSlabByteOffset + hdr.triangleStreamOffset, desc.triangleByteOffset, t);
+        uint3 tri = SWDecodeTriangle(
+            slab,
+            pageSlabByteOffset + gs_pageHeader.triangleStreamOffset,
+            gs_meshletDescriptor.triangleByteOffset,
+            t);
         if (reverseWinding) { uint tmp = tri.y; tri.y = tri.z; tri.z = tmp; }
 
         float2 s0 = gs_screenPos[tri.x];
@@ -570,7 +641,7 @@ void SWRasterCluster(
                         const float invSum = rcp(pc0 + pc1 + pc2);
                         const float2 texcoord =
                             (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
-                        if (SWAlphaTestFailed(texcoord, materialDataIndex))
+                        if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
                         {
                             b0 += dx_b0;
                             b1 += dx_b1;
@@ -619,7 +690,7 @@ void SWRasterCluster(
                         const float invSum = rcp(pc0 + pc1 + pc2);
                         const float2 texcoord =
                             (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
-                        if (SWAlphaTestFailed(texcoord, materialDataIndex))
+                        if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
                         {
                             b0 += dx_b0;
                             b1 += dx_b1;
@@ -682,7 +753,15 @@ void WG_SWRaster(
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
-    SWRasterCluster(packedCluster, visibleClusterTransformIndices[unsortedClusterIndex], unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
+    SWRasterCluster(
+        packedCluster,
+        visibleClusterTransformIndices[unsortedClusterIndex],
+        unsortedClusterIndex,
+        false,
+        0xFFFFFFFFu,
+        GI,
+        subGroup,
+        viewRasterInfoBuf);
 }
 
 // Non-WG SW raster
@@ -706,12 +785,25 @@ void SWRasterIndirectCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Group
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> sortedToUnsortedMapping =
+    StructuredBuffer<CLodSoftwareRasterMapping> sortedToUnsortedMapping =
         ResourceDescriptorHeap[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf =
         ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
 
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
-    const uint unsortedClusterIndex = sortedToUnsortedMapping[sortedClusterIndex];
-    SWRasterCluster(packedCluster, compactedVisibleClusterTransformIndices[sortedClusterIndex], unsortedClusterIndex, GI, subGroup, viewRasterInfoBuf);
+    const CLodSoftwareRasterMapping mapping = sortedToUnsortedMapping[sortedClusterIndex];
+    SWRasterCluster(
+        packedCluster,
+        compactedVisibleClusterTransformIndices[sortedClusterIndex],
+        mapping.unsortedClusterIndex,
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        false,
+        0xFFFFFFFFu,
+#else
+        true,
+        mapping.skinningInstanceSlot,
+#endif
+        GI,
+        subGroup,
+        viewRasterInfoBuf);
 }

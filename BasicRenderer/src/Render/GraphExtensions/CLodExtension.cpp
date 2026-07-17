@@ -916,7 +916,7 @@ void CLodExtension::InitializeCoreResources()
     m_sortedToUnsortedMappingBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
     m_sortedToUnsortedMappingBuffer->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer"));
 
-    m_sortedToUnsortedMappingBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
+    m_sortedToUnsortedMappingBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t) * 2u, true, false, false, true);
     m_sortedToUnsortedMappingBufferSw->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer SW"));
 
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);

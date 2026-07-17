@@ -736,7 +736,7 @@ namespace CLodCache {
 		}
 	}
 
-	uint64_t ComputeBuildConfigHash()
+	uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier)
 	{
 		size_t seed = 0;
 		auto hashEnvironmentString = [&seed](const char* name)
@@ -777,7 +777,10 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // voxel coverage/SGGX estimator version
-		boost::hash_combine(seed, GetCLodAssetSettingsConfigHash());
+		// Asset-local settings must only invalidate caches built for the matching
+		// asset. Including the whole settings document here invalidates unrelated
+		// assets (notably every terrain world) whenever one model is tuned.
+		boost::hash_combine(seed, GetCLodAssetSettingsHash(assetIdentifier));
 		hashEnvironmentString("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_GRID");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_MIN_RES");

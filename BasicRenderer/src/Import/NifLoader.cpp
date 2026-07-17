@@ -2034,6 +2034,17 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                 return std::nullopt;
             }
         }
+        const std::uint64_t expectedBuildConfigHash =
+            CLodCache::ComputeBuildConfigHash(prebuilt.cacheSource.sourceIdentifier);
+        if (prebuilt.cacheSource.buildConfigHash != expectedBuildConfigHash) {
+            spdlog::info(
+                "nif_asset_payload_cache: stale CLod build config for '{}' mesh={} cached=0x{:016X} expected=0x{:016X}",
+                normalizedCacheKey,
+                meshIndex,
+                prebuilt.cacheSource.buildConfigHash,
+                expectedBuildConfigHash);
+            return std::nullopt;
+        }
         ZoneText(desc.name.data(), desc.name.size());
         const SkeletonArtifactReference skeletonArtifact = prebuilt.assemblySkeletonArtifact;
         std::uint32_t vertexFlags = 0;

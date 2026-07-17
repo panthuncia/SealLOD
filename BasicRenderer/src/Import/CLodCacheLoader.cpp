@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/propertySpec.h>
@@ -144,30 +145,36 @@ namespace {
 		return pointsIdentity;
 	}
 
-	void LogBuildConfigOnce(uint64_t buildHash)
+	void LogBuildConfigOnce(uint64_t buildHash, std::string_view assetIdentifier)
 	{
-		static std::once_flag logOnce;
-		std::call_once(logOnce, [buildHash]() {
-			const ClusterLODBuilderSettings effectiveSettings =
-				ApplyClusterLODBuilderEnvironmentOverrides(GetDefaultBuilderSettings());
-			spdlog::info(
-				"CLod cache build config: hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} coverage_preservation_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
-				buildHash,
-				!effectiveSettings.disableSloppyFallback,
-				effectiveSettings.sloppyFallbackErrorFactor,
-				ToCoveragePreservationModeString(effectiveSettings.coveragePreservationMode),
-				effectiveSettings.voxelGridBaseResolution,
-				effectiveSettings.voxelRaysPerCell,
-				effectiveSettings.voxelFallbackScalingFactor,
-				effectiveSettings.voxelFallbackOpacityThreshold,
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_GRID"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_RAYS"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SCALE"),
-				GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD"));
-		});
+		static std::mutex loggedHashesMutex;
+		static std::unordered_set<uint64_t> loggedHashes;
+		{
+			std::lock_guard lock(loggedHashesMutex);
+			if (!loggedHashes.insert(buildHash).second) {
+				return;
+			}
+		}
+		const ClusterLODBuilderSettings effectiveSettings = GetDefaultBuilderSettings(assetIdentifier);
+		spdlog::info(
+			"CLod cache build config: source='{}' hash=0x{:016X} asset_settings_hash=0x{:016X} sloppy_fallback={} sloppy_error_factor={} coverage_preservation_mode='{}' voxel_grid={} voxel_rays={} voxel_scale={} voxel_opacity_threshold={} env_sloppy_disable='{}' env_sloppy_factor='{}' env_mode='{}' env_grid='{}' env_rays='{}' env_scale='{}' env_opacity_threshold='{}'",
+			assetIdentifier,
+			buildHash,
+			GetCLodAssetSettingsHash(assetIdentifier),
+			!effectiveSettings.disableSloppyFallback,
+			effectiveSettings.sloppyFallbackErrorFactor,
+			ToCoveragePreservationModeString(effectiveSettings.coveragePreservationMode),
+			effectiveSettings.voxelGridBaseResolution,
+			effectiveSettings.voxelRaysPerCell,
+			effectiveSettings.voxelFallbackScalingFactor,
+			effectiveSettings.voxelFallbackOpacityThreshold,
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_GRID"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_RAYS"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SCALE"),
+			GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD"));
 	}
 }
 
@@ -211,9 +218,9 @@ std::optional<ClusterLODPrebuiltData> TryLoadPrebuilt(const MeshCacheIdentity& i
 {
 	ZoneScopedN("CLodCacheLoader::TryLoadPrebuilt");
 	const auto cacheKey = ToCacheKey(identity);
-	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
+	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash(identity.sourceIdentifier);
 	const auto lookup = CLodCache::BuildCacheLookup(cacheKey, buildHash);
-	LogBuildConfigOnce(buildHash);
+	LogBuildConfigOnce(buildHash, identity.sourceIdentifier);
 	spdlog::debug("CLodCacheLoader::TryLoadPrebuilt  src='{}' prim='{}' subset='{}' hash=0x{:X} metadata='{}' container='{}'",
 		identity.sourceIdentifier,
 		identity.primPath,
@@ -292,8 +299,8 @@ bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltDat
 {
 	ZoneScopedN("CLodCacheLoader::SavePrebuilt");
 	const auto cacheKey = ToCacheKey(identity);
-	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
-	LogBuildConfigOnce(buildHash);
+	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash(identity.sourceIdentifier);
+	LogBuildConfigOnce(buildHash, identity.sourceIdentifier);
 	return CLodCache::Save(cacheKey, buildHash, prebuiltData, payload);
 }
 
@@ -301,8 +308,8 @@ bool SavePrebuilt(const MeshCacheIdentity& identity, const ClusterLODPrebuiltDat
 {
 	ZoneScopedN("CLodCacheLoader::SavePrebuilt::WithSavedData");
 	const auto cacheKey = ToCacheKey(identity);
-	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash();
-	LogBuildConfigOnce(buildHash);
+	const uint64_t buildHash = CLodCache::ComputeBuildConfigHash(identity.sourceIdentifier);
+	LogBuildConfigOnce(buildHash, identity.sourceIdentifier);
 	return CLodCache::Save(cacheKey, buildHash, prebuiltData, payload, outSavedPrebuiltData);
 }
 

@@ -20,6 +20,7 @@ namespace
     {
         std::string object;
         nlohmann::json settings;
+        uint64_t hash = 0u;
     };
 
     struct OverrideConfig
@@ -95,12 +96,19 @@ namespace
 
                     const std::string normalizedIdentity = NormalizeObject(identity);
                     if (normalizedIdentity.empty()) throw std::runtime_error("asset settings identity must be non-empty");
-                    result.rules.push_back({ normalizedIdentity, *clod });
+                    uint64_t ruleHash = 1469598103934665603ull;
+                    HashString(ruleHash, normalizedIdentity);
+                    HashString(ruleHash, clod->dump());
+                    result.rules.push_back({ normalizedIdentity, *clod, ruleHash });
                     HashString(hash, normalizedIdentity);
                     HashString(hash, clod->dump());
                 }
                 result.hash = result.rules.empty() ? 0u : hash;
-                spdlog::info("SARP asset CLod settings: loaded {} asset rule(s) from '{}'", result.rules.size(), path->string());
+                spdlog::info(
+                    "SARP asset CLod settings: loaded {} asset rule(s) from '{}' config_hash=0x{:016X}",
+                    result.rules.size(),
+                    path->string(),
+                    result.hash);
             } catch (const std::exception& error) {
                 spdlog::error("SARP asset CLod settings: failed to load '{}': {}", path->string(), error.what());
                 result = {};
@@ -210,4 +218,16 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
 uint64_t GetCLodAssetSettingsConfigHash()
 {
     return GetOverrideConfig().hash;
+}
+
+uint64_t GetCLodAssetSettingsHash(std::string_view assetIdentifier)
+{
+    const std::string normalized = NormalizeObject(assetIdentifier);
+    for (const auto& rule : GetOverrideConfig().rules) {
+        if (normalized == rule.object ||
+            (normalized.size() > rule.object.size() && normalized.ends_with('/' + rule.object))) {
+            return rule.hash;
+        }
+    }
+    return 0u;
 }

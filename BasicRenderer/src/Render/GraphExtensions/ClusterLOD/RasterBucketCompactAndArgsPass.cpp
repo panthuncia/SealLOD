@@ -93,6 +93,7 @@ void RasterBucketCompactAndArgsPass::DeclareResourceUsages(ComputePassBuilder* b
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
+            Builtin::SkeletonResources::SkinningInstanceInfo,
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureGroup,

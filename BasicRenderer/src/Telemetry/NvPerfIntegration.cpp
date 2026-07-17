@@ -206,6 +206,7 @@ struct D3D12PassProfiler {
     bool failed = false;
     bool finished = false;
     bool csvHeaderWritten = false;
+    bool missingRangeWarningEmitted = false;
     uint64_t captureStartFrame = 0;
     uint64_t captureEndFrame = 0;
     uint64_t sampleId = 0;
@@ -232,6 +233,7 @@ struct D3D12PassProfiler {
     std::mutex mutex;
     std::unordered_map<ID3D12CommandQueue*, QueueCapture> queues;
     std::unordered_map<ID3D12GraphicsCommandList*, uint32_t> activeCommandListRanges;
+    std::unordered_set<std::string> observedRasterPassNames;
 };
 
 D3D12PassProfiler& Profiler()
@@ -1380,6 +1382,8 @@ bool ArmCapture(uint64_t sampleId, std::string& error)
     }
     profiler.queues.clear();
     profiler.activeCommandListRanges.clear();
+    profiler.observedRasterPassNames.clear();
+    profiler.missingRangeWarningEmitted = false;
     profiler.requested = true;
     profiler.armed = true;
     profiler.initialized = false;
@@ -1593,6 +1597,35 @@ void EndFrameCapture(rhi::Backend backend, rhi::Queue graphicsQueue, uint64_t fr
         return;
     }
 
+    if (profiler.queues.empty()) {
+        const uint64_t framesWithoutRange = frameNumber >= profiler.captureStartFrame
+            ? frameNumber - profiler.captureStartFrame + 1u
+            : 0u;
+        if (!profiler.missingRangeWarningEmitted && framesWithoutRange >= 2u) {
+            std::string expected;
+            for (const auto& filter : profiler.passFilters) {
+                if (!expected.empty()) expected += ", ";
+                expected += "'" + filter.name + "'@'" + filter.queue + "'";
+            }
+            std::string observed;
+            for (const auto& name : profiler.observedRasterPassNames) {
+                if (!observed.empty()) observed += ", ";
+                observed += "'" + name + "'";
+            }
+            spdlog::warn(
+                "NVPerf: no selected pass range observed after {} frame(s); expected=[{}] observedRasterPasses=[{}]",
+                framesWithoutRange,
+                expected,
+                observed);
+            profiler.missingRangeWarningEmitted = true;
+        }
+        if (framesWithoutRange >= 8u) {
+            profiler.error = "no selected NVPerf pass range was observed within 8 rendered frames";
+            profiler.failed = true;
+        }
+        return;
+    }
+
     bool anyActive = false;
     bool allSubmitted = !profiler.queues.empty();
     for (auto& [nativeQueue, queueCapture] : profiler.queues) {
@@ -1711,6 +1744,10 @@ void BeginPassRange(rhi::Backend backend, rhi::CommandList commandList, rhi::Que
         return;
     }
     const char* resolvedPassName = passName && passName[0] != '\0' ? passName : "<unnamed>";
+    if (std::strstr(resolvedPassName, "Raster") != nullptr ||
+        std::strstr(resolvedPassName, "Culling") != nullptr) {
+        profiler.observedRasterPassNames.emplace(resolvedPassName);
+    }
     if (!PassIsSelected(profiler, resolvedQueueName, resolvedPassName)) {
         return;
     }

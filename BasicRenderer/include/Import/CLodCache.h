@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Mesh/ClusterLODTypes.h"
@@ -60,7 +61,7 @@ using GroupPayloadLayoutMetadata = PagePayloadLayoutMetadata;
 
 std::wstring ResolveContainerPath(const ClusterLODCacheSource& cacheSource);
 
-uint64_t ComputeBuildConfigHash();
+uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier = {});
 CacheLookup BuildCacheLookup(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier);

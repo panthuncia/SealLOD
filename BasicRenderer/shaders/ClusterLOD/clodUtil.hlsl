@@ -2,6 +2,7 @@
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
+#include "include/skinningCommon.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "PerPassRootConstants/clodClearUintBufferRootConstants.h"
@@ -2948,13 +2949,15 @@ void RasterBucketsBlockOffsetsCS(uint3 groupThreadId : SV_GroupThreadID,
     }
 }
 
-uint GetRasterBucketIndexFromInstance(uint instanceID)
+uint GetRasterBucketIndexFromInstance(
+    uint instanceID,
+    out PerMeshInstanceBuffer instanceData)
 {
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
-    PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceID);
-    PerMeshBuffer meshBuffer = perMeshBuffer[instanceData.perMeshBufferIndex];
-    return meshBuffer.rasterBucketIndex;
+    instanceData = LoadMeshTemplateForDraw(instanceID);
+    const PerMeshBuffer meshData = perMeshBuffer[instanceData.perMeshBufferIndex];
+    return meshData.rasterBucketIndex;
 }
 
 static const uint CLOD_COMPACTION_GROUP_SIZE = CLUSTER_HISTOGRAM_GROUP_SIZE;
@@ -3001,7 +3004,6 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
             ResourceDescriptorHeap[CLOD_COMPACTION_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         StructuredBuffer<uint> offsets = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX];
         RWStructuredBuffer<uint> writeCursor = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_WRITE_CURSOR_DESCRIPTOR_INDEX];
-        RWStructuredBuffer<uint> sortedToUnsortedMapping = ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
         const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusters, sourceClusterIndex);
         if (shouldCompactCluster && CLodVisibleClusterIsVoxel(packedCluster))
         {
@@ -3011,7 +3013,9 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
 
         if (shouldCompactCluster)
         {
-            uint bucketIndex = GetRasterBucketIndexFromInstance(CLodVisibleClusterInstanceID(packedCluster));
+            const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
+            PerMeshInstanceBuffer meshInstance;
+            uint bucketIndex = GetRasterBucketIndexFromInstance(instanceID, meshInstance);
             shouldCompactCluster = bucketIndex < numBuckets;
             if (shouldCompactCluster)
             {
@@ -3021,7 +3025,23 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
                 uint dst = baseClusterOffset + offsets[bucketIndex] + localOffset;
                 CLodStoreVisibleClusterPackedWordsRW(compactedClusters, dst, packedCluster);
                 compactedClusterTransformIndices[dst] = visibleClusterTransformIndices[sourceClusterIndex];
-                sortedToUnsortedMapping[dst] = sourceClusterIndex;
+                if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
+                {
+                    RWStructuredBuffer<CLodSoftwareRasterMapping> softwareRasterMapping =
+                        ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
+                    CLodSoftwareRasterMapping mapping;
+                    mapping.unsortedClusterIndex = sourceClusterIndex;
+                    mapping.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
+                        instanceID,
+                        meshInstance.skinningInstanceSlot);
+                    softwareRasterMapping[dst] = mapping;
+                }
+                else
+                {
+                    RWStructuredBuffer<uint> sortedToUnsortedMapping =
+                        ResourceDescriptorHeap[CLOD_COMPACTION_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
+                    sortedToUnsortedMapping[dst] = sourceClusterIndex;
+                }
                 CLodSortTelemetryAdd(CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX, WG_COUNTER_RASTER_SORT_COMPACTION_TRIANGLE_EMITTED, 1u);
             }
         }
