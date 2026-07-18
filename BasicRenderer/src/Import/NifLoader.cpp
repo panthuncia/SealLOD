@@ -50,7 +50,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "31";
+constexpr std::string_view kObjectReyesConfigVersion = "34";
 constexpr std::string_view kNifTreeWindCacheVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
@@ -566,9 +566,46 @@ bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, co
         !config.displacementScaleOverrides.empty();
 }
 
+bool ObjectReyesConfigHasRuntimeAtlasForNif(const ObjectReyesConfig& config, const std::string& normalizedNifCacheKey)
+{
+    if (!config.loaded) {
+        return false;
+    }
+
+    const std::string normalizedSlashKey = NormalizeObjectReyesNifWhitelistPath(normalizedNifCacheKey);
+    const bool bakedHeightListed =
+        config.bakedHeightNifPaths.contains(normalizedSlashKey) ||
+        std::any_of(
+            config.bakedHeightMaterials.begin(),
+            config.bakedHeightMaterials.end(),
+            [&](const ObjectReyesConfig::BakedHeightMaterialEntry& entry) { return entry.nifPath == normalizedSlashKey; });
+    if (bakedHeightListed) {
+        return true;
+    }
+
+    if (config.surfaceSamplingMode != "atlasBakedHeight") {
+        return false;
+    }
+
+    return config.nifPaths.contains(normalizedSlashKey) ||
+        config.surfaceSamplingNifPaths.contains(normalizedSlashKey) ||
+        config.triplanarProjectionNifPaths.contains(normalizedSlashKey) ||
+        config.tripleTapStochasticNifPaths.contains(normalizedSlashKey);
+}
+
 std::string ObjectReyesContentHashMarker(const ObjectReyesConfig& config)
 {
     return "_object_reyes_" + std::string(kObjectReyesConfigVersion) + "_" + config.contentHash + "_texroots_";
+}
+
+std::string StableNifContentHashForObjectReyesAtlas(std::string_view contentHash)
+{
+    constexpr std::string_view marker = "_object_reyes_";
+    const auto markerPos = contentHash.find(marker);
+    if (markerPos != std::string_view::npos) {
+        return std::string(contentHash.substr(0, markerPos));
+    }
+    return std::string(contentHash);
 }
 
 bool CachedContentHashMatchesObjectReyesConfig(const std::string& contentHash, const ObjectReyesConfig& config)
@@ -651,6 +688,11 @@ std::string MakeAssetFileName(const std::string& normalizedCacheKey, const std::
     return NifStemFromCacheKey(normalizedCacheKey) + "__p" + pathHash + "__c" + contentHash + std::string(kNifMetaCacheSuffix);
 }
 
+fs::path MakeObjectReyesRecipePayloadCachePath(const fs::path& finalizedCachePath)
+{
+    return finalizedCachePath.parent_path() / "object_reyes_recipe.payload";
+}
+
 bool HasAssetCacheSuffix(const fs::path& path)
 {
     const auto fileName = path.filename().string();
@@ -707,7 +749,7 @@ fs::path AssetManifestPath()
 // whenever that ownership/serialization contract changes so preprocessing
 // cannot hide a stale inline-skeleton assembly behind an otherwise valid NIF
 // payload cache.
-constexpr std::uint32_t kPayloadCacheVersion = 49u;
+constexpr std::uint32_t kPayloadCacheVersion = 54u;
 
 enum class CachedSkeletonStorage : std::uint8_t
 {
@@ -1110,6 +1152,13 @@ public:
     }
 
     bool Good() const { return static_cast<bool>(out); }
+	bool Close()
+	{
+		out.flush();
+		const bool good = static_cast<bool>(out);
+		out.close();
+		return good;
+	}
 
 private:
     std::ofstream out;
@@ -1687,6 +1736,7 @@ void WriteObjectReyesAtlasBakeData(
     writer.Pod(data->atlasUvSetIndex);
     writer.Pod(data->texelsPerUnit);
     writer.Pod(data->blendWidthObjectUnits);
+	writer.String(data->storageFormat);
     writer.PodVector(data->positions);
     writer.PodVector(data->normals);
     writer.PodVector(data->atlasUvs);
@@ -1727,6 +1777,7 @@ bool ReadObjectReyesAtlasBakeData(
         !reader.Pod(mutableData->atlasUvSetIndex) ||
         !reader.Pod(mutableData->texelsPerUnit) ||
         !reader.Pod(mutableData->blendWidthObjectUnits) ||
+		!reader.String(mutableData->storageFormat) ||
         !reader.PodVector(mutableData->positions) ||
         !reader.PodVector(mutableData->normals) ||
         !reader.PodVector(mutableData->atlasUvs)) {
@@ -1837,6 +1888,43 @@ void WritePrebuilt(BinaryWriter& writer, const ClusterLODPrebuiltData& data)
     writer.Pod(data.maxTraversalDepth);
 }
 
+void WriteObjectReyesAtlasCacheIdentity(
+	BinaryWriter& writer,
+	const std::optional<br::import::ObjectReyesAtlasCacheIdentity>& identity)
+{
+	const bool present = identity.has_value();
+	writer.Pod(present);
+	if (!present) return;
+	writer.Pod(identity->schemaVersion);
+	writer.String(identity->canonicalNifPath);
+	writer.String(identity->nifContentHash);
+	writer.String(identity->reyesConfigHash);
+	writer.Pod(identity->clodAssetSettingsHash);
+}
+
+bool ReadObjectReyesAtlasCacheIdentity(
+	BinaryReader& reader,
+	std::optional<br::import::ObjectReyesAtlasCacheIdentity>& identity)
+{
+	bool present = false;
+	if (!reader.Pod(present)) return false;
+	if (!present) {
+		identity.reset();
+		return true;
+	}
+	br::import::ObjectReyesAtlasCacheIdentity value;
+	if (!reader.Pod(value.schemaVersion) ||
+		!reader.String(value.canonicalNifPath) ||
+		!reader.String(value.nifContentHash) ||
+		!reader.String(value.reyesConfigHash) ||
+		!reader.Pod(value.clodAssetSettingsHash) ||
+		value.schemaVersion != br::import::kObjectReyesAtlasCacheSchemaVersion) {
+		return false;
+	}
+	identity = std::move(value);
+	return true;
+}
+
 bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
 {
     return reader.PodVector(data.groups) &&
@@ -1929,9 +2017,10 @@ bool WritePayloadCache(
     }
 
     const fs::path payloadPath = cachePath;
+	const fs::path temporaryPath = fs::path(cachePath.string() + ".tmp");
     std::error_code ec;
     fs::create_directories(payloadPath.parent_path(), ec);
-    BinaryWriter writer(payloadPath);
+    BinaryWriter writer(temporaryPath);
     if (!writer) {
         return false;
     }
@@ -1944,6 +2033,7 @@ bool WritePayloadCache(
     writer.String(pathHash);
     writer.String(contentHash);
     WriteStringVector(writer, textureSearchRoots);
+    WriteObjectReyesAtlasCacheIdentity(writer, payload.objectReyesAtlasCacheIdentity);
 
     std::unordered_map<const Mesh*, std::uint32_t> meshIndices;
     {
@@ -2050,7 +2140,18 @@ bool WritePayloadCache(
             WritePrototypeGeometryVector(writer, part.prototypeGeometries);
         }
     }
-    return writer.Good();
+    if (!writer.Close()) {
+		fs::remove(temporaryPath, ec);
+		return false;
+	}
+	if (!MoveFileExW(
+		temporaryPath.c_str(),
+		payloadPath.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		fs::remove(temporaryPath, ec);
+		return false;
+	}
+	return true;
 }
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
@@ -2085,6 +2186,10 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         return std::nullopt;
     }
     USDLoader::ImportedAssetPayload payload;
+    payload.cacheTextureSearchRoots = textureSearchRoots;
+    if (!ReadObjectReyesAtlasCacheIdentity(reader, payload.objectReyesAtlasCacheIdentity)) {
+		return std::nullopt;
+	}
     std::uint64_t meshCount = 0;
     if (!reader.Pod(meshCount) || meshCount > 100000u) {
         return std::nullopt;
@@ -2329,6 +2434,15 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         }
 
         if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash, settings.loadMaterialTextures)) {
+            if (objectReyesRequiresCurrentPayload &&
+                (!payload->objectReyesAtlasCacheIdentity || !payload->objectReyesAtlasCacheIdentity->IsComplete())) {
+                spdlog::info(
+                    "nif_meta_cache=skip_candidate game='{}' path='{}' content_hash='{}' reason='object Reyes payload lacks finalized atlas identity'",
+                    normalizedCacheKey,
+                    cachePath.string(),
+                    fileContentHash);
+                continue;
+            }
             spdlog::debug(
                 "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
@@ -2404,6 +2518,8 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
     }
 
     const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const bool objectReyesRequiresCurrentPayload =
+        ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
     const std::vector<std::string> textureSearchRoots =
         MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
     const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
@@ -2434,26 +2550,49 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         stats->meshBuildMs += usdTiming.meshPreprocessMs;
     }
     if (payload) {
+		payload->cacheTextureSearchRoots = textureSearchRoots;
+        if (ObjectReyesConfigHasRuntimeAtlasForNif(objectReyesConfig, normalizedCacheKey)) {
+			payload->objectReyesAtlasCacheIdentity = br::import::ObjectReyesAtlasCacheIdentity{
+				.schemaVersion = br::import::kObjectReyesAtlasCacheSchemaVersion,
+				.canonicalNifPath = normalizedCacheKey,
+				.nifContentHash = StableNifContentHashForObjectReyesAtlas(effectiveContentHash),
+				.reyesConfigHash = objectReyesConfig.contentHash,
+				.clodAssetSettingsHash = 0,
+			};
+        }
+        else {
+            payload->objectReyesAtlasCacheIdentity.reset();
+        }
         {
             ZoneScopedN("NifLoader::LoadImportedAssetWithCacheKey::EnsurePayloadMaterialHashes");
             EnsurePayloadMaterialHashes(*payload);
         }
-        const fs::path cachePath = CLodCache::GetCacheFilePathForSource(
+        const bool preBakeRequiresRecipePayload =
+            objectReyesRequiresCurrentPayload &&
+            settings.prepareObjectReyesAtlasRecipes;
+        const fs::path finalizedCachePath = CLodCache::GetCacheFilePathForSource(
             s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, effectiveContentHash)),
             stableSourceIdentifier);
+        const fs::path recipeCachePath = MakeObjectReyesRecipePayloadCachePath(finalizedCachePath);
+        const fs::path cachePath = preBakeRequiresRecipePayload ? recipeCachePath : finalizedCachePath;
         const auto cacheWriteBegin = std::chrono::steady_clock::now();
         bool wrote = false;
         bool reusedExisting = false;
-        if (auto existingPayload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, effectiveContentHash, settings.loadMaterialTextures)) {
-            payload = std::move(existingPayload);
-            reusedExisting = true;
-            RegisterCachedAsset(pathHash, cachePath);
-            spdlog::info(
-                "nif_meta_cache=existing game='{}' path='{}' content_hash='{}'",
-                normalizedCacheKey,
-                cachePath.string(),
+        bool preserveExistingFinalizedPayload = false;
+        if (!preBakeRequiresRecipePayload) {
+            auto existingPayload = TryLoadPayloadCache(finalizedCachePath, normalizedCacheKey, pathHash, effectiveContentHash, settings.loadMaterialTextures);
+            if (existingPayload) {
+                payload = std::move(existingPayload);
+                reusedExisting = true;
+                RegisterCachedAsset(pathHash, finalizedCachePath);
+                spdlog::info(
+                    "nif_meta_cache=existing game='{}' path='{}' content_hash='{}'",
+                    normalizedCacheKey,
+                    finalizedCachePath.string(),
                 effectiveContentHash);
-        } else {
+            }
+        }
+        if (!reusedExisting && !preserveExistingFinalizedPayload) {
             wrote = WritePayloadCache(
                 cachePath,
                 normalizedCacheKey,
@@ -2461,6 +2600,14 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
                 effectiveContentHash,
                 textureSearchRoots,
                 *payload);
+            if (!wrote) {
+                spdlog::warn(
+                    "{} game='{}' path='{}' content_hash='{}' reason='payload write failed'",
+                    preBakeRequiresRecipePayload ? "nif_meta_cache=write_object_reyes_recipe_failed" : "nif_meta_cache=write_failed",
+                    normalizedCacheKey,
+                    cachePath.string(),
+                    effectiveContentHash);
+            }
         }
         if (stats) {
             stats->assetWriteMs += ElapsedMs(cacheWriteBegin, std::chrono::steady_clock::now());
@@ -2471,9 +2618,12 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             stats->contentHash = effectiveContentHash;
         }
         if (wrote) {
-            RegisterCachedAsset(pathHash, cachePath);
+            if (!preBakeRequiresRecipePayload) {
+                RegisterCachedAsset(pathHash, cachePath);
+            }
             spdlog::info(
-                "nif_meta_cache=write game='{}' path='{}' content_hash='{}'",
+                "{} game='{}' path='{}' content_hash='{}'",
+                preBakeRequiresRecipePayload ? "nif_meta_cache=write_object_reyes_recipe" : "nif_meta_cache=write",
                 normalizedCacheKey,
                 cachePath.string(),
                 effectiveContentHash);
@@ -2568,6 +2718,72 @@ PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cac
     result.materialCompileFlags.assign(materialCompileFlags.begin(), materialCompileFlags.end());
     result.success = true;
     return result;
+}
+
+bool FinalizeObjectReyesPayloadCache(
+	const std::filesystem::path& cachePath,
+	std::string cacheKey,
+	std::string contentHash,
+	std::uint64_t clodAssetSettingsHash,
+	std::string* failureReason)
+{
+	const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
+	const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
+	if (normalizedCacheKey.empty() || contentHash.empty()) {
+		if (failureReason) *failureReason = "incomplete finalization identity";
+		return false;
+	}
+	const fs::path finalizedCachePath = CLodCache::GetCacheFilePathForSource(
+		s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, contentHash)),
+		MakeStableSourceIdentifier(normalizedCacheKey, contentHash));
+	fs::path stagingCachePath = cachePath;
+	if (stagingCachePath.empty()) {
+		stagingCachePath = finalizedCachePath;
+	}
+	auto payload = TryLoadPayloadCache(stagingCachePath, normalizedCacheKey, pathHash, contentHash, false);
+	if (!payload) {
+		if (failureReason) *failureReason = "staging payload could not be reopened";
+		return false;
+	}
+	const ObjectReyesConfig config = LoadObjectReyesConfig();
+	for (const auto& mesh : payload->meshes) {
+		if (mesh) mesh->SetObjectReyesAtlasBakeData(nullptr);
+	}
+	payload->objectReyesAtlasCacheIdentity = br::import::ObjectReyesAtlasCacheIdentity{
+		.schemaVersion = br::import::kObjectReyesAtlasCacheSchemaVersion,
+		.canonicalNifPath = normalizedCacheKey,
+		.nifContentHash = StableNifContentHashForObjectReyesAtlas(contentHash),
+		.reyesConfigHash = config.contentHash,
+		.clodAssetSettingsHash = clodAssetSettingsHash,
+	};
+	if (!WritePayloadCache(
+		finalizedCachePath,
+		normalizedCacheKey,
+		pathHash,
+		contentHash,
+		payload->cacheTextureSearchRoots,
+		*payload)) {
+		if (failureReason) *failureReason = "final payload write failed";
+		return false;
+	}
+	spdlog::info(
+		"nif_meta_cache=finalized game='{}' path='{}' content_hash='{}' clod_settings=0x{:016x}",
+		normalizedCacheKey,
+		finalizedCachePath.string(),
+		contentHash,
+		clodAssetSettingsHash);
+	if (stagingCachePath != finalizedCachePath) {
+		std::error_code ec;
+		fs::remove(stagingCachePath, ec);
+		if (ec) {
+			spdlog::warn(
+				"nif_meta_cache=recipe_cleanup_failed game='{}' path='{}' reason='{}'",
+				normalizedCacheKey,
+				stagingCachePath.string(),
+				ec.message());
+		}
+	}
+	return true;
 }
 
 std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)

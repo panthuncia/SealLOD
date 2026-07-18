@@ -99,6 +99,9 @@ public:
     static std::unique_ptr<TerrainManager> CreateUnique();
 
     std::uint32_t SetActiveTerrain(const TerrainMaterialDesc& desc, TextureFactory* textureFactory, MaterialManager* materialManager = nullptr);
+    // Advances the main-thread terrain activation boundary after streaming
+    // binding callbacks have been drained for the frame.
+    void ProcessPendingUpdates();
     void ClearActiveTerrain();
 
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -117,7 +120,10 @@ private:
     void RefreshTerrainLayerTextureBinding(
         std::uint32_t layerIndex,
         TerrainTextureSlot slot,
-        const std::shared_ptr<TextureAsset>& texture);
+        const std::shared_ptr<TextureAsset>& texture,
+        std::uint64_t terrainGeneration,
+        std::size_t initialDependencyIndex);
+    void InvalidateAndScheduleTerrainSetActivation();
 
     std::shared_ptr<DynamicStructuredBuffer<TerrainSetGPU>> m_sets;
     std::shared_ptr<DynamicStructuredBuffer<TerrainLayerGPU>> m_layers;
@@ -128,6 +134,13 @@ private:
     std::shared_ptr<ResourceGroup> m_textureGroup;
     std::vector<std::shared_ptr<TextureAsset>> m_layerTextures;
     std::vector<TerrainLayerGPU> m_layerData;
+    TerrainSetGPU m_desiredSet{};
+    std::vector<std::uint8_t> m_initialBindingReady;
+    std::size_t m_readyInitialBindingCount = 0;
+    std::uint64_t m_terrainGeneration = 0;
+    std::uint32_t m_activationDelayFrames = 0;
+    bool m_terrainSetActive = false;
+    bool m_pendingTerrainSetActivation = false;
     std::vector<std::uint64_t> m_streamingBindingIDs;
     TextureStreamingManager* m_textureStreamingManager = nullptr;
 };

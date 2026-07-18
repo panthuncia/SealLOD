@@ -1227,6 +1227,10 @@ void Renderer::RunRenderResourceSyncStage() {
         const uint64_t nextFrameIndex = m_totalFramesRendered + 1u;
         materialManager->ProcessPendingMaterialUpdates(nextFrameIndex);
     }
+    if (auto* terrainManager = m_managerInterface.GetTerrainManager()) {
+        ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
+        terrainManager->ProcessPendingUpdates();
+    }
 
     auto* objectManager = m_managerInterface.GetObjectManager();
     std::vector<std::pair<size_t, size_t>> perObjectDirtyRanges;

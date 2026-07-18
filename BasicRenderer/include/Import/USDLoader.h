@@ -14,6 +14,7 @@
 #include <pxr/usd/usd/stage.h>
 
 #include "Import/RenderablePrototypeGeometry.h"
+#include "Import/ObjectReyesAtlasCache.h"
 #include "Materials/MaterialDescription.h"
 
 class Scene;
@@ -38,6 +39,9 @@ namespace USDLoader {
 		// path must name a materialized filesystem file for the duration of the
 		// import. Loose-file and ordinary USD resolution remain the first choice.
 		std::function<std::optional<std::string>(std::string_view)> resolveResourcePath;
+		// Offline-only. Allows construction of the temporary geometry/material
+		// recipe used to publish Reyes height-atlas variants.
+		bool prepareObjectReyesAtlasRecipes = false;
 	};
 
 	struct InMemoryStageOptions {
@@ -87,6 +91,8 @@ namespace USDLoader {
 		std::vector<std::shared_ptr<Mesh>> meshes;
 		std::vector<std::uint64_t> meshMaterialHashes;
 		std::vector<RenderablePartPayload> parts;
+		std::optional<br::import::ObjectReyesAtlasCacheIdentity> objectReyesAtlasCacheIdentity;
+		std::vector<std::string> cacheTextureSearchRoots;
 	};
 
 	struct ImportTimingStats {

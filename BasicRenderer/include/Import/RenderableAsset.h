@@ -37,6 +37,7 @@ struct RenderableAsset
 	std::vector<std::shared_ptr<Mesh>> meshes;
 	std::vector<std::uint64_t> meshMaterialHashes;
 	std::vector<RenderableAssetPart> parts;
+	std::optional<ObjectReyesAtlasCacheIdentity> objectReyesAtlasCacheIdentity;
 };
 
 bool IsRenderableMesh(const std::shared_ptr<Mesh>& mesh);

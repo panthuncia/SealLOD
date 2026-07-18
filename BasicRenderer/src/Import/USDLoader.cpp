@@ -3367,6 +3367,7 @@ namespace USDLoader {
 		sharedBakeData->atlasUvSetIndex = atlasResult.atlasUvSetIndex;
 		sharedBakeData->texelsPerUnit = atlasResult.texelsPerUnit;
 		sharedBakeData->blendWidthObjectUnits = stageOptions.objectReyesBoundaryBlendStripWidthObjectUnits;
+		sharedBakeData->storageFormat = stageOptions.objectReyesHeightAtlasStorage;
 		sharedBakeData->atlasUvs = atlasResult.uvSets[atlasResult.atlasUvSetIndex].values;
 		sharedBakeData->uvSets.clear();
 		sharedBakeData->uvSets.reserve(atlasResult.uvSets.size());
@@ -3503,7 +3504,7 @@ namespace USDLoader {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
 			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
-			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=13";
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=14";
 			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
 			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
@@ -3570,6 +3571,9 @@ namespace USDLoader {
 			}
 			preprocessed[index]->geometricDisplacementOptIn = false;
 			preprocessed[index]->objectSurfaceSamplingMode = ObjectSurfaceSamplingMode::None;
+			preprocessed[index]->objectSurfaceUseTriplanarProjection = false;
+			preprocessed[index]->objectSurfaceUseTripleTapStochastic = false;
+			preprocessed[index]->objectSurfaceTexelDensity = 1.0f;
 		}
 	}
 
@@ -3710,8 +3714,11 @@ namespace USDLoader {
 					auto mat = UsdShadeMaterialBindingAPI(mesh).ComputeBoundMaterial();
 					ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 					auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
-					extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
-					extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
+					extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts ||
+						retainArtifactsForAssetAssembly ||
+						(importSettings.prepareObjectReyesAtlasRecipes && stageOptions.objectReyesNifMatched);
+					extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts &&
+						!(importSettings.prepareObjectReyesAtlasRecipes && stageOptions.objectReyesNifMatched);
 					if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 						spdlog::info(
 							"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -3746,8 +3753,11 @@ namespace USDLoader {
 						auto mat = UsdShadeMaterialBindingAPI(subset).ComputeBoundMaterial();
 						ProcessMaterial(mat, stage, stageOptions, isUSDZ, directory, importSettings.loadMaterialTextures);
 						auto extractOptions = BuildGeometryExtractOptions(mesh, mat, stageOptions);
-						extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts || retainArtifactsForAssetAssembly;
-						extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts;
+						extractOptions.retainClusterLODArtifacts = extractOptions.retainClusterLODArtifacts ||
+							retainArtifactsForAssetAssembly ||
+							(importSettings.prepareObjectReyesAtlasRecipes && stageOptions.objectReyesNifMatched);
+						extractOptions.skipCachedClusterLODMeshBuilds = !extractOptions.retainClusterLODArtifacts &&
+							!(importSettings.prepareObjectReyesAtlasRecipes && stageOptions.objectReyesNifMatched);
 						if (ShouldTemporarilyBlockBrniflyVertexAlphaOverlay(extractOptions)) {
 							spdlog::info(
 								"Temporarily skipping BRNifly vertex-alpha overlay mesh '{}' subset '{}' material '{}' (zwrite={}, decal={}, dynamicDecal={}, cutoff={}).",
@@ -3843,19 +3853,36 @@ namespace USDLoader {
 				atlasBakeGroups[parentPath].push_back(workIndex);
 			}
 			for (const auto& [parentPath, group] : atlasBakeGroups) {
-				if (group.empty()) {
+				std::vector<std::size_t> orderedGroup = group;
+				std::ranges::stable_sort(orderedGroup, [&](std::size_t lhs, std::size_t rhs) {
+					const std::string lhsPath = lhs < workItems.size() && workItems[lhs].mesh
+						? workItems[lhs].mesh.GetPrim().GetPath().GetString()
+						: std::string{};
+					const std::string rhsPath = rhs < workItems.size() && workItems[rhs].mesh
+						? workItems[rhs].mesh.GetPrim().GetPath().GetString()
+						: std::string{};
+					return lhsPath < rhsPath;
+				});
+				if (orderedGroup.empty()) {
 					continue;
 				}
-				auto bakedSubsets = TryBuildObjectReyesAtlasBakedParentGroup(group, workItems, preprocessed, stageOptions);
+				if (!importSettings.prepareObjectReyesAtlasRecipes) {
+					DisableObjectReyesForGroup(orderedGroup, preprocessed);
+					spdlog::warn(
+						"Object Reyes atlas manifest unavailable for cold runtime import under '{}'; using clean opaque fallback without source-geometry inspection.",
+						parentPath);
+					continue;
+				}
+				auto bakedSubsets = TryBuildObjectReyesAtlasBakedParentGroup(orderedGroup, workItems, preprocessed, stageOptions);
 				if (!bakedSubsets) {
 					spdlog::warn(
 						"Object Reyes atlas-baked height failed under '{}'; disabling Object Reyes geometric displacement for that parent.",
 						parentPath);
-					DisableObjectReyesForGroup(group, preprocessed);
+					DisableObjectReyesForGroup(orderedGroup, preprocessed);
 					continue;
 				}
 
-				const std::size_t ownerIndex = group.front();
+				const std::size_t ownerIndex = orderedGroup.front();
 				const MeshPreprocessWorkItem& ownerItem = workItems[ownerIndex];
 				auto& ownerRecord = loadingCache.preprocessedMeshCache[ownerItem.meshPath];
 				ownerRecord.authoredDoubleSided = ownerItem.authoredDoubleSided;
@@ -3871,8 +3898,8 @@ namespace USDLoader {
 						sourceItem.mesh.GetPrim().GetName().GetString());
 				}
 
-				for (std::size_t groupEntry = 0u; groupEntry < group.size(); ++groupEntry) {
-					const std::size_t index = group[groupEntry];
+				for (std::size_t groupEntry = 0u; groupEntry < orderedGroup.size(); ++groupEntry) {
+					const std::size_t index = orderedGroup[groupEntry];
 					const MeshPreprocessWorkItem& item = workItems[index];
 					if (index != ownerIndex) {
 						auto& emptyRecord = loadingCache.preprocessedMeshCache[item.meshPath];
@@ -7250,7 +7277,7 @@ namespace USDLoader {
 		// so TREE candidates stay on the ordinary per-mesh CLod payload path where
 		// it can be promoted into a BRSKEL artifact below.
 		std::vector<AssetAssemblyBucketInfo> assemblyBuckets;
-		if (!importSettings.enableNifTreeProceduralWind) {
+		if (!importSettings.enableNifTreeProceduralWind && !importSettings.prepareObjectReyesAtlasRecipes) {
 			assemblyBuckets = DiscoverAssetAssemblyBuckets(
 				stage,
 				assemblySkelCache,

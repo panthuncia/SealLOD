@@ -102,6 +102,7 @@ RenderableAsset RenderableAssetFromPayload(USDLoader::ImportedAssetPayload&& pay
 	RenderableAsset asset;
 	asset.meshes = std::move(payload.meshes);
 	asset.meshMaterialHashes = std::move(payload.meshMaterialHashes);
+	asset.objectReyesAtlasCacheIdentity = std::move(payload.objectReyesAtlasCacheIdentity);
 	asset.parts.reserve(payload.parts.size());
 	for (auto& payloadPart : payload.parts) {
 		RenderableAssetPart part;

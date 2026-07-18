@@ -442,6 +442,7 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     const auto totalBegin = std::chrono::steady_clock::now();
     ClearActiveTerrain();
     m_textureStreamingManager = materialManager ? materialManager->GetTextureStreamingManager() : nullptr;
+    const std::uint64_t terrainGeneration = m_terrainGeneration;
 
     const auto denseBegin = std::chrono::steady_clock::now();
     std::int32_t minRegionX = 0;
@@ -738,8 +739,11 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     m_layerData = std::move(layers);
     m_layers->ReplaceData(m_layerData);
     if (m_textureStreamingManager && textureFactory) {
+        m_initialBindingReady.assign(pendingTextureBindings.size(), 0u);
+        m_readyInitialBindingCount = 0u;
         m_streamingBindingIDs.reserve(pendingTextureBindings.size());
-        for (const auto& pending : pendingTextureBindings) {
+        for (std::size_t dependencyIndex = 0; dependencyIndex < pendingTextureBindings.size(); ++dependencyIndex) {
+            const auto& pending = pendingTextureBindings[dependencyIndex];
             LogTerrainTextureState(
                 "register-binding-before",
                 pending.layerIndex,
@@ -750,12 +754,26 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 [this,
                  layerIndex = pending.layerIndex,
                  slot = pending.slot,
-                 texture = pending.texture](TextureAsset&) {
-                    RefreshTerrainLayerTextureBinding(layerIndex, slot, texture);
+                 texture = pending.texture,
+                 terrainGeneration,
+                 dependencyIndex](TextureAsset&) {
+                    RefreshTerrainLayerTextureBinding(
+                        layerIndex,
+                        slot,
+                        texture,
+                        terrainGeneration,
+                        dependencyIndex);
                 },
                 "terrain-layer:" + std::to_string(pending.layerIndex));
             if (bindingID != 0u) {
                 m_streamingBindingIDs.push_back(bindingID);
+            }
+            else if (pending.texture->ImagePtr() && !pending.texture->IsUsingFallbackImage()) {
+                // Textures without a streaming ID have no asynchronous owner
+                // callback. Their directly uploaded published binding is the
+                // complete dependency for this slot.
+                m_initialBindingReady[dependencyIndex] = 1u;
+                ++m_readyInitialBindingCount;
             }
             LogTerrainTextureState(
                 bindingID != 0u ? "register-binding-after" : "register-binding-skipped",
@@ -824,7 +842,19 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     set.weightBlockBase = 0;
     set.weightBlockCount = weightBlockCount;
     set.regionSizeWorld = desc.regionSizeWorld > 0.0f ? desc.regionSizeWorld : kDefaultTerrainRegionSizeWorld;
-    m_sets->UpdateAt(0u, set);
+    m_desiredSet = set;
+    // A terrain set with valid extents is enough for the RVT to begin creating
+    // permanent pages.  Do not expose it until every initial streaming owner has
+    // observed a non-placeholder published image.  The binding callbacks queue
+    // the layer-buffer writes behind the corresponding texture upload.
+    if (m_readyInitialBindingCount == m_initialBindingReady.size()) {
+        m_sets->UpdateAt(0u, m_desiredSet);
+        m_terrainSetActive = true;
+    }
+    else {
+        m_sets->UpdateAt(0u, MakeEmptySet());
+        m_terrainSetActive = false;
+    }
     const auto totalEnd = std::chrono::steady_clock::now();
     std::uint32_t boundDiffuseLayerCount = 0;
     std::uint32_t boundNormalLayerCount = 0;
@@ -892,8 +922,13 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
 void TerrainManager::RefreshTerrainLayerTextureBinding(
     std::uint32_t layerIndex,
     TerrainTextureSlot slot,
-    const std::shared_ptr<TextureAsset>& texture)
+    const std::shared_ptr<TextureAsset>& texture,
+    std::uint64_t terrainGeneration,
+    std::size_t initialDependencyIndex)
 {
+    if (terrainGeneration != m_terrainGeneration) {
+        return;
+    }
     if (!texture) {
         LogTerrainTextureState("refresh-callback-null-texture", layerIndex, static_cast<std::uint32_t>(slot), texture);
         return;
@@ -963,10 +998,68 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
     m_textureGroup->AddResource(image);
     m_layerTextures.push_back(texture);
     m_layers->UpdateAt(layerIndex, layer);
+
+    const bool isFinalBinding = !texture->IsUsingFallbackImage();
+    if (isFinalBinding && initialDependencyIndex < m_initialBindingReady.size() &&
+        m_initialBindingReady[initialDependencyIndex] == 0u) {
+        m_initialBindingReady[initialDependencyIndex] = 1u;
+        ++m_readyInitialBindingCount;
+    }
+
+    if (m_readyInitialBindingCount == m_initialBindingReady.size()) {
+        InvalidateAndScheduleTerrainSetActivation();
+    }
+    else if (m_terrainSetActive) {
+        // A later descriptor replacement changes the source content of every RVT
+        // page which sampled this layer.  Pulse the set inactive for one complete
+        // RVT frame so FrameReset invalidates those cached page-table entries.
+        InvalidateAndScheduleTerrainSetActivation();
+    }
+}
+
+void TerrainManager::InvalidateAndScheduleTerrainSetActivation()
+{
+    m_sets->UpdateAt(0u, MakeEmptySet());
+    m_terrainSetActive = false;
+    m_pendingTerrainSetActivation = true;
+    m_activationDelayFrames = 1u;
+    if (TerrainTextureDiagnosticsEnabled()) {
+        spdlog::info(
+            "TerrainManager: terrain set gated generation={} readyBindings={}/{}",
+            m_terrainGeneration,
+            m_readyInitialBindingCount,
+            m_initialBindingReady.size());
+    }
+}
+
+void TerrainManager::ProcessPendingUpdates()
+{
+    if (!m_pendingTerrainSetActivation) {
+        return;
+    }
+    if (m_activationDelayFrames != 0u) {
+        --m_activationDelayFrames;
+        return;
+    }
+    if (m_readyInitialBindingCount != m_initialBindingReady.size()) {
+        return;
+    }
+
+    m_sets->UpdateAt(0u, m_desiredSet);
+    m_terrainSetActive = true;
+    m_pendingTerrainSetActivation = false;
+    if (TerrainTextureDiagnosticsEnabled()) {
+        spdlog::info(
+            "TerrainManager: terrain set activated generation={} readyBindings={}/{}",
+            m_terrainGeneration,
+            m_readyInitialBindingCount,
+            m_initialBindingReady.size());
+    }
 }
 
 void TerrainManager::ClearActiveTerrain()
 {
+    ++m_terrainGeneration;
     if (m_textureStreamingManager) {
         m_textureStreamingManager->UnregisterTextureBindings(m_streamingBindingIDs);
     }
@@ -981,6 +1074,12 @@ void TerrainManager::ClearActiveTerrain()
     }
     m_layerTextures.clear();
     m_layerData.clear();
+    m_initialBindingReady.clear();
+    m_readyInitialBindingCount = 0u;
+    m_activationDelayFrames = 0u;
+    m_terrainSetActive = false;
+    m_pendingTerrainSetActivation = false;
+    m_desiredSet = MakeEmptySet();
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
     m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());

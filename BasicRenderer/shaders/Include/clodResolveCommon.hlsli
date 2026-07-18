@@ -1992,10 +1992,22 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     // Use the same source-triangle barycentrics at the previous palette. This
     // captures skeletal deformation instead of treating the current skinned
     // object-space position as though it also existed last frame.
-    const float3 previousPosOS =
+    float3 previousPosOS =
         previousP0 * bary.m_lambda.x +
         previousP1 * bary.m_lambda.y +
         previousP2 * bary.m_lambda.z;
+#if !defined(PSO_CLOD_SKINNING)
+    // Static Reyes patches resolve the current position from the displaced
+    // micro-triangle surface. Reprojecting against the undisplaced source
+    // triangle gives DLSS/TAA a bogus per-frame velocity equal to the static
+    // displacement offset, which shows up as jitter/swimming when camera jitter
+    // is enabled. For non-skinned objects, the same displaced object-space
+    // surface existed last frame; obj.prevModel still accounts for object motion.
+    if (isReyesPatch)
+    {
+        previousPosOS = posOS;
+    }
+#endif
     float3 dpdxOS = float3(interpPosX.y, interpPosY.y, interpPosZ.y);
     float3 dpdyOS = float3(interpPosX.z, interpPosY.z, interpPosZ.z);
     if (useSourceDerivativeBary)
