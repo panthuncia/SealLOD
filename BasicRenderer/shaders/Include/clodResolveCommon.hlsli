@@ -1497,14 +1497,17 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const float2 winSize = float2(perFrame.screenResX, perFrame.screenResY);
     const float2 pixelUv = (float2(pixel) + 0.5f) / winSize;
     const float2 ndc = float2(pixelUv.x * 2.0f - 1.0f, 1.0f - pixelUv.y * 2.0f);
-    float4 viewNear = mul(float4(ndc, 0.0f, 1.0f), cam.projectionInverse);
+    // Match voxelSoftwareRaster's ray construction. With reverse-Z, clip Z=0
+    // can be the infinite far plane; unprojecting it as a point and subtracting
+    // two transformed positions loses substantial precision for large instances.
+    // Clip Z=1 is finite, and transforming the ray as a vector also avoids the
+    // translation/subtraction cancellation entirely.
+    float4 viewNear = mul(float4(ndc, 1.0f, 1.0f), cam.projectionInverse);
     viewNear.xyz /= max(viewNear.w, 1e-6f);
-    float4 worldNear = mul(float4(viewNear.xyz, 1.0f), cam.viewInverse);
-    const float3 worldPoint = worldNear.xyz / max(worldNear.w, 1e-6f);
     const float3 rayOriginWS = cam.positionWorldSpace.xyz;
     const float3 rayOriginObject = mul(float4(rayOriginWS, 1.0f), worldToLocal).xyz;
-    const float3 localPoint = mul(float4(worldPoint, 1.0f), worldToLocal).xyz;
-    const float3 rayDirObject = normalize(localPoint - rayOriginObject);
+    const float3 rayDirWS = mul(float4(viewNear.xyz, 0.0f), cam.viewInverse).xyz;
+    const float3 rayDirObject = normalize(mul(float4(rayDirWS, 0.0f), worldToLocal).xyz);
     const float3 rayOriginCube = (rayOriginObject - cubeMinObject) / voxelWidth;
     const float3 rayDirCube = rayDirObject / voxelWidth;
 

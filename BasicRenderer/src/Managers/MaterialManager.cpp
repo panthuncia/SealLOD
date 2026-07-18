@@ -509,7 +509,7 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 			}
 			{
 				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::TrackTextureAssets");
-				TrackMaterialTextureAssets(material, 1, textureFactory);
+				TrackMaterialTextureAssets(material, 1);
 			}
 			{
 				ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::FirstUse::MarkDirty");
@@ -529,15 +529,16 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 	ZoneValue(material.GetMaterialID());
 	const unsigned int materialSlot = GetMaterialSlot(material.GetMaterialID());
 	material.SetOpenPBRMaterialDataIndex(materialSlot);
-	const bool refreshedTextures = textureFactory != nullptr;
-	if (textureFactory) {
+	const bool textureAssetsChanged = MaterialTextureAssetBindingsChanged(material);
+	const bool refreshedTextures = textureFactory != nullptr || textureAssetsChanged;
+	if (textureAssetsChanged) {
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UntrackTextureBindings");
 			TrackMaterialTextureAssets(material, -1);
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::TrackTextureBindings");
-			TrackMaterialTextureAssets(material, 1, textureFactory);
+			TrackMaterialTextureAssets(material, 1);
 		}
 	}
 
@@ -718,15 +719,25 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 	m_trackedMaterialTextures.erase(trackedIt);
 }
 
-void MaterialManager::TrackMaterialTextureAssets(const Material& material, int delta, TextureFactory* textureFactory) {
+bool MaterialManager::MaterialTextureAssetBindingsChanged(const Material& material) const {
+	std::vector<uint32_t> currentTextureIDs;
+	for (const auto& texture : CollectMaterialTextureAssets(material)) {
+		if (texture && texture->GetStreamingTextureID() != 0u) currentTextureIDs.push_back(texture->GetStreamingTextureID());
+	}
+	const auto trackedIt = m_materialTextureStreamingTextureIDs.find(material.GetMaterialID());
+	return trackedIt == m_materialTextureStreamingTextureIDs.end() || trackedIt->second != currentTextureIDs;
+}
+
+void MaterialManager::TrackMaterialTextureAssets(const Material& material, int delta) {
 	ZoneScopedN("MaterialManager::TrackMaterialTextureAssets");
 	const uint32_t materialID = material.GetMaterialID();
 	ZoneValue(materialID);
 	if (delta > 0) {
-		if (!m_textureStreamingManager || !textureFactory) {
+		if (!m_textureStreamingManager) {
 			return;
 		}
 		std::vector<uint64_t> bindingIDs;
+		std::vector<uint32_t> streamingTextureIDs;
 		std::vector<std::shared_ptr<TextureAsset>> textureAssets;
 		{
 			ZoneScopedN("MaterialManager::TrackMaterialTextureAssets::CollectAssets");
@@ -748,7 +759,6 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 
 			const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
 				texture,
-				*textureFactory,
 				[this, materialID](TextureAsset&) {
 					if (auto materialIt = m_activeMaterialsByID.find(materialID);
 						materialIt != m_activeMaterialsByID.end() && materialIt->second) {
@@ -758,15 +768,18 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 				"material:" + std::to_string(materialID));
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
+				streamingTextureIDs.push_back(streamingTextureID);
 			}
 		}
 		TracyPlot("MaterialManager.RegisteredBindingCountForMaterial", static_cast<int64_t>(bindingIDs.size()));
 		m_materialTextureStreamingBindingIDs[materialID] = std::move(bindingIDs);
+		m_materialTextureStreamingTextureIDs[materialID] = std::move(streamingTextureIDs);
 		return;
 	}
 
 	auto trackedIt = m_materialTextureStreamingBindingIDs.find(materialID);
 	if (trackedIt == m_materialTextureStreamingBindingIDs.end()) {
+		m_materialTextureStreamingTextureIDs.erase(materialID);
 		return;
 	}
 
@@ -776,6 +789,7 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 	}
 
 	m_materialTextureStreamingBindingIDs.erase(trackedIt);
+	m_materialTextureStreamingTextureIDs.erase(materialID);
 }
 
 void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {

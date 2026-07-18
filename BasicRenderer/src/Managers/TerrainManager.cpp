@@ -747,7 +747,6 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 pending.texture);
             const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
                 pending.texture,
-                *textureFactory,
                 [this,
                  layerIndex = pending.layerIndex,
                  slot = pending.slot,

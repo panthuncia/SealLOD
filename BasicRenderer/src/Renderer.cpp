@@ -1326,11 +1326,30 @@ void Renderer::RunRenderResourceSyncStage() {
                         drawInfo->perInstanceTransformViews.size(),
                         drawInfo->normalMatrixViews.size()
                     });
+                    XMMATRIX previousFirstTransform = item.instanceTransforms->transforms.front().matrix;
                     for (size_t rowIndex = 0; rowIndex < rowCount; ++rowIndex) {
                         const auto& instanceTransform = item.instanceTransforms->transforms[rowIndex];
                         auto perObject = object->perObjectCB;
                         perObject.modelMatrix = instanceTransform.matrix;
                         perObject.prevModelMatrix = instanceTransform.matrix;
+                        const auto& instanceTransformView = drawInfo->perInstanceTransformViews[rowIndex];
+                        if (instanceTransformView && perInstanceTransformHandle.data) {
+                            const size_t offset = instanceTransformView->GetOffset();
+                            if (offset <= perInstanceTransformHandle.capacity &&
+                                sizeof(PerInstanceTransformCB) <= perInstanceTransformHandle.capacity - offset) {
+                                // The CPU shadow still contains the last uploaded row
+                                // until writeRow replaces it below.
+                                PerInstanceTransformCB previousRow{};
+                                std::memcpy(
+                                    &previousRow,
+                                    perInstanceTransformHandle.data + offset,
+                                    sizeof(previousRow));
+                                perObject.prevModelMatrix = previousRow.modelMatrix;
+                            }
+                        }
+                        if (rowIndex == 0) {
+                            previousFirstTransform = perObject.prevModelMatrix;
+                        }
                         perObject.modelInverseMatrix = XMMatrixInverse(nullptr, instanceTransform.matrix);
                         const XMVECTOR det = XMMatrixDeterminant(instanceTransform.matrix);
                         perObject.objectFlags = (XMVectorGetX(det) < 0.0f) ? OBJECT_FLAG_REVERSE_WINDING : 0u;
@@ -1338,7 +1357,7 @@ void Renderer::RunRenderResourceSyncStage() {
                     }
                     if (!item.instanceTransforms->transforms.empty()) {
                         object->perObjectCB.modelMatrix = item.instanceTransforms->transforms.front().matrix;
-                        object->perObjectCB.prevModelMatrix = item.instanceTransforms->transforms.front().matrix;
+                        object->perObjectCB.prevModelMatrix = previousFirstTransform;
                         object->perObjectCB.modelInverseMatrix = XMMatrixInverse(nullptr, object->perObjectCB.modelMatrix);
                     }
                 } else {

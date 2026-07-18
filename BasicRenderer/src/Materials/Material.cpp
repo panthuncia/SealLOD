@@ -507,6 +507,25 @@ void Material::EnsureTexturesUploaded(const TextureFactory& factory, TextureUplo
 
 void Material::RefreshTextureBindings() {
     const bool textureStreamingEnabled = IsMaterialTextureStreamingEnabledSetting();
+	// Rebuild the complete descriptor tuple from the current TextureAssets.  Leaving
+	// one field untouched when an asset is removed or temporarily has no published
+	// image retains a descriptor that may already have entered deferred retirement.
+	m_materialData.baseColorTextureIndex = 0u;
+	m_materialData.baseColorSamplerIndex = 0u;
+	m_materialData.normalTextureIndex = 0u;
+	m_materialData.normalSamplerIndex = 0u;
+	m_materialData.metallicTextureIndex = 0u;
+	m_materialData.metallicSamplerIndex = 0u;
+	m_materialData.roughnessTextureIndex = 0u;
+	m_materialData.roughnessSamplerIndex = 0u;
+	m_materialData.emissiveTextureIndex = 0u;
+	m_materialData.emissiveSamplerIndex = 0u;
+	m_materialData.aoMapIndex = 0u;
+	m_materialData.aoSamplerIndex = 0u;
+	m_materialData.heightMapIndex = 0u;
+	m_materialData.heightSamplerIndex = 0u;
+	m_materialData.opacityTextureIndex = 0u;
+	m_materialData.opacitySamplerIndex = 0u;
     m_materialData.baseColorStreamingTextureID = 0u;
     m_materialData.normalStreamingTextureID = 0u;
     m_materialData.metallicStreamingTextureID = 0u;
@@ -515,8 +534,6 @@ void Material::RefreshTextureBindings() {
     m_materialData.aoStreamingTextureID = 0u;
     m_materialData.heightStreamingTextureID = 0u;
     m_materialData.opacityStreamingTextureID = 0u;
-    m_materialData.heightMapIndex = 0u;
-    m_materialData.heightSamplerIndex = 0u;
 
     auto annotateMaterialTexture = [](const std::shared_ptr<TextureAsset>& texture, const char* name) {
         if (!texture || texture->IsUsingFallbackImage() || !texture->HasUsableImage()) {

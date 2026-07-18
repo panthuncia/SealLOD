@@ -80,7 +80,8 @@ private:
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
 	void RefreshMaterialTextureUsage(const Material& material);
 	void UpdateTrackedMaterialTextureRefs(const std::vector<std::shared_ptr<Resource>>& textures, int delta);
-	void TrackMaterialTextureAssets(const Material& material, int delta, TextureFactory* textureFactory = nullptr);
+	void TrackMaterialTextureAssets(const Material& material, int delta);
+	bool MaterialTextureAssetBindingsChanged(const Material& material) const;
 	void FlushDirtyMaterial(Material& material, TextureFactory* textureFactory = nullptr);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
 	void EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots);
@@ -93,6 +94,7 @@ private:
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
+	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
 	bool m_textureStreamingFeedbackSuppressed = false;
 	std::unordered_map <MaterialCompileFlags, unsigned int> m_compileFlagsSlotMapping;
 	std::atomic<unsigned int> m_nextCompileFlagsSlot{ 1 };

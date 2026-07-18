@@ -55,7 +55,6 @@ public:
 
 	uint64_t RegisterTextureBinding(
 		const std::shared_ptr<TextureAsset>& texture,
-		TextureFactory& textureFactory,
 		BindingChangedCallback onBindingChanged,
 		std::string debugLabel = {},
 		bool seedCurrentBinding = true);
@@ -78,7 +77,6 @@ private:
 		uint64_t bindingID = 0;
 		uint32_t streamingTextureID = 0;
 		std::weak_ptr<TextureAsset> texture;
-		BindingChangedCallback onBindingChanged;
 		std::string debugLabel;
 	};
 	struct WorkerCommand {
@@ -86,7 +84,6 @@ private:
 		uint64_t bindingID = 0;
 		uint64_t frameIndex = 0;
 		std::shared_ptr<TextureAsset> texture;
-		BindingChangedCallback callback;
 		std::string debugLabel;
 		bool seedCurrentBinding = true;
 		bool needsUploadAdvance = false;
@@ -102,12 +99,20 @@ private:
 		std::shared_ptr<PixelBuffer> newImage;
 		TextureStreamingGPUInfo metadata{};
 		std::vector<std::shared_ptr<PixelBuffer>> supersededImages;
-		std::vector<std::pair<uint64_t, BindingChangedCallback>> callbacks;
+	};
+	struct MainThreadBindingOwner {
+		uint32_t streamingTextureID = 0;
+		std::weak_ptr<TextureAsset> texture;
+		BindingChangedCallback callback;
+		uint64_t appliedBindingRevision = 0;
+		uint64_t appliedImageResourceID = 0;
 	};
 	void ApplyRegisterCommand(WorkerCommand&& command);
 	void ApplyUnregisterCommand(uint64_t bindingID);
 	void QueueBindingChanged(TextureAsset& texture, std::shared_ptr<PixelBuffer> previousImage);
 	void QueueCommand(WorkerCommand&& command);
+	void MarkLiveTextureBindingsDirty(uint32_t streamingTextureID);
+	std::size_t RefreshDirtyLiveBindings();
 	void PollCompletedReadbackSlots(uint64_t& lastProcessedFence);
 	void EnsureTextureUploadAdvanced(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	void FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture);
@@ -167,7 +172,10 @@ private:
 	std::mutex m_pendingBindingChangeMutex;
 	std::vector<PendingBindingChange> m_pendingBindingChanges;
 	std::mutex m_liveBindingMutex;
-	std::unordered_set<uint64_t> m_liveBindingIDs;
+	std::unordered_map<uint64_t, MainThreadBindingOwner> m_liveBindingsByID;
+	std::unordered_map<uint32_t, std::vector<uint64_t>> m_liveBindingIDsByStreamingTextureID;
+	std::vector<uint64_t> m_dirtyLiveBindingIDs;
+	std::unordered_set<uint64_t> m_dirtyLiveBindingIDSet;
 	mutable std::mutex m_statsMutex;
 	MaterialTextureStreamingStats m_publishedStats;
 	std::chrono::steady_clock::time_point m_lastTextureUpdateStatsLog = {};

@@ -2115,8 +2115,18 @@ TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
 }
 
 bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex, bool forceResidencyChange) {
+	constexpr uint64_t kUpgradeRequestSettleFrames = 8u;
+	constexpr uint32_t kStreamingMipLevelStep = 4u;
 	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
-	const uint32_t clampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
+	const uint32_t rawClampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
+	// Every streamed image is a complete replacement, so changing residency by one
+	// mip at a time is disproportionately expensive.  Quantize upgrades toward the
+	// finer end of a four-mip bucket: this never supplies less detail than feedback
+	// requested and caps a typical 12-mip texture at 11 -> 8 -> 4 -> 0.
+	const uint32_t clampedTopMip =
+		!forceResidencyChange && rawClampedTopMip < m_streamingState.residency.residentTopMip
+			? (rawClampedTopMip / kStreamingMipLevelStep) * kStreamingMipLevelStep
+			: rawClampedTopMip;
 	const bool requestChanged = m_streamingState.requestedTopMip != clampedTopMip;
 	const bool frameChanged = frameIndex != 0u && m_streamingState.lastSeenFrame != frameIndex;
 	const bool requestIsResident = clampedTopMip >= m_streamingState.residency.residentTopMip;
@@ -2146,9 +2156,22 @@ bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIn
 				m_directStorageReloadHandle != nullptr;
 		}
 	}
+	if (requestChanged) {
+		m_streamingRequestChangedFrame = frameIndex;
+	}
+	// Feedback commonly walks through several successively finer mips while an
+	// object approaches the camera.  Rebuilding a complete replacement for every
+	// intermediate request multiplies texture copies.  Keep the current usable
+	// image briefly and let the request settle; mip zero remains immediate.
+	const bool upgradeRequestSettled =
+		frameIndex == 0u ||
+		clampedTopMip == 0u ||
+		m_streamingRequestChangedFrame == 0u ||
+		frameIndex >= m_streamingRequestChangedFrame + kUpgradeRequestSettleFrames;
 	const bool shouldChangeResidency =
 		(forceResidencyChange && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip) ||
-		(!requestIsResident && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip);
+		(!requestIsResident && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip &&
+		 upgradeRequestSettled);
 
 	if (!requestChanged && !shouldChangeResidency && !frameChanged) {
 		return false;
@@ -2279,6 +2302,7 @@ bool TextureAsset::PublishPreparedImage(
 		*replacedPublishedImage = m_publishedImage;
 	}
 	m_publishedImage = image;
+	m_publishedBindingRevision = bindingRevision;
 	return true;
 }
 
@@ -2344,7 +2368,9 @@ bool TextureAsset::DropResidentImageForStreaming() {
 	}
 
 	m_image.reset();
-	m_publishedImage.reset();
+	// Keep the last usable binding published until a replacement reaches the
+	// manager's adoption boundary.  Dropping the working image must not expose a
+	// null descriptor to existing material owners.
 	m_hasUploadedFinalImage = false;
 	m_hasUploadedPlaceholder = false;
 	m_directStorageReloadHandle.reset();
@@ -2406,7 +2432,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::GetSharedPlaceholderTexture");
 			m_image = GetSharedProcessingPlaceholderTexture(factory, m_meta.processing);
-			if (!m_streamingState.enabled) m_publishedImage = m_image;
+			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 		}
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::EnsureProcessingPlaceholder::RecordUploadPath");
@@ -2618,7 +2644,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				ShouldPreserveAlphaCoverage(m_meta, sourceDataToUpload->desc),
 				false,
 				m_meta.processing.maxMipLevels);
-			if (!m_streamingState.enabled) m_publishedImage = m_image;
+			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 		}
 		if (!m_image || !m_image->HasValidBackingResource()) {
 			return false;
@@ -2955,7 +2981,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						ShouldPreserveAlphaCoverage(m_meta, sourceData->desc),
 						false,
 						m_meta.processing.maxMipLevels);
-					if (!m_streamingState.enabled) m_publishedImage = m_image;
+					if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 				}
 				m_hasUploadedFinalImage = true;
 				m_hasUploadedPlaceholder = false;
@@ -3254,7 +3280,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
 							false,
 							m_meta.processing.maxMipLevels);
-						if (!m_streamingState.enabled) m_publishedImage = m_image;
+						if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 						RefreshStreamingStateFromDescription();
 						SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
 						SetPendingTopMip(desiredResidentTopMip);
@@ -3299,7 +3325,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 						ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
 						false,
 						m_meta.processing.maxMipLevels);
-					if (!m_streamingState.enabled) m_publishedImage = m_image;
+					if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 				}
 				RefreshStreamingStateFromDescription();
 				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
@@ -3405,7 +3431,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 				ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc),
 				false,
 				m_meta.processing.maxMipLevels);
-			if (!m_streamingState.enabled) m_publishedImage = m_image;
+			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 		}
 		RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture uploaded through TextureFactory without preprocessing");
 		m_hasUploadedFinalImage = true;

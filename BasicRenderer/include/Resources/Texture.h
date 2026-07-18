@@ -290,9 +290,16 @@ public:
             }, m_initialStorage);
     }
 
-    std::shared_ptr<PixelBuffer> ImagePtr() const {
+    struct PublishedBindingSnapshot {
+        std::shared_ptr<PixelBuffer> image;
+        uint64_t bindingRevision = 0;
+    };
+    PublishedBindingSnapshot GetPublishedBindingSnapshot() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
-        return m_publishedImage;
+        return {m_publishedImage, m_publishedBindingRevision};
+    }
+    std::shared_ptr<PixelBuffer> ImagePtr() const {
+        return GetPublishedBindingSnapshot().image;
     }
     std::shared_ptr<PixelBuffer> PreparedImagePtr() const {
         std::scoped_lock lock(m_uploadAdvanceMutex);
@@ -322,7 +329,7 @@ public:
         std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_streamingState;
     }
-    uint32_t GetStreamingTextureID() const { return m_streamingState.streamingTextureID; }
+    uint32_t GetStreamingTextureID() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.streamingTextureID; }
     bool IsMipStreamingEligible() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.eligible; }
     bool IsMipStreamingEnabled() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_streamingState.enabled; }
     bool IsUsingFallbackImage() const { std::scoped_lock lock(m_uploadAdvanceMutex); return m_hasUploadedPlaceholder && !m_hasUploadedFinalImage; }
@@ -439,12 +446,14 @@ private:
 	mutable std::recursive_mutex m_uploadAdvanceMutex;
     std::shared_ptr<PixelBuffer> m_image;
     std::shared_ptr<PixelBuffer> m_publishedImage;
+    uint64_t m_publishedBindingRevision = 0;
     std::shared_ptr<Sampler> m_sampler;
     TextureFileMeta m_meta;
 	std::shared_ptr<TextureProcessingJobHandle> m_processingHandle;
     std::shared_ptr<TextureReloadJobHandle> m_reloadHandle;
     std::shared_ptr<TextureDirectStorageReloadJobHandle> m_directStorageReloadHandle;
     TextureStreamingState m_streamingState;
+	uint64_t m_streamingRequestChangedFrame = 0;
     bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;
@@ -462,7 +471,10 @@ private:
     void RefreshStreamingStateFromDescription();
 	void SetPreparedImageLocked(std::shared_ptr<PixelBuffer> image) {
 		m_image = std::move(image);
-		if (!m_streamingState.enabled) {
+		// Material texture publication is owned by TextureStreamingManager even when
+		// mip streaming is disabled or the texture is ineligible.  Otherwise an
+		// upload can change the descriptor without producing an owner-dirty event.
+		if (!m_meta.processing.isParticipatingMaterialTexture) {
 			m_publishedImage = m_image;
 		}
 	}
