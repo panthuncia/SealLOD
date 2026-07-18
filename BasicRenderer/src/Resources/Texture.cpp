@@ -2368,9 +2368,14 @@ bool TextureAsset::DropResidentImageForStreaming() {
 	}
 
 	m_image.reset();
-	// Keep the last usable binding published until a replacement reaches the
-	// manager's adoption boundary.  Dropping the working image must not expose a
-	// null descriptor to existing material owners.
+	if (!m_meta.processing.isParticipatingMaterialTexture) {
+		m_publishedImage.reset();
+		m_publishedBindingRevision = 0u;
+	}
+	// Participating material textures keep the last usable binding published until
+	// a replacement reaches the manager's adoption boundary.  Dropping the working
+	// image must not expose a null descriptor to existing generic texture-streaming
+	// material owners.
 	m_hasUploadedFinalImage = false;
 	m_hasUploadedPlaceholder = false;
 	m_directStorageReloadHandle.reset();

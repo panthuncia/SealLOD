@@ -1246,6 +1246,25 @@ struct CLodReyesTelemetry
     uint32_t replayDiceQueueOverflowCount = 0u;
     uint32_t replaySplitMergeCount = 0u;
     uint32_t replayDiceMergeCount = 0u;
+    uint32_t objectReyesAtlasDebugMaterialCount = 0u;
+    uint32_t objectReyesAtlasDebugDisplacementEnabledCount = 0u;
+    uint32_t objectReyesAtlasDebugZeroHeightDescriptorCount = 0u;
+    uint32_t objectReyesAtlasDebugSampleCount = 0u;
+    uint32_t objectReyesAtlasDebugMinMaterialSlot = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxMaterialSlot = 0u;
+    uint32_t objectReyesAtlasDebugMinHeightDescriptor = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxHeightDescriptor = 0u;
+    uint32_t objectReyesAtlasDebugMinSamplerDescriptor = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxSamplerDescriptor = 0u;
+    uint32_t objectReyesAtlasDebugMinHeightValueU16 = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxHeightValueU16 = 0u;
+    uint32_t objectReyesAtlasDebugPatchSampleCount = 0u;
+    uint32_t objectReyesAtlasDebugMinPatchHeightValueU16 = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxPatchHeightValueU16 = 0u;
+    uint32_t objectReyesAtlasDebugMinPatchUvXU16 = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxPatchUvXU16 = 0u;
+    uint32_t objectReyesAtlasDebugMinPatchUvYU16 = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxPatchUvYU16 = 0u;
 };
 
 inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u;

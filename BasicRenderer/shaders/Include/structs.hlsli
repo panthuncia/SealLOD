@@ -1207,11 +1207,11 @@ struct CLodReyesTelemetry
     uint hardwareRasterMicroTriangleCount;
     uint hardwareRasterRequestedMicroTriangleCount;
     uint hardwareRasterPackedWorkEntryCount;
-    uint splitInputCounts[5];
-    uint splitChildOutputCounts[5];
-    uint splitDiceOutputCounts[5];
-    uint splitQueueOverflowCounts[5];
-    uint diceQueueOverflowCounts[5];
+    uint splitInputCounts[4];
+    uint splitChildOutputCounts[4];
+    uint splitDiceOutputCounts[4];
+    uint splitQueueOverflowCounts[4];
+    uint diceQueueOverflowCounts[4];
     uint invalidSplitPatchDomainCount;
     uint invalidDicePatchDomainCount;
     uint splitCollapseFallbackDiceCount;
@@ -1249,6 +1249,25 @@ struct CLodReyesTelemetry
     uint replayDiceQueueOverflowCount;
     uint replaySplitMergeCount;
     uint replayDiceMergeCount;
+    uint objectReyesAtlasDebugMaterialCount;
+    uint objectReyesAtlasDebugDisplacementEnabledCount;
+    uint objectReyesAtlasDebugZeroHeightDescriptorCount;
+    uint objectReyesAtlasDebugSampleCount;
+    uint objectReyesAtlasDebugMinMaterialSlot;
+    uint objectReyesAtlasDebugMaxMaterialSlot;
+    uint objectReyesAtlasDebugMinHeightDescriptor;
+    uint objectReyesAtlasDebugMaxHeightDescriptor;
+    uint objectReyesAtlasDebugMinSamplerDescriptor;
+    uint objectReyesAtlasDebugMaxSamplerDescriptor;
+    uint objectReyesAtlasDebugMinHeightValueU16;
+    uint objectReyesAtlasDebugMaxHeightValueU16;
+    uint objectReyesAtlasDebugPatchSampleCount;
+    uint objectReyesAtlasDebugMinPatchHeightValueU16;
+    uint objectReyesAtlasDebugMaxPatchHeightValueU16;
+    uint objectReyesAtlasDebugMinPatchUvXU16;
+    uint objectReyesAtlasDebugMaxPatchUvXU16;
+    uint objectReyesAtlasDebugMinPatchUvYU16;
+    uint objectReyesAtlasDebugMaxPatchUvYU16;
 };
 
 #endif // __STRUCTS_HLSL__

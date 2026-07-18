@@ -129,6 +129,7 @@ void D3D12DebugCallback(
 namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
+constexpr const char* ObjectReyesAtlasTelemetryDebugSettingName = "objectReyesAtlasTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
 
 bool OutputTypeRequiresRenderGraphRebuild(unsigned int outputType)
@@ -1845,6 +1846,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
+    settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, true);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
     settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
@@ -2703,6 +2705,7 @@ void Renderer::Update(float elapsedSeconds) {
     context.beforeCompileFrame = [this]() {
         ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
+        MaybeRequestObjectReyesAtlasTelemetry();
     };
 
     auto& deviceManager = DeviceManager::GetInstance();
@@ -3129,6 +3132,139 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 visibleClusters);
         });
 
+}
+
+void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
+    if (!currentRenderGraph) {
+        return;
+    }
+
+    if (!SettingsManager::GetInstance().getSettingGetter<bool>(ObjectReyesAtlasTelemetryDebugSettingName)()) {
+        m_loggedObjectReyesAtlasTelemetryEnabled = false;
+        return;
+    }
+
+    if (!m_loggedObjectReyesAtlasTelemetryEnabled) {
+        spdlog::info(
+            "SARP Object Reyes atlas shader telemetry debug enabled (setting '{}').",
+            ObjectReyesAtlasTelemetryDebugSettingName);
+        m_loggedObjectReyesAtlasTelemetryEnabled = true;
+    }
+
+    constexpr uint64_t kCaptureIntervalFrames = 30;
+    if (m_lastObjectReyesAtlasTelemetryRequestFrame != UINT64_MAX &&
+        m_totalFramesRendered - m_lastObjectReyesAtlasTelemetryRequestFrame < kCaptureIntervalFrames) {
+        return;
+    }
+    if (m_objectReyesAtlasTelemetryPhase1ReadbackPending ||
+        m_objectReyesAtlasTelemetryPhase2ReadbackPending) {
+        return;
+    }
+
+    auto* readbackService = currentRenderGraph->GetReadbackService();
+    if (!readbackService) {
+        return;
+    }
+
+    auto& world = RendererECSManager::GetInstance().GetWorld();
+    const auto visibilityTag = world.component<CLodExtensionVisibilityBufferTag>();
+
+    std::shared_ptr<Resource> phase1Resource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodReyesTelemetryBufferPhase1Tag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!phase1Resource) {
+                phase1Resource = component.resource.lock();
+            }
+        });
+
+    std::shared_ptr<Resource> phase2Resource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodReyesTelemetryBufferPhase2Tag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!phase2Resource) {
+                phase2Resource = component.resource.lock();
+            }
+        });
+
+    if (!phase1Resource && !phase2Resource) {
+        return;
+    }
+
+    const uint64_t requestedFrame = m_totalFramesRendered;
+    m_lastObjectReyesAtlasTelemetryRequestFrame = requestedFrame;
+
+    auto logTelemetry = [requestedFrame](const char* phaseLabel, ReadbackCaptureResult&& result) {
+        if (result.data.size() < sizeof(CLodReyesTelemetry)) {
+            spdlog::warn(
+                "SARP Object Reyes atlas shader telemetry: frame={} phase={} payload too small ({} bytes).",
+                requestedFrame,
+                phaseLabel,
+                result.data.size());
+            return;
+        }
+
+        CLodReyesTelemetry telemetry{};
+        std::memcpy(&telemetry, result.data.data(), sizeof(CLodReyesTelemetry));
+        const auto normalizeSentinel = [](uint32_t value) {
+            return value == 0xFFFFFFFFu ? 0u : value;
+        };
+        spdlog::info(
+            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) rasterWork={} patches={} microTris={}",
+            requestedFrame,
+            phaseLabel,
+            telemetry.phaseIndex,
+            telemetry.objectReyesAtlasDebugMaterialCount,
+            telemetry.objectReyesAtlasDebugDisplacementEnabledCount,
+            telemetry.objectReyesAtlasDebugZeroHeightDescriptorCount,
+            telemetry.objectReyesAtlasDebugSampleCount,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinMaterialSlot),
+            telemetry.objectReyesAtlasDebugMaxMaterialSlot,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinHeightDescriptor),
+            telemetry.objectReyesAtlasDebugMaxHeightDescriptor,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinSamplerDescriptor),
+            telemetry.objectReyesAtlasDebugMaxSamplerDescriptor,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinHeightValueU16),
+            telemetry.objectReyesAtlasDebugMaxHeightValueU16,
+            telemetry.objectReyesAtlasDebugPatchSampleCount,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinPatchHeightValueU16),
+            telemetry.objectReyesAtlasDebugMaxPatchHeightValueU16,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinPatchUvXU16),
+            telemetry.objectReyesAtlasDebugMaxPatchUvXU16,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinPatchUvYU16),
+            telemetry.objectReyesAtlasDebugMaxPatchUvYU16,
+            telemetry.rasterWorkEntryCount,
+            telemetry.patchRasterizedPatchCount,
+            telemetry.patchRasterizedMicroTriangleCount);
+    };
+
+    if (phase1Resource) {
+        m_objectReyesAtlasTelemetryPhase1ReadbackPending = true;
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::ReyesPatchRasterPass1",
+            phase1Resource.get(),
+            RangeSpec{},
+            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+                m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
+                logTelemetry("phase1", std::move(result));
+            });
+    }
+
+    if (phase2Resource) {
+        m_objectReyesAtlasTelemetryPhase2ReadbackPending = true;
+        readbackService->RequestReadbackCapture(
+            "CLodOpaque::ReyesPatchRasterPass2",
+            phase2Resource.get(),
+            RangeSpec{},
+            [this, logTelemetry](ReadbackCaptureResult&& result) mutable {
+                m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
+                logTelemetry("phase2", std::move(result));
+            });
+    }
 }
 
 void Renderer::MaybeRequestTerrainRvtTelemetry() {

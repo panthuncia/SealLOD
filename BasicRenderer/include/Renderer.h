@@ -246,6 +246,7 @@ private:
         const std::chrono::steady_clock::time_point& stageEnd);
     void PublishFrameTaskGraphCapture();
     void MaybeRequestCLodVisibilityTelemetry();
+    void MaybeRequestObjectReyesAtlasTelemetry();
     void MaybeRequestTerrainRvtTelemetry();
     void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
 
@@ -339,6 +340,10 @@ private:
     bool m_clodVisibleCounterReadbackPending = false;
     bool m_loggedCLodVisibilityTelemetryEnabled = false;
     bool m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
+    uint64_t m_lastObjectReyesAtlasTelemetryRequestFrame = UINT64_MAX;
+    bool m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
+    bool m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
+    bool m_loggedObjectReyesAtlasTelemetryEnabled = false;
 
     class CoreResourceProvider : public IResourceProvider {
 	public:

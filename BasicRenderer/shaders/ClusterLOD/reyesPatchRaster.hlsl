@@ -698,6 +698,26 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         diceEntry.instanceID, assemblyTransformIndex);
     const CullingCameraInfo camera = cameras[diceEntry.viewID];
     const MaterialInfo materialInfo = materials[perMesh.materialDataIndex];
+    const bool objectReyesAtlasDebugMaterial =
+        materialInfo.objectSurfaceSamplingMode == OBJECT_SURFACE_SAMPLING_ATLAS_BAKED_HEIGHT;
+    if (objectReyesAtlasDebugMaterial)
+    {
+        InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugMaterialCount, 1u);
+        InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinMaterialSlot, perMesh.materialDataIndex);
+        InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxMaterialSlot, perMesh.materialDataIndex);
+        InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinHeightDescriptor, materialInfo.heightMapIndex);
+        InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxHeightDescriptor, materialInfo.heightMapIndex);
+        InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinSamplerDescriptor, materialInfo.heightSamplerIndex);
+        InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxSamplerDescriptor, materialInfo.heightSamplerIndex);
+        if (ReyesGeometricDisplacementEnabled(materialInfo))
+        {
+            InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugDisplacementEnabledCount, 1u);
+        }
+        if (materialInfo.heightMapIndex == 0u || materialInfo.heightSamplerIndex == 0u)
+        {
+            InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugZeroHeightDescriptorCount, 1u);
+        }
+    }
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
     const uint sourceTriangleIndex = diceEntry.sourcePrimitiveAndSplitConfig & 0xFFFFu;
@@ -725,6 +745,22 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
         sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+        if (objectReyesAtlasDebugMaterial && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
+        {
+            Texture2D<float4> objectReyesAtlasDebugHeightTexture =
+                ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+            SamplerState objectReyesAtlasDebugHeightSampler =
+                SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+            const float objectReyesAtlasDebugHeightValue = saturate(ObjectReyesSampleAtlasHeightSmooth(
+                objectReyesAtlasDebugHeightTexture,
+                objectReyesAtlasDebugHeightSampler,
+                saturate(sourceUv0)));
+            const uint objectReyesAtlasDebugHeightValueU16 =
+                (uint)round(objectReyesAtlasDebugHeightValue * 65535.0f);
+            InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugSampleCount, 1u);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinHeightValueU16, objectReyesAtlasDebugHeightValueU16);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxHeightValueU16, objectReyesAtlasDebugHeightValueU16);
+        }
     }
 
     const float3 domain0 = ReyesPatchDomainUVToBarycentrics(diceEntry.domainVertex0UV);
@@ -801,6 +837,54 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             patchPosition0,
             patchPosition1,
             patchPosition2);
+
+        if (objectReyesAtlasDebugMaterial && displacementEnabled && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
+        {
+            Texture2D<float4> objectReyesAtlasDebugPatchHeightTexture =
+                ResourceDescriptorHeap[NonUniformResourceIndex(materialInfo.heightMapIndex)];
+            SamplerState objectReyesAtlasDebugPatchHeightSampler =
+                SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
+            const float2 patchUv0 = saturate(ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary0));
+            const float2 patchUv1 = saturate(ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary1));
+            const float2 patchUv2 = saturate(ReyesInterpolateFloat2Precise(sourceUv0, sourceUv1, sourceUv2, sourceBary2));
+            const float patchHeight0 = saturate(ObjectReyesSampleAtlasHeightSmooth(
+                objectReyesAtlasDebugPatchHeightTexture,
+                objectReyesAtlasDebugPatchHeightSampler,
+                patchUv0));
+            const float patchHeight1 = saturate(ObjectReyesSampleAtlasHeightSmooth(
+                objectReyesAtlasDebugPatchHeightTexture,
+                objectReyesAtlasDebugPatchHeightSampler,
+                patchUv1));
+            const float patchHeight2 = saturate(ObjectReyesSampleAtlasHeightSmooth(
+                objectReyesAtlasDebugPatchHeightTexture,
+                objectReyesAtlasDebugPatchHeightSampler,
+                patchUv2));
+            const uint patchHeight0U16 = (uint)round(patchHeight0 * 65535.0f);
+            const uint patchHeight1U16 = (uint)round(patchHeight1 * 65535.0f);
+            const uint patchHeight2U16 = (uint)round(patchHeight2 * 65535.0f);
+            const uint2 patchUv0U16 = (uint2)round(patchUv0 * 65535.0f);
+            const uint2 patchUv1U16 = (uint2)round(patchUv1 * 65535.0f);
+            const uint2 patchUv2U16 = (uint2)round(patchUv2 * 65535.0f);
+            InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugPatchSampleCount, 3u);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchHeightValueU16, patchHeight0U16);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchHeightValueU16, patchHeight1U16);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchHeightValueU16, patchHeight2U16);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchHeightValueU16, patchHeight0U16);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchHeightValueU16, patchHeight1U16);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchHeightValueU16, patchHeight2U16);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvXU16, patchUv0U16.x);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvXU16, patchUv1U16.x);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvXU16, patchUv2U16.x);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvXU16, patchUv0U16.x);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvXU16, patchUv1U16.x);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvXU16, patchUv2U16.x);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvYU16, patchUv0U16.y);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvYU16, patchUv1U16.y);
+            InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPatchUvYU16, patchUv2U16.y);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvYU16, patchUv0U16.y);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvYU16, patchUv1U16.y);
+            InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPatchUvYU16, patchUv2U16.y);
+        }
 
         const float4 clip0 = mul(float4(patchPosition0, 1.0f), modelViewProjection);
         const float4 clip1 = mul(float4(patchPosition1, 1.0f), modelViewProjection);

@@ -158,6 +158,13 @@ void ReyesQueueResetPass::Update(const UpdateExecutionContext& executionContext)
     CLodReyesTelemetry telemetry{};
     telemetry.phaseIndex = m_phaseIndex;
     telemetry.configuredMaxSplitPassCount = CLodReyesMaxSplitPassCount;
+    telemetry.objectReyesAtlasDebugMinMaterialSlot = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinHeightDescriptor = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinSamplerDescriptor = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinHeightValueU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchHeightValueU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchUvXU16 = 0xFFFFFFFFu;
+    telemetry.objectReyesAtlasDebugMinPatchUvYU16 = 0xFFFFFFFFu;
     BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), rg::runtime::UploadTarget::FromShared(m_telemetryBuffer), 0);
 }
 

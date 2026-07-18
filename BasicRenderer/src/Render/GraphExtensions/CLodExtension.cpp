@@ -1435,7 +1435,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         m_reyesDiceIndirectArgsBufferPhase2->SetName(MakeVariantResourceName(traits, "Reyes Dice Indirect Args Buffer Phase2"));
     }
 
-    m_reyesTelemetryBufferPhase1 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, true);
+    m_reyesTelemetryBufferPhase1 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, false);
     m_reyesTelemetryBufferPhase1->SetName(MakeVariantResourceName(traits, "Reyes Telemetry Buffer Phase1"));
     m_reyesTelemetryBufferPhase1->GetECSEntity()
         .set<Components::Resource>({ m_reyesTelemetryBufferPhase1 })
@@ -1443,7 +1443,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         .add<CLodExtensionTypeTag>(typeEntity);
 
     if (usesPhase2ReyesResources) {
-        m_reyesTelemetryBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, true);
+        m_reyesTelemetryBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, false);
         m_reyesTelemetryBufferPhase2->SetName(MakeVariantResourceName(traits, "Reyes Telemetry Buffer Phase2"));
         m_reyesTelemetryBufferPhase2->GetECSEntity()
             .set<Components::Resource>({ m_reyesTelemetryBufferPhase2 })

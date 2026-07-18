@@ -579,20 +579,55 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			!BytewiseEqual(signature.evalData, evalData) ||
 			!BytewiseEqual(signature.openPBRData, openPBRData);
 	}
+	const auto descForAtlasDebug = material.ToCacheDescription();
+	const bool isObjectReyesAtlasHeightMaterial =
+		descForAtlasDebug.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
+		descForAtlasDebug.heightMap.uvSetName == "__object_reyes_atlas_height" ||
+		materialData.objectSurfaceSamplingMode == static_cast<std::uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
+	if (isObjectReyesAtlasHeightMaterial && (dataChanged || refreshedTextures)) {
+		static std::atomic<std::uint32_t> loggedAtlasPublications{ 0 };
+		const auto logIndex = loggedAtlasPublications.fetch_add(1, std::memory_order_relaxed);
+		if (logIndex < 4096u) {
+			const auto* heightTexture = descForAtlasDebug.heightMap.texture.get();
+			spdlog::info(
+				"SARP Object Reyes atlas material publication: id={} slot={} name='{}' base='{}' atlas='{}' dataChanged={} refreshedTextures={} heightIndex={} heightSampler={} heightUv={} heightScale={} geom=[{},{}] geometric={} fallbackHeight={} usableHeight={} objectSurfaceMode={} flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x}.",
+				material.GetMaterialID(),
+				materialSlot,
+				descForAtlasDebug.name,
+				descForAtlasDebug.baseColor.sourcePath,
+				descForAtlasDebug.heightMap.sourcePath,
+				dataChanged ? 1 : 0,
+				refreshedTextures ? 1 : 0,
+				materialData.heightMapIndex,
+				materialData.heightSamplerIndex,
+				materialData.heightUvSetIndex,
+				materialData.heightMapScale,
+				materialData.geometricDisplacementMin,
+				materialData.geometricDisplacementMax,
+				materialData.geometricDisplacementEnabled,
+				heightTexture ? heightTexture->IsUsingFallbackImage() : false,
+				heightTexture ? heightTexture->HasUsableImage() : false,
+				materialData.objectSurfaceSamplingMode,
+				materialData.materialFlags,
+				static_cast<std::uint64_t>(material.Technique().compileFlags),
+				static_cast<std::uint32_t>(material.Technique().rasterFlags));
+		}
+	}
 	if (dataChanged) {
 		if (materialData.geometricDisplacementEnabled != 0u &&
 			(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
 			static std::atomic<std::uint32_t> loggedGeometricMaterials{ 0 };
 			const auto logIndex = loggedGeometricMaterials.fetch_add(1, std::memory_order_relaxed);
-			const auto desc = material.ToCacheDescription();
+			const auto& desc = descForAtlasDebug;
 			const bool forceAtlasHeightLog =
 				desc.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
 				desc.heightMap.uvSetName == "__object_reyes_atlas_height";
 			if (logIndex < 128u || forceAtlasHeightLog) {
 				const auto* heightTexture = desc.heightMap.texture.get();
 				spdlog::info(
-					"SARP material upload: non-terrain geometric material id={} name='{}' base='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} baseIndex={} baseSampler={} normalIndex={} mrIndex=({}, {}) aoIndex={} heightIndex={} heightSampler={} heightUv={} heightChannel={} heightScale={} geomMin={} geomMax={} fallbackHeight={} usableHeight={} reyesUvDensity=({}, {}) objectSurfaceMode={} objectSurfaceDensity={}",
+					"SARP material upload: non-terrain geometric material id={} slot={} name='{}' base='{}' height='{}' flags=0x{:x} compileFlags=0x{:x} rasterFlags=0x{:x} baseIndex={} baseSampler={} normalIndex={} mrIndex=({}, {}) aoIndex={} heightIndex={} heightSampler={} heightUv={} heightChannel={} heightScale={} geomMin={} geomMax={} fallbackHeight={} usableHeight={} reyesUvDensity=({}, {}) objectSurfaceMode={} objectSurfaceDensity={}",
 					material.GetMaterialID(),
+					materialSlot,
 					desc.name,
 					desc.baseColor.sourcePath,
 					desc.heightMap.sourcePath,

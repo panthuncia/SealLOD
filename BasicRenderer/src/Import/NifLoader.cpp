@@ -683,9 +683,14 @@ std::string MakeStableSourceIdentifier(
     return "sarp-nif://" + uriPath + "#brnifly=" + contentHash;
 }
 
+std::string CacheContentFileKey(std::string_view contentHash)
+{
+    return Hex64(Fnv1a64(contentHash));
+}
+
 std::string MakeAssetFileName(const std::string& normalizedCacheKey, const std::string& pathHash, const std::string& contentHash)
 {
-    return NifStemFromCacheKey(normalizedCacheKey) + "__p" + pathHash + "__c" + contentHash + std::string(kNifMetaCacheSuffix);
+    return NifStemFromCacheKey(normalizedCacheKey) + "__p" + pathHash + "__c" + CacheContentFileKey(contentHash) + std::string(kNifMetaCacheSuffix);
 }
 
 fs::path MakeObjectReyesRecipePayloadCachePath(const fs::path& finalizedCachePath)
@@ -2159,7 +2164,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     const std::string& normalizedCacheKey,
     const std::string& pathHash,
     const std::string& contentHash,
-    bool loadMaterialTextures)
+    bool loadMaterialTextures,
+    std::string* loadedContentHash = nullptr)
 {
     ZoneScopedN("NifLoader::TryLoadPayloadCache");
     const auto cachePathText = cachePath.string();
@@ -2177,8 +2183,12 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     if (!reader.Pod(magic) || !reader.Pod(version) ||
         magic != 0x50524153u || version != kPayloadCacheVersion ||
         !reader.String(fileKey) || !reader.String(filePathHash) || !reader.String(fileContentHash) ||
-        fileKey != normalizedCacheKey || filePathHash != pathHash || fileContentHash != contentHash) {
+        fileKey != normalizedCacheKey || filePathHash != pathHash ||
+        (fileContentHash != contentHash && CacheContentFileKey(fileContentHash) != contentHash)) {
         return std::nullopt;
+    }
+    if (loadedContentHash) {
+        *loadedContentHash = fileContentHash;
     }
 
     std::vector<std::string> textureSearchRoots;
@@ -2400,6 +2410,8 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
     const bool objectReyesRequiresCurrentPayload =
         ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
+    const bool objectReyesRequiresRuntimeAtlas =
+        ObjectReyesConfigHasRuntimeAtlasForNif(objectReyesConfig, normalizedCacheKey);
 
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     std::vector<fs::path> candidates;
@@ -2418,43 +2430,50 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
 
     for (const auto& cachePath : candidates) {
         ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
-        const std::string fileContentHash = ExtractContentHashFromFileName(cachePath);
-        if (!CachedContentHashMatchesNifTreeWindSettings(fileContentHash, settings)) {
-            continue;
-        }
-        if (objectReyesRequiresCurrentPayload &&
-            !CachedContentHashMatchesObjectReyesConfig(fileContentHash, objectReyesConfig)) {
-            spdlog::debug(
-                "nif_meta_cache=skip_candidate game='{}' path='{}' content_hash='{}' reason='object Reyes config hash {} may affect payload'",
-                normalizedCacheKey,
-                cachePath.string(),
-                fileContentHash,
-                objectReyesConfig.contentHash);
-            continue;
-        }
+        const std::string fileContentKey = ExtractContentHashFromFileName(cachePath);
 
-        if (auto payload = TryLoadPayloadCache(cachePath, normalizedCacheKey, pathHash, fileContentHash, settings.loadMaterialTextures)) {
+        std::string loadedContentHash;
+        if (auto payload = TryLoadPayloadCache(
+                cachePath,
+                normalizedCacheKey,
+                pathHash,
+                fileContentKey,
+                settings.loadMaterialTextures,
+                std::addressof(loadedContentHash))) {
+            if (!CachedContentHashMatchesNifTreeWindSettings(loadedContentHash, settings)) {
+                continue;
+            }
             if (objectReyesRequiresCurrentPayload &&
+                !CachedContentHashMatchesObjectReyesConfig(loadedContentHash, objectReyesConfig)) {
+                spdlog::debug(
+                    "nif_meta_cache=skip_candidate game='{}' path='{}' content_hash='{}' reason='object Reyes config hash {} may affect payload'",
+                    normalizedCacheKey,
+                    cachePath.string(),
+                    loadedContentHash,
+                    objectReyesConfig.contentHash);
+                continue;
+            }
+            if (objectReyesRequiresRuntimeAtlas &&
                 (!payload->objectReyesAtlasCacheIdentity || !payload->objectReyesAtlasCacheIdentity->IsComplete())) {
                 spdlog::info(
                     "nif_meta_cache=skip_candidate game='{}' path='{}' content_hash='{}' reason='object Reyes payload lacks finalized atlas identity'",
                     normalizedCacheKey,
                     cachePath.string(),
-                    fileContentHash);
+                    loadedContentHash);
                 continue;
             }
             spdlog::debug(
                 "nif_meta_cache=hit game='{}' path='{}' content_hash='{}'",
                 normalizedCacheKey,
                 cachePath.string(),
-                fileContentHash);
+                loadedContentHash);
             if (stats) {
                 stats->cacheProbeMs += ElapsedMs(probeBegin, std::chrono::steady_clock::now());
                 stats->cacheHit = true;
                 stats->payloadCacheHit = true;
                 stats->cachePath = cachePath;
-                stats->contentHash = fileContentHash;
-                stats->sourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, fileContentHash);
+                stats->contentHash = loadedContentHash;
+                stats->sourceIdentifier = MakeStableSourceIdentifier(normalizedCacheKey, loadedContentHash);
             }
             return payload;
         }
@@ -2520,6 +2539,8 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
     const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
     const bool objectReyesRequiresCurrentPayload =
         ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
+    const bool objectReyesRequiresRuntimeAtlas =
+        ObjectReyesConfigHasRuntimeAtlasForNif(objectReyesConfig, normalizedCacheKey);
     const std::vector<std::string> textureSearchRoots =
         MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
     const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +
@@ -2551,7 +2572,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
     }
     if (payload) {
 		payload->cacheTextureSearchRoots = textureSearchRoots;
-        if (ObjectReyesConfigHasRuntimeAtlasForNif(objectReyesConfig, normalizedCacheKey)) {
+        if (objectReyesRequiresRuntimeAtlas) {
 			payload->objectReyesAtlasCacheIdentity = br::import::ObjectReyesAtlasCacheIdentity{
 				.schemaVersion = br::import::kObjectReyesAtlasCacheSchemaVersion,
 				.canonicalNifPath = normalizedCacheKey,
@@ -2568,7 +2589,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
             EnsurePayloadMaterialHashes(*payload);
         }
         const bool preBakeRequiresRecipePayload =
-            objectReyesRequiresCurrentPayload &&
+            objectReyesRequiresRuntimeAtlas &&
             settings.prepareObjectReyesAtlasRecipes;
         const fs::path finalizedCachePath = CLodCache::GetCacheFilePathForSource(
             s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, effectiveContentHash)),
@@ -2579,6 +2600,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         bool wrote = false;
         bool reusedExisting = false;
         bool preserveExistingFinalizedPayload = false;
+        const bool payloadCacheable = !payload->meshes.empty() && !payload->parts.empty();
         if (!preBakeRequiresRecipePayload) {
             auto existingPayload = TryLoadPayloadCache(finalizedCachePath, normalizedCacheKey, pathHash, effectiveContentHash, settings.loadMaterialTextures);
             if (existingPayload) {
@@ -2592,7 +2614,14 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
                 effectiveContentHash);
             }
         }
-        if (!reusedExisting && !preserveExistingFinalizedPayload) {
+        if (!payloadCacheable) {
+            spdlog::debug(
+                "nif_meta_cache=skip_write game='{}' path='{}' content_hash='{}' reason='empty renderable payload'",
+                normalizedCacheKey,
+                cachePath.string(),
+                effectiveContentHash);
+        }
+        else if (!reusedExisting && !preserveExistingFinalizedPayload) {
             wrote = WritePayloadCache(
                 cachePath,
                 normalizedCacheKey,
