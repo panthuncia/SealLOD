@@ -2778,6 +2778,36 @@ bool FinalizeObjectReyesPayloadCache(
 		if (failureReason) *failureReason = "staging payload could not be reopened";
 		return false;
 	}
+	std::size_t atlasRecipeMeshCount = 0u;
+	for (const auto& mesh : payload->meshes) {
+		if (!mesh) {
+			continue;
+		}
+		const auto& recipe = mesh->GetObjectReyesAtlasBakeData();
+		if (!recipe) {
+			continue;
+		}
+		++atlasRecipeMeshCount;
+		if (recipe->atlasUvSetIndex >= recipe->uvSets.size()) {
+			if (failureReason) {
+				*failureReason = "staging payload atlas recipe references a missing UV set";
+			}
+			return false;
+		}
+		const ClusterLODPrebuiltData prebuilt = mesh->GetClusterLODPrebuiltData();
+		const std::string uvIdentityMarker =
+			"#object_reyes_atlas_uv=" + std::to_string(recipe->atlasUvSetIndex);
+		if (prebuilt.cacheSource.sourceIdentifier.find(uvIdentityMarker) == std::string::npos) {
+			if (failureReason) {
+				*failureReason = "staging payload CLod identity does not include its atlas UV set";
+			}
+			return false;
+		}
+	}
+	if (atlasRecipeMeshCount == 0u) {
+		if (failureReason) *failureReason = "staging payload contains no Object Reyes atlas recipe meshes";
+		return false;
+	}
 	const ObjectReyesConfig config = LoadObjectReyesConfig();
 	for (const auto& mesh : payload->meshes) {
 		if (mesh) mesh->SetObjectReyesAtlasBakeData(nullptr);
@@ -2799,6 +2829,7 @@ bool FinalizeObjectReyesPayloadCache(
 		if (failureReason) *failureReason = "final payload write failed";
 		return false;
 	}
+	RegisterCachedAsset(pathHash, finalizedCachePath);
 	spdlog::info(
 		"nif_meta_cache=finalized game='{}' path='{}' content_hash='{}' clod_settings=0x{:016x}",
 		normalizedCacheKey,
