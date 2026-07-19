@@ -464,8 +464,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
 	//mountainScene->GetRoot().set<Components::Position>({ 0.0, -2.0, 0.0 });
 
-    auto tigerScene = LoadModel("models/tiger.glb");
-    tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
+    //auto tigerScene = LoadModel("models/tiger.glb");
+    //tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
 
 	//auto shiba = LoadModel("models/shiba.glb");
 
@@ -478,7 +478,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto robot = LoadModel("models/robot.usdz");
 
-	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
+	auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
 	//auto zorah = LoadModel("models/zorah_materials/zorah.usdc");
 
 	//auto island = LoadModel("models/island/usd/elements/isMountainB/instance.usda");
@@ -602,7 +602,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(island->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(zorah->Clone());
+	renderer.GetCurrentScene()->AppendScene(zorah->Clone());
 
     //mountainScene = LoadModel("models/terrain.glb");
  //   mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
@@ -611,7 +611,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
     
-	renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
+	//renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(robot->Clone());
 
@@ -629,8 +629,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 1.f, 2.f);
-        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 10.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(68.f, 5.f, 0.f);
+        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 50.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;

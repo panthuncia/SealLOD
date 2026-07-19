@@ -1085,11 +1085,15 @@ void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, flo
         m_managerInterface.GetIndirectCommandBufferManager()->UnregisterBuffers(m_primaryCamera.id());
     }
 
-	CameraInfo info;
+	const XMMATRIX view = XMMatrixLookAtRH(XMLoadFloat3(&pos), XMLoadFloat3(&lookAt), XMLoadFloat3(&up));
+	const XMMATRIX cameraModel = XMMatrixInverse(nullptr, view);
+	const XMVECTOR cameraRotation = XMQuaternionNormalize(XMQuaternionRotationMatrix(cameraModel));
+
+	CameraInfo info{};
 	auto planes = GetFrustumPlanesPerspective(aspect, fov, zNear, zFar);
 	DisableFarClipPlane(planes);
-	//info.view = XMMatrixTranslation(pos.x, pos.y, pos.z);
-	//info.viewInverse = XMMatrixIdentity();
+	info.view = view;
+	info.viewInverse = cameraModel;
 	info.unjitteredProjection = MakeInfiniteReverseZPerspectiveFovRH(fov, aspect, zNear);
 	info.jitteredProjection = info.unjitteredProjection;
 	info.viewProjection = DirectX::XMMatrixMultiply(info.view, info.unjitteredProjection);
@@ -1097,7 +1101,7 @@ void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, flo
 	info.prevView = info.view;
 	info.prevJitteredProjection = info.jitteredProjection;
 	info.prevUnjitteredProjection = info.unjitteredProjection;
-	info.positionWorldSpace = { 0.0f, 0.0f, 0.0f, 1.0f };
+	info.positionWorldSpace = { pos.x, pos.y, pos.z, 1.0f };
 	info.clippingPlanes[0] = planes[0];
 	info.clippingPlanes[1] = planes[1];
 	info.clippingPlanes[2] = planes[2];
@@ -1119,9 +1123,9 @@ void Scene::SetCamera(XMFLOAT3 pos, XMFLOAT3 lookAt, XMFLOAT3 up, float fov, flo
 	auto entity = world.entity()
 		.set<Components::Camera>(camera)
 		.set<Components::Position>({ pos.x, pos.y, pos.z })
-		.set<Components::Rotation>({ 0, 0, 0 })
+		.set<Components::Rotation>(cameraRotation)
 		.set<Components::Scale>({ 1, 1, 1 })
-		.set<Components::Matrix>(DirectX::XMMatrixIdentity())
+		.set<Components::Matrix>(cameraModel)
 		.set<Components::Name>("Primary Camera")
 		.child_of(ECSSceneRoot);
 	AssignStableSceneID(entity);
