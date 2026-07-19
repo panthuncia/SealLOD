@@ -50,7 +50,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "34";
+constexpr std::string_view kObjectReyesConfigVersion = "35";
 constexpr std::string_view kNifTreeWindCacheVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
@@ -2754,13 +2754,17 @@ bool FinalizeObjectReyesPayloadCache(
 	std::string cacheKey,
 	std::string contentHash,
 	std::uint64_t clodAssetSettingsHash,
-	std::string* failureReason)
+	std::string* failureReason,
+	std::string stagingContentHash)
 {
 	const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
 	const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
 	if (normalizedCacheKey.empty() || contentHash.empty()) {
 		if (failureReason) *failureReason = "incomplete finalization identity";
 		return false;
+	}
+	if (stagingContentHash.empty()) {
+		stagingContentHash = contentHash;
 	}
 	const fs::path finalizedCachePath = CLodCache::GetCacheFilePathForSource(
 		s2ws(MakeAssetFileName(normalizedCacheKey, pathHash, contentHash)),
@@ -2769,7 +2773,7 @@ bool FinalizeObjectReyesPayloadCache(
 	if (stagingCachePath.empty()) {
 		stagingCachePath = finalizedCachePath;
 	}
-	auto payload = TryLoadPayloadCache(stagingCachePath, normalizedCacheKey, pathHash, contentHash, false);
+	auto payload = TryLoadPayloadCache(stagingCachePath, normalizedCacheKey, pathHash, stagingContentHash, false);
 	if (!payload) {
 		if (failureReason) *failureReason = "staging payload could not be reopened";
 		return false;

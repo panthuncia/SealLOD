@@ -717,6 +717,14 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         {
             InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugZeroHeightDescriptorCount, 1u);
         }
+        InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinPageUvSetCount, hdr.uvSetCount);
+        InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxPageUvSetCount, hdr.uvSetCount);
+        InterlockedMin(telemetryBuffer[0].objectReyesAtlasDebugMinHeightUvSetIndex, materialInfo.heightUvSetIndex);
+        InterlockedMax(telemetryBuffer[0].objectReyesAtlasDebugMaxHeightUvSetIndex, materialInfo.heightUvSetIndex);
+        if (materialInfo.heightUvSetIndex >= hdr.uvSetCount)
+        {
+            InterlockedAdd(telemetryBuffer[0].objectReyesAtlasDebugInvalidHeightUvSetCount, 1u);
+        }
     }
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(pageSlabDescriptorIndex)];
@@ -730,7 +738,9 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
     const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
     const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
-    const bool displacementEnabled = ReyesGeometricDisplacementEnabled(materialInfo);
+    const bool displacementEnabled =
+        ReyesGeometricDisplacementEnabled(materialInfo) &&
+        materialInfo.heightUvSetIndex < hdr.uvSetCount;
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);
@@ -742,9 +752,12 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         sourceNormal0 = DecodeSkinnedNormal(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
         sourceNormal1 = DecodeSkinnedNormal(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
         sourceNormal2 = DecodeSkinnedNormal(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot, clodMetadata, assemblyTransformIndex);
-        sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
-        sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
-        sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+        if (materialInfo.heightUvSetIndex < hdr.uvSetCount)
+        {
+            sourceUv0 = DecodeCompressedUV(sourceTriangle.x, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+            sourceUv1 = DecodeCompressedUV(sourceTriangle.y, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+            sourceUv2 = DecodeCompressedUV(sourceTriangle.z, materialInfo.heightUvSetIndex, hdr, meshletDesc, localMeshletIndex, pageSlabByteOffset, pageSlabDescriptorIndex);
+        }
         if (objectReyesAtlasDebugMaterial && materialInfo.heightMapIndex != 0u && materialInfo.heightSamplerIndex != 0u)
         {
             Texture2D<float4> objectReyesAtlasDebugHeightTexture =

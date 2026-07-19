@@ -5819,7 +5819,9 @@ void WG_ReyesRaster(
     const float3 sourcePosition0 = DecodeSkinnedPosition(sourceTriangle.x, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition1 = DecodeSkinnedPosition(sourceTriangle.y, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
     const float3 sourcePosition2 = DecodeSkinnedPosition(sourceTriangle.z, hdr, meshletDesc, pageSlabByteOffset, pageSlabDescriptorIndex, perMesh.vertexFlags, meshInstance.skinningInstanceSlot);
-    const bool displacementEnabled = ReyesGeometricDisplacementEnabled(materialInfo);
+    const bool displacementEnabled =
+        ReyesGeometricDisplacementEnabled(materialInfo) &&
+        materialInfo.heightUvSetIndex < hdr.uvSetCount;
     float3 sourceNormal0 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal1 = float3(0.0f, 0.0f, 1.0f);
     float3 sourceNormal2 = float3(0.0f, 0.0f, 1.0f);

@@ -1268,6 +1268,11 @@ struct CLodReyesTelemetry
     uint objectReyesAtlasDebugMaxPatchUvXU16;
     uint objectReyesAtlasDebugMinPatchUvYU16;
     uint objectReyesAtlasDebugMaxPatchUvYU16;
+    uint objectReyesAtlasDebugInvalidHeightUvSetCount;
+    uint objectReyesAtlasDebugMinPageUvSetCount;
+    uint objectReyesAtlasDebugMaxPageUvSetCount;
+    uint objectReyesAtlasDebugMinHeightUvSetIndex;
+    uint objectReyesAtlasDebugMaxHeightUvSetIndex;
 };
 
 #endif // __STRUCTS_HLSL__

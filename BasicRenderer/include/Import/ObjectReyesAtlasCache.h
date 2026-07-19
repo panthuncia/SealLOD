@@ -7,7 +7,7 @@
 
 namespace br::import {
 
-inline constexpr std::uint32_t kObjectReyesAtlasCacheSchemaVersion = 6u;
+inline constexpr std::uint32_t kObjectReyesAtlasCacheSchemaVersion = 7u;
 
 struct ObjectReyesAtlasCacheIdentity
 {

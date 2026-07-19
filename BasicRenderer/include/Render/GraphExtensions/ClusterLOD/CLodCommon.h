@@ -1265,6 +1265,11 @@ struct CLodReyesTelemetry
     uint32_t objectReyesAtlasDebugMaxPatchUvXU16 = 0u;
     uint32_t objectReyesAtlasDebugMinPatchUvYU16 = 0xFFFFFFFFu;
     uint32_t objectReyesAtlasDebugMaxPatchUvYU16 = 0u;
+    uint32_t objectReyesAtlasDebugInvalidHeightUvSetCount = 0u;
+    uint32_t objectReyesAtlasDebugMinPageUvSetCount = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxPageUvSetCount = 0u;
+    uint32_t objectReyesAtlasDebugMinHeightUvSetIndex = 0xFFFFFFFFu;
+    uint32_t objectReyesAtlasDebugMaxHeightUvSetIndex = 0u;
 };
 
 inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u;

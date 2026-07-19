@@ -3151,7 +3151,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         m_loggedObjectReyesAtlasTelemetryEnabled = true;
     }
 
-    constexpr uint64_t kCaptureIntervalFrames = 30;
+    constexpr uint64_t kCaptureIntervalFrames = 300;
     if (m_lastObjectReyesAtlasTelemetryRequestFrame != UINT64_MAX &&
         m_totalFramesRendered - m_lastObjectReyesAtlasTelemetryRequestFrame < kCaptureIntervalFrames) {
         return;
@@ -3214,7 +3214,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             return value == 0xFFFFFFFFu ? 0u : value;
         };
         spdlog::info(
-            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) rasterWork={} patches={} microTris={}",
+            "SARP Object Reyes atlas shader telemetry: frame={} phase={} phaseIndex={} atlasMaterials={} displacementEnabled={} zeroDescriptor={} sourceSamples={} materialSlot=[{},{}] heightDescriptor=[{},{}] sampler=[{},{}] sourceHeightU16=[{},{}] patchSamples={} patchHeightU16=[{},{}] patchUvU16=([{},{}],[{},{}]) pageUvSets=[{},{}] heightUvSet=[{},{}] invalidHeightUvSet={} rasterWork={} patches={} microTris={}",
             requestedFrame,
             phaseLabel,
             telemetry.phaseIndex,
@@ -3237,6 +3237,11 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
             telemetry.objectReyesAtlasDebugMaxPatchUvXU16,
             normalizeSentinel(telemetry.objectReyesAtlasDebugMinPatchUvYU16),
             telemetry.objectReyesAtlasDebugMaxPatchUvYU16,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinPageUvSetCount),
+            telemetry.objectReyesAtlasDebugMaxPageUvSetCount,
+            normalizeSentinel(telemetry.objectReyesAtlasDebugMinHeightUvSetIndex),
+            telemetry.objectReyesAtlasDebugMaxHeightUvSetIndex,
+            telemetry.objectReyesAtlasDebugInvalidHeightUvSetCount,
             telemetry.rasterWorkEntryCount,
             telemetry.patchRasterizedPatchCount,
             telemetry.patchRasterizedMicroTriangleCount);

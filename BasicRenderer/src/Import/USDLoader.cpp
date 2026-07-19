@@ -3504,7 +3504,7 @@ namespace USDLoader {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
 			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
-			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=14";
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=15";
 			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
 			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);

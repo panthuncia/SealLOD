@@ -88,7 +88,8 @@ bool FinalizeObjectReyesPayloadCache(
 	std::string cacheKey,
 	std::string contentHash,
 	std::uint64_t clodAssetSettingsHash,
-	std::string* failureReason = nullptr);
+	std::string* failureReason = nullptr,
+	std::string stagingContentHash = {});
 std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string cacheKey, const USDLoader::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::shared_ptr<Scene> LoadModel(std::string filePath, const USDLoader::ImportSettings& settings = {});
 
