@@ -582,6 +582,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
         if (leaf.isVoxel)
         {
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
             if (assemblyPartVoxelLeaf)
             {
                 WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_VOXEL_RASTER_WORK_RECORDS, 1);
@@ -644,6 +645,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                     remainingClusters -= chunkCount;
                 }
             }
+#endif
             return;
         }
 

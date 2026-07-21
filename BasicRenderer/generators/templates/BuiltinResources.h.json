@@ -125,6 +125,7 @@
       "Emissive": {}
     },
     "PostProcessing": {
+      "BloomTexture": {},
       "UpscaledHDR": {},
       "ScreenSpaceReflections": {},
       "LuminanceHistogram": {},

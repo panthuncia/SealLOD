@@ -26,6 +26,8 @@
 #include "Renderer.h"
 #include "Utilities/Utilities.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/DeviceManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Materials/Material.h"
 #include "Menu/Menu.h"
 #include "Materials/MaterialFlags.h"
@@ -34,6 +36,8 @@
 #include "Managers/Singletons/DeletionManager.h"
 #include "Import/ModelLoader.h"
 #include "spdlogStreambuf.h"
+#include <rhi_interop_dx12.h>
+#include <d3d12sdklayers.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "ThirdParty/stb/stb_image.h"
@@ -49,6 +53,63 @@ extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 614;}
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D\\"; }
 
 #pragma comment(lib, "WinPixEventRuntime.lib")
+
+namespace {
+    void ResetD3D12SmokeValidationMessages() {
+        auto device = DeviceManager::GetInstance().GetDevice();
+        ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
+        Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
+        if (nativeDevice && SUCCEEDED(nativeDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+            infoQueue->ClearStoredMessages();
+        }
+    }
+
+    bool D3D12SmokeValidationFailed() {
+        auto device = DeviceManager::GetInstance().GetDevice();
+        ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
+        Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
+        if (!nativeDevice || FAILED(nativeDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+            spdlog::error("Pipeline replacement smoke test could not query the D3D12 InfoQueue.");
+            return true;
+        }
+
+        bool failed = false;
+        UINT64 matchedCount = 0;
+        UINT64 loggedCount = 0;
+        const UINT64 messageCount = infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+        for (UINT64 index = 0; index < messageCount; ++index) {
+            SIZE_T messageBytes = 0;
+            if (FAILED(infoQueue->GetMessage(index, nullptr, &messageBytes)) || messageBytes == 0) continue;
+            std::vector<std::byte> storage(messageBytes);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if (FAILED(infoQueue->GetMessage(index, message, &messageBytes))) continue;
+
+            const bool isClearMismatch =
+                message->ID == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE;
+            const bool isError =
+                message->Severity == D3D12_MESSAGE_SEVERITY_ERROR
+                || message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
+            if (!isClearMismatch && !isError) continue;
+
+            failed = true;
+            ++matchedCount;
+            if (loggedCount < 16) {
+                ++loggedCount;
+                spdlog::error(
+                    "Pipeline replacement smoke D3D12 validation message: severity={} id={} {}",
+                    static_cast<uint32_t>(message->Severity),
+                    static_cast<uint32_t>(message->ID),
+                    message->pDescription ? message->pDescription : "<no description>");
+            }
+        }
+        if (matchedCount > loggedCount) {
+            spdlog::error(
+                "Pipeline replacement smoke suppressed {} additional matching D3D12 messages.",
+                matchedCount - loggedCount);
+        }
+        return failed;
+    }
+}
 
 namespace crashlog {
 
@@ -409,6 +470,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     spdlog::set_default_logger(file_logger);
     file_logger->flush_on(spdlog::level::info);
 
+    const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
+    const bool pipelineReplacementSmokeTest =
+        commandLine.find("--pipeline-replacement-smoke-test") != std::string_view::npos;
+    const bool clodGraphRebuildSmokeTest =
+        commandLine.find("--clod-graph-rebuild-smoke-test") != std::string_view::npos;
+    const bool graphRebuildSmokeTest = pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest;
+
     ConfigureMainRenderThreadScheduling();
 
     crashlog::InstallTerminateHandler();
@@ -442,8 +510,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Initialize Nvidia Streamline
 
-    renderer.Initialize(hwnd, x_res, y_res);
+    renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
+    if (graphRebuildSmokeTest) {
+        SettingsManager::GetInstance().getSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
+        ResetD3D12SmokeValidationMessages();
+        if (pipelineReplacementSmokeTest) {
+            spdlog::info("Pipeline replacement smoke test armed: bloom will toggle off/on/off at frames 120/240/360.");
+        }
+        else {
+            spdlog::info("CLod graph-rebuild smoke test armed: occlusion culling will toggle off/on/off at frames 120/240/360.");
+        }
+    }
     renderer.SetInputMode(InputMode::wasd);
 
     {
@@ -478,8 +556,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto robot = LoadModel("models/robot.usdz");
 
-	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
-	auto zorah = LoadModel("models/bunny.usdc");
+	auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
+	//auto zorah = LoadModel("models/bunny.usdc");
 
 	//auto zorah = LoadModel("models/zorah_materials/zorah.usdc");
 
@@ -631,8 +709,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(68.f, 5.f, 0.f);
-        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 50.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(2.f, 5.f, 0.f);
+        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 0.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;
@@ -673,6 +751,40 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             lastUpdateTime = currentTime;
 
             frameIndex += 1;
+            if (graphRebuildSmokeTest && frameIndex == 120) {
+                if (pipelineReplacementSmokeTest) {
+                    spdlog::info("Pipeline replacement smoke test: disabling bloom at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                }
+                else {
+                    spdlog::info("CLod graph-rebuild smoke test: disabling occlusion culling at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
+                }
+            }
+            if (graphRebuildSmokeTest && frameIndex == 240) {
+                if (pipelineReplacementSmokeTest) {
+                    spdlog::info("Pipeline replacement smoke test: enabling bloom at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(true);
+                }
+                else {
+                    spdlog::info("CLod graph-rebuild smoke test: enabling occlusion culling at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(true);
+                }
+            }
+            if (graphRebuildSmokeTest && frameIndex == 360) {
+                if (pipelineReplacementSmokeTest) {
+                    spdlog::info("Pipeline replacement smoke test: disabling bloom again at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                }
+                else {
+                    spdlog::info("CLod graph-rebuild smoke test: disabling occlusion culling again at frame {}.", frameIndex);
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
+                }
+            }
+            if (graphRebuildSmokeTest && frameIndex == 480) {
+                spdlog::info("Graph-rebuild smoke test completed after {} frames; closing.", frameIndex);
+                PostMessage(hwnd, WM_CLOSE, 0, 0);
+            }
             renderer.Update(elapsedSeconds.count());
             renderer.PostUpdate();
             if (frameIndex % 100 == 0) {
@@ -682,9 +794,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
 
+    const bool smokeValidationFailed = graphRebuildSmokeTest && D3D12SmokeValidationFailed();
     renderer.Cleanup();
 
-    return 0;
+    return smokeValidationFailed ? 1 : 0;
 }
 
 // Window callback procedure

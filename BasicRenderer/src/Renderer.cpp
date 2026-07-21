@@ -434,7 +434,29 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 
 } // namespace
 
-void Renderer::Initialize(HWND hwnd, UINT x_res, UINT y_res) {
+void Renderer::Initialize(
+    HWND hwnd,
+    UINT x_res,
+    UINT y_res,
+    br::pipeline::PipelineRecipe recipe) {
+    const auto validation = recipe.Validate();
+    if (!validation.valid) {
+        std::string message = "Invalid renderer pipeline recipe:";
+        for (const auto& error : validation.errors) {
+            message += "\n - " + error;
+        }
+        throw std::invalid_argument(message);
+    }
+    m_pipelineRecipe = std::move(recipe);
+    m_pipelineExtensionsDirty = true;
+    m_gtaoEnabled = m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>();
+    m_clusteredLighting = m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>();
+    m_bloom = m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>();
+#if defined(_DEBUG)
+    if (!m_pipelineReplacementDebugBreakHandler) {
+        m_pipelineReplacementDebugBreakHandler = [] { __debugbreak(); };
+    }
+#endif
     BufferBase::ScopedBackingMutation initializationBackingMutation;
     m_hwnd = hwnd;
 
@@ -1568,11 +1590,17 @@ void Renderer::CreateDefaultEnvironmentResources() {
     auto reflectionResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("reflectionCubemapResolution")();
     auto skyboxResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("skyboxResolution")();
 
-    m_defaultEnvironmentCubemap = makeFallbackCubemap(skyboxResolution, false, "Fallback Environment Cubemap");
-    m_defaultEnvironmentPrefilteredCubemap = makeFallbackCubemap(reflectionResolution, true, "Fallback Prefiltered Environment Cubemap");
-
-    rg::memory::SetResourceUsageHint(*m_defaultEnvironmentCubemap, "Fallback environment resources");
-    rg::memory::SetResourceUsageHint(*m_defaultEnvironmentPrefilteredCubemap, "Fallback environment resources");
+    if (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap) && !m_defaultEnvironmentCubemap) {
+        m_defaultEnvironmentCubemap = makeFallbackCubemap(skyboxResolution, false, "Fallback Environment Cubemap");
+        rg::memory::SetResourceUsageHint(*m_defaultEnvironmentCubemap, "Fallback environment resources");
+    }
+    if (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentPrefilteredCubemap) && !m_defaultEnvironmentPrefilteredCubemap) {
+        m_defaultEnvironmentPrefilteredCubemap = makeFallbackCubemap(
+            reflectionResolution,
+            true,
+            "Fallback Prefiltered Environment Cubemap");
+        rg::memory::SetResourceUsageHint(*m_defaultEnvironmentPrefilteredCubemap, "Fallback environment resources");
+    }
 }
 
 bool Renderer::IsSceneReadyForFrame(bool logWarnings) {
@@ -1694,7 +1722,9 @@ void Renderer::SetSettings() {
 	}
 	settingsManager.registerSetting<int32_t>(ProceduralWindForcedSkeletonLodSettingName, forcedSkeletonLod);
 	settingsManager.registerSetting<bool>("enableWireframe", false);
-	settingsManager.registerSetting<bool>("enableShadows", false);
+    settingsManager.registerSetting<bool>(
+        "enableShadows",
+        m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
 	settingsManager.registerSetting<uint16_t>("skyboxResolution", 2048);
     settingsManager.registerSetting<uint16_t>("reflectionCubemapResolution", 512);
 	settingsManager.registerSetting<bool>("enableImageBasedLighting", true);
@@ -1713,8 +1743,12 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableTerrainGaussianStochasticSampling", false);
     settingsManager.registerSetting<bool>("enableParallaxOcclusionMapping", true);
     settingsManager.registerSetting<bool>("enableTerrainParallaxOcclusionMapping", true);
-    settingsManager.registerSetting<bool>("enableTerrainRegionMaterialEvaluation", false);
-    settingsManager.registerSetting<bool>("enableTerrainRvt", true);
+    settingsManager.registerSetting<bool>(
+        "enableTerrainRegionMaterialEvaluation",
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
+    settingsManager.registerSetting<bool>(
+        "enableTerrainRvt",
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
     settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
@@ -1849,7 +1883,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, true);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
-    settingsManager.registerSetting<bool>(CLodDisableReyesRasterizationSettingName, false);
+    settingsManager.registerSetting<bool>(
+        CLodDisableReyesRasterizationSettingName,
+        m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
 	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName, CLodVirtualShadowDefaultPhysicalPageCount);
@@ -1882,8 +1918,18 @@ void Renderer::SetSettings() {
     
 
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableShadows", [this](const bool& newValue) {
-        // Trigger recompilation of the render graph when setting changes
-        rebuildRenderGraph = true;
+        if (m_syncingPipelineTopologySettings) {
+            return;
+        }
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) {
+            recipe.Add<br::pipeline::ClusterLodShadowTechnique>(
+                recipe.Options<br::pipeline::ClusterLodTechnique>());
+        }
+        else {
+            recipe.Remove<br::pipeline::ClusterLodShadowTechnique>();
+        }
+        RequestPipelineReplacement(std::move(recipe));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<std::string>("environmentName", [this](const std::string& newValue) {
 		SetEnvironmentInternal(s2ws(newValue));
@@ -1917,26 +1963,46 @@ void Renderer::SetSettings() {
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableClusteredLighting", [this](const bool& newValue) {
 		m_clusteredLighting = newValue;
-		rebuildRenderGraph = true;
+		if (m_syncingPipelineTopologySettings) return;
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) recipe.Add<br::pipeline::ClusteredLightingTechnique>();
+        else recipe.Remove<br::pipeline::ClusteredLightingTechnique>();
+        RequestPipelineReplacement(std::move(recipe));
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableImageBasedLighting", [this](const bool& newValue) {
 		m_imageBasedLighting = newValue;
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableGTAO", [this](const bool& newValue) {
 		m_gtaoEnabled = newValue;
-		rebuildRenderGraph = true;
+		if (m_syncingPipelineTopologySettings) return;
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) recipe.Add<br::pipeline::GtaoTechnique>();
+        else recipe.Remove<br::pipeline::GtaoTechnique>();
+        RequestPipelineReplacement(std::move(recipe));
 		}));
 	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableVisibilityRendering", [this](const bool& newValue) {
 		m_visibilityRendering = newValue;
 		rebuildRenderGraph = true;
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableTerrainRegionMaterialEvaluation", [this](const bool& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
+        if (m_syncingPipelineTopologySettings) return;
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) recipe.Add<br::pipeline::TerrainRegionMaterialEvaluationTechnique>();
+        else recipe.Remove<br::pipeline::TerrainRegionMaterialEvaluationTechnique>();
+        RequestPipelineReplacement(std::move(recipe));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableTerrainRvt", [this](const bool& newValue) {
-        (void)newValue;
-        rebuildRenderGraph = true;
+        if (m_syncingPipelineTopologySettings) {
+            return;
+        }
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) {
+            recipe.Add<br::pipeline::TerrainRvtTechnique>();
+        }
+        else {
+            recipe.Remove<br::pipeline::TerrainRvtTechnique>();
+        }
+        RequestPipelineReplacement(std::move(recipe));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPageSize", [this](const uint32_t& newValue) {
         (void)newValue;
@@ -2026,8 +2092,20 @@ void Renderer::SetSettings() {
         rebuildRenderGraph = true;
         }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDisableReyesRasterizationSettingName, [this](const bool& newValue) {
-            (void)newValue;
-            rebuildRenderGraph = true;
+            if (m_syncingPipelineTopologySettings) {
+                return;
+            }
+            auto recipe = GetPipelineRecipeForMutation();
+            auto options = recipe.Options<br::pipeline::ClusterLodTechnique>();
+            options.reyes = newValue ? br::pipeline::ReyesMode::Disabled : br::pipeline::ReyesMode::Enabled;
+            recipe.Configure<br::pipeline::ClusterLodTechnique>(options);
+            if (recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>()) {
+                recipe.Configure<br::pipeline::ClusterLodAlphaTechnique>(options);
+            }
+            if (recipe.Contains<br::pipeline::ClusterLodShadowTechnique>()) {
+                recipe.Configure<br::pipeline::ClusterLodShadowTechnique>(options);
+            }
+            RequestPipelineReplacement(std::move(recipe));
             }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, [this](const uint32_t& newValue) {
             (void)newValue;
@@ -2039,7 +2117,11 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableBloom", [this](const bool& newValue) {
         m_bloom = newValue;
-        rebuildRenderGraph = true;
+        if (m_syncingPipelineTopologySettings) return;
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) recipe.Add<br::pipeline::BloomTechnique>();
+        else recipe.Remove<br::pipeline::BloomTechnique>();
+        RequestPipelineReplacement(std::move(recipe));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableJitter", [this](const bool& newValue) {
         m_jitter = newValue;
@@ -2297,7 +2379,10 @@ void Renderer::CreateTextures() {
     auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     hdrDesc.imageDimensions[0].width = outputResolution.x;
     hdrDesc.imageDimensions[0].height = outputResolution.y;
-    hdrDesc.generateMipMaps = true;
+    // Streamline's D3D12 interop operates on the native resource as a whole.
+    // Keep its output single-mip; the optional bloom technique owns a separate
+    // mip chain so removing bloom also removes that allocation.
+    hdrDesc.generateMipMaps = false;
     hdrDesc.allowAlias = true;
 	auto upscaledHDRColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
 	upscaledHDRColorTarget->SetName("Upscaled HDR Color Target");
@@ -2591,11 +2676,22 @@ void Renderer::Update(float elapsedSeconds) {
         });
     }
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
+    ApplyPendingPipelineReplacement();
 
     if (rebuildRenderGraph) {
         runCapturedStage("RenderGraphBuild", [&]() {
             ZoneScopedN("Renderer::Update::RenderGraphBuild");
-		    CreateRenderGraph();
+            try {
+		        CreateRenderGraph();
+                m_pipelineRollbackRecipe.reset();
+            }
+            catch (const std::exception& error) {
+                if (!m_pipelineRollbackRecipe) {
+                    throw;
+                }
+                HandlePipelineReplacementFailure(error);
+                CreateRenderGraph();
+            }
         });
         ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after RenderGraphBuild");
     }
@@ -2775,30 +2871,89 @@ void Renderer::PostUpdate() {
 	currentScene->PostUpdate();
 }
 
-bool Renderer::RegisterRenderGraphExtension(std::string id, RenderGraphExtensionFactory factory) {
-    if (id.empty()) {
-        spdlog::error("Renderer::RegisterRenderGraphExtension rejected an extension with an empty id.");
-        return false;
-    }
-    if (!factory) {
-        spdlog::error("Renderer::RegisterRenderGraphExtension rejected extension '{}' because its factory is empty.", id);
-        return false;
-    }
-    if (m_renderGraphRuntimeInitialized) {
-        spdlog::error(
-            "Renderer::RegisterRenderGraphExtension rejected extension '{}' because the render graph runtime is already initialized.",
-            id);
-        return false;
-    }
-    for (const auto& [registeredId, _] : m_externalRenderGraphExtensionFactories) {
-        if (registeredId == id) {
-            spdlog::error("Renderer::RegisterRenderGraphExtension rejected duplicate extension id '{}'.", id);
-            return false;
+bool Renderer::RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe) {
+    const auto validation = recipe.Validate();
+    if (!validation.valid) {
+        for (const auto& error : validation.errors) {
+            spdlog::error("Renderer rejected pipeline replacement: {}", error);
         }
+        return false;
     }
 
-    m_externalRenderGraphExtensionFactories.emplace_back(std::move(id), std::move(factory));
+    std::scoped_lock lock(m_pipelineRecipeMutex);
+    m_pendingPipelineRecipe = std::move(recipe);
     return true;
+}
+
+br::pipeline::PipelineRecipe Renderer::GetPipelineRecipeForMutation() const {
+    std::scoped_lock lock(m_pipelineRecipeMutex);
+    return m_pendingPipelineRecipe ? *m_pendingPipelineRecipe : m_pipelineRecipe;
+}
+
+void Renderer::ApplyPendingPipelineReplacement() {
+    std::optional<br::pipeline::PipelineRecipe> pending;
+    {
+        std::scoped_lock lock(m_pipelineRecipeMutex);
+        pending.swap(m_pendingPipelineRecipe);
+    }
+    if (!pending) {
+        return;
+    }
+
+    m_pipelineRollbackRecipe = m_pipelineRecipe;
+    m_pipelineRecipe = std::move(*pending);
+    m_pipelineExtensionsDirty = true;
+    rebuildRenderGraph = true;
+
+    m_syncingPipelineTopologySettings = true;
+    auto& settings = SettingsManager::GetInstance();
+    settings.getSettingSetter<bool>("enableTerrainRvt")(
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
+    settings.getSettingSetter<bool>(CLodDisableReyesRasterizationSettingName)(
+        m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
+    settings.getSettingSetter<bool>("enableGTAO")(
+        m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>());
+    settings.getSettingSetter<bool>("enableClusteredLighting")(
+        m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>());
+    settings.getSettingSetter<bool>("enableBloom")(
+        m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>());
+    settings.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation")(
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
+    settings.getSettingSetter<bool>("enableShadows")(
+        m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    m_syncingPipelineTopologySettings = false;
+}
+
+void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
+    spdlog::error("Renderer pipeline replacement failed: {}", error.what());
+    if (m_pipelineReplacementDebugBreakHandler) {
+        m_pipelineReplacementDebugBreakHandler();
+    }
+    if (!m_pipelineRollbackRecipe) {
+        throw;
+    }
+
+    m_pipelineRecipe = std::move(*m_pipelineRollbackRecipe);
+    m_pipelineRollbackRecipe.reset();
+    m_pipelineExtensionsDirty = true;
+    rebuildRenderGraph = true;
+    m_syncingPipelineTopologySettings = true;
+    auto& settings = SettingsManager::GetInstance();
+    settings.getSettingSetter<bool>("enableTerrainRvt")(
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
+    settings.getSettingSetter<bool>(CLodDisableReyesRasterizationSettingName)(
+        m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
+    settings.getSettingSetter<bool>("enableGTAO")(
+        m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>());
+    settings.getSettingSetter<bool>("enableClusteredLighting")(
+        m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>());
+    settings.getSettingSetter<bool>("enableBloom")(
+        m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>());
+    settings.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation")(
+        m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
+    settings.getSettingSetter<bool>("enableShadows")(
+        m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    m_syncingPipelineTopologySettings = false;
 }
 
 void Renderer::MaybeRequestCLodVisibilityTelemetry() {
@@ -3884,6 +4039,7 @@ void Renderer::Cleanup() {
 	m_pObjectManager.reset();
     m_pMaterialManager.reset();
     m_pEnvironmentManager.reset();
+	m_pTerrainManager.reset();
 	m_pSkeletonManager.reset();
     m_pReadbackManager.reset();
     m_pTextureFactory.reset();
@@ -4110,6 +4266,74 @@ void Renderer::SetupInputHandlers() {
         });
 }
 
+void Renderer::RegisterPipelineExtensions() {
+    currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
+        m_managerInterface.GetTextureFactory(),
+        currentRenderGraph->GetUploadService(),
+        m_pReadbackManager.get(),
+        m_managerInterface.GetMaterialManager()),
+        "BuiltinIO");
+    currentRenderGraph->RegisterExtension(std::make_unique<ReadbackCaptureExtension>(
+        currentRenderGraph->GetReadbackService()),
+        "BuiltinReadbackCapture");
+
+    br::pipeline::PipelineBuildContext extensionContext(
+        *currentRenderGraph,
+        m_pipelineRecipe.Bindings(),
+        {},
+        [this](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions& optionsVariant) {
+            CLodExtensionType extensionType{};
+            const char* extensionId = nullptr;
+            switch (id) {
+            case br::pipeline::TechniqueId::ClusterLod:
+                extensionType = CLodExtensionType::VisiblityBuffer;
+                extensionId = "CLodOpaque";
+                break;
+            case br::pipeline::TechniqueId::ClusterLodAlpha:
+                extensionType = CLodExtensionType::AlphaBlend;
+                extensionId = "CLodAlpha";
+                break;
+            case br::pipeline::TechniqueId::ClusterLodShadow:
+                extensionType = CLodExtensionType::Shadow;
+                extensionId = "CLodShadow";
+                break;
+            default:
+                return;
+            }
+
+            const auto& options = std::get<br::pipeline::ClusterLodOptions>(optionsVariant);
+            const bool voxelRasterizationEnabled =
+                m_pipelineRecipe.Contains<br::pipeline::ClusterLodVoxelTechnique>();
+            const uint32_t voxelRasterWorkCapacity = voxelRasterizationEnabled
+                ? m_pipelineRecipe.Options<br::pipeline::ClusterLodVoxelTechnique>().workRecordCapacity
+                : 0u;
+            const uint32_t maxClusters = std::clamp(
+                SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodVisibleClusterCapacitySettingName)(),
+                CLodMinVisibleClusterCapacity,
+                CLodMaxVisibleClusterCapacity);
+            currentRenderGraph->RegisterExtension(
+                std::make_unique<CLodExtension>(
+                    extensionType,
+                    maxClusters,
+                    CLodExtensionOptions{
+                        .enableReyes = options.reyes == br::pipeline::ReyesMode::Enabled,
+                        .enableVoxelRasterization = voxelRasterizationEnabled,
+                        .voxelRasterWorkCapacity = voxelRasterWorkCapacity }),
+                extensionId);
+        });
+    for (const auto& entry : m_pipelineRecipe.Techniques()) {
+        entry.technique->RegisterExtensions(extensionContext);
+    }
+
+    for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
+        auto extension = factory();
+        if (!extension) {
+            throw std::runtime_error("Pipeline extension factory returned null: " + id);
+        }
+        currentRenderGraph->RegisterExtension(std::move(extension), id);
+    }
+}
+
 void Renderer::CreateRenderGraph() {
     if (!IsSceneReadyForFrame()) {
         rebuildRenderGraph = true;
@@ -4124,6 +4348,11 @@ void Renderer::CreateRenderGraph() {
     }
 
     StallPipeline();
+
+    // Render-graph queue timelines are recreated below. Descriptor retirement
+    // snapshots contain non-owning timeline handles, so consume all pending
+    // releases and clear the snapshot while those timelines are still alive.
+    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
 
     // TODO: Find a better way to handle resources like this
     // TODO: this access pattern is stupid
@@ -4162,44 +4391,15 @@ void Renderer::CreateRenderGraph() {
             textureFactory->SetReadbackService(currentRenderGraph->GetReadbackService());
         }
 
-        RendererECSManager::GetInstance().CreateRenderPhaseEntity(Engine::Primary::CLodTransparentPass);
 
-        currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
-            m_managerInterface.GetTextureFactory(),
-            currentRenderGraph->GetUploadService(),
-                m_pReadbackManager.get(),
-                m_managerInterface.GetMaterialManager()));
-        currentRenderGraph->RegisterExtension(std::make_unique<ReadbackCaptureExtension>(
-            currentRenderGraph->GetReadbackService()));
-        const uint32_t maxClusters = std::clamp(
-            SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodVisibleClusterCapacitySettingName)(),
-            CLodMinVisibleClusterCapacity,
-            CLodMaxVisibleClusterCapacity);
-        currentRenderGraph->RegisterExtension(
-            std::make_unique<CLodExtension>(CLodExtensionType::VisiblityBuffer, static_cast<uint32_t>(maxClusters)),
-            "CLodOpaque");
-        constexpr bool kEnableAlphaBlendCLodVariant = true;
-        if (kEnableAlphaBlendCLodVariant) {
-            currentRenderGraph->RegisterExtension(
-                std::make_unique<CLodExtension>(CLodExtensionType::AlphaBlend, static_cast<uint32_t>(maxClusters)),
-                "CLodAlpha");
-        }
-        constexpr bool kEnableShadowCLodVariant = true;
-        if (kEnableShadowCLodVariant) {
-            currentRenderGraph->RegisterExtension(
-                std::make_unique<CLodExtension>(CLodExtensionType::Shadow, static_cast<uint32_t>(maxClusters)),
-                "CLodShadow");
-        }
-        for (auto& [id, factory] : m_externalRenderGraphExtensionFactories) {
-            auto extension = factory();
-            if (!extension) {
-                spdlog::error("Renderer::CreateRenderGraph skipped external render graph extension '{}' because its factory returned null.", id);
-                continue;
-            }
-            currentRenderGraph->RegisterExtension(std::move(extension), id);
-            spdlog::info("Renderer::CreateRenderGraph registered external render graph extension '{}'.", id);
-        }
+        RendererECSManager::GetInstance().CreateRenderPhaseEntity(Engine::Primary::CLodTransparentPass);
 		m_renderGraphRuntimeInitialized = true;
+    }
+
+    if (m_pipelineExtensionsDirty) {
+        currentRenderGraph->ClearExtensions();
+        RegisterPipelineExtensions();
+        m_pipelineExtensionsDirty = false;
     }
 
     auto& newGraph = currentRenderGraph;
@@ -4208,6 +4408,12 @@ void Renderer::CreateRenderGraph() {
     };
 
     newGraph->ResetForRebuild();
+    // CreateRenderGraph stalls every queue before teardown. ResetForRebuild
+    // therefore leaves only GPU-idle objects in the deletion queues, and it is
+    // safe (and important) to release them before materializing the candidate
+    // graph. Otherwise two complete alias-pool generations overlap for the
+    // normal frames-in-flight retirement delay and can exhaust VRAM.
+    DeletionManager::GetInstance().DrainAll();
     probeGraphBuildPhase("CreateRenderGraph after ResetForRebuild");
 
     newGraph->RegisterProvider(m_pMeshManager.get());
@@ -4225,229 +4431,193 @@ void Renderer::CreateRenderGraph() {
     auto& depth = primaryCameraEntity.get<Components::DepthMap>();
     std::shared_ptr<PixelBuffer> depthTexture = depth.depthMap;
 
-    newGraph->RegisterResource(Builtin::PrimaryCamera::DepthTexture, depthTexture);
-    newGraph->RegisterResource(Builtin::PrimaryCamera::LinearDepthMap, depth.linearDepthMap);
-    // In visibility rendering (CLod), projected depth is computed by the depth copy pass.
-    // In standard rasterization, the hardware DSV already contains projected depth.
-    if (m_visibilityRendering) {
-        newGraph->RegisterResource(Builtin::PrimaryCamera::ProjectedDepthTexture, depth.projectedDepthMap);
-    } else {
-        newGraph->RegisterResource(Builtin::PrimaryCamera::ProjectedDepthTexture, depthTexture);
+    const bool terrainRvtEnabled = m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>();
+    br::pipeline::PipelineBuildContext buildContext(
+        *newGraph,
+        m_pipelineRecipe.Bindings(),
+        [&](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions&) {
+            using enum br::pipeline::TechniqueId;
+            switch (id) {
+            case FrameResources:
+                newGraph->RegisterResource(Builtin::PrimaryCamera::DepthTexture, depthTexture);
+                newGraph->RegisterResource(Builtin::PrimaryCamera::LinearDepthMap, depth.linearDepthMap);
+                newGraph->RegisterResource(
+                    Builtin::PrimaryCamera::ProjectedDepthTexture,
+                    m_visibilityRendering ? depth.projectedDepthMap : depthTexture);
+                newGraph->RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
+                newGraph->RegisterResource(Builtin::PerFrameBuffer, ResourceManager::GetInstance().GetPerFrameBuffer());
+                break;
+            case BrdfIntegration:
+                BuildBRDFIntegrationPass(newGraph.get());
+                break;
+            case Environment: {
+                if (m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap)) m_defaultEnvironmentCubemap.reset();
+                if (m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentPrefilteredCubemap)) m_defaultEnvironmentPrefilteredCubemap.reset();
+                if ((!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap) && !m_defaultEnvironmentCubemap) ||
+                    (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentPrefilteredCubemap) && !m_defaultEnvironmentPrefilteredCubemap)) {
+                    CreateDefaultEnvironmentResources();
+                }
+                BuildEnvironmentPipeline(newGraph.get());
+                auto currentCubemap = m_defaultEnvironmentCubemap;
+                auto currentPrefiltered = m_defaultEnvironmentPrefilteredCubemap;
+                if (m_currentEnvironment && m_currentEnvironment->GetEnvironmentCubemap() &&
+                    m_currentEnvironment->GetEnvironmentCubemap()->ImagePtr() &&
+                    m_currentEnvironment->GetEnvironmentPrefilteredCubemap()) {
+                    currentCubemap = m_currentEnvironment->GetEnvironmentCubemap()->ImagePtr();
+                    currentPrefiltered = m_currentEnvironment->GetEnvironmentPrefilteredCubemap();
+                    m_warnedUsingFallbackEnvironment = false;
+                }
+                else if (!m_warnedUsingFallbackEnvironment) {
+                    spdlog::warn("Renderer: no valid environment is active. Using fallback blank cubemaps.");
+                    m_warnedUsingFallbackEnvironment = true;
+                }
+                const auto registerEnvironment = [&](ResourceIdentifier resourceId, std::shared_ptr<Resource> fallback) {
+                    if (const auto* binding = m_pipelineRecipe.Bindings().Find(resourceId)) {
+                        const auto& contract = binding->contract;
+                        if (contract.initialAccess != rhi::ResourceAccessType::None ||
+                            contract.initialLayout != rhi::ResourceLayout::Undefined ||
+                            contract.initialSync != rhi::ResourceSyncState::None) {
+                            if (auto* tracker = binding->resource->GetStateTracker()) {
+                                tracker->Reset(RangeSpec{}, ResourceState{ contract.initialAccess, contract.initialLayout, contract.initialSync });
+                            }
+                        }
+                        newGraph->RegisterResource(resourceId, binding->resource);
+                    }
+                    else {
+                        newGraph->RegisterResource(resourceId, std::move(fallback));
+                    }
+                };
+                registerEnvironment(Builtin::Environment::CurrentCubemap, currentCubemap);
+                registerEnvironment(Builtin::Environment::CurrentPrefilteredCubemap, currentPrefiltered);
+                if (m_blueNoiseTexture) newGraph->RegisterResource(Builtin::Noise::BlueNoise2D, m_blueNoiseTexture);
+                if (m_openPBRLookupResources.idealDielectricEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricEnergyComplement, m_openPBRLookupResources.idealDielectricEnergyComplement);
+                if (m_openPBRLookupResources.idealDielectricAverageEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricAverageEnergyComplement, m_openPBRLookupResources.idealDielectricAverageEnergyComplement);
+                if (m_openPBRLookupResources.idealDielectricReflectionRatio) newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricReflectionRatio, m_openPBRLookupResources.idealDielectricReflectionRatio);
+                if (m_openPBRLookupResources.opaqueDielectricEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement, m_openPBRLookupResources.opaqueDielectricEnergyComplement);
+                if (m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement);
+                if (m_openPBRLookupResources.idealMetalEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::IdealMetalEnergyComplement, m_openPBRLookupResources.idealMetalEnergyComplement);
+                if (m_openPBRLookupResources.idealMetalAverageEnergyComplement) newGraph->RegisterResource(Builtin::OpenPBR::IdealMetalAverageEnergyComplement, m_openPBRLookupResources.idealMetalAverageEnergyComplement);
+                if (m_openPBRLookupResources.fuzzLTC) newGraph->RegisterResource(Builtin::OpenPBR::FuzzLTC, m_openPBRLookupResources.fuzzLTC);
+                break;
+            }
+            case ClusterLod:
+            case ClusterLodAlpha:
+            case ClusterLodShadow:
+            case ClusterLodVoxel:
+                break; // These techniques own ordered graph extensions.
+            case GBufferResources: {
+                const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+                TextureDescription desc;
+                desc.channels = 2;
+                desc.format = rhi::Format::R32G32_UInt;
+                desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
+                desc.allowAlias = true;
+                desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+                auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(desc);
+                visibilityBuffer->SetName("Visibility Buffer");
+                rg::memory::SetResourceUsageHint(*visibilityBuffer, "GBuffer");
+                newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
+                m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
+                CreateGBufferResources(newGraph.get());
+                CreateDebugVisualizationResources(newGraph.get());
+                if (m_visibilityRendering) {
+                    newGraph->BuildRenderPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
+                    newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::GBuffer Construction");
+                }
+                break;
+            }
+            case VisibilityMaterialBinning:
+                RegisterVisUtilResources(newGraph.get(), false);
+                BuildVisibilityMaterialBinningPipeline(newGraph.get());
+                break;
+            case TerrainRvt:
+                RegisterVisUtilResources(newGraph.get(), true, false);
+                BuildTerrainRvtPipeline(newGraph.get());
+                break;
+            case TerrainRegionMaterialEvaluation:
+                BuildTerrainRegionMaterialEvaluationPipeline(newGraph.get());
+                break;
+            case MaterialEvaluation:
+                BuildMaterialEvaluationPipeline(newGraph.get(), terrainRvtEnabled);
+                break;
+            case Gtao:
+                RegisterGTAOResources(newGraph.get());
+                BuildGTAOPipeline(newGraph.get(), primaryCameraEntity.try_get<Components::Camera>());
+                break;
+            case ClusteredLighting:
+                BuildLightClusteringPipeline(newGraph.get());
+                break;
+            case PrimaryLighting:
+                BuildPrimaryPass(newGraph.get(), m_currentEnvironment.get(),
+                    m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap));
+                break;
+            case Reflections: {
+                const bool rayTraced = m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported();
+                if (rayTraced) BuildRayTracedReflectionPasses(newGraph.get());
+                else if (m_screenSpaceReflections) BuildSSRPasses(newGraph.get());
+                break;
+            }
+            case Exposure: {
+                auto adapted = CreateIndexedStructuredBuffer(1, sizeof(float), true, false);
+                adapted->SetName("Adapted Luminance");
+                rg::memory::SetResourceUsageHint(*adapted, "Post-Processing resources");
+                newGraph->RegisterResource(Builtin::PostProcessing::AdaptedLuminance, adapted);
+                auto histogram = CreateIndexedStructuredBuffer(256, sizeof(uint32_t), true, false);
+                histogram->SetName("Luminance Histogram Buffer");
+                rg::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
+                newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
+                newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
+                newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
+                newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
+                newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
+                break;
+            }
+            case Upscaling:
+                newGraph->BuildRenderPass<UpscalingPass>("UpscalingPass");
+                newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
+                break;
+            case Bloom:
+                BuildBloomPipeline(newGraph.get());
+                break;
+            case Tonemapping:
+                newGraph->BuildRenderPass<TonemappingPass>("TonemappingPass");
+                newGraph->SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
+                break;
+            case DebugOutput: {
+                const bool skeletons = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")() ==
+                    static_cast<unsigned int>(OutputType::SKELETONS) && DeviceManager::GetInstance().GetMeshShadersSupported();
+                if (skeletons) {
+                    newGraph->BuildRenderPass<DebugSkeletonPass>("DebugSkeletonPass");
+                    newGraph->SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
+                }
+                else {
+                    newGraph->BuildRenderPass<DebugResolvePass>("DebugResolvePass");
+                    newGraph->SetPassTechnique("DebugResolvePass", "Debug::Visualization");
+                }
+                if (getDrawBoundingSpheres()) {
+                    newGraph->BuildRenderPass<DebugSpherePass>("DebugSpherePass");
+                    newGraph->SetPassTechnique("DebugSpherePass", "Debug::Visualization");
+                }
+                break;
+            }
+            case DebugUi:
+                newGraph->BuildRenderPass<MenuRenderPass>("MenuRenderPass");
+                newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");
+                break;
+            case DepthHistory:
+                BuildLinearDepthHistoryCopyPass(newGraph.get());
+                break;
+            case Present:
+                newGraph->BuildRenderPass<PresentPass>("PresentPass");
+                newGraph->SetPassTechnique("PresentPass", "Frame::Present");
+                break;
+            }
+        });
+
+    for (const auto& entry : m_pipelineRecipe.Techniques()) {
+        entry.technique->Build(buildContext);
+        probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
     }
-    newGraph->RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
-    newGraph->RegisterResource(Builtin::PerFrameBuffer, ResourceManager::GetInstance().GetPerFrameBuffer());
-
-    bool useMeshShaders = getMeshShadersEnabled();
-    if (!DeviceManager::GetInstance().GetMeshShadersSupported()) {
-        useMeshShaders = false;
-    }
-
-    BuildBRDFIntegrationPass(newGraph.get());
-
-    BuildEnvironmentPipeline(newGraph.get());
-    
-    bool indirect = getIndirectDrawsEnabled();
-    if (!useMeshShaders) { // Indirect draws only supported with mesh shaders
-        indirect = false;
-    }
-
-    auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    TextureDescription visibilityDesc;
-    visibilityDesc.channels = 2;
-    visibilityDesc.format = rhi::Format::R32G32_UInt;
-    visibilityDesc.hasRTV = true;
-    visibilityDesc.hasSRV = true;
-    visibilityDesc.hasUAV = true; // For clearing
-    visibilityDesc.hasNonShaderVisibleUAV = true; // For clearing with ClearUnorderedAccessViewUint
-    visibilityDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-	visibilityDesc.allowAlias = true;
-    auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(visibilityDesc);
-    visibilityBuffer->SetName("Visibility Buffer");
-    rg::memory::SetResourceUsageHint(*visibilityBuffer, "GBuffer");
-    newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
-
-	m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
-
-    if (IsCLodVisibilityTelemetryDebugEnabled()) {
-        const auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
-        const auto upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
-        const auto upscalingQuality = UpscalingManager::GetInstance().GetCurrentUpscalingQualityMode();
-        const View* primaryView = m_pViewManager ? m_pViewManager->Get(primaryViewID) : nullptr;
-        const uint32_t depthWidth = depth.depthMap ? depth.depthMap->GetWidth() : 0u;
-        const uint32_t depthHeight = depth.depthMap ? depth.depthMap->GetHeight() : 0u;
-        const uint32_t linearDepthWidth = depth.linearDepthMap ? depth.linearDepthMap->GetWidth() : 0u;
-        const uint32_t linearDepthHeight = depth.linearDepthMap ? depth.linearDepthMap->GetHeight() : 0u;
-        spdlog::info(
-            "SARP CLOD graph resources: render={}x{} output={}x{} visibility={}x{} depth={}x{} linear_depth={}x{} camera_depth_res={}x{} camera_lod_height={} upscaling={} quality={}",
-            resolution.x,
-            resolution.y,
-            outputResolution.x,
-            outputResolution.y,
-            visibilityBuffer->GetWidth(),
-            visibilityBuffer->GetHeight(),
-            depthWidth,
-            depthHeight,
-            linearDepthWidth,
-            linearDepthHeight,
-            primaryView ? primaryView->cameraInfo.depthResX : 0u,
-            primaryView ? primaryView->cameraInfo.depthResY : 0u,
-            primaryView ? primaryView->cameraInfo.lodResY : 0u,
-            UpscalingModeNames[static_cast<size_t>(upscalingMode)],
-            UpscaleQualityModeNames[static_cast<size_t>(upscalingQuality)]);
-    }
-
-    CreateGBufferResources(newGraph.get());
-
-    CreateDebugVisualizationResources(newGraph.get());
-
-    if (m_visibilityRendering) {
-        newGraph->BuildRenderPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
-        newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::GBuffer Construction");
-    }
-
-	// Either visibility or standard GBuffer pass
-    BuildGBufferPipeline(newGraph.get());
-    probeGraphBuildPhase("CreateRenderGraph after BuildGBufferPipeline");
-
-    // GTAO pass
-    if (m_gtaoEnabled) {
-		RegisterGTAOResources(newGraph.get());
-        BuildGTAOPipeline(newGraph.get(), primaryCameraEntity.try_get<Components::Camera>());
-    }
-
-	if (m_clusteredLighting) {  // TODO: active cluster determination using Z prepass
-        BuildLightClusteringPipeline(newGraph.get());
-    }
-
-    // Linear depth downsample is scheduled by CLodExtension between phase-1 and phase-2.
-	
-    auto currentEnvironmentCubemap = m_defaultEnvironmentCubemap;
-    auto currentEnvironmentPrefilteredCubemap = m_defaultEnvironmentPrefilteredCubemap;
-    if (m_currentEnvironment != nullptr
-        && m_currentEnvironment->GetEnvironmentCubemap() != nullptr
-        && m_currentEnvironment->GetEnvironmentCubemap()->ImagePtr() != nullptr
-        && m_currentEnvironment->GetEnvironmentPrefilteredCubemap() != nullptr) {
-        currentEnvironmentCubemap = m_currentEnvironment->GetEnvironmentCubemap()->ImagePtr();
-        currentEnvironmentPrefilteredCubemap = m_currentEnvironment->GetEnvironmentPrefilteredCubemap();
-        m_warnedUsingFallbackEnvironment = false;
-    }
-    else if (!m_warnedUsingFallbackEnvironment) {
-        spdlog::warn("Renderer: no valid environment is active. Using fallback blank cubemaps.");
-        m_warnedUsingFallbackEnvironment = true;
-    }
-
-    newGraph->RegisterResource(Builtin::Environment::CurrentCubemap, currentEnvironmentCubemap);
-    newGraph->RegisterResource(Builtin::Environment::CurrentPrefilteredCubemap, currentEnvironmentPrefilteredCubemap);
-
-    if (m_blueNoiseTexture) {
-        newGraph->RegisterResource(Builtin::Noise::BlueNoise2D, m_blueNoiseTexture);
-    }
-    if (m_openPBRLookupResources.idealDielectricEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricEnergyComplement, m_openPBRLookupResources.idealDielectricEnergyComplement);
-    }
-    if (m_openPBRLookupResources.idealDielectricAverageEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricAverageEnergyComplement, m_openPBRLookupResources.idealDielectricAverageEnergyComplement);
-    }
-    if (m_openPBRLookupResources.idealDielectricReflectionRatio) {
-        newGraph->RegisterResource(Builtin::OpenPBR::IdealDielectricReflectionRatio, m_openPBRLookupResources.idealDielectricReflectionRatio);
-    }
-    if (m_openPBRLookupResources.opaqueDielectricEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement, m_openPBRLookupResources.opaqueDielectricEnergyComplement);
-    }
-    if (m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement);
-    }
-    if (m_openPBRLookupResources.idealMetalEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::IdealMetalEnergyComplement, m_openPBRLookupResources.idealMetalEnergyComplement);
-    }
-    if (m_openPBRLookupResources.idealMetalAverageEnergyComplement) {
-        newGraph->RegisterResource(Builtin::OpenPBR::IdealMetalAverageEnergyComplement, m_openPBRLookupResources.idealMetalAverageEnergyComplement);
-    }
-    if (m_openPBRLookupResources.fuzzLTC) {
-        newGraph->RegisterResource(Builtin::OpenPBR::FuzzLTC, m_openPBRLookupResources.fuzzLTC);
-    }
-
-    BuildPrimaryPass(newGraph.get(), m_currentEnvironment.get());
-    probeGraphBuildPhase("CreateRenderGraph after BuildPrimaryPass");
-
-	// Start of post-processing passes
-
-    const bool useRayTracedReflections = m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported();
-    if (m_rayTracedReflections && !useRayTracedReflections && !m_warnedRayTracedReflectionsUnsupported) {
-        m_warnedRayTracedReflectionsUnsupported = true;
-        spdlog::warn("Ray traced reflections requested, but clustered ray tracing is not supported by the active RHI backend/device.");
-    }
-    if (useRayTracedReflections) {
-        BuildRayTracedReflectionPasses(newGraph.get());
-    }
-    else if (m_screenSpaceReflections) {
-        BuildSSRPasses(newGraph.get());
-    }
-
-	auto adaptedLuminanceBuffer = CreateIndexedStructuredBuffer(1, sizeof(float), true, false);
-    adaptedLuminanceBuffer->SetName("Adapted Luminance");
-    rg::memory::SetResourceUsageHint(*adaptedLuminanceBuffer, "Post-Processing resources");
-	newGraph->RegisterResource(Builtin::PostProcessing::AdaptedLuminance, adaptedLuminanceBuffer);
-	auto histogramBuffer = CreateIndexedStructuredBuffer(256, sizeof(uint32_t), true, false);
-	histogramBuffer->SetName("Luminance Histogram Buffer");
-    rg::memory::SetResourceUsageHint(*histogramBuffer, "Post-Processing resources");
-	newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogramBuffer);
-
-    newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
-    newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
-    newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
-    newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
-
-    // DebugGridPass::Params params;
-    // params.planeY = 0.0f;
-    // params.minorCellSize = 1.0;
-    // params.majorCellSize = 10;
-    // params.axisHalfWidthWorld = 0.5f * 0.04f * params.minorCellSize;
-    // params.minorLineWidth = 0.01f;
-    // params.majorLineWidth = 0.02f;
-    // params.minorOpacity = 0.3f;
-	// params.majorOpacity = 0.55f;
-	// params.axisOpacity = 0.85f;
-    // params.overallOpacity = 1.0f;
-
-	// newGraph->BuildComputePass<DebugGridPass>("DebugGridPass", params);
-    // newGraph->SetPassTechnique("DebugGridPass", "Debug::Overlays");
-
-    newGraph->BuildRenderPass<UpscalingPass>("UpscalingPass");
-    newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
-
-    if (m_bloom) {
-        BuildBloomPipeline(newGraph.get());
-    }
-
-    newGraph->BuildRenderPass<TonemappingPass>("TonemappingPass");
-    newGraph->SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
-
-    const auto outputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")();
-    const bool skeletonDebugOutput =
-        outputType == static_cast<unsigned int>(OutputType::SKELETONS) &&
-        DeviceManager::GetInstance().GetMeshShadersSupported();
-    if (skeletonDebugOutput) {
-        newGraph->BuildRenderPass<DebugSkeletonPass>("DebugSkeletonPass");
-        newGraph->SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
-    }
-    else {
-        newGraph->BuildRenderPass<DebugResolvePass>("DebugResolvePass");
-        newGraph->SetPassTechnique("DebugResolvePass", "Debug::Visualization");
-    }
-
-    newGraph->BuildRenderPass<MenuRenderPass>("MenuRenderPass");
-    newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");
-
-    if (getDrawBoundingSpheres()) {
-        newGraph->BuildRenderPass<DebugSpherePass>("DebugSpherePass");
-        newGraph->SetPassTechnique("DebugSpherePass", "Debug::Visualization");
-    }
-
-	BuildLinearDepthHistoryCopyPass(newGraph.get());
-
-    newGraph->BuildRenderPass<PresentPass>("PresentPass");
-    newGraph->SetPassTechnique("PresentPass", "Frame::Present");
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");
 

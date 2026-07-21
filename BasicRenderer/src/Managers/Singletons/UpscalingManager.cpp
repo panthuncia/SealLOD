@@ -516,7 +516,14 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         const sl::BaseStructure* inputs[] = { &myViewport };
         if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
         {
-            spdlog::error("DLSS evaluation failed!");
+            spdlog::error(
+                "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
+                static_cast<int32_t>(result),
+                frameNumber,
+                static_cast<const void*>(pHDRTarget),
+                static_cast<const void*>(pUpscaledHDRTarget),
+                static_cast<const void*>(pDepthTexture),
+                static_cast<const void*>(pMotionVectors));
         }
 
         rhi::TextureBarrier streamlineOutputBarrier{};
@@ -543,7 +550,14 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         const sl::BaseStructure* inputs[] = { &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag };
         if (SL_FAILED(result, slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList)))
         {
-            spdlog::error("DLSS evaluation failed!");
+            spdlog::error(
+                "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
+                static_cast<int32_t>(result),
+                frameNumber,
+                static_cast<const void*>(pHDRTarget),
+                static_cast<const void*>(pUpscaledHDRTarget),
+                static_cast<const void*>(pDepthTexture),
+                static_cast<const void*>(pMotionVectors));
         }
         else
         {

@@ -27,20 +27,26 @@ public:
     void DeclareResourceUsages(RenderPassBuilder* builder) override {
 		auto inputs = Inputs<BloomSamplePassInputs>();
 		m_mipIndex = inputs.mipIndex;
-		m_isUpsample = inputs.isUpsample;
+        m_isUpsample = inputs.isUpsample;
 
         if (!m_isUpsample) {
-            builder->WithShaderResource(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ m_mipIndex, 1 }))
-                .WithRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ m_mipIndex + 1, 1 }));
+            const auto source = m_mipIndex == 0
+                ? Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 })
+                : Subresources(Builtin::PostProcessing::BloomTexture, Mip{ m_mipIndex, 1 });
+            builder->WithShaderResource(source)
+                .WithRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ m_mipIndex + 1, 1 }));
         }
         else {
-            builder->WithShaderResource(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ m_mipIndex + 1, 1 }))
-                .WithRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ m_mipIndex, 1 }));
+            builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ m_mipIndex + 1, 1 }))
+                .WithRenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ m_mipIndex, 1 }));
         }
     }
 
     void Setup() override {
-        m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
+        m_pBloomTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::BloomTexture);
+        if (!m_isUpsample && m_mipIndex == 0) {
+            m_pUpscaledHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
+        }
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -55,14 +61,14 @@ public:
 
 		rhi::PassBeginInfo passInfo{};
 		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = m_pHDRTarget->GetRTVInfo(m_mipIndex + mipOffset).slot;
+		colorAttachment.rtv = m_pBloomTarget->GetRTVInfo(m_mipIndex + mipOffset).slot;
 		colorAttachment.loadOp = m_isUpsample ? rhi::LoadOp::Load : rhi::LoadOp::DontCare;
 		colorAttachment.mipSlice = m_mipIndex + mipOffset;
 		colorAttachment.storeOp = rhi::StoreOp::Store;
-		colorAttachment.resource = m_pHDRTarget->GetAPIResource().GetHandle();
+		colorAttachment.resource = m_pBloomTarget->GetAPIResource().GetHandle();
 		passInfo.colors = { &colorAttachment };
-        passInfo.width = m_pHDRTarget->GetWidth() >> (m_mipIndex + mipOffset);
-        passInfo.height = m_pHDRTarget->GetHeight() >> (m_mipIndex + mipOffset);
+        passInfo.width = m_pBloomTarget->GetWidth() >> (m_mipIndex + mipOffset);
+        passInfo.height = m_pBloomTarget->GetHeight() >> (m_mipIndex + mipOffset);
 		commandList.BeginPass(passInfo);
 
         commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
@@ -80,10 +86,12 @@ public:
 		BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
 
         unsigned int misc[NumMiscUintRootConstants] = {};
-        // misc[UintRootConstant0] = m_pHDRTarget->GetSRVInfo(m_mipIndex + (m_isUpsample ? 1 : 0)).index;
-        misc[MIP_INDEX] = m_mipIndex;
-        misc[MIP_WIDTH] = m_pHDRTarget->GetWidth() >> m_mipIndex;
-        misc[MIP_HEIGHT] = m_pHDRTarget->GetHeight() >> m_mipIndex;
+        const bool readsUpscaledHDR = !m_isUpsample && m_mipIndex == 0;
+        PixelBuffer* source = readsUpscaledHDR ? m_pUpscaledHDRTarget : m_pBloomTarget;
+        const unsigned int sourceMip = readsUpscaledHDR ? 0 : m_mipIndex + (m_isUpsample ? 1 : 0);
+        misc[SOURCE_TEXTURE_DESCRIPTOR_INDEX] = source->GetSRVInfo(sourceMip).slot.index;
+        misc[MIP_WIDTH] = source->GetWidth() >> sourceMip;
+        misc[MIP_HEIGHT] = source->GetHeight() >> sourceMip;
         if (m_isUpsample) {
             misc[BLOOM_SAMPLE_FILTER_RADIUS] = as_uint(0.001f); // Kernel size
             misc[BLOOM_SAMPLE_ASPECT_RATIO] = as_uint(misc[MIP_WIDTH] / static_cast<float>(misc[MIP_HEIGHT])); // Aspect ratio
@@ -110,7 +118,8 @@ private:
     rhi::PipelinePtr m_downsamplePso;
     rhi::PipelinePtr m_upsamplePso;
 
-    PixelBuffer* m_pHDRTarget;
+	PixelBuffer* m_pBloomTarget = nullptr;
+	PixelBuffer* m_pUpscaledHDRTarget = nullptr;
 
 	PipelineResources m_resourceDescriptorBindings;
 

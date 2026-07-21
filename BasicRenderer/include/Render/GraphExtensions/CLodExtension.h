@@ -17,9 +17,18 @@ class PixelBuffer;
 class ResourceGroup;
 struct CLodVariantTraits;
 
+struct CLodExtensionOptions {
+    bool enableReyes = true;
+    bool enableVoxelRasterization = false;
+    uint32_t voxelRasterWorkCapacity = 0u;
+};
+
 class CLodExtension final : public RenderGraph::IRenderGraphExtension, public IResourceProvider {
 public:
-    explicit CLodExtension(CLodExtensionType type, uint32_t maxVisibleClusters);
+    explicit CLodExtension(
+        CLodExtensionType type,
+        uint32_t maxVisibleClusters,
+        CLodExtensionOptions options = {});
     ~CLodExtension();
 
     void PrepareForBuild(RenderGraph& rg) override;
@@ -69,6 +78,7 @@ private:
         std::string& shadowClearDirtyBitsAfterPassName);
 
     CLodExtensionType m_type;
+    CLodExtensionOptions m_options;
     uint32_t m_maxVisibleClusters = 0u;
     uint32_t m_visibleClusterCapacity = 0u;
     uint32_t m_reyesFullClusterOutputCapacity = 0u;

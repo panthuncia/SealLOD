@@ -234,15 +234,17 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         rg::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD pure compute");
     }
 
-    m_voxelRasterQueueDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        1u,
-        sizeof(CLodVoxelRasterQueueDescriptors),
-        false,
-        false,
-        false,
-        false);
-    m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Pure Compute Voxel Raster Queue Descriptors");
-    rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD pure compute");
+    if (m_voxelRasterWorkCapacity != 0u) {
+        m_voxelRasterQueueDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            1u,
+            sizeof(CLodVoxelRasterQueueDescriptors),
+            false,
+            false,
+            false,
+            false);
+        m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Pure Compute Voxel Raster Queue Descriptors");
+        rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
+    }
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
     const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodNodeReplayStrideBytes;
@@ -310,6 +312,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER", enableComputePageJobDescriptorBuffer ? L"1" : L"0" },
+        { L"CLOD_WG_ENABLE_VOXEL_OUTPUT", m_voxelRasterWorkCapacity != 0u ? L"1" : L"0" },
         { L"CLOD_COMPUTE_INCLUDE_ONLY", L"1" },
         { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelQueueDescriptorResourceIdDefine.c_str() },
     };
@@ -400,6 +403,23 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         pureComputeDefines,
         "CLod.PureCompute.DenseClusterCull");
 
+    const ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
+    auto validateVoxelVariant = [&](const PipelineState& pipeline, bool expectsVoxelDescriptor) {
+        const auto& resources = pipeline.GetResourceDescriptorSlots();
+        const bool requestsVoxelDescriptor = std::ranges::find(
+            resources.mandatoryResourceDescriptorSlots,
+            voxelDescriptorId) != resources.mandatoryResourceDescriptorSlots.end();
+        if (requestsVoxelDescriptor != expectsVoxelDescriptor) {
+            throw std::runtime_error(
+                "CLod pure-compute shader voxel-output variant has an inconsistent resource interface");
+        }
+    };
+    validateVoxelVariant(m_pureComputeObjectCullPipelineState, false);
+    validateVoxelVariant(m_pureComputeTraversePipelineState, false);
+    validateVoxelVariant(m_pureComputeLeafPipelineState, false);
+    validateVoxelVariant(m_pureComputeClusterPipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant(m_pureComputeDenseClusterPipelineState, m_voxelRasterWorkCapacity != 0u);
+
     rhi::IndirectArg dispatchArg[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
@@ -440,10 +460,6 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             m_visibleClustersBuffer,
             m_visibleClusterTransformIndicesBuffer,
             m_visibleClustersCounterBuffer,
-            m_voxelRasterWorkBuffer,
-            m_voxelRasterWorkCounterBuffer,
-            m_skinnedVoxelRasterWorkBuffer,
-            m_skinnedVoxelRasterWorkCounterBuffer,
             m_histogramIndirectCommand,
             m_workGraphTelemetryBuffer,
             m_occlusionReplayBuffer,
@@ -498,8 +514,7 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
-            m_viewRasterInfoBuffer,
-            m_voxelRasterQueueDescriptorResourceId.c_str())
+            m_viewRasterInfoBuffer)
         .WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)
         .WithShaderResource(ECSResourceResolver(drawSetIndicesQuery))
         .WithInternalTransition(m_visibleClustersCounterBuffer, computeReadState)
@@ -508,6 +523,15 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         .WithInternalTransition(m_pureComputeCurrentNodeCounterBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentLeafFrontierBuffer, computeReadState)
         .WithInternalTransition(m_pureComputeCurrentLeafCounterBuffer, computeReadState);
+
+    if (m_voxelRasterWorkCapacity != 0u) {
+        builder->WithUnorderedAccess(
+                m_voxelRasterWorkBuffer,
+                m_voxelRasterWorkCounterBuffer,
+                m_skinnedVoxelRasterWorkBuffer,
+                m_skinnedVoxelRasterWorkCounterBuffer)
+            .WithShaderResource(m_voxelRasterQueueDescriptorResourceId.c_str());
+    }
 
     const uint32_t traversalLevelCount = std::min(m_activeTraversalDepth, kPureComputeMaxTraversalLevels);
     if (!m_isFirstPass || traversalLevelCount > 0u) {
@@ -760,8 +784,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         commandList.Dispatch(1u, 1u, 1u);
     };
 
-    clearCounter(m_voxelRasterWorkCounterBuffer);
-    clearCounter(m_skinnedVoxelRasterWorkCounterBuffer);
+    if (m_voxelRasterWorkCapacity != 0u) {
+        clearCounter(m_voxelRasterWorkCounterBuffer);
+        clearCounter(m_skinnedVoxelRasterWorkCounterBuffer);
+    }
 
     auto bufferBarrier = [&](std::initializer_list<std::shared_ptr<Buffer>> buffers,
                              rhi::ResourceAccessType beforeAccess,
@@ -836,7 +862,9 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             rhi::ResourceSyncState::ComputeShading);
     };
 
-    uavBarrier({ m_voxelRasterWorkCounterBuffer, m_skinnedVoxelRasterWorkCounterBuffer });
+    if (m_voxelRasterWorkCapacity != 0u) {
+        uavBarrier({ m_voxelRasterWorkCounterBuffer, m_skinnedVoxelRasterWorkCounterBuffer });
+    }
 
     bool nodeDispatchArgsNeedReuseBarrier = false;
     bool leafDispatchArgsNeedReuseBarrier = false;
@@ -1500,20 +1528,22 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             }
         }
 
-        CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
-        voxelQueueDescriptors.rigidWorkRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.skinnedWorkRecordsUAVDescriptorIndex = m_skinnedVoxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex = m_skinnedVoxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
-        if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
-            m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;
-            m_hasCachedVoxelQueueDescriptors = true;
-            BUFFER_UPLOAD(
-                &voxelQueueDescriptors,
-                sizeof(CLodVoxelRasterQueueDescriptors),
-                rg::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
-                0);
+        if (m_voxelRasterWorkCapacity != 0u) {
+            CLodVoxelRasterQueueDescriptors voxelQueueDescriptors{};
+            voxelQueueDescriptors.rigidWorkRecordsUAVDescriptorIndex = m_voxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.rigidWorkRecordCounterUAVDescriptorIndex = m_voxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.skinnedWorkRecordsUAVDescriptorIndex = m_skinnedVoxelRasterWorkBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex = m_skinnedVoxelRasterWorkCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            voxelQueueDescriptors.workRecordCapacity = m_voxelRasterWorkCapacity;
+            if (!m_hasCachedVoxelQueueDescriptors || !BytesEqual(voxelQueueDescriptors, m_cachedVoxelQueueDescriptors)) {
+                m_cachedVoxelQueueDescriptors = voxelQueueDescriptors;
+                m_hasCachedVoxelQueueDescriptors = true;
+                BUFFER_UPLOAD(
+                    &voxelQueueDescriptors,
+                    sizeof(CLodVoxelRasterQueueDescriptors),
+                    rg::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
+                    0);
+            }
         }
     }
 
@@ -1679,7 +1709,10 @@ std::shared_ptr<Resource> HierarchicalDispatchCullingPass::ProvideResource(Resou
 
 std::vector<ResourceIdentifier> HierarchicalDispatchCullingPass::GetSupportedKeys()
 {
-    std::vector<ResourceIdentifier> resources{ ResourceIdentifier{ m_voxelRasterQueueDescriptorResourceId } };
+    std::vector<ResourceIdentifier> resources;
+    if (m_voxelRasterQueueDescriptorsBuffer) {
+        resources.emplace_back(m_voxelRasterQueueDescriptorResourceId);
+    }
     if (m_workGraphComputePageJobDescriptorsBuffer) {
         resources.emplace_back(m_workGraphComputePageJobDescriptorResourceId);
     }

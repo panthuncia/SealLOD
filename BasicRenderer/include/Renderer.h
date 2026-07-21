@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <flecs.h>
@@ -45,6 +46,7 @@
 #include "Render/SceneRenderBridge.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
 #include "Render/ShaderVariantRequestService.h"
+#include "Render/Pipeline/PipelineRecipe.h"
 
 class DynamicResource;
 class ExternalTextureResource;
@@ -99,7 +101,7 @@ public:
 
     Renderer() = default;
 
-    void Initialize(HWND hwnd, UINT x_res, UINT y_res);
+    void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
     void OnResize(UINT newWidth, UINT newHeight);
     void Update(float elapsedSeconds);
 	void PostUpdate();
@@ -125,7 +127,11 @@ public:
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
     RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
     const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
-    bool RegisterRenderGraphExtension(std::string id, RenderGraphExtensionFactory factory);
+    bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
+    const br::pipeline::PipelineRecipe& GetPipelineRecipe() const { return m_pipelineRecipe; }
+    void SetPipelineReplacementDebugBreakHandler(std::function<void()> handler) {
+        m_pipelineReplacementDebugBreakHandler = std::move(handler);
+    }
 
 private:
 	bool m_isInitialized = false;
@@ -166,7 +172,13 @@ private:
 
     std::unique_ptr<RenderGraph> currentRenderGraph = nullptr;
     bool m_renderGraphRuntimeInitialized = false;
-    std::vector<std::pair<std::string, RenderGraphExtensionFactory>> m_externalRenderGraphExtensionFactories;
+    br::pipeline::PipelineRecipe m_pipelineRecipe;
+    std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
+    std::optional<br::pipeline::PipelineRecipe> m_pipelineRollbackRecipe;
+    mutable std::mutex m_pipelineRecipeMutex;
+    bool m_pipelineExtensionsDirty = true;
+    bool m_syncingPipelineTopologySettings = false;
+    std::function<void()> m_pipelineReplacementDebugBreakHandler;
     bool rebuildRenderGraph = true;
     bool m_shaderReloadRequested = false;
 
@@ -209,6 +221,10 @@ private:
     void CreateGlobalResources();
     void CreateDefaultEnvironmentResources();
     void CreateRenderGraph();
+    void ApplyPendingPipelineReplacement();
+    br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;
+    void RegisterPipelineExtensions();
+    void HandlePipelineReplacementFailure(const std::exception& error);
     void SetSettings();
     void SetEnvironmentInternal(std::wstring name);
 	void ToggleMeshShaders(bool useMeshShaders);

@@ -36,7 +36,7 @@ float4 upsample(FULLSCREEN_VS_OUTPUT input) : SV_Target
     float x = filterRadius;
     float y = filterRadius * BLOOM_SAMPLE_ASPECT_RATIO;
     
-    Texture2D<float4> source = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PostProcessing::UpscaledHDR)];
+    Texture2D<float4> source = ResourceDescriptorHeap[SOURCE_TEXTURE_DESCRIPTOR_INDEX];
     float2 texCoord = input.uv;
     texCoord.y = 1.0f - texCoord.y;
     

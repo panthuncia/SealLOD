@@ -121,6 +121,7 @@ struct Builtin {
   inline static constexpr std::string_view PerObjectBuffer = "Builtin::PerObjectBuffer";
   struct PostProcessing {
     inline static constexpr std::string_view AdaptedLuminance = "Builtin::PostProcessing::AdaptedLuminance";
+    inline static constexpr std::string_view BloomTexture = "Builtin::PostProcessing::BloomTexture";
     inline static constexpr std::string_view LuminanceHistogram = "Builtin::PostProcessing::LuminanceHistogram";
     inline static constexpr std::string_view ScreenSpaceReflections = "Builtin::PostProcessing::ScreenSpaceReflections";
     inline static constexpr std::string_view UpscaledHDR = "Builtin::PostProcessing::UpscaledHDR";

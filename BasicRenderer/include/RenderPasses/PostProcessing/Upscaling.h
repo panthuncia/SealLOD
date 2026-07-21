@@ -15,7 +15,12 @@ public:
     }
 
     void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        ResourceIdentifierAndRange upscaledHDR(Builtin::PostProcessing::UpscaledHDR, {});
+        // Upscalers produce only the full-resolution image in mip 0. Keep the
+        // interop contract explicit so it remains correct if this output is
+        // replaced by an external resource with additional subresources.
+        const auto upscaledHDR = Subresources(
+            Builtin::PostProcessing::UpscaledHDR,
+            Mip{ 0, 1 });
         const UpscalingMode upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
         const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
 

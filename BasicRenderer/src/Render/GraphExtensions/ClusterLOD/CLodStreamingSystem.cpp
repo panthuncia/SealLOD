@@ -969,11 +969,86 @@ void CLodStreamingSystem::Shutdown() {
         m_streamingWorkerThread.join();
     }
 
-    ShutdownGraphResources();
+    // Destruction transfers streaming ownership back to MeshManager/PagePool.
+    // A render-graph registry reset does not: the same streaming system remains
+    // alive and must retain its resident pages across the graph rebuild.
+    ResetStreamingStateForShutdown();
 }
 
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     (void)reg;
+    std::lock_guard serviceLock(m_streamingServiceMutex);
+
+    // The registry and the alias placements are graph-local, but CLod residency
+    // is not. Keep the CPU domain, page ownership, resident groups, LRU and
+    // pending disk work intact while releasing only graph-facing backings.
+    auto releaseBufferBacking = [](const std::shared_ptr<Buffer>& buffer) {
+        if (buffer) {
+            buffer->Dematerialize();
+        }
+    };
+
+    releaseBufferBacking(m_streamingNonResidentBits);
+    releaseBufferBacking(m_streamingActiveGroupsBits);
+    releaseBufferBacking(m_streamingLoadRequestKeys);
+    releaseBufferBacking(m_streamingLoadRequests);
+    releaseBufferBacking(m_streamingLoadCounter);
+    releaseBufferBacking(m_streamingRuntimeState);
+    releaseBufferBacking(m_usedGroupsCounter);
+    releaseBufferBacking(m_usedGroupsBuffer);
+    releaseBufferBacking(m_sourceGroupMismatchCounter);
+    releaseBufferBacking(m_sourceGroupMismatchDetails);
+    if (m_parallelSortState) {
+        releaseBufferBacking(m_parallelSortState->keyScratch);
+        releaseBufferBacking(m_parallelSortState->payloadScratch);
+        releaseBufferBacking(m_parallelSortState->sumTable);
+        releaseBufferBacking(m_parallelSortState->reduceTable);
+        releaseBufferBacking(m_parallelSortState->constants);
+        releaseBufferBacking(m_parallelSortState->countScatterArgs);
+        releaseBufferBacking(m_parallelSortState->reduceScanArgs);
+    }
+
+    if (MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr) {
+        ClearStreamingUploadFunction(meshManager);
+    }
+    if (m_uploadInstance) {
+        m_uploadInstance->Cleanup();
+        m_uploadInstance.reset();
+    }
+
+    // The rematerialized bitsets have undefined contents. Re-upload the
+    // authoritative CPU mirrors without declaring every live group nonresident.
+    MarkStreamingNonResidentBitsDirtyAll();
+    MarkStreamingActiveGroupsBitsDirty();
+    {
+        std::lock_guard publishLock(m_streamingPublishMutex);
+        m_publishedActiveGroupsBits.clear();
+        m_publishedActiveGroupScanCount = 0u;
+        m_publishedActiveGroupsBitsUploadPending = true;
+    }
+    m_streamingServicePublishedGeneration = 0;
+
+    // Readbacks reference graph queue timelines/backings and cannot cross a
+    // rebuild. Their decoded requests are advisory and will be regenerated.
+    std::lock_guard workerLock(m_streamingWorkerMutex);
+    {
+        std::lock_guard lock(m_decodedReadbackMutex);
+        m_decodedReadbackBatch.clear();
+        m_decodedUsedGroupsBatch.clear();
+    }
+    for (auto& slot : m_readbackStagingSlots) {
+        slot.inFlight = false;
+        slot.fenceValue = 0;
+    }
+    m_readbackStagingCursor = 0;
+    m_streamingReadbackDiscardedFenceCounter.store(
+        m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
+        std::memory_order_release);
+    m_streamingServiceRequested.store(true, std::memory_order_release);
+    m_streamingWorkerCV.notify_one();
+}
+
+void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     std::lock_guard serviceLock(m_streamingServiceMutex);
 
     auto releaseBufferBacking = [](const std::shared_ptr<Buffer>& buffer) {
@@ -4677,6 +4752,84 @@ bool CLodStreamingSystem::PublishPendingStreamingStorageGpuResizeLocked() {
     return true;
 }
 
+void CLodStreamingSystem::InitializeActiveRange(
+    MeshManager* meshManager,
+    uint32_t begin,
+    uint32_t count,
+    uint32_t& initializedGroups,
+    uint32_t& queuedPinnedGroups) {
+    if (meshManager == nullptr) {
+        return;
+    }
+
+    const uint32_t end = std::min(begin + count, m_streamingStorageGroupCapacity);
+    for (uint32_t groupIndex = begin; groupIndex < end; ++groupIndex) {
+        const uint32_t word = BitWordAddress(groupIndex);
+        if (word >= m_streamingResidencyInitializedBitsCpu.size()) {
+            continue;
+        }
+        const uint32_t mask = BitMask(groupIndex);
+        if ((m_streamingActiveGroupsBitsCpu[word] & mask) == 0u ||
+            (m_streamingResidencyInitializedBitsCpu[word] & mask) != 0u) {
+            continue;
+        }
+        m_streamingResidencyInitializedBitsCpu[word] |= mask;
+        ++initializedGroups;
+
+        const bool pinned = word < m_streamingPinnedGroupsBitsCpu.size()
+            && (m_streamingPinnedGroupsBitsCpu[word] & mask) != 0u;
+        if (!pinned) {
+            SetGroupResidentBit(groupIndex, false);
+            continue;
+        }
+
+        const MeshManager::CLodGroupStreamingInfo info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
+        PreAllocatedPages preAlloc{};
+        if (info.valid && info.pageCount > 0u) {
+            preAlloc = PreAllocatePagesForGroup(groupIndex, info, meshManager);
+            if (preAlloc.segmentCount == 0u) {
+                SetGroupResidentBit(groupIndex, false);
+                m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                if (SarpClodImportDebugLoggingEnabled()) {
+                    spdlog::warn("SARPDBG CLodStreaming failed to preallocate pinned root group={}", groupIndex);
+                }
+                continue;
+            }
+            preAlloc.requestGeneration = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+                ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+                : 0u;
+            m_preAllocatedPagesByGroup[groupIndex] = preAlloc;
+        }
+
+        const bool queued = meshManager->QueueCLodGroupDiskIO(
+            groupIndex,
+            preAlloc.segmentNeedsFetch,
+            preAlloc.pagesBySegment);
+        if (queued) {
+            ++queuedPinnedGroups;
+            MarkStreamingRequestDiskIo(groupIndex);
+            SetGroupResidentBit(groupIndex, false);
+            if (SarpClodImportDebugLoggingEnabled() && queuedPinnedGroups <= 16u) {
+                spdlog::info("SARPDBG CLodStreaming queued pinned root group={}", groupIndex);
+            }
+        } else {
+            if (preAlloc.segmentCount != 0u) {
+                ReleasePreAllocatedPages(preAlloc, meshManager);
+                m_preAllocatedPagesByGroup.erase(groupIndex);
+            }
+            if (info.valid && info.pageCount == 0u) {
+                SetGroupResidentBit(groupIndex, true);
+            } else {
+                SetGroupResidentBit(groupIndex, false);
+                m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                if (SarpClodImportDebugLoggingEnabled()) {
+                    spdlog::warn("SARPDBG CLodStreaming failed to queue pinned root group={}", groupIndex);
+                }
+            }
+        }
+    }
+}
+
 void CLodStreamingSystem::RebuildStreamingDomainFromSnapshot(MeshManager* meshManager) {
     ZoneScopedN("CLodStreamingSystem::RebuildStreamingDomainFromSnapshot");
     if (meshManager == nullptr) {
@@ -4720,9 +4873,35 @@ void CLodStreamingSystem::RebuildStreamingDomainFromSnapshot(MeshManager* meshMa
             m_streamingPinnedGroupsBitsCpu[BitWordAddress(groupIndex)] |= BitMask(groupIndex);
         }
     }
+
+    // Snapshot reconstruction is the new owner's equivalent of replaying all
+    // historical ActiveRangeAdded events. In particular, pinned/coarsest roots
+    // must become resident (or be queued) before traversal can refine safely.
+    uint32_t initializedGroups = 0u;
+    uint32_t queuedPinnedGroups = 0u;
+    for (const auto& range : snapshot.activeRanges) {
+        InitializeActiveRange(
+            meshManager,
+            range.groupsBase,
+            range.groupCount,
+            initializedGroups,
+            queuedPinnedGroups);
+    }
     MarkStreamingActiveGroupsBitsDirty();
     MarkStreamingNonResidentBitsDirtyAll();
     TracyPlot("CLodStreaming.Domain.FallbackFullReset", static_cast<int64_t>(1));
+    TracyPlot("CLodStreaming.Domain.SnapshotInitializedGroups", static_cast<int64_t>(initializedGroups));
+    TracyPlot("CLodStreaming.Domain.SnapshotQueuedPinnedGroups", static_cast<int64_t>(queuedPinnedGroups));
+    if (SarpClodImportDebugLoggingEnabled()) {
+        spdlog::info(
+            "SARPDBG CLodStreaming SnapshotSummary activeRanges={} coarsestRanges={} initialized={} queuedPinned={} activeScan={} storageCapacity={}",
+            snapshot.activeRanges.size(),
+            snapshot.coarsestRanges.size(),
+            initializedGroups,
+            queuedPinnedGroups,
+            m_streamingActiveGroupScanCount,
+            m_streamingStorageGroupCapacity);
+    }
 }
 
 void CLodStreamingSystem::ProcessStreamingDomainEvents() {
@@ -4782,75 +4961,6 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
         }
     };
 
-    auto initializeActiveRange = [this, meshManager](uint32_t begin, uint32_t count, uint32_t& initializedGroups, uint32_t& queuedPinnedGroups) {
-        const uint32_t end = std::min(begin + count, m_streamingStorageGroupCapacity);
-        for (uint32_t groupIndex = begin; groupIndex < end; ++groupIndex) {
-            const uint32_t word = BitWordAddress(groupIndex);
-            if (word >= m_streamingResidencyInitializedBitsCpu.size()) {
-                continue;
-            }
-            const uint32_t mask = BitMask(groupIndex);
-            if ((m_streamingActiveGroupsBitsCpu[word] & mask) == 0u ||
-                (m_streamingResidencyInitializedBitsCpu[word] & mask) != 0u) {
-                continue;
-            }
-            m_streamingResidencyInitializedBitsCpu[word] |= mask;
-            ++initializedGroups;
-
-            const bool pinned = word < m_streamingPinnedGroupsBitsCpu.size()
-                && (m_streamingPinnedGroupsBitsCpu[word] & mask) != 0u;
-            if (!pinned) {
-                SetGroupResidentBit(groupIndex, false);
-                continue;
-            }
-
-            const MeshManager::CLodGroupStreamingInfo info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
-            PreAllocatedPages preAlloc{};
-            if (info.valid && info.pageCount > 0u) {
-                preAlloc = PreAllocatePagesForGroup(groupIndex, info, meshManager);
-                if (preAlloc.segmentCount == 0u) {
-                    SetGroupResidentBit(groupIndex, false);
-                    m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
-                    if (SarpClodImportDebugLoggingEnabled()) {
-                        spdlog::warn("SARPDBG CLodStreaming failed to preallocate pinned root group={}", groupIndex);
-                    }
-                    continue;
-                }
-                preAlloc.requestGeneration = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
-                    ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
-                    : 0u;
-                m_preAllocatedPagesByGroup[groupIndex] = preAlloc;
-            }
-
-            const bool queued = meshManager->QueueCLodGroupDiskIO(
-                groupIndex,
-                preAlloc.segmentNeedsFetch,
-                preAlloc.pagesBySegment);
-            if (queued) {
-                ++queuedPinnedGroups;
-                MarkStreamingRequestDiskIo(groupIndex);
-                SetGroupResidentBit(groupIndex, false);
-                if (SarpClodImportDebugLoggingEnabled() && queuedPinnedGroups <= 16u) {
-                    spdlog::info("SARPDBG CLodStreaming queued pinned root group={}", groupIndex);
-                }
-            } else {
-                if (preAlloc.segmentCount != 0u) {
-                    ReleasePreAllocatedPages(preAlloc, meshManager);
-                    m_preAllocatedPagesByGroup.erase(groupIndex);
-                }
-                if (info.valid && info.pageCount == 0u) {
-                    SetGroupResidentBit(groupIndex, true);
-                } else {
-                    SetGroupResidentBit(groupIndex, false);
-                    m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
-                    if (SarpClodImportDebugLoggingEnabled()) {
-                        spdlog::warn("SARPDBG CLodStreaming failed to queue pinned root group={}", groupIndex);
-                    }
-                }
-            }
-        }
-    };
-
     auto releaseRemovedRange = [this, meshManager](uint32_t begin, uint32_t count) {
         const uint32_t end = std::min(begin + count, m_streamingStorageGroupCapacity);
         for (uint32_t groupIndex = begin; groupIndex < end; ++groupIndex) {
@@ -4904,7 +5014,12 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
                 setBitRange(m_streamingPinnedGroupsBitsCpu, pinnedRange.groupsBase, pinnedRange.groupCount, true);
             }
             MarkStreamingActiveGroupsBitsDirty();
-            initializeActiveRange(event.groupsBase, event.groupCount, initializedGroups, queuedPinnedGroups);
+            InitializeActiveRange(
+                meshManager,
+                event.groupsBase,
+                event.groupCount,
+                initializedGroups,
+                queuedPinnedGroups);
             break;
         case MeshManager::CLodStreamingDomainEventKind::ActiveRangeRemoved:
             ++activeRangesRemoved;

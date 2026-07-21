@@ -21,7 +21,8 @@ public:
 			Builtin::Color::HDRColorTarget,
 			Builtin::DebugVisualization);
 		builder->WithDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
-		builder->WithRenderTargetClear(Builtin::PrimaryCamera::LinearDepthMap);
+		builder->WithRenderTargetClear(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
+			.WithUnorderedAccessClear(Subresources(Builtin::PrimaryCamera::LinearDepthMap, FromMip{ 1 }));
 	}
 
 	void Setup() override {
@@ -97,16 +98,16 @@ public:
 		clearResource(m_HDRColorTarget); // TODO: Only needed because of non-zero initialized memory issue- make a clear manager instead?
 		clearDepth(m_depthTexture); // same
 		if (m_linearDepthTexture) {
-			auto derivedMipClear = m_linearDepthTexture->GetClearColor();
-			derivedMipClear.rgba[0] = 0.0f;
-			derivedMipClear.rgba[1] = 0.0f;
-			derivedMipClear.rgba[2] = 0.0f;
-			derivedMipClear.rgba[3] = 0.0f;
 			for (unsigned int slice = 0; slice < m_linearDepthTexture->GetNumRTVSlices(); ++slice) {
-				for (unsigned int mip = 0; mip < m_linearDepthTexture->GetNumRTVMipLevels(); ++mip) {
-					commandList.ClearRenderTargetView(
-						m_linearDepthTexture->GetRTVInfo(mip, slice).slot,
-						mip == 0 ? m_linearDepthTexture->GetClearColor() : derivedMipClear);
+				commandList.ClearRenderTargetView(
+					m_linearDepthTexture->GetRTVInfo(0, slice).slot,
+					m_linearDepthTexture->GetClearColor());
+				for (unsigned int mip = 1; mip < m_linearDepthTexture->GetNumUAVMipLevels(); ++mip) {
+					rhi::UavClearInfo clearInfo{};
+					clearInfo.cpuVisible = m_linearDepthTexture->GetUAVNonShaderVisibleInfo(mip, slice).slot;
+					clearInfo.shaderVisible = m_linearDepthTexture->GetUAVShaderVisibleInfo(mip, slice).slot;
+					clearInfo.resource = m_linearDepthTexture->GetAPIResource();
+					commandList.ClearUavFloat(clearInfo, rhi::UavClearFloat{});
 				}
 			}
 		}

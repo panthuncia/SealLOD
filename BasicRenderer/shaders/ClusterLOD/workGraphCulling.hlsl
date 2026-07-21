@@ -51,6 +51,10 @@
 #define CLOD_WG_ENABLE_REYES_VISIBILITY 0
 #endif
 
+#ifndef CLOD_WG_ENABLE_VOXEL_OUTPUT
+#define CLOD_WG_ENABLE_VOXEL_OUTPUT 1
+#endif
+
 // Set to 1 to enable occlusion culling for VSM / shadow cameras (ortho).
 // Defaults to 0 (off): ortho cameras skip occlusion culling entirely.
 #ifndef CLOD_VSM_OCCLUSION_CULLING
@@ -1413,6 +1417,7 @@ float ProjectedGeometricError(
 
 bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, Camera camera);
 
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
 void CLodAppendVoxelRasterClusterWork(
     CLodMeshMetadata clodMeshMetadata,
     uint instanceIndex,
@@ -1653,6 +1658,7 @@ void CLodAppendVoxelRasterClusterWork(
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_DROPPED, droppedCount);
     }
 }
+#endif
 
 void ReplayReserveNodeSlotsWave(
     RWStructuredBuffer<CLodReplayBufferState> replayState,
@@ -1925,6 +1931,7 @@ bool CLodBucketContainsVoxels(CLodClusterRunRecord record)
     return UnpackClusterKind(record.clusterKindAndPageIndex) == CLOD_CLUSTER_KIND_VOXEL;
 }
 
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
 void CLodProcessVoxelClusterBucket(CLodClusterRunRecord record)
 {
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
@@ -1976,6 +1983,7 @@ void CLodProcessVoxelClusterBucket(CLodClusterRunRecord record)
         cullCamera,
         dirtyPageCullingEnabled);
 }
+#endif
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 struct CLodVirtualShadowPredictiveInvalidationCandidate
@@ -2591,6 +2599,7 @@ bool CLodPrepareRenderableLeaf(
     return true;
 }
 
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
 void CLodAppendVoxelRasterWorkForLeaf(
     CLodMeshMetadata clodMeshMetadata,
     uint instanceIndex,
@@ -2659,6 +2668,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
         cullCamera,
         dirtyPageCullingEnabled);
 }
+#endif
 
 void CLodHandleRenderableLeaf(
     TraverseNodeRecord rec,
@@ -2756,6 +2766,7 @@ void CLodHandleRenderableLeaf(
     }
     else if (leaf.isVoxel)
     {
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
         if (assemblyPartVoxelLeaf)
         {
             WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_VOXEL_RASTER_WORK_RECORDS, 1);
@@ -2771,6 +2782,7 @@ void CLodHandleRenderableLeaf(
             lodUniformScale,
             cullCamera,
             dirtyPageCullingEnabled);
+#endif
     }
     else
     {
@@ -3897,9 +3909,11 @@ void ClusterCullBody(
     // launches or executes a separate voxel-leaf cull path.
     if (hasBucket && commonPageValid && CLodBucketContainsVoxels(b))
     {
+#if CLOD_WG_ENABLE_VOXEL_OUTPUT
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1u);
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, UnpackClusterCount(b.clusterIndexAndCount));
         CLodProcessVoxelClusterBucket(b);
+#endif
         swPendingOut = 0u;
         pageJobPendingOut = 0u;
         reyesPendingOut = 0u;

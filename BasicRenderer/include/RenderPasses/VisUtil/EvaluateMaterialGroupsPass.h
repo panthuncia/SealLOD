@@ -23,7 +23,8 @@
 
 class EvaluateMaterialGroupsPass : public ComputePass {
 public:
-    EvaluateMaterialGroupsPass() {
+    explicit EvaluateMaterialGroupsPass(bool terrainRvtEnabled)
+        : m_terrainRvtEnabled(terrainRvtEnabled) {
         auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
 
         // Global LOD extension visibility buffer tag
@@ -112,17 +113,6 @@ public:
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
             Builtin::Terrain::TextureGroup,
-            Builtin::Terrain::RvtInfo,
-            Builtin::Terrain::RvtClipInfos,
-            Builtin::Terrain::RvtPageTable,
-            Builtin::Terrain::RvtPageKeys,
-            Builtin::Terrain::RvtPhysicalPageOwner,
-            Builtin::Terrain::RvtPhysicalPageAtlas,
-            Builtin::Terrain::RvtHeightResidentCache,
-            Builtin::Terrain::RvtHeightAtlas,
-            Builtin::Terrain::RvtAlbedoAtlas,
-            Builtin::Terrain::RvtNormalAtlas,
-            Builtin::Terrain::RvtMaterialAtlas,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CLod::Offsets,
 			Builtin::CLod::GroupChunks,
@@ -142,12 +132,28 @@ public:
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
                 Builtin::DebugVisualization,
-                Builtin::Terrain::RvtRequestMasks,
-                Builtin::Terrain::RvtRequestList,
-                Builtin::Terrain::RvtCounters,
-                Builtin::Terrain::RvtStats,
 				Builtin::Material::TextureStreamingFeedbackBuffer)
     	.WithConstantBuffer(Builtin::PerFrameBuffer);
+
+        if (m_terrainRvtEnabled) {
+            b->WithShaderResource(
+                Builtin::Terrain::RvtInfo,
+                Builtin::Terrain::RvtClipInfos,
+                Builtin::Terrain::RvtPageTable,
+                Builtin::Terrain::RvtPageKeys,
+                Builtin::Terrain::RvtPhysicalPageOwner,
+                Builtin::Terrain::RvtPhysicalPageAtlas,
+                Builtin::Terrain::RvtHeightResidentCache,
+                Builtin::Terrain::RvtHeightAtlas,
+                Builtin::Terrain::RvtAlbedoAtlas,
+                Builtin::Terrain::RvtNormalAtlas,
+                Builtin::Terrain::RvtMaterialAtlas)
+                .WithUnorderedAccess(
+                    Builtin::Terrain::RvtRequestMasks,
+                    Builtin::Terrain::RvtRequestList,
+                    Builtin::Terrain::RvtCounters,
+                    Builtin::Terrain::RvtStats);
+        }
         b->WithIndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
     }
 
@@ -303,7 +309,7 @@ public:
             }
 
             cl.BindPipeline(pso->GetAPIPipelineState().GetHandle());
-            BindResourceDescriptorIndices(cl, pso->GetResourceDescriptorSlots());
+            BindMaterialResourceDescriptorIndices(cl, pso->GetResourceDescriptorSlots());
 
             // Set per-pass root constants
             unsigned int miscRootConstants[NumMiscUintRootConstants] = {};
@@ -356,6 +362,33 @@ public:
     }
 
 private:
+    void BindMaterialResourceDescriptorIndices(
+        rhi::CommandList& commandList,
+        const PipelineResources& resources) {
+        unsigned int indices[rg::shaderapi::kNumResourceDescriptorIndicesRootConstants] = {};
+        int indexCount = 0;
+        for (const auto& binding : resources.mandatoryResourceDescriptorSlots) {
+            const bool allowMissing =
+                !m_terrainRvtEnabled && binding.name.starts_with("Builtin::Terrain::Rvt");
+            indices[indexCount++] =
+                m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, allowMissing);
+        }
+        for (const auto& binding : resources.optionalResourceDescriptorSlots) {
+            indices[indexCount++] =
+                m_resourceDescriptorIndexHelper->GetResourceDescriptorIndex(binding, true);
+        }
+        if (indexCount > 0) {
+            commandList.PushConstants(
+                rhi::ShaderStage::Compute,
+                0,
+                rg::shaderapi::kResourceDescriptorIndicesRootParameter,
+                0,
+                indexCount,
+                indices);
+        }
+    }
+
+    bool m_terrainRvtEnabled = false;
     Resource* m_materialEvalCmds;
     flecs::query<> m_visibleClustersQuery;
     flecs::query<> m_visibleClusterTransformIndicesQuery;

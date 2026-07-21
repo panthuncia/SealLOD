@@ -4,10 +4,8 @@
 #include "include/gammaCorrection.hlsli"
 #include "PerPassRootConstants/bloomSampleRootConstants.h"
 
-// UintRootConstant0 is HDR source SRV
-// UintRootConstant1 is mip level of bloom source SRV
-// UintRootConstant2 is src res x
-// UintRootConstant3 is src res y
+// UintRootConstant0 is the source SRV descriptor index.
+// UintRootConstant1/2 are the source dimensions.
 
 // UintRootConstant3/4 carry texel size as float bit patterns
 float4 downsample(FULLSCREEN_VS_OUTPUT input) : SV_Target
@@ -15,7 +13,7 @@ float4 downsample(FULLSCREEN_VS_OUTPUT input) : SV_Target
     float x = SRC_TEXEL_SIZE_X;
     float y = SRC_TEXEL_SIZE_Y;
     
-    Texture2D<float4> source = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PostProcessing::UpscaledHDR)];
+    Texture2D<float4> source = ResourceDescriptorHeap[SOURCE_TEXTURE_DESCRIPTOR_INDEX];
     float2 texCoord = input.uv;
     texCoord.y = 1.0f - texCoord.y;
     

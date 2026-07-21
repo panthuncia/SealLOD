@@ -2393,6 +2393,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 	downsampledDesc.hasDSV = false;
 	downsampledDesc.hasSRV = true;
 	downsampledDesc.hasUAV = true;
+	downsampledDesc.hasNonShaderVisibleUAV = true;
 	downsampledDesc.isCubemap = isCubemap;
 	downsampledDesc.channels = 1;
 	downsampledDesc.srvFormat = rhi::Format::R32_Float;

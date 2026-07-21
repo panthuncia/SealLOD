@@ -268,6 +268,7 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
 )
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
 add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
+add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -1305,10 +1306,13 @@ PRIVATE
 )
 
 target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
 if(MSVC)
     target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
+    target_compile_options(PipelineRecipeTests PRIVATE /std:c++latest)
 endif()
 
 enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
+add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)

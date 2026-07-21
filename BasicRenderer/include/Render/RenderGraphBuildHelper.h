@@ -185,13 +185,15 @@ void BuildBRDFIntegrationPass(RenderGraph* graph) {
     TagPassTechnique(graph, "BRDF Integration Pass", "Environment Lighting::BRDF Integration");
 }
 
-inline void RegisterVisUtilResources(RenderGraph* graph)
+inline void RegisterVisUtilResources(RenderGraph* graph, bool terrainRvt, bool registerCommonResources = true)
 {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const uint32_t maxPixels = resolution.x * resolution.y;
 
     auto& rm = ResourceManager::GetInstance();
     (void)rm;
+
+    if (registerCommonResources) {
 
     // Total pixel count buffer (uint[1])
     auto totalPixelCountBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
@@ -353,6 +355,9 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     rg::memory::SetResourceUsageHint(*terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer", terrainRegionMaterialEvalCommandBuildDispatchArgsBuffer);
 
+    }
+
+    if (terrainRvt) {
     struct TerrainRvtInfoPOD {
         uint32_t pageSize;
         uint32_t borderTexels;
@@ -707,17 +712,81 @@ inline void RegisterVisUtilResources(RenderGraph* graph)
     createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
     createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R16G16B16A16_Float, 4);
     createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    }
 }
 
-void BuildGBufferPipeline(RenderGraph* graph) {
-    RegisterVisUtilResources(graph);
+inline void BuildVisibilityMaterialBinningPipeline(RenderGraph* graph)
+{
+    graph->BuildComputePass<MaterialUAVResetPass>("MaterialPixelCounterResetPass");
+    TagPassTechnique(graph, "MaterialPixelCounterResetPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildComputePass<MaterialHistogramPass>("MaterialHistogramPass");
+    TagPassTechnique(graph, "MaterialHistogramPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildComputePass<MaterialBlockScanPass>("MaterialBlockScanPass");
+    TagPassTechnique(graph, "MaterialBlockScanPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildComputePass<MaterialBlockOffsetsPass>("MaterialBlockOffsetsPass");
+    TagPassTechnique(graph, "MaterialBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+    graph->BuildComputePass<BuildPixelListPass>("BuildPixelListPass");
+    TagPassTechnique(graph, "BuildPixelListPass", "Primary Visibility::GBuffer Construction::VisUtil");
+    graph->BuildComputePass<BuildMaterialIndirectCommandBufferPass>("BuildMaterialIndirectCommandBufferPass");
+    TagPassTechnique(graph, "BuildMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Material Groups");
+}
+
+inline void BuildTerrainRvtPipeline(RenderGraph* graph)
+{
+    graph->BuildComputePass<TerrainRvtFrameResetPass>("TerrainRvtFrameResetPass");
+    TagPassTechnique(graph, "TerrainRvtFrameResetPass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtResolveRequestsPass>("TerrainRvtResolveMaterialRequestsPass");
+    TagPassTechnique(graph, "TerrainRvtResolveMaterialRequestsPass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtBuildGenerateDispatchArgsPass>("TerrainRvtBuildMaterialGenerateDispatchArgsPass");
+    TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
+    TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
+    TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtBuildHeightResidentCachePass>("TerrainRvtBuildHeightResidentCachePass");
+    TagPassTechnique(graph, "TerrainRvtBuildHeightResidentCachePass", "Primary Visibility::Terrain RVT");
+    graph->BuildComputePass<TerrainRvtClearFeedbackRequestsPass>("TerrainRvtClearFeedbackRequestsPass");
+    TagPassTechnique(graph, "TerrainRvtClearFeedbackRequestsPass", "Primary Visibility::Terrain RVT");
+}
+
+inline void BuildTerrainRegionMaterialEvaluationPipeline(RenderGraph* graph)
+{
+    graph->BuildComputePass<TerrainRegionCounterResetPass>("TerrainRegionCounterResetPass");
+    TagPassTechnique(graph, "TerrainRegionCounterResetPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<TerrainRegionHistogramPass>("TerrainRegionHistogramPass");
+    TagPassTechnique(graph, "TerrainRegionHistogramPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<TerrainRegionBlockScanPass>("TerrainRegionBlockScanPass");
+    TagPassTechnique(graph, "TerrainRegionBlockScanPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<TerrainRegionBlockOffsetsPass>("TerrainRegionBlockOffsetsPass");
+    TagPassTechnique(graph, "TerrainRegionBlockOffsetsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<TerrainRegionPixelListPass>("TerrainRegionPixelListPass");
+    TagPassTechnique(graph, "TerrainRegionPixelListPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass>("BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass");
+    TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBuildDispatchArgsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<BuildTerrainRegionMaterialIndirectCommandBufferPass>("BuildTerrainRegionMaterialIndirectCommandBufferPass");
+    TagPassTechnique(graph, "BuildTerrainRegionMaterialIndirectCommandBufferPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+    graph->BuildComputePass<EvaluateTerrainRegionMaterialGroupsPass>("EvaluateTerrainRegionMaterialGroupsPass");
+    TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
+}
+
+inline void BuildMaterialEvaluationPipeline(RenderGraph* graph, bool terrainRvt)
+{
+    graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", terrainRvt);
+    TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+}
+
+void BuildGBufferPipeline(
+    RenderGraph* graph,
+    bool visibilityMaterialBinning,
+    bool terrainRvt,
+    bool terrainRegionMaterialEvaluation,
+    bool materialEvaluation) {
+    RegisterVisUtilResources(graph, terrainRvt);
     bool occlusionCulling = SettingsManager::GetInstance().getSettingGetter<bool>("enableOcclusionCulling")();
 	bool enableWireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
 	bool useMeshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
 	bool indirect = SettingsManager::GetInstance().getSettingGetter<bool>("enableIndirectDraws")();
     bool visibilityRendering = SettingsManager::GetInstance().getSettingGetter<bool>("enableVisibilityRendering")();
-    bool terrainRegionMaterialEvaluation = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
-    bool terrainRvt = SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRvt")();
 
     if (!useMeshShaders) {
         indirect = false; // Mesh shader pipelines are required for indirect draws
@@ -725,7 +794,7 @@ void BuildGBufferPipeline(RenderGraph* graph) {
 
     // Z prepass goes before light clustering for when active cluster determination is implemented
     bool clearRTVs = false;
-    const bool needsVisibilityMaterialEvaluation = visibilityRendering;
+    const bool needsVisibilityMaterialEvaluation = visibilityRendering && visibilityMaterialBinning;
     if (!needsVisibilityMaterialEvaluation && (!occlusionCulling || !indirect)) {
         clearRTVs = true; // We will not run an earlier pass
     }
@@ -803,8 +872,10 @@ void BuildGBufferPipeline(RenderGraph* graph) {
         }
 
         // Evaluate material groups
-        graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass");
-        TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+        if (materialEvaluation) {
+            graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", terrainRvt);
+            TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+        }
 
         // PrimaryDepthCopyPass is disabled for CLod two-phase path.
     }
@@ -927,7 +998,7 @@ void BuildLinearDepthHistoryCopyPass(RenderGraph* graph) {
     TagPassTechnique(graph, "LinearDepthHistoryCopyPass", "Post Process::Depth History");
 }
 
-void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment) {
+void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
 
 	bool gtaoEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")();
 	bool meshShaders = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader")();
@@ -942,7 +1013,7 @@ void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment) {
     // a second linear-depth copy is inserted immediately before DeferredShadingPass.
     // Building the skybox here keeps it after that final depth write while still
     // letting forward/transparent passes blend over the background.
-    if (currentEnvironment != nullptr) {
+    if (currentEnvironment != nullptr || hasBoundEnvironment) {
         graph->BuildComputePass<SkyboxRenderPass>("SkyboxPass");
         TagPassTechnique(graph, "SkyboxPass", "Lighting::Primary Shading");
     }
@@ -1044,7 +1115,25 @@ void BuildPPLLPipeline(RenderGraph* graph) {
 }
 
 void BuildBloomPipeline(RenderGraph* graph) {
-	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+
+    TextureDescription bloomDesc;
+    bloomDesc.arraySize = 1;
+    bloomDesc.channels = 4;
+    bloomDesc.isCubemap = false;
+    bloomDesc.hasRTV = true;
+    bloomDesc.hasSRV = true;
+    bloomDesc.format = rhi::Format::R16G16B16A16_Float;
+    bloomDesc.generateMipMaps = true;
+    bloomDesc.imageDimensions.push_back({ resolution.x, resolution.y, 0, 0 });
+    // This remains separate from the single-mip Streamline output, but can
+    // participate in the render graph's enhanced-barrier aliasing model.
+    bloomDesc.allowAlias = true;
+    auto bloomTexture = PixelBuffer::CreateSharedUnmaterialized(bloomDesc);
+    bloomTexture->SetName("Bloom Texture");
+    rg::memory::SetResourceUsageHint(*bloomTexture, "Post-Processing resources");
+    graph->RegisterResource(Builtin::PostProcessing::BloomTexture, bloomTexture);
+
     // Calculate max mips
 	unsigned int maxBloomMips = static_cast<unsigned int>(std::log2(std::max(resolution.x, resolution.y))) + 1;
     unsigned int numBloomMips = 5;

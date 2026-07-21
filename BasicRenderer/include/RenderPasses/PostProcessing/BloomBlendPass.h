@@ -17,12 +17,13 @@ public:
     }
 
     void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithShaderResource(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 1, 1 }))
+        builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 1 }))
             .WithUnorderedAccess(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 }));
     }
 
     void Setup() override {
         m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
+        m_pBloomTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::BloomTexture);
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
@@ -47,7 +48,7 @@ public:
 
         unsigned int misc[NumMiscUintRootConstants] = {};
 		misc[HDR_TARGET_UAV_DESCRIPTOR_INDEX] = m_pHDRTarget->GetUAVShaderVisibleInfo(0).slot.index; // HDR target index
-		misc[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pHDRTarget->GetSRVInfo(1).slot.index; // Bloom texture index
+		misc[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(1).slot.index; // Bloom texture index
         misc[DST_WIDTH] = m_pHDRTarget->GetWidth();
         misc[DST_HEIGHT] = m_pHDRTarget->GetHeight();
         misc[BLOOM_BLEND_FILTER_RADIUS] = as_uint(0.001f); // Kernel size
@@ -70,6 +71,7 @@ private:
     rhi::PipelinePtr m_pso;
 
 	PixelBuffer* m_pHDRTarget;
+	PixelBuffer* m_pBloomTarget;
 
 	PipelineResources m_resourceDescriptorBindings;
 

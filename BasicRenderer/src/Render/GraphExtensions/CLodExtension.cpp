@@ -83,11 +83,6 @@
 
 namespace {
 
-bool AreRendererShadowsEnabled()
-{
-    return SettingsManager::GetInstance().getSettingGetter<bool>("enableShadows")();
-}
-
 CLodTransparencyMode GetTransparencyMode(CLodExtensionType type)
 {
     if (type != CLodExtensionType::AlphaBlend) {
@@ -145,7 +140,10 @@ struct StructuralSchedulingPolicy {
     RenderPhase renderPhase;
 };
 
-StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(const CLodVariantTraits& traits, CLodExtensionType type)
+StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(
+    const CLodVariantTraits& traits,
+    CLodExtensionType type,
+    bool enableReyes)
 {
     const auto softwareRasterMode =
         SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
@@ -156,8 +154,7 @@ StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(const CLodVariantTrai
             ? SettingsManager::GetInstance().getSettingGetter<CLodVSMRasterMode>(CLodVSMRasterModeSettingName)()
             : CLodVSMRasterMode::Standard;
     const CLodTransparencyMode transparencyMode = GetTransparencyMode(type);
-    const bool disableReyesTessellation =
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableReyesRasterizationSettingName)();
+    const bool disableReyesTessellation = !enableReyes;
     const bool forceHardwareOnly =
         traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassCullOnly ||
         traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassDeepVisibility ||
@@ -694,7 +691,7 @@ CLodExtension::~CLodExtension() = default;
 
 bool CLodExtension::IsReyesTessellationDisabled() const
 {
-    return SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableReyesRasterizationSettingName)();
+    return !m_options.enableReyes;
 }
 
 void CLodExtension::RefreshShadowConfiguredSettings()
@@ -894,24 +891,37 @@ void CLodExtension::InitializeCoreResources()
     m_swVisibleClustersCounterBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_swVisibleClustersCounterBufferPhase2->SetName(MakeVariantResourceName(traits, "SW Visible Clusters Counter Buffer Phase2"));
 
-    m_voxelRasterWorkCapacity = CLodVoxelRasterWorkCapacity(m_visibleClusterCapacity);
-    m_voxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
-    m_voxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Rigid"));
+    if (m_options.enableVoxelRasterization) {
+        m_voxelRasterWorkCapacity = std::clamp(
+            m_options.voxelRasterWorkCapacity,
+            1u,
+            m_visibleClusterCapacity);
+        m_voxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
+        m_voxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Rigid"));
 
-    m_voxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_voxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Rigid"));
+        m_voxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+        m_voxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Rigid"));
 
-    m_skinnedVoxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
-    m_skinnedVoxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Skinned"));
+        m_skinnedVoxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
+        m_skinnedVoxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Skinned"));
 
-    m_skinnedVoxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_skinnedVoxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Skinned"));
+        m_skinnedVoxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+        m_skinnedVoxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Skinned"));
 
-    m_voxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
-    m_voxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Rigid"));
+        m_voxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
+        m_voxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Rigid"));
 
-    m_skinnedVoxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
-    m_skinnedVoxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Skinned"));
+        m_skinnedVoxelRasterIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVoxelRasterDispatchCommand), true, false, false, true);
+        m_skinnedVoxelRasterIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Indirect Args Buffer Skinned"));
+
+        const uint64_t queueBytes = static_cast<uint64_t>(m_voxelRasterWorkCapacity) * sizeof(CLodVoxelRasterWorkRecord);
+        spdlog::info(
+            "CLod voxel raster allocation '{}': capacity={} perQueueMiB={:.2f} pairMiB={:.2f}",
+            traits.resourcePrefix,
+            m_voxelRasterWorkCapacity,
+            static_cast<double>(queueBytes) / (1024.0 * 1024.0),
+            static_cast<double>(queueBytes * 2u) / (1024.0 * 1024.0));
+    }
 
     m_sortedToUnsortedMappingBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
     m_sortedToUnsortedMappingBuffer->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer"));
@@ -1496,8 +1506,12 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     tagBufferUsage(m_reyesTelemetryBufferPhase2, "Cluster LOD telemetry");
 }
 
-CLodExtension::CLodExtension(CLodExtensionType type, uint32_t maxVisibleClusters)
+CLodExtension::CLodExtension(
+    CLodExtensionType type,
+    uint32_t maxVisibleClusters,
+    CLodExtensionOptions options)
     : m_type(type)
+    , m_options(options)
     , m_maxVisibleClusters(maxVisibleClusters) {
     const auto& traits = GetVariantTraits(type);
 
@@ -1536,10 +1550,6 @@ void CLodExtension::RefreshShadowResourcesForCurrentSettings()
 
 void CLodExtension::PrepareForBuild(RenderGraph& rg)
 {
-    if (m_type == CLodExtensionType::Shadow && !AreRendererShadowsEnabled()) {
-        return;
-    }
-
     RefreshTransparencyResourcesForCurrentSettings();
     RefreshShadowResourcesForCurrentSettings();
 
@@ -1595,10 +1605,6 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
 {
     PrepareForBuild(rg);
 
-    if (m_type == CLodExtensionType::Shadow && !AreRendererShadowsEnabled()) {
-        return;
-    }
-
     const auto& traits = GetVariantTraits(m_type);
     if (m_streamingSystem) {
         m_streamingSystem->GatherStructuralPasses(rg, outPasses);
@@ -1632,7 +1638,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
 
     // Snapshot the setting-driven scheduling policy up front so the rest of the
     // function can read as orchestration rather than a sequence of settings lookups.
-    const StructuralSchedulingPolicy schedulingPolicy = BuildStructuralSchedulingPolicy(traits, m_type);
+    const StructuralSchedulingPolicy schedulingPolicy =
+        BuildStructuralSchedulingPolicy(traits, m_type, m_options.enableReyes);
     if (traits.type == CLodExtensionType::AlphaBlend && schedulingPolicy.transparencyMode == CLodTransparencyMode::Disabled) {
         applyTechniqueTags();
         appendStreamingTailPasses();
@@ -2193,6 +2200,11 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                 ? CLodShadowVariant::AppendPhase1ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses)
                 : CLodShadowVariant::AppendPhase2ReyesLargeRasterPasses(*this, traits, slabGroup, outPasses);
             shadowClearDirtyBitsAfterPassName = lastRasterPassName;
+        }
+
+        if (!m_options.enableVoxelRasterization) {
+            appendPerViewDepthCopyPass(phaseIndex);
+            return lastRasterPassName;
         }
 
         const std::string voxelRasterPassName = MakeVariantPassName(traits, "VoxelSoftwareRasterizePass" + std::to_string(phaseIndex));

@@ -86,6 +86,13 @@ private:
     void EnsureStreamingStorageCapacity(uint32_t requiredGroupCount);
     void ProcessStreamingDomainEvents();
     void RebuildStreamingDomainFromSnapshot(MeshManager* meshManager);
+    void InitializeActiveRange(
+        MeshManager* meshManager,
+        uint32_t begin,
+        uint32_t count,
+        uint32_t& initializedGroups,
+        uint32_t& queuedPinnedGroups);
+    void ResetStreamingStateForShutdown();
     bool IsStreamingRequestInProgress(uint32_t groupIndex) const;
     void MarkStreamingRequestPending(uint32_t groupIndex);
     void MarkStreamingRequestWaitingForPages(uint32_t groupIndex);
@@ -381,7 +388,10 @@ private:
     std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
     uint64_t m_lastStreamingDomainEventGeneration = 0;
-    bool m_streamingDomainFullResetPending = false;
+    // A newly-created streaming owner has not consumed the already-live mesh
+    // domain. Incremental domain events are not replayable, so its first update
+    // must bootstrap residency from MeshManager's authoritative snapshot.
+    bool m_streamingDomainFullResetPending = true;
 
     // Worker-owned streaming residency state is protected by this mutex when
     // the main thread publishes upload snapshots or handles registry resets.
