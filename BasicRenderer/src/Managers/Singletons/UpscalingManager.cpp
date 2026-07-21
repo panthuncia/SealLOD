@@ -499,7 +499,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
 
     void* nativeCommandList = backend == rhi::Backend::Vulkan
         ? static_cast<void*>(rhi::vulkan::get_cmd_list(commandList))
-        : static_cast<void*>(rhi::dx12::get_cmd_list(commandList));
+		: static_cast<void*>(rhi::dx12::get_streamline_cmd_list(commandList));
 
     if (backend == rhi::Backend::Vulkan) {
         const sl::ResourceTag tags[] = {

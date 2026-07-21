@@ -145,7 +145,12 @@ float OpenPBRFuzzDirectionalReflectance(float fuzzRoughness, float cosTheta)
 
 float OpenPBRFuzzIncomingReflected(float fuzzWeight, float fuzzRoughness, float NdotV)
 {
-    return saturate(saturate(fuzzWeight) * OpenPBRFuzzDirectionalReflectance(fuzzRoughness, NdotV));
+    const float presence = saturate(fuzzWeight);
+    if (presence <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return saturate(presence * OpenPBRFuzzDirectionalReflectance(fuzzRoughness, NdotV));
 }
 
 float OpenPBRFuzzBaseLayerScaleIncoming(float fuzzWeight, float fuzzRoughness, float NdotV)
@@ -183,11 +188,19 @@ float OpenPBRFuzzBaseLayerScaleIncoming(OpenPBRFuzzLayerState state)
 
 float OpenPBRFuzzBaseLayerScaleOutgoing(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f;
+    }
     return 1.0f - OpenPBRFuzzProportionReflected(state, OpenPBRWorldToLocal(state.basis, normalize(lightDirection)));
 }
 
 float OpenPBRFuzzBaseLayerScaleComplete(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f;
+    }
     return OpenPBRFuzzBaseLayerScaleIncoming(state) * OpenPBRFuzzBaseLayerScaleOutgoing(state, lightDirection);
 }
 
@@ -227,6 +240,10 @@ float OpenPBRFuzzEvaluateLTC(float3 wiLocal, float3 ltcCoefficients)
 
 float3 OpenPBRFuzzSheenBRDF(OpenPBRFuzzLayerState state, float3 lightDirection)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
     const float3 lightDirLocal = OpenPBRWorldToLocal(state.basis, normalize(lightDirection));
     if (state.viewDirLocal.z <= 0.0f || lightDirLocal.z <= 0.0f)
     {
@@ -241,6 +258,10 @@ float3 OpenPBRFuzzSheenBRDF(OpenPBRFuzzLayerState state, float3 lightDirection)
 
 float3 OpenPBRFuzzSheenIBL(float3 fuzzColor, float fuzzWeight, float fuzzRoughness, float NdotV, float3 reflectedRadiance)
 {
+    if (fuzzWeight <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
     const float viewReflected = OpenPBRFuzzIncomingReflected(fuzzWeight, fuzzRoughness, NdotV);
     return viewReflected * saturate(fuzzColor) * reflectedRadiance;
 }

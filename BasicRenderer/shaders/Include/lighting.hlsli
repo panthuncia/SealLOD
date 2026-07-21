@@ -151,6 +151,13 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
 {
     float normDotView = saturate(dot(lightingParameters.normal, lightingParameters.viewDir));
     float normDotLight = saturate(dot(lightingParameters.normal, light.lightToFrag));
+    // A light at or below the geometric shading horizon has no direct surface
+    // contribution. Besides avoiding needless BRDF work, returning here keeps
+    // the GGX horizon singularity from becoming Inf * 0 when NoL is zero.
+    if (normDotLight <= 0.0f || normDotView <= 0.0f)
+    {
+        return 0.0f.xxx;
+    }
     const OpenPBRBaseLayerState baseState = MakeOpenPBRBaseLayerState(
         lightingParameters.weightedBaseColor,
         lightingParameters.diffuseColor,
@@ -193,7 +200,7 @@ float3 calculateLightContributionPBR(LightFragmentData light, LightingParameters
     float3 fuzzFr = OpenPBRFuzzSheenBRDF(fuzzState, light.lightToFrag);
     float3 baseAttenuation = fuzzLayerScale.xxx * baseLayerScale;
     float3 BRDF = (baseEvaluation.diffuse + baseEvaluation.specular) * baseAttenuation + coatFr * fuzzLayerScale.xxx + fuzzFr;
-    
+
     return BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight +
         EvaluateGlintContribution(light, lightingParameters);
 }

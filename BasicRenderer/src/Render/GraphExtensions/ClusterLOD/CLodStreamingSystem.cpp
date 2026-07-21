@@ -1109,6 +1109,28 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
         for (const auto& [_, pages] : m_preAllocatedPagesByGroup) {
             ReleasePreAllocatedPages(pages, meshManager);
         }
+
+		// Full extension shutdown happens only after Renderer::StallPipeline, so no
+		// command list can still reference these pages. Release pinned resident and
+		// retiring pages directly instead of putting them through the normal
+		// frame-delayed retirement path: the latter is cleared just below and used to
+		// strand every pinned page whenever a recipe replacement recreated CLod.
+		std::vector<uint32_t> pinnedPagesToFree;
+		pinnedPagesToFree.reserve(m_pagePinnedStorage.size());
+		for (uint32_t page = 0; page < static_cast<uint32_t>(m_pagePinnedStorage.size()); ++page) {
+			if (m_pagePinnedStorage[page] != 0u) {
+				pinnedPagesToFree.push_back(page);
+				m_pagePinnedStorage[page] = 0u;
+			}
+		}
+		if (!pinnedPagesToFree.empty()) {
+			if (PagePool* pool = meshManager->GetCLodPagePool()) {
+				pool->FreePinnedPages(pinnedPagesToFree);
+				spdlog::info(
+					"CLod streaming shutdown returned {} pinned pages to the shared page pool",
+					pinnedPagesToFree.size());
+			}
+		}
     }
 
     m_pendingStreamingRequests.clear();
