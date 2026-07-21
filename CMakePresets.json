@@ -25,7 +25,8 @@
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang-cl.exe",
-        "CMAKE_CXX_COMPILER": "clang-cl.exe"
+        "CMAKE_CXX_COMPILER": "clang-cl.exe",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/out/v/${presetName}"
       },
       "condition": {
         "type": "equals",

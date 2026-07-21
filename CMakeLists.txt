@@ -242,6 +242,36 @@ if(NOT EXISTS "${USD_REL_DIR}")
   file(REMOVE "${USD_REL_ZIP}")
 endif()
 
+# The TBB bundled with the USD artifacts uses kind_type for four private states,
+# while its enum only declares the first two. Recent Clang versions reject the
+# resulting out-of-range enum constants. Extend the declared range without
+# changing the values or layout used by the prebuilt TBB binaries.
+function(basicrenderer_patch_usd_tbb_task_header usd_dir)
+  set(_task_header "${usd_dir}/include/tbb/task.h")
+  if(NOT EXISTS "${_task_header}")
+    return()
+  endif()
+
+  file(READ "${_task_header}" _task_header_contents)
+  if(_task_header_contents MATCHES "kind_type_max = 4")
+    return()
+  endif()
+
+  string(REGEX REPLACE
+    "enum kind_type \\{[ \t\r\n]+isolated,[ \t\r\n]+bound[ \t\r\n]+\\};"
+    "enum kind_type {\n        isolated,\n        bound,\n        kind_type_max = 4\n    };"
+    _patched_task_header_contents
+    "${_task_header_contents}"
+  )
+  if(_patched_task_header_contents STREQUAL _task_header_contents)
+    message(FATAL_ERROR "Could not apply the Clang compatibility patch to '${_task_header}'.")
+  endif()
+  file(WRITE "${_task_header}" "${_patched_task_header_contents}")
+endfunction()
+
+basicrenderer_patch_usd_tbb_task_header("${USD_DBG_DIR}")
+basicrenderer_patch_usd_tbb_task_header("${USD_REL_DIR}")
+
 # Include sub-projects.
 if(NOT BASICRENDERER_USD_VARIANT)
   if(CMAKE_CONFIGURATION_TYPES)
