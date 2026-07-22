@@ -2735,7 +2735,7 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
         (m_streamingDiagnosticsLastOutlierLogTick == 0u ||
             m_streamingDiagnosticTick >= m_streamingDiagnosticsLastOutlierLogTick + 120u)) {
         m_streamingDiagnosticsLastOutlierLogTick = m_streamingDiagnosticTick;
-        spdlog::warn(
+        spdlog::debug(
             "CLod streaming latency diag[tick={}]: req->resident worst={} group={} samples={} req->upload worst={} group={} pendingCpuMax={} group={} diskIoMax={} group={} commitMax={} group={} pendingCpu={} inProgress={} diskIo={} pendingCommit={} readyCompletions={} preallocDeferrals={} promotionDeferrals={}",
             m_streamingDiagnosticTick,
             stats.requestToResidentWorstTicks,
@@ -3685,7 +3685,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                             }
                         }
                     }
-                    spdlog::warn(
+                    spdlog::debug(
                         "CLod streaming diag[tick={}]: preallocation failed for group {} missingPages={} acquired={} lruSize={} scanned={} scanLimit={} reject(protected={}, pendingWrite={}, evictFailed={}, evictionBudget={}, dirtyMetadata={}) evicted={} evictionBudgetLimit={} evictionsUsed={} freeClean={} pendingCpu={} inProgress={} residentGroups={} preallocGroups={} preallocFreshPages={}",
                         m_streamingDiagnosticTick,
                         groupIndex,
@@ -3905,6 +3905,12 @@ void CLodStreamingSystem::ReleasePreAllocatedPages(const PreAllocatedPages& page
             }
 
             if (fetchedPage) {
+                // A completion may outlive its preallocation. Never retire a
+                // physical page that has since been released or reassigned.
+                if (page >= m_pageOwnerMeshPageKey.size() ||
+                    m_pageOwnerMeshPageKey[page] != meshPageKey) {
+                    continue;
+                }
                 RetirePhysicalPage(page, meshManager, IsPhysicalPagePinnedStorage(page));
             } else if (meshManager != nullptr) {
                 if (IsPhysicalPagePinnedStorage(page)) {
@@ -3927,6 +3933,11 @@ void CLodStreamingSystem::ReleasePreAllocatedPages(const PreAllocatedPages& page
                 continue;
             }
 
+            // Stale completion cleanup must not retire the page's new owner.
+            if (page >= m_pageOwnerMeshPageKey.size() ||
+                m_pageOwnerMeshPageKey[page] != meshPageKey) {
+                continue;
+            }
             RetirePhysicalPage(page, meshManager, IsPhysicalPagePinnedStorage(page));
         }
     }
@@ -5353,6 +5364,49 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::ReusedExistingPages;
                 const bool payloadNeedsCpuUpload =
                     completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::CpuPageBlobs;
+
+                // Validate the preallocation immediately before using it. A
+                // delayed I/O completion can arrive after one of its physical
+                // pages was retired and reused. Previously the CPU upload was
+                // queued first and AssignPagesToGroup detected the mismatch
+                // afterwards, so stale data could overwrite the page's new
+                // mesh owner even though the completion was ultimately rejected.
+                bool pageOwnershipValid = true;
+                for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
+                    const uint32_t page = preAlloc.pagesBySegment[seg];
+                    const uint64_t meshPageKey = preAlloc.meshPageKeys[seg];
+                    const bool fetchedPage = preAlloc.segmentNeedsFetch[seg];
+                    const bool ownerMatches =
+                        page != ~0u &&
+                        page < m_pageOwnerMeshPageKey.size() &&
+                        meshPageKey != kInvalidCLodMeshPageKey &&
+                        m_pageOwnerMeshPageKey[page] == meshPageKey;
+                    const bool stateMatches = fetchedPage
+                        ? page < m_pendingPageOwnerGroup.size() &&
+                            m_pendingPageOwnerGroup[page] == groupIndex
+                        : IsPhysicalPageResidentForKey(page, meshPageKey) ||
+                            IsPhysicalPagePendingForKey(page, meshPageKey);
+                    if (!ownerMatches || !stateMatches) {
+                        spdlog::warn(
+                            "CLod streaming: dropping stale completion for group {} seg {} page {} key {} before upload (ownerKey={}, fetched={}, pendingOwner={})",
+                            groupIndex,
+                            seg,
+                            page,
+                            meshPageKey,
+                            page < m_pageOwnerMeshPageKey.size() ? m_pageOwnerMeshPageKey[page] : kInvalidCLodMeshPageKey,
+                            fetchedPage,
+                            page < m_pendingPageOwnerGroup.size() ? m_pendingPageOwnerGroup[page] : UINT32_MAX);
+                        pageOwnershipValid = false;
+                        break;
+                    }
+                }
+                if (!pageOwnershipValid) {
+                    ReleasePreAllocatedPages(preAlloc, meshManager);
+                    m_pendingResidencyCommitGroups.erase(groupIndex);
+                    clearCompletionRequestState();
+                    continue;
+                }
+
                 if (payloadGpuReady) {
                     if (completion.pageAllocations.size() != expectedPageCount ||
                         completion.pageMapEntries.size() != expectedPageCount ||

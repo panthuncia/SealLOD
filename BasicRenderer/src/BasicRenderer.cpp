@@ -277,10 +277,11 @@ bool ShouldBlockRendererInputForImGui(UINT message) {
         return false;
     }
 
-    return io.WantCaptureMouse ||
-        ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) ||
-        ImGui::IsAnyItemHovered() ||
-        ImGui::IsAnyItemActive();
+    // ImGui computes this from the previous frame specifically so the host
+    // application can decide where to dispatch mouse input.  Hover/active
+    // queries are broader than capture intent and caused the renderer camera
+    // to lose mouse input whenever the cursor happened to be over a menu.
+    return io.WantCaptureMouse;
 }
 
 }

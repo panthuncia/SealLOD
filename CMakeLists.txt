@@ -26,11 +26,22 @@ foreach(_basicrenderer_cached_tool
   endif()
 endforeach()
 
+set(BASICRENDERER_VCPKG_ROOT "" CACHE PATH
+  "Preferred vcpkg root for BasicRenderer (takes precedence over VCPKG_ROOT)")
+
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
   set(_basicrenderer_vcpkg_toolchain "")
+  set(_basicrenderer_vcpkg_root_source "")
 
-  if(DEFINED ENV{VCPKG_ROOT})
+  if(NOT BASICRENDERER_VCPKG_ROOT STREQUAL "")
+    set(_basicrenderer_vcpkg_toolchain "${BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "BASICRENDERER_VCPKG_ROOT")
+  elseif(DEFINED ENV{BASICRENDERER_VCPKG_ROOT} AND NOT "$ENV{BASICRENDERER_VCPKG_ROOT}" STREQUAL "")
+    set(_basicrenderer_vcpkg_toolchain "$ENV{BASICRENDERER_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "the BASICRENDERER_VCPKG_ROOT environment variable")
+  elseif(DEFINED ENV{VCPKG_ROOT} AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
     set(_basicrenderer_vcpkg_toolchain "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    set(_basicrenderer_vcpkg_root_source "the VCPKG_ROOT environment variable")
   endif()
 
   if(CMAKE_HOST_WIN32 AND NOT EXISTS "${_basicrenderer_vcpkg_toolchain}")
@@ -43,11 +54,12 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
   endif()
 
   if(EXISTS "${_basicrenderer_vcpkg_toolchain}")
+    message(STATUS "Using vcpkg toolchain: ${_basicrenderer_vcpkg_toolchain}")
     set(CMAKE_TOOLCHAIN_FILE "${_basicrenderer_vcpkg_toolchain}" CACHE FILEPATH "")
-  elseif(DEFINED ENV{VCPKG_ROOT})
-    message(FATAL_ERROR "VCPKG_ROOT is set, but the vcpkg toolchain file was not found at '${_basicrenderer_vcpkg_toolchain}'.")
+  elseif(NOT _basicrenderer_vcpkg_root_source STREQUAL "")
+    message(FATAL_ERROR "${_basicrenderer_vcpkg_root_source} is set, but the vcpkg toolchain file was not found at '${_basicrenderer_vcpkg_toolchain}'.")
   else()
-    message(FATAL_ERROR "Could not find vcpkg. Set VCPKG_ROOT or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
+    message(FATAL_ERROR "Could not find vcpkg. Set BASICRENDERER_VCPKG_ROOT, VCPKG_ROOT, or pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake.")
   endif()
 endif()
 
@@ -242,10 +254,12 @@ if(NOT EXISTS "${USD_REL_DIR}")
   file(REMOVE "${USD_REL_ZIP}")
 endif()
 
-# The TBB bundled with the USD artifacts uses kind_type for four private states,
-# while its enum only declares the first two. Recent Clang versions reject the
-# resulting out-of-range enum constants. Extend the declared range without
-# changing the values or layout used by the prebuilt TBB binaries.
+# Older TBB versions bundled with the USD artifacts use kind_type for four
+# private states, while the enum only declares the first two. Recent Clang
+# versions reject the resulting out-of-range enum constants. Extend the
+# declared range without changing the values or layout used by the prebuilt
+# TBB binaries. Newer artifacts declare the private states directly and need
+# no patch.
 function(basicrenderer_patch_usd_tbb_task_header usd_dir)
   set(_task_header "${usd_dir}/include/tbb/task.h")
   if(NOT EXISTS "${_task_header}")
@@ -253,7 +267,8 @@ function(basicrenderer_patch_usd_tbb_task_header usd_dir)
   endif()
 
   file(READ "${_task_header}" _task_header_contents)
-  if(_task_header_contents MATCHES "kind_type_max = 4")
+  if(_task_header_contents MATCHES "kind_type_max = 4" OR
+     _task_header_contents MATCHES "internal_dying")
     return()
   endif()
 
@@ -269,8 +284,42 @@ function(basicrenderer_patch_usd_tbb_task_header usd_dir)
   file(WRITE "${_task_header}" "${_patched_task_header_contents}")
 endfunction()
 
+function(basicrenderer_patch_usd_pxr_config usd_dir)
+  set(_pxr_config "${usd_dir}/pxrConfig.cmake")
+  if(NOT EXISTS "${_pxr_config}")
+    return()
+  endif()
+
+  file(READ "${_pxr_config}" _pxr_config_contents)
+  string(FIND "${_pxr_config_contents}" "elseif(NOT TARGET TBB::tbb)" _tbb_target_guard_pos)
+  if(NOT _tbb_target_guard_pos EQUAL -1)
+    return()
+  endif()
+
+  string(REPLACE
+    "else()\n    add_library(TBB::tbb SHARED IMPORTED)"
+    "elseif(NOT TARGET TBB::tbb)\n    add_library(TBB::tbb SHARED IMPORTED)"
+    _patched_pxr_config_contents
+    "${_pxr_config_contents}"
+  )
+  if(_patched_pxr_config_contents STREQUAL _pxr_config_contents)
+    string(REPLACE
+      "else()\r\n    add_library(TBB::tbb SHARED IMPORTED)"
+      "elseif(NOT TARGET TBB::tbb)\r\n    add_library(TBB::tbb SHARED IMPORTED)"
+      _patched_pxr_config_contents
+      "${_pxr_config_contents}"
+    )
+  endif()
+  if(_patched_pxr_config_contents STREQUAL _pxr_config_contents)
+    message(FATAL_ERROR "Could not apply the existing-TBB-target compatibility patch to '${_pxr_config}'.")
+  endif()
+  file(WRITE "${_pxr_config}" "${_patched_pxr_config_contents}")
+endfunction()
+
 basicrenderer_patch_usd_tbb_task_header("${USD_DBG_DIR}")
 basicrenderer_patch_usd_tbb_task_header("${USD_REL_DIR}")
+basicrenderer_patch_usd_pxr_config("${USD_DBG_DIR}")
+basicrenderer_patch_usd_pxr_config("${USD_REL_DIR}")
 
 # Include sub-projects.
 if(NOT BASICRENDERER_USD_VARIANT)

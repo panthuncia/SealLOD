@@ -11,7 +11,7 @@ void ECSManager::Initialize() {
 			.build();
 		world.set<Components::GameScene>({ game });
 
-		world.import<flecs::stats>();
+		FlecsStatsImport(world);
 
 		// Creates REST server on default port (27750)
 		world.set<flecs::Rest>({});

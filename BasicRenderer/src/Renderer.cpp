@@ -1715,13 +1715,17 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
 	int32_t forcedSkeletonLod = -1;
-	if (const char* value = std::getenv("SARP_PROCEDURAL_WIND_FORCE_LOD")) {
+	char* forcedSkeletonLodValue = nullptr;
+	size_t forcedSkeletonLodValueSize = 0;
+	if (_dupenv_s(&forcedSkeletonLodValue, &forcedSkeletonLodValueSize, "SARP_PROCEDURAL_WIND_FORCE_LOD") == 0 &&
+		forcedSkeletonLodValue != nullptr) {
 		char* end = nullptr;
-		const long parsed = std::strtol(value, &end, 10);
-		if (end != value && *end == '\0') {
+		const long parsed = std::strtol(forcedSkeletonLodValue, &end, 10);
+		if (end != forcedSkeletonLodValue && *end == '\0') {
 			forcedSkeletonLod = std::clamp(static_cast<int32_t>(parsed), -1, 15);
 		}
 	}
+	std::free(forcedSkeletonLodValue);
 	settingsManager.registerSetting<int32_t>(ProceduralWindForcedSkeletonLodSettingName, forcedSkeletonLod);
 	settingsManager.registerSetting<bool>("enableWireframe", false);
     settingsManager.registerSetting<bool>(

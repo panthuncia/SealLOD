@@ -458,7 +458,7 @@ private:
     void ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> backing, size_t capacity, size_t previousCapacity = 0) {
         const size_t replayElements = (std::min)(m_data.size(), capacity);
         if (previousCapacity != 0u) {
-            spdlog::info(
+            spdlog::debug(
                 "DynamicStructuredBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={}",
                 name,
                 GetGlobalResourceID(),
@@ -468,7 +468,7 @@ private:
 
 		SetBacking(std::move(backing), sizeof(T) * capacity);
         if (previousCapacity != 0u) {
-            spdlog::info(
+            spdlog::debug(
                 "DynamicStructuredBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
                 name,
                 GetGlobalResourceID(),
@@ -511,7 +511,7 @@ private:
         }
 
         if (previousCapacity != 0u) {
-            spdlog::info(
+            spdlog::debug(
                 "DynamicStructuredBuffer '{}' id={} GrowBuffer complete finalCapacity={}",
                 name,
                 GetGlobalResourceID(),

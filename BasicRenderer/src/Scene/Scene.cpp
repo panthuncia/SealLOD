@@ -95,7 +95,7 @@ namespace {
 				.with(flecs::System)
 				.build();
 			world.set<Components::GameScene>({ game });
-			world.import<flecs::stats>();
+			FlecsStatsImport(world);
 			world.set<flecs::Rest>({});
 			world.set_threads(8);
 
@@ -175,7 +175,7 @@ namespace {
 				.with<Components::Active>()
 				.with<Components::TransformDirty>()
 				.term_at(3).parent().cascade()
-				.cached().cache_kind(flecs::QueryCacheAll)
+				.cache_kind(flecs::QueryCacheAuto)
 				.each([](flecs::entity e, const Components::Position& position, const Components::Rotation& rotation, const Components::Scale& scale, const Components::Matrix* matrix, Components::Matrix& output) {
 					XMMATRIX matRotation = XMMatrixRotationQuaternion(rotation.rot);
 					XMMATRIX matTranslation = XMMatrixTranslationFromVector(position.pos);

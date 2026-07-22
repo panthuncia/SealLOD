@@ -415,7 +415,7 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
 void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBacking> newDataBuffer, uint64_t newCapacity) {
     const uint64_t previousCapacity = m_capacity;
     const auto stride = ElementStride();
-    spdlog::info(
+    spdlog::debug(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking begin previousCapacity={} newCapacity={} activeEntryMode={}",
         GetName(),
         GetGlobalResourceID(),
@@ -423,7 +423,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBackin
         newCapacity,
         m_activeEntryMode ? 1 : 0);
     SetBacking(std::move(newDataBuffer), newCapacity * stride);
-    spdlog::info(
+    spdlog::debug(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer SetBacking complete bufferSize={} backingGeneration={}",
         GetName(),
         GetGlobalResourceID(),
@@ -453,7 +453,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<GpuBufferBackin
     m_capacity = newCapacity;
     AssignDescriptorSlots();
     SetName(name);
-    spdlog::info(
+    spdlog::debug(
         "SortedUnsignedIntBuffer '{}' id={} GrowBuffer complete finalCapacity={}",
         GetName(),
         GetGlobalResourceID(),

@@ -919,16 +919,49 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 			throw std::runtime_error("Menu::Initialize failed to create ImGui descriptor heap for DX12 backend");
 		}
 
-        ImGui_ImplDX12_Init(rhi::dx12::get_device(device), 
-            numFramesInFlight,
-            DXGI_FORMAT_R8G8B8A8_UNORM, 
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get()),
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetCPUDescriptorHandleForHeapStart(),
-            rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetGPUDescriptorHandleForHeapStart());
-
         // Cache GPU start and increment size for user-texture descriptor allocation.
-        imguiHeapGpuStart_ = rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get())->GetGPUDescriptorHandleForHeapStart().ptr;
+        auto* nativeDescriptorHeap = rhi::dx12::get_descriptor_heap(g_pd3dSrvDescHeap.Get());
+        imguiHeapGpuStart_ = nativeDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr;
         imguiHeapIncrementSize_ = device.GetDescriptorHandleIncrementSize(rhi::DescriptorHeapType::CbvSrvUav);
+
+        ImGui_ImplDX12_InitInfo initInfo{};
+        initInfo.Device = rhi::dx12::get_device(device);
+        initInfo.CommandQueue = rhi::dx12::get_queue(DeviceManager::GetInstance().GetGraphicsQueue());
+        initInfo.NumFramesInFlight = numFramesInFlight;
+        initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        initInfo.UserData = this;
+        initInfo.SrvDescriptorHeap = nativeDescriptorHeap;
+        initInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info,
+            D3D12_CPU_DESCRIPTOR_HANDLE* cpuHandle,
+            D3D12_GPU_DESCRIPTOR_HANDLE* gpuHandle) {
+            auto* menu = static_cast<Menu*>(info->UserData);
+            const uint32_t descriptorIndex = menu->AllocateImGuiDescriptor();
+            const uint64_t descriptorOffset =
+                static_cast<uint64_t>(descriptorIndex) * menu->imguiHeapIncrementSize_;
+            *cpuHandle = info->SrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+            *gpuHandle = info->SrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+            cpuHandle->ptr += static_cast<SIZE_T>(descriptorOffset);
+            gpuHandle->ptr += descriptorOffset;
+        };
+        initInfo.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo* info,
+            D3D12_CPU_DESCRIPTOR_HANDLE,
+            D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle) {
+            auto* menu = static_cast<Menu*>(info->UserData);
+            if (gpuHandle.ptr < menu->imguiHeapGpuStart_ || menu->imguiHeapIncrementSize_ == 0) {
+                return;
+            }
+            const uint64_t descriptorOffset = gpuHandle.ptr - menu->imguiHeapGpuStart_;
+            if (descriptorOffset % menu->imguiHeapIncrementSize_ != 0) {
+                return;
+            }
+            menu->FreeImGuiDescriptor(static_cast<uint32_t>(
+                descriptorOffset / menu->imguiHeapIncrementSize_));
+        };
+
+        if (!ImGui_ImplDX12_Init(&initInfo)) {
+            throw std::runtime_error("Menu::Initialize failed to initialize ImGui DX12 backend");
+        }
         m_imguiBackend = rhi::Backend::D3D12;
     } else if (DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan) {
 #if BASICRENDERER_HAS_IMGUI_VULKAN
@@ -941,14 +974,14 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         initInfo.Queue = rhi::vulkan::get_queue(DeviceManager::GetInstance().GetGraphicsQueue());
         initInfo.MinImageCount = numFramesInFlight;
         initInfo.ImageCount = numFramesInFlight;
-        initInfo.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        initInfo.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
         initInfo.DescriptorPoolSize = kImGuiHeapCapacity;
         initInfo.UseDynamicRendering = true;
         m_imguiVkColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
         m_imguiVkRenderingInfo = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
         m_imguiVkRenderingInfo.colorAttachmentCount = 1;
         m_imguiVkRenderingInfo.pColorAttachmentFormats = &m_imguiVkColorFormat;
-        initInfo.PipelineRenderingCreateInfo = m_imguiVkRenderingInfo;
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = m_imguiVkRenderingInfo;
         initInfo.CheckVkResultFn = [](VkResult result) {
             if (result != VK_SUCCESS) {
                 spdlog::error("ImGui Vulkan backend returned VkResult {}", static_cast<int>(result));
@@ -997,9 +1030,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         if (!ImGui_ImplVulkan_Init(&initInfo)) {
             throw std::runtime_error("Menu::Initialize failed to initialize ImGui Vulkan backend");
         }
-        if (!ImGui_ImplVulkan_CreateFontsTexture()) {
-            throw std::runtime_error("Menu::Initialize failed to create ImGui Vulkan font texture");
-        }
 
         auto result = device.CreateDescriptorHeap({ rhi::DescriptorHeapType::CbvSrvUav, kImGuiHeapCapacity, true }, g_pd3dSrvDescHeap);
         if (!rhi::IsOk(result) || !g_pd3dSrvDescHeap) {
@@ -1039,6 +1069,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+    // Keep keyboard navigation available without having a focused navigation
+    // window claim every key from the renderer. Active text fields and modal
+    // widgets still set WantCaptureKeyboard independently.
+    io.ConfigNavCaptureKeyboard = false;
     io.FontGlobalScale = 1.2f;
 
     ImGui::StyleColorsDark();
@@ -5264,8 +5298,10 @@ inline void Menu::DrawFrameTaskGraphWindow() {
         if (frameSamples > 0) {
             const double avgLine[2] = { static_cast<double>(avgFrameEndUs) / 1000.0, static_cast<double>(avgFrameEndUs) / 1000.0 };
             const double avgX[2] = { 0.0, static_cast<double>((std::max)(size_t{ 1 }, frameHistoryMs.size())) - 1.0 };
-            ImPlot::SetNextLineStyle(ImVec4(0.95f, 0.8f, 0.2f, 1.0f), 1.5f);
-            ImPlot::PlotLine("Average", avgX, avgLine, 2);
+            ImPlotSpec avgLineSpec;
+            avgLineSpec.LineColor = ImVec4(0.95f, 0.8f, 0.2f, 1.0f);
+            avgLineSpec.LineWeight = 1.5f;
+            ImPlot::PlotLine("Average", avgX, avgLine, 2, avgLineSpec);
         }
         ImPlot::EndPlot();
     }

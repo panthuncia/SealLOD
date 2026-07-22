@@ -309,7 +309,7 @@ struct WindSharedResources {
 			placementCapacity != lastStructuralPlacementCapacity ||
 			placementCount != lastStructuralPlacementCount ||
 			activeSkinnedPlacements.get() != lastActivePlacementsBuffer;
-		TracyPlot("ProceduralWind.StructuralRebuild", structureChanged ? 1 : 0);
+		TracyPlot("ProceduralWind.StructuralRebuild", static_cast<std::int64_t>(structureChanged ? 1 : 0));
 		if (registeredTypeCount != 0u) {
 			// SkeletonManager flips the current/previous transient palette halves in
 			// BeginFrame. Keep this value copy current even when the expensive type
