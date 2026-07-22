@@ -9,12 +9,43 @@
 
 class LinearDepthHistoryCopyPass : public RenderPass {
 public:
-    LinearDepthHistoryCopyPass() = default;
+    explicit LinearDepthHistoryCopyPass(ViewManager* viewManager)
+        : m_viewManager(viewManager) {
+    }
 
     void DeclareResourceUsages(RenderPassBuilder* builder) override {
+        m_copies.clear();
         builder->WithCopySource(
-            "Builtin::PrimaryCamera::LinearDepthMap")
+            Builtin::LinearDepthMaps)
             .WithCopyDest(Builtin::LastFrameLinearDepthMaps);
+
+        if (!m_viewManager) {
+            return;
+        }
+
+        std::unordered_set<uint64_t> declaredPairs;
+        m_viewManager->ForEachView([&](uint64_t viewID) {
+            auto* view = m_viewManager->Get(viewID);
+            if (!view || !view->gpu.linearDepthMap || !view->gpu.lastFrameLinearDepthMap) {
+                return;
+            }
+
+            const uint64_t sourceID = view->gpu.linearDepthMap->GetGlobalResourceID();
+            const uint64_t historyID = view->gpu.lastFrameLinearDepthMap->GetGlobalResourceID();
+            const uint64_t pairKey = sourceID ^ (historyID + 0x9e3779b97f4a7c15ull
+                + (sourceID << 6u) + (sourceID >> 2u));
+            if (!declaredPairs.insert(pairKey).second) {
+                return;
+            }
+
+            builder->WithCopySource(view->gpu.linearDepthMap)
+                .WithCopyDest(view->gpu.lastFrameLinearDepthMap);
+            m_copies.push_back({
+                viewID,
+                view->gpu.linearDepthMap,
+                view->gpu.lastFrameLinearDepthMap
+            });
+        });
     }
 
     void Setup() override {
@@ -25,25 +56,9 @@ public:
         auto& context = *renderContext;
         auto& commandList = executionContext.commandList;
 
-        std::unordered_set<uint64_t> copiedSources;
-
-        context.viewManager->ForEachView([&](uint64_t viewID) {
-            auto* view = context.viewManager->Get(viewID);
-            if (!view || !view->gpu.linearDepthMap || !view->gpu.lastFrameLinearDepthMap) {
-                return;
-            }
-
-            // Once a view participates in the history copy, phase-1 occlusion can safely consume it.
-            context.viewManager->MarkDepthHistoryValid(viewID);
-            
-            const auto& source = view->gpu.linearDepthMap;
-            const auto& history = view->gpu.lastFrameLinearDepthMap;
-            const uint64_t sourceID = source->GetGlobalResourceID();
-            if (copiedSources.contains(sourceID)) {
-                return;
-            }
-
-            copiedSources.insert(sourceID);
+        for (const auto& copy : m_copies) {
+            const auto& source = copy.source;
+            const auto& history = copy.history;
 
             const auto& desc = source->GetDescription();
             const uint32_t sliceCount = desc.isCubemap
@@ -78,11 +93,25 @@ public:
                     commandList.CopyTextureRegion(dstRegion, srcRegion);
                 }
             }
-        });
+
+            // Once the declared copy has executed, phase-1 occlusion can safely consume it.
+            context.viewManager->MarkDepthHistoryValid(copy.viewID);
+        }
 
         return {};
     }
 
     void Cleanup() override {
+        m_copies.clear();
     }
+
+private:
+    struct CopyPair {
+        uint64_t viewID = 0;
+        std::shared_ptr<PixelBuffer> source;
+        std::shared_ptr<PixelBuffer> history;
+    };
+
+    ViewManager* m_viewManager = nullptr;
+    std::vector<CopyPair> m_copies;
 };

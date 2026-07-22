@@ -1,12 +1,12 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -17,9 +17,17 @@
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodPageLRU.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodUploadStream.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Utilities/BoundedSpscQueue.h"
 
 class UploadInstance;
+
+struct CLodActiveGroupsSnapshot {
+    std::vector<uint32_t> bits;
+    uint32_t activeGroupScanCount = 0;
+    uint64_t generation = 0;
+};
 
 class CLodStreamingSystem {
 public:
@@ -130,8 +138,6 @@ private:
     uint32_t GetPendingMeshPageRefCount(uint32_t page, uint64_t key) const;
     void AddPendingMeshPageReference(uint32_t page, uint64_t key);
     void ReleasePendingMeshPageReference(uint32_t page, uint64_t key);
-    void RecordPageMapWrite(const MeshManager::CLodPageMapWriteEvent& event);
-    void LogPageMapProvenanceForMismatch(const CLodSourceGroupMismatchDetail& detail) const;
     bool SetGroupResidentBit(uint32_t groupIndex, bool resident);
     void ForceGroupNonResident(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
     void TouchGroupPages(uint32_t groupIndex);
@@ -151,6 +157,12 @@ private:
     void DestroyParallelSortResources();
     void ClearStreamingUploadFunction(MeshManager* meshManager);
     void InstallStreamingUploadFunction(MeshManager* meshManager);
+    bool PublishRetainedUploadBatch();
+    void SealStreamingUploadBatch();
+    void ObserveUploadBatchTickets();
+    void PublishActiveGroupSnapshot();
+    void StartStreamingWorker();
+    void StopStreamingWorker();
 
     // Page-level LRU helpers
     void InitializePageLru(MeshManager* meshManager);
@@ -219,22 +231,6 @@ private:
         uint64_t commitTick = 0u;
     };
 
-    struct PageMapWriteProvenance {
-        MeshManager::CLodPageMapWriteReason reason = MeshManager::CLodPageMapWriteReason::Commit;
-        uint32_t groupGlobalIndex = 0u;
-        uint32_t groupLocalIndex = 0u;
-        uint32_t groupsBase = 0u;
-        uint32_t meshPageIndex = 0u;
-        uint32_t pageMapOffset = 0u;
-        uint32_t physicalPage = ~0u;
-        uint32_t slabDescriptorIndex = 0u;
-        uint32_t slabByteOffset = 0u;
-        uint32_t previousSlabDescriptorIndex = 0u;
-        uint32_t previousSlabByteOffset = 0u;
-        uint32_t referencedResidentGroupCount = 0u;
-        uint64_t tick = 0u;
-    };
-
     PreAllocatedPages PreAllocatePagesForGroup(uint32_t groupIndex, const MeshManager::CLodGroupStreamingInfo& info, MeshManager* meshManager);
     bool AssignPagesToGroup(uint32_t groupIndex, const PreAllocatedPages& pages, MeshManager* meshManager);
     void ReleasePreAllocatedPages(const PreAllocatedPages& pages, MeshManager* meshManager);
@@ -287,8 +283,6 @@ private:
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_groupOwnedPages; // group to page IDs by segment (~0u = no page)
     std::unordered_map<uint32_t, std::vector<uint64_t>> m_groupOwnedMeshPageKeys; // group to mesh-page keys by page slot
     std::unordered_map<uint32_t, CommittedGroupPageMap> m_groupCommittedPageMaps;
-    mutable std::mutex m_pageMapWriteProvenanceMutex;
-    std::unordered_map<uint64_t, PageMapWriteProvenance> m_pageMapWriteProvenance;
     std::unordered_map<uint64_t, uint32_t> m_residentMeshPageToPhysicalPage;
     std::unordered_map<uint64_t, uint32_t> m_residentMeshPageRefCounts;
     std::unordered_map<uint64_t, uint32_t> m_pendingMeshPageToPhysicalPage;
@@ -347,7 +341,6 @@ private:
     uint64_t m_streamingDiagnosticsCommitToResidentSumThisFrame = 0u;
     uint32_t m_streamingDiagnosticsCommitToResidentWorstThisFrame = 0u;
     uint64_t m_streamingDiagnosticsLastOutlierLogTick = 0u;
-    uint64_t m_streamingDiagnosticsLastPeriodicLogTick = 0u;
     uint32_t m_streamingRequestsInProgressCount = 0u;
     uint32_t m_pendingStreamingRequestCount = 0u;
     uint32_t m_pagePopEvictionsThisUpdate = 0u;
@@ -357,8 +350,10 @@ private:
     uint32_t m_streamingResidentGroupsCount = 0u;
     uint32_t m_streamingActiveGroupScanCount = 0u;
     uint32_t m_streamingStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
-    uint32_t m_streamingGpuStorageGroupCapacity = CLodStreamingInitialGroupCapacity;
-    uint32_t m_pendingStreamingGpuStorageGroupCapacity = 0u;
+    std::atomic<uint32_t> m_streamingGpuStorageGroupCapacity{CLodStreamingInitialGroupCapacity};
+    std::atomic<uint32_t> m_pendingStreamingGpuStorageGroupCapacity{0u};
+    std::atomic<uint64_t> m_streamingGpuResizeAckGeneration{0u};
+    uint64_t m_observedStreamingGpuResizeAckGeneration = 0u;
     bool m_streamingNonResidentBitsUploadPending = false;
     bool m_streamingActiveGroupsBitsUploadPending = true;
     uint32_t m_streamingNonResidentBitsDirtyBegin = 0u;
@@ -383,7 +378,6 @@ private:
     std::vector<uint32_t> m_pendingStreamingRequestGenerationByGroup;
     CLodPriorityMode m_priorityMode = CLodPriorityMode::Max;
     uint64_t m_streamingDiagnosticTick = 0;
-    std::unordered_map<uint32_t, uint64_t> m_lastInProgressSuppressionLogTick;
 
     std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
@@ -393,17 +387,22 @@ private:
     // must bootstrap residency from MeshManager's authoritative snapshot.
     bool m_streamingDomainFullResetPending = true;
 
-    // Worker-owned streaming residency state is protected by this mutex when
-    // the main thread publishes upload snapshots or handles registry resets.
-    std::mutex m_streamingServiceMutex;
-    std::atomic<bool> m_streamingServiceRequested{true};
+    std::atomic<uint64_t> m_streamingServiceEpoch{1};
     std::atomic<bool> m_streamingServiceRunning{false};
-    std::atomic<uint64_t> m_streamingServiceRequestCounter{0};
     uint64_t m_streamingServicePublishedGeneration = 0;
-    std::mutex m_streamingPublishMutex;
     std::vector<uint32_t> m_publishedActiveGroupsBits;
     uint32_t m_publishedActiveGroupScanCount = 0;
     bool m_publishedActiveGroupsBitsUploadPending = true;
+    BoundedSpscQueue<CLodActiveGroupsSnapshot, 4> m_activeGroupsSnapshotQueue;
+    std::optional<CLodActiveGroupsSnapshot> m_retainedActiveGroupsSnapshot;
+
+    BoundedSpscQueue<std::shared_ptr<CLodUploadBatch>, 16> m_uploadBatchQueue;
+    std::shared_ptr<CLodUploadBatch> m_retainedUploadBatch;
+    std::vector<std::shared_ptr<CLodUploadBatch>> m_outstandingUploadBatches;
+    std::atomic<uint64_t> m_nextUploadBatchId{0};
+    uint64_t m_uploadBatchGeneration = 1;
+    uint64_t m_cancelledUploadBatchCount = 0;
+    uint64_t m_replayedUploadBatchCount = 0;
 
     // Self-managed readback pipeline 
     // Dedicated fence signalled when a readback copy completes on the copy queue.
@@ -417,11 +416,13 @@ private:
     rhi::TimelinePtr m_directStorageLaunchFencePtr;
     rhi::Timeline m_directStorageLaunchFenceHandle;
     std::atomic<uint64_t> m_directStorageLaunchFenceCounter{0};
-    // Guarded by m_streamingServiceMutex. While nonzero, launch production is
-    // frozen until the after-present graphics signal reaches this value.
-    uint64_t m_directStorageArmedLaunchFenceValue = 0;
+    // Worker publishes launch demand; the graph thread supplies the queue
+    // fence, and the worker consumes it after completion.
+    std::atomic<bool> m_directStorageLaunchRequested{false};
+    std::atomic<uint64_t> m_directStorageArmedLaunchFenceValue{0};
 
     struct ReadbackStagingSlot {
+        enum class State : uint8_t { Free, Recording, Submitted, Decoding };
         std::shared_ptr<Buffer> counterStaging;
         std::shared_ptr<Buffer> requestsStaging;
         std::shared_ptr<Buffer> usedGroupsCounterStaging;
@@ -429,17 +430,38 @@ private:
         std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
         uint64_t fenceValue = 0;
-        uint64_t armedMs = 0;
-        bool inFlight = false;
+        std::atomic<State> state{State::Free};
+
+        ReadbackStagingSlot() = default;
+        ReadbackStagingSlot(const ReadbackStagingSlot&) = delete;
+        ReadbackStagingSlot& operator=(const ReadbackStagingSlot&) = delete;
+        ReadbackStagingSlot(ReadbackStagingSlot&& other) noexcept
+            : counterStaging(std::move(other.counterStaging))
+            , requestsStaging(std::move(other.requestsStaging))
+            , usedGroupsCounterStaging(std::move(other.usedGroupsCounterStaging))
+            , usedGroupsBufferStaging(std::move(other.usedGroupsBufferStaging))
+            , sourceGroupMismatchCounterStaging(std::move(other.sourceGroupMismatchCounterStaging))
+            , sourceGroupMismatchDetailsStaging(std::move(other.sourceGroupMismatchDetailsStaging))
+            , fenceValue(other.fenceValue)
+            , state(other.state.load(std::memory_order_relaxed)) {}
+        ReadbackStagingSlot& operator=(ReadbackStagingSlot&& other) noexcept {
+            counterStaging = std::move(other.counterStaging);
+            requestsStaging = std::move(other.requestsStaging);
+            usedGroupsCounterStaging = std::move(other.usedGroupsCounterStaging);
+            usedGroupsBufferStaging = std::move(other.usedGroupsBufferStaging);
+            sourceGroupMismatchCounterStaging = std::move(other.sourceGroupMismatchCounterStaging);
+            sourceGroupMismatchDetailsStaging = std::move(other.sourceGroupMismatchDetailsStaging);
+            fenceValue = other.fenceValue;
+            state.store(other.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            return *this;
+        }
     };
     std::vector<ReadbackStagingSlot> m_readbackStagingSlots;
     uint32_t m_readbackStagingCursor = 0;
+    uint64_t m_readbackSlotFullEvents = 0;
 
     // Background streaming worker thread
     std::thread m_streamingWorkerThread;
-    std::mutex m_streamingWorkerMutex;
-    std::mutex m_decodedReadbackMutex;
-    std::condition_variable m_streamingWorkerCV;
     std::atomic<bool> m_streamingWorkerQuit{false};
     // Decoded (groupIndex, priority) pairs produced by the worker, consumed by the main thread.
     std::vector<std::pair<uint32_t, uint32_t>> m_decodedReadbackBatch;
@@ -467,6 +489,6 @@ private:
     bool m_parallelSortAttempted = false;
 
     // Dedicated upload instance + copy queue for async CLod streaming uploads.
-    std::unique_ptr<UploadInstance> m_uploadInstance;
+    std::unique_ptr<CLodUploadStream> m_uploadStream;
     QueueSlotIndex m_uploadQueueSlot{};
 };

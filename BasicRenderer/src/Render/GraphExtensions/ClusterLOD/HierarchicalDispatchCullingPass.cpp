@@ -1,7 +1,6 @@
 #include "Render/GraphExtensions/ClusterLOD/HierarchicalDispatchCullingPass.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -37,21 +36,6 @@
 #include "../shaders/PerPassRootConstants/clodWorkGraphRootConstants.h"
 
 namespace {
-
-bool SarpClodImportDebugLoggingEnabled()
-{
-    static const bool enabled = [] {
-        char* value = nullptr;
-        size_t length = 0;
-        if (_dupenv_s(&value, &length, "SARP_DEBUG_CLOD_IMPORT") != 0 || value == nullptr) {
-            return false;
-        }
-        const bool result = length > 1 && value[0] != '0';
-        std::free(value);
-        return result;
-    }();
-    return enabled;
-}
 
 uint64_t GetNativeBufferDeviceAddress(rhi::Resource resource) noexcept
 {
@@ -1378,15 +1362,6 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             if (currentDrawSetResourceIds != m_declaredDrawSetResourceIds) {
                 m_declaredDrawSetResourceIds = currentDrawSetResourceIds;
                 m_declaredResourcesChanged = true;
-                if (SarpClodImportDebugLoggingEnabled()) {
-                    spdlog::info(
-                        "SARPDBG HierarchicalDispatchCulling declared draw sets changed passFirst={} phase={} clodOnly={} count={} rev={}",
-                        m_isFirstPass ? 1 : 0,
-                        m_renderPhase.hash,
-                        m_clodOnlyWorkloads ? 1 : 0,
-                        m_declaredDrawSetResourceIds.size(),
-                        drawSetRevision);
-                }
             }
         }
     }

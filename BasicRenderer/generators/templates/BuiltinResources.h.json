@@ -1,6 +1,7 @@
 {
   "Builtin": {
     "Backbuffer": {},
+    "LinearDepthMaps": {},
     "LastFrameLinearDepthMaps": {},
     "Material": {
       "TextureGroup": {},

@@ -1,16 +1,12 @@
 ﻿#include <iostream>
 #include <Windows.h>
 #include <windowsx.h>
-#include <iostream>
-#include <bit>
 #include <memory>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <imgui.h>
 #include <random>
 #include <cmath>
-#include <io.h>        // _pipe, _dup2, _read, _close
-#include <fcntl.h>     // _O_BINARY
 #include <thread>
 #ifndef USE_PIX
 #define USE_PIX 1
@@ -21,8 +17,6 @@
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
-#include <mutex>
-#include <optional>
 //#include <tracy/Tracy.hpp>
 
 #include "Mesh/Mesh.h"
@@ -35,6 +29,7 @@
 #include "Menu/Menu.h"
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
+#include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Managers/Singletons/DeletionManager.h"
 #include "Import/ModelLoader.h"
@@ -58,293 +53,6 @@ extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D\\";
 #pragma comment(lib, "WinPixEventRuntime.lib")
 
 namespace {
-    struct DeferredTelemetryCapture {
-        std::mutex mutex;
-        std::string label;
-        std::optional<ReadbackCaptureResult> depth;
-        std::optional<ReadbackCaptureResult> normals;
-        std::optional<ReadbackCaptureResult> albedo;
-        std::optional<ReadbackCaptureResult> metallicRoughness;
-        std::optional<ReadbackCaptureResult> hdr;
-        std::optional<ReadbackCaptureResult> debug;
-        std::optional<ReadbackCaptureResult> environmentInfo;
-        std::optional<ReadbackCaptureResult> opaqueDielectricAverage;
-        bool complete = false;
-    };
-
-    float HalfToFloat(uint16_t value) {
-        const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16u;
-        uint32_t exponent = (value >> 10u) & 0x1fu;
-        uint32_t mantissa = value & 0x03ffu;
-        uint32_t bits = 0;
-        if (exponent == 0u) {
-            if (mantissa == 0u) {
-                bits = sign;
-            }
-            else {
-                int shift = 0;
-                while ((mantissa & 0x0400u) == 0u) {
-                    mantissa <<= 1u;
-                    ++shift;
-                }
-                mantissa &= 0x03ffu;
-                bits = sign | (static_cast<uint32_t>(127 - 15 - shift) << 23u) | (mantissa << 13u);
-            }
-        }
-        else if (exponent == 0x1fu) {
-            bits = sign | 0x7f800000u | (mantissa << 13u);
-        }
-        else {
-            bits = sign | ((exponent + (127u - 15u)) << 23u) | (mantissa << 13u);
-        }
-        return std::bit_cast<float>(bits);
-    }
-
-    void TryLogDeferredTelemetry(const std::shared_ptr<DeferredTelemetryCapture>& capture) {
-        std::scoped_lock lock(capture->mutex);
-        if (capture->complete || !capture->depth || !capture->normals ||
-            !capture->albedo || !capture->metallicRoughness || !capture->hdr ||
-            !capture->debug || !capture->environmentInfo || !capture->opaqueDielectricAverage) {
-            return;
-        }
-
-        const auto& depth = *capture->depth;
-        const auto& normals = *capture->normals;
-        const auto& albedo = *capture->albedo;
-        const auto& material = *capture->metallicRoughness;
-        const auto& hdr = *capture->hdr;
-        const auto& debug = *capture->debug;
-        const auto& environmentInfo = *capture->environmentInfo;
-        const auto& opaqueDielectricAverage = *capture->opaqueDielectricAverage;
-        if (depth.layouts.empty() || normals.layouts.empty() || albedo.layouts.empty() ||
-            material.layouts.empty() || hdr.layouts.empty() || debug.layouts.empty()) {
-            spdlog::error("Deferred telemetry capture has no texture footprint.");
-            capture->complete = true;
-            return;
-        }
-
-        const uint32_t width = (std::min)({ depth.width, normals.width, albedo.width, material.width, hdr.width, debug.width });
-        const uint32_t height = (std::min)({ depth.height, normals.height, albedo.height, material.height, hdr.height, debug.height });
-        const auto& depthLayout = depth.layouts.front();
-        const auto& normalLayout = normals.layouts.front();
-        const auto& albedoLayout = albedo.layouts.front();
-        const auto& materialLayout = material.layouts.front();
-        const auto& hdrLayout = hdr.layouts.front();
-        const auto& debugLayout = debug.layouts.front();
-        uint64_t geometryPixels = 0;
-        uint64_t zeroNormalPixels = 0;
-        uint64_t invalidNormalPixels = 0;
-        uint64_t zeroAlbedoPixels = 0;
-        uint64_t zeroRoughnessPixels = 0;
-        uint64_t lowRoughnessPixels = 0;
-        double normalLengthSum = 0.0;
-        double metallicSum = 0.0;
-        double roughnessSum = 0.0;
-        float minRoughness = 1.0f;
-        float maxRoughness = 0.0f;
-        double hdrLuminanceSum = 0.0;
-        double debugLuminanceSum = 0.0;
-        float hdrLuminanceMax = 0.0f;
-        float debugLuminanceMax = 0.0f;
-        uint64_t hdrOverOne = 0;
-        uint64_t hdrInvalid = 0;
-        uint64_t debugInvalid = 0;
-        uint64_t diffuseCompOverOneHundred = 0;
-        float maxDiffuseComp = 0.0f;
-        float maxDiffuseCompIor = 0.0f;
-        float maxDiffuseCompAlpha = 0.0f;
-        float minSampledAverageComplement = 1.0f;
-
-        for (uint32_t y = 0; y < height; ++y) {
-            const auto* depthRow = reinterpret_cast<const float*>(
-                depth.data.data() + depthLayout.offset + static_cast<uint64_t>(y) * depthLayout.rowPitch);
-            const auto* normalRow = reinterpret_cast<const float*>(
-                normals.data.data() + normalLayout.offset + static_cast<uint64_t>(y) * normalLayout.rowPitch);
-            const auto* albedoRow = reinterpret_cast<const uint8_t*>(
-                albedo.data.data() + albedoLayout.offset + static_cast<uint64_t>(y) * albedoLayout.rowPitch);
-            const auto* materialRow = reinterpret_cast<const uint8_t*>(
-                material.data.data() + materialLayout.offset + static_cast<uint64_t>(y) * materialLayout.rowPitch);
-            const auto* hdrRow = reinterpret_cast<const uint16_t*>(
-                hdr.data.data() + hdrLayout.offset + static_cast<uint64_t>(y) * hdrLayout.rowPitch);
-            const auto* debugRow = reinterpret_cast<const uint32_t*>(
-                debug.data.data() + debugLayout.offset + static_cast<uint64_t>(y) * debugLayout.rowPitch);
-            for (uint32_t x = 0; x < width; ++x) {
-                const float z = depthRow[x];
-                if (!std::isfinite(z) || std::bit_cast<uint32_t>(z) == 0x7f7fffffu) {
-                    continue;
-                }
-                ++geometryPixels;
-                const float nx = normalRow[x * 4u + 0u];
-                const float ny = normalRow[x * 4u + 1u];
-                const float nz = normalRow[x * 4u + 2u];
-                const float normalLength = std::sqrt(nx * nx + ny * ny + nz * nz);
-                if (!std::isfinite(normalLength)) ++invalidNormalPixels;
-                else {
-                    normalLengthSum += normalLength;
-                    if (normalLength < 0.1f) ++zeroNormalPixels;
-                }
-                const auto* a = albedoRow + x * 4u;
-                if ((a[0] | a[1] | a[2] | a[3]) == 0u) ++zeroAlbedoPixels;
-                const auto* mr = materialRow + x * 4u;
-                const float metallic = static_cast<float>(mr[0]) / 255.0f;
-                const float roughness = static_cast<float>(mr[1]) / 255.0f;
-                metallicSum += metallic;
-                roughnessSum += roughness;
-                minRoughness = (std::min)(minRoughness, roughness);
-                maxRoughness = (std::max)(maxRoughness, roughness);
-                if (mr[1] == 0u) ++zeroRoughnessPixels;
-                if (roughness < 0.1f) ++lowRoughnessPixels;
-
-                const float hr = HalfToFloat(hdrRow[x * 4u + 0u]);
-                const float hg = HalfToFloat(hdrRow[x * 4u + 1u]);
-                const float hb = HalfToFloat(hdrRow[x * 4u + 2u]);
-                const float hdrLuminance = 0.2126f * hr + 0.7152f * hg + 0.0722f * hb;
-                if (std::isfinite(hdrLuminance)) {
-                    hdrLuminanceSum += hdrLuminance;
-                    hdrLuminanceMax = (std::max)(hdrLuminanceMax, hdrLuminance);
-                    if (hdrLuminance > 1.0f) ++hdrOverOne;
-                }
-                else {
-                    ++hdrInvalid;
-                }
-
-                const uint32_t packedXY = debugRow[x * 2u + 0u];
-                const uint32_t packedZ = debugRow[x * 2u + 1u];
-                if (capture->label == "openpbr-diffuse") {
-                    const float ior = HalfToFloat(static_cast<uint16_t>(packedXY & 0xffffu));
-                    const float alpha = HalfToFloat(static_cast<uint16_t>(packedXY >> 16u));
-                    const float averageComplement = HalfToFloat(static_cast<uint16_t>(packedZ & 0xffffu));
-                    const float diffuseComp = HalfToFloat(static_cast<uint16_t>(packedZ >> 16u));
-                    if (std::isfinite(averageComplement)) {
-                        minSampledAverageComplement = (std::min)(minSampledAverageComplement, averageComplement);
-                    }
-                    if (std::isfinite(diffuseComp)) {
-                        if (diffuseComp > 100.0f) ++diffuseCompOverOneHundred;
-                        if (diffuseComp > maxDiffuseComp) {
-                            maxDiffuseComp = diffuseComp;
-                            maxDiffuseCompIor = ior;
-                            maxDiffuseCompAlpha = alpha;
-                        }
-                    }
-                    else {
-                        ++debugInvalid;
-                    }
-                    continue;
-                }
-                const float dr = HalfToFloat(static_cast<uint16_t>(packedXY & 0xffffu));
-                const float dg = HalfToFloat(static_cast<uint16_t>(packedXY >> 16u));
-                const float db = HalfToFloat(static_cast<uint16_t>(packedZ & 0xffffu));
-                const float debugLuminance = 0.2126f * dr + 0.7152f * dg + 0.0722f * db;
-                if (std::isfinite(debugLuminance)) {
-                    debugLuminanceSum += debugLuminance;
-                    debugLuminanceMax = (std::max)(debugLuminanceMax, debugLuminance);
-                }
-                else {
-                    ++debugInvalid;
-                }
-            }
-        }
-
-        const double divisor = geometryPixels ? static_cast<double>(geometryPixels) : 1.0;
-        spdlog::info(
-            "Deferred telemetry [{}]: dimensions={}x{} geometry={} normal(zero={} invalid={} avg_len={:.4f}) albedo_zero={} material(metal_avg={:.4f} rough_avg={:.4f} rough_min={:.4f} rough_max={:.4f} rough_zero={} rough_lt_0.1={}) HDR(avg_luma={:.4f} max_luma={:.4f} over_one={} invalid={}) debug(avg_luma={:.4f} max_luma={:.4f} invalid={})",
-            capture->label, width, height, geometryPixels, zeroNormalPixels, invalidNormalPixels,
-            normalLengthSum / divisor, zeroAlbedoPixels, metallicSum / divisor, roughnessSum / divisor,
-            minRoughness, maxRoughness, zeroRoughnessPixels, lowRoughnessPixels,
-            hdrLuminanceSum / divisor, hdrLuminanceMax, hdrOverOne, hdrInvalid,
-            debugLuminanceSum / divisor, debugLuminanceMax, debugInvalid);
-        if (capture->label == "openpbr-diffuse") {
-            spdlog::info(
-                "Deferred telemetry [openpbr-diffuse]: min_average_complement={} max_diffuse_comp={} max_comp_ior={} max_comp_alpha={} comp_over_100={} invalid={}",
-                minSampledAverageComplement, maxDiffuseComp, maxDiffuseCompIor,
-                maxDiffuseCompAlpha, diffuseCompOverOneHundred, debugInvalid);
-        }
-
-        if (!opaqueDielectricAverage.layouts.empty()) {
-            uint16_t minRaw = UINT16_MAX;
-            uint16_t maxRaw = 0u;
-            uint64_t zeroRaw = 0u;
-            for (const auto& layout : opaqueDielectricAverage.layouts) {
-                const uint32_t rows = layout.height;
-                const uint32_t valuesPerRow = layout.width;
-                for (uint32_t row = 0; row < rows; ++row) {
-                    const auto* values = reinterpret_cast<const uint16_t*>(
-                        opaqueDielectricAverage.data.data() + layout.offset +
-                        static_cast<uint64_t>(row) * layout.rowPitch);
-                    uint16_t rowMin = UINT16_MAX;
-                    uint16_t rowMax = 0u;
-                    uint32_t rowZeros = 0u;
-                    for (uint32_t column = 0; column < valuesPerRow; ++column) {
-                        minRaw = (std::min)(minRaw, values[column]);
-                        maxRaw = (std::max)(maxRaw, values[column]);
-                        if (values[column] == 0u) ++zeroRaw;
-                        rowMin = (std::min)(rowMin, values[column]);
-                        rowMax = (std::max)(rowMax, values[column]);
-                        if (values[column] == 0u) ++rowZeros;
-                    }
-                    spdlog::info(
-                        "Deferred telemetry [openpbr-diffuse]: opaque-average row={} min={} max={} zeros={}",
-                        row, rowMin, rowMax, rowZeros);
-                }
-            }
-            spdlog::info(
-                "Deferred telemetry [{}]: opaque-average LUT raw_min={} raw_max={} zeros={} layouts={}",
-                capture->label, minRaw, maxRaw, zeroRaw, opaqueDielectricAverage.layouts.size());
-        }
-
-        if (environmentInfo.data.size() >= sizeof(EnvironmentInfo)) {
-            EnvironmentInfo info{};
-            std::memcpy(&info, environmentInfo.data.data(), sizeof(info));
-            int minSH = info.sphericalHarmonics[0];
-            int maxSH = info.sphericalHarmonics[0];
-            int64_t absSH = 0;
-            for (const int coefficient : info.sphericalHarmonics) {
-                minSH = (std::min)(minSH, coefficient);
-                maxSH = (std::max)(maxSH, coefficient);
-                absSH += std::abs(static_cast<int64_t>(coefficient));
-            }
-            spdlog::info(
-                "Deferred telemetry [{}]: environment cubemap_srv={} prefiltered_srv={} sh_scale={} sh_min={} sh_max={} sh_abs_sum={}",
-                capture->label, info.cubeMapDescriptorIndex, info.prefilteredCubemapDescriptorIndex,
-                info.sphericalHarmonicsScale, minSH, maxSH, absSH);
-        }
-        capture->complete = true;
-    }
-
-    void RequestDeferredTelemetry(Renderer& renderer, const std::shared_ptr<DeferredTelemetryCapture>& capture) {
-        auto* graph = renderer.GetRenderGraph();
-        auto* readback = graph ? graph->GetReadbackService() : nullptr;
-        if (!graph || !readback) {
-            spdlog::error("Deferred telemetry could not access the active render graph readback service.");
-            return;
-        }
-        const auto request = [&](ResourceIdentifier id, std::optional<ReadbackCaptureResult> DeferredTelemetryCapture::* member) {
-            auto resource = graph->RequestResourcePtr(id, true);
-            if (!resource) {
-                spdlog::error("Deferred telemetry resource is unavailable: {}", id.ToString());
-                return;
-            }
-            readback->RequestReadbackCapture(
-                "DeferredShadingPass", resource.get(), RangeSpec{},
-                [capture, member](ReadbackCaptureResult&& result) {
-                    {
-                        std::scoped_lock lock(capture->mutex);
-                        capture.get()->*member = std::move(result);
-                    }
-                    TryLogDeferredTelemetry(capture);
-                });
-        };
-        request(Builtin::PrimaryCamera::LinearDepthMap, &DeferredTelemetryCapture::depth);
-        request(Builtin::GBuffer::Normals, &DeferredTelemetryCapture::normals);
-        request(Builtin::GBuffer::Albedo, &DeferredTelemetryCapture::albedo);
-        request(Builtin::GBuffer::MetallicRoughness, &DeferredTelemetryCapture::metallicRoughness);
-        request(Builtin::Color::HDRColorTarget, &DeferredTelemetryCapture::hdr);
-        request(Builtin::DebugVisualization, &DeferredTelemetryCapture::debug);
-        request(Builtin::Environment::InfoBuffer, &DeferredTelemetryCapture::environmentInfo);
-        request(Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
-            &DeferredTelemetryCapture::opaqueDielectricAverage);
-    }
-
     void ResetD3D12SmokeValidationMessages() {
         auto device = DeviceManager::GetInstance().GetDevice();
         ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
@@ -765,18 +473,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         commandLine.find("--pipeline-replacement-smoke-test") != std::string_view::npos;
     const bool clodGraphRebuildSmokeTest =
         commandLine.find("--clod-graph-rebuild-smoke-test") != std::string_view::npos;
-    const bool deferredTelemetryTest =
-        commandLine.find("--deferred-telemetry-test") != std::string_view::npos;
-    const bool deferredTelemetryDiffuse =
-        commandLine.find("--deferred-telemetry-diffuse") != std::string_view::npos;
-    const bool deferredTelemetrySpecular =
-        commandLine.find("--deferred-telemetry-specular") != std::string_view::npos;
-    const bool deferredTelemetryNoIbl =
-        commandLine.find("--deferred-telemetry-no-ibl") != std::string_view::npos;
-    const bool deferredTelemetryNoPunctual =
-        commandLine.find("--deferred-telemetry-no-punctual") != std::string_view::npos;
-    const bool graphRebuildSmokeTest = pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest;
-    auto deferredTelemetryCapture = std::make_shared<DeferredTelemetryCapture>();
+    const bool clodStreamingCleanupTest =
+        commandLine.find("--clod-streaming-cleanup-test") != std::string_view::npos;
+    const bool clodStreamingStressTest =
+        commandLine.find("--clod-streaming-stress-test") != std::string_view::npos ||
+        clodStreamingCleanupTest;
+    const bool graphRebuildSmokeTest =
+        pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest || clodStreamingStressTest;
 
     ConfigureMainRenderThreadScheduling();
 
@@ -811,31 +514,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // Initialize Nvidia Streamline
 
+    if (clodStreamingStressTest) {
+        // Keep the coordinator stress signal independent of vendor upscaler
+        // lifecycle behavior across repeated graph replacement.
+        _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
+    }
     renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
-    if (deferredTelemetryTest) {
-        SettingsManager::GetInstance().getSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
-        ResetD3D12SmokeValidationMessages();
-        if (deferredTelemetryDiffuse) {
-            deferredTelemetryCapture->label = "diffuse-ibl";
-        }
-        else if (deferredTelemetrySpecular) {
-            deferredTelemetryCapture->label = "specular-ibl";
-        }
-        else if (deferredTelemetryNoIbl) {
-            deferredTelemetryCapture->label = "no-ibl";
-        }
-        else if (deferredTelemetryNoPunctual) {
-            deferredTelemetryCapture->label = "no-punctual";
-        }
-        else {
-            deferredTelemetryCapture->label = "color";
-        }
+    if (clodStreamingStressTest) {
+        SettingsManager::GetInstance().getSettingSetter<uint32_t>(
+            "clodStreamingCpuUploadBudgetRequests")(256u);
     }
     if (graphRebuildSmokeTest) {
         SettingsManager::GetInstance().getSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
         ResetD3D12SmokeValidationMessages();
-        if (pipelineReplacementSmokeTest) {
+        if (clodStreamingStressTest) {
+            spdlog::info("CLod streaming stress test armed: deterministic camera sweeps, teleports, and graph rebuilds through frame 1200.");
+        }
+        else if (pipelineReplacementSmokeTest) {
             spdlog::info("Pipeline replacement smoke test armed: bloom will toggle off/on/off at frames 120/240/360.");
         }
         else {
@@ -1058,6 +754,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     MSG msg = {};
     unsigned int frameIndex = 0;
+    uint64_t clodStressTelemetrySequence = 0;
+    uint32_t clodStressResidentAtLastMove = 0;
+    bool clodStressFailed = false;
     auto lastUpdateTime = std::chrono::system_clock::now();
     while (msg.message != WM_QUIT) {
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1071,25 +770,48 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             lastUpdateTime = currentTime;
 
             frameIndex += 1;
-            if (deferredTelemetryTest && frameIndex == 5) {
-                auto& settings = SettingsManager::GetInstance();
-                if (deferredTelemetryDiffuse) {
-                    settings.getSettingSetter<unsigned int>("outputType")(OutputType::OUTPUT_DIFFUSE_IBL);
+            if (clodStreamingStressTest) {
+                constexpr float kStressFov = 80.0f * (XM_PI / 180.0f);
+                constexpr float kStressAspect = 16.0f / 9.0f;
+                const uint32_t leg = frameIndex / 300u;
+                const float phase = static_cast<float>((frameIndex / 30u) % 10u) / 10.0f;
+                const float angle = phase * XM_2PI + static_cast<float>(leg) * 0.73f;
+                const float radius = (leg & 1u) ? 12.0f : 4.0f;
+                const XMFLOAT3 stressPosition{
+                    2.0f + std::cos(angle) * radius,
+                    5.0f + ((leg % 3u) == 2u ? 4.0f : 0.0f),
+                    std::sin(angle) * radius};
+                if (frameIndex == 1u || frameIndex % 30u == 0u) {
+                    renderer.GetCurrentScene()->SetCamera(
+                        stressPosition,
+                        XMFLOAT3(0.0f, 5.0f, 0.0f),
+                        XMFLOAT3(0.0f, 1.0f, 0.0f),
+                        kStressFov,
+                        kStressAspect,
+                        0.1f,
+                        1000.0f);
                 }
-                else if (deferredTelemetrySpecular) {
-                    settings.getSettingSetter<unsigned int>("outputType")(OutputType::OUTPUT_SPECULAR_IBL);
+
+                if (frameIndex % 120u == 0u) {
+                    CLodStreamingOperationStats stats{};
+                    if (TryReadCLodStreamingOperationStats(clodStressTelemetrySequence, stats)) {
+                        spdlog::info(
+                            "CLod stress telemetry frame={}: resident={} pendingCpu={} diskIo={} pendingCommit={} ready={} maxCommitAge={} streamedBytes={}",
+                            frameIndex,
+                            stats.residentGroups,
+                            stats.pendingCpuRequests,
+                            stats.diskIoRequests,
+                            stats.pendingCommitGroups,
+                            stats.readyCompletions,
+                            stats.pendingCommitMaxAgeTicks,
+                            stats.streamedBytesThisFrame);
+                        if (stats.pendingCommitGroups != 0u && stats.pendingCommitMaxAgeTicks > 120u) {
+                            clodStressFailed = true;
+                            spdlog::error("CLod stress invariant failed: pending commit age {} exceeds 120 ticks", stats.pendingCommitMaxAgeTicks);
+                        }
+                        clodStressResidentAtLastMove = stats.residentGroups;
+                    }
                 }
-                else if (deferredTelemetryNoIbl) {
-                    settings.getSettingSetter<bool>("enableImageBasedLighting")(false);
-                }
-                else if (deferredTelemetryNoPunctual) {
-                    settings.getSettingSetter<bool>("enablePunctualLighting")(false);
-                }
-            }
-            if (deferredTelemetryTest && frameIndex == 20) {
-                spdlog::info("Deferred telemetry: requesting correlated GBuffer readbacks at frame {}.", frameIndex);
-                D3D12SmokeValidationFailed();
-                RequestDeferredTelemetry(renderer, deferredTelemetryCapture);
             }
             if (graphRebuildSmokeTest && frameIndex == 120) {
                 if (pipelineReplacementSmokeTest) {
@@ -1100,6 +822,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     spdlog::info("CLod graph-rebuild smoke test: disabling occlusion culling at frame {}.", frameIndex);
                     SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
                 }
+                if (clodStreamingStressTest) {
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(false);
+                }
             }
             if (graphRebuildSmokeTest && frameIndex == 240) {
                 if (pipelineReplacementSmokeTest) {
@@ -1109,6 +834,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 else {
                     spdlog::info("CLod graph-rebuild smoke test: enabling occlusion culling at frame {}.", frameIndex);
                     SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(true);
+                }
+                if (clodStreamingStressTest) {
+                    SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(true);
                 }
             }
             if (graphRebuildSmokeTest && frameIndex == 360) {
@@ -1121,16 +849,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(false);
                 }
             }
-            if (graphRebuildSmokeTest && frameIndex == 480) {
+            if (graphRebuildSmokeTest && !clodStreamingStressTest && frameIndex == 480) {
                 spdlog::info("Graph-rebuild smoke test completed after {} frames; closing.", frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
-            if (deferredTelemetryTest && frameIndex >= 240 && deferredTelemetryCapture->complete) {
-                spdlog::info("Deferred telemetry test completed after {} frames; closing.", frameIndex);
+            if (clodStreamingStressTest && (frameIndex == 600 || frameIndex == 840)) {
+                const bool enabled = frameIndex == 840;
+                spdlog::info("CLod stress: graph rebuild at frame {} bloom={} occlusion={}", frameIndex, enabled, enabled);
+                SettingsManager::GetInstance().getSettingSetter<bool>("enableBloom")(enabled);
+                SettingsManager::GetInstance().getSettingSetter<bool>("enableOcclusionCulling")(enabled);
+            }
+            if (clodStreamingStressTest && frameIndex == 1200) {
+                spdlog::info("CLod streaming stress test completed after {} frames; closing.", frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
-            if (deferredTelemetryTest && frameIndex == 600) {
-                spdlog::error("Deferred telemetry test timed out waiting for readback; closing.");
+            if (clodStreamingCleanupTest && frameIndex == 180) {
+                spdlog::info("CLod streaming cleanup test reached frame {} after graph replacement; closing.", frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
             renderer.Update(elapsedSeconds.count());
@@ -1145,7 +879,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     const bool smokeValidationFailed = graphRebuildSmokeTest && D3D12SmokeValidationFailed();
     renderer.Cleanup();
 
-    return smokeValidationFailed ? 1 : 0;
+    return (smokeValidationFailed || clodStressFailed) ? 1 : 0;
 }
 
 // Window callback procedure

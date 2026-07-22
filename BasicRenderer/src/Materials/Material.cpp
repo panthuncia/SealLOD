@@ -12,21 +12,6 @@
 #include "Render/MemoryIntrospectionAPI.h"
 
 namespace {
-    bool GltfMaterialDebugLoggingEnabled() {
-        static const bool enabled = [] {
-            char* value = nullptr;
-            size_t valueLength = 0;
-            const bool isSet =
-                _dupenv_s(&value, &valueLength, "SARP_GLTF_MATERIAL_LOG") == 0 &&
-                value != nullptr &&
-                value[0] != '\0' &&
-                value[0] != '0';
-            std::free(value);
-            return isSet;
-        }();
-        return enabled;
-    }
-
     bool NormalTextureNeedsReconstructedZ(rhi::Format format) {
         switch (format) {
         case rhi::Format::BC5_UNorm:
@@ -683,50 +668,4 @@ void Material::RefreshTextureBindings() {
     nameOpenPBRTexture(m_openPBRTextures.fuzzWeight.texture, "OpenPBRFuzzWeightTexture");
     nameOpenPBRTexture(m_openPBRTextures.fuzzRoughness.texture, "OpenPBRFuzzRoughnessTexture");
 
-    if (GltfMaterialDebugLoggingEnabled()) {
-        static std::atomic<uint32_t> loggedUploads{ 0u };
-        const uint32_t logIndex = loggedUploads.fetch_add(1u, std::memory_order_relaxed);
-        if (logIndex < 512u) {
-			auto baseImage = m_baseColorTexture ? m_baseColorTexture->ImagePtr() : nullptr;
-			const auto basePending = m_baseColorTexture
-				? m_baseColorTexture->GetPendingDebugInfo()
-				: TexturePendingDebugInfo{};
-            spdlog::info(
-                "SARPDBG material upload id={} name='{}' flags=0x{:x} baseIndex={} baseSampler={} baseFallback={} baseUsable={} baseBackingValid={} baseStreamingID={} baseBindingRevision={} basePending={} basePlaceholder={} baseDirectStorage={} normalIndex={} normalFallback={} normalUsable={} mrIndex=({}, {}) aoIndex={} opacityIndex={} uv(base,normal,mr,ao)=({}, {}, {}, {}) channels(base,normal,mr,ao)=({}, {}, {}, {}; {}, {}, {}; {}, {}; {})",
-                m_materialID,
-                m_name,
-                m_materialData.materialFlags,
-                m_materialData.baseColorTextureIndex,
-                m_materialData.baseColorSamplerIndex,
-                m_baseColorTexture ? m_baseColorTexture->IsUsingFallbackImage() : false,
-                m_baseColorTexture ? m_baseColorTexture->HasUsableImage() : false,
-				baseImage ? baseImage->HasValidBackingResource() : false,
-				m_materialData.baseColorStreamingTextureID,
-				basePending.bindingRevision,
-				m_baseColorTexture ? m_baseColorTexture->HasPendingUploadWork() : false,
-				basePending.hasPlaceholder,
-				basePending.directStorageState,
-                m_materialData.normalTextureIndex,
-                m_normalTexture ? m_normalTexture->IsUsingFallbackImage() : false,
-                m_normalTexture ? m_normalTexture->HasUsableImage() : false,
-                m_materialData.metallicTextureIndex,
-                m_materialData.roughnessTextureIndex,
-                m_materialData.aoMapIndex,
-                m_materialData.opacityTextureIndex,
-                m_materialData.baseColorUvSetIndex,
-                m_materialData.normalUvSetIndex,
-                m_materialData.metallicUvSetIndex,
-                m_materialData.aoUvSetIndex,
-                m_materialData.baseColorChannels.x,
-                m_materialData.baseColorChannels.y,
-                m_materialData.baseColorChannels.z,
-                m_materialData.baseColorChannels.w,
-                m_materialData.normalChannels.x,
-                m_materialData.normalChannels.y,
-                m_materialData.normalChannels.z,
-                m_materialData.metallicChannel,
-                m_materialData.roughnessChannel,
-                m_materialData.aoChannel);
-        }
-    }
 }

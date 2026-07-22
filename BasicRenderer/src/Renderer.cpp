@@ -471,7 +471,9 @@ void Renderer::Initialize(
     settingsManager.registerSetting<WindowResolutionPreset>(
         WindowResolutionPresetSettingName,
         FindClosestWindowResolutionPreset(x_res, y_res));
-    settingsManager.registerSetting<UpscalingMode>("upscalingMode", UpscalingMode::DLSS);
+    settingsManager.registerSetting<UpscalingMode>(
+        "upscalingMode",
+        enableStreamline ? UpscalingMode::DLSS : UpscalingMode::None);
     settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::DLAA);
     settingsManager.registerSetting<bool>("enableVisibilityRendering", m_visibilityRendering);
     settingsManager.registerSetting<bool>("enableStreamline", enableStreamline);
@@ -1800,7 +1802,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
-    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Disabled);
+    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
@@ -1880,7 +1882,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
-    settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, true);
+    settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
     settingsManager.registerSetting<bool>(
@@ -2723,6 +2725,17 @@ void Renderer::Update(float elapsedSeconds) {
         }
         DescriptorHeapManager::GetInstance().ProcessDeferredReleases(m_frameIndex);
         RendererECSManager::GetInstance().FlushDeferredWorldOperations();
+
+		// Retire upload pages only after the previous use of this frame slot has
+		// completed, and before CompileFrame can assign newly recorded uploads to
+		// the slot.  Doing this in FrameMaintenance (after RenderGraph::Update)
+		// recycled current-frame staging pages before RenderGraph::Execute had
+		// submitted their copies.
+		if (currentRenderGraph) {
+			if (auto* uploadService = currentRenderGraph->GetUploadService()) {
+				uploadService->ProcessDeferredReleases(m_frameIndex);
+			}
+		}
         });
 
     if (m_dynamicBackbuffer && m_swapChainReady && m_frameIndex < m_backbufferResources.size()) {
@@ -2850,13 +2863,6 @@ void Renderer::Update(float elapsedSeconds) {
             if (auto* statisticsService = currentRenderGraph->GetStatisticsService()) {
                 statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
                 statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
-            }
-        }
-
-        if (currentRenderGraph) {
-            ZoneScopedN("Renderer::Update::DeferredReleases");
-            if (auto* uploadService = currentRenderGraph->GetUploadService()) {
-                uploadService->ProcessDeferredReleases(m_frameIndex);
             }
         }
         });
@@ -4605,7 +4611,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->SetPassTechnique("MenuRenderPass", "Debug::UI");
                 break;
             case DepthHistory:
-                BuildLinearDepthHistoryCopyPass(newGraph.get());
+                BuildLinearDepthHistoryCopyPass(newGraph.get(), m_pViewManager.get());
                 break;
             case Present:
                 newGraph->BuildRenderPass<PresentPass>("PresentPass");

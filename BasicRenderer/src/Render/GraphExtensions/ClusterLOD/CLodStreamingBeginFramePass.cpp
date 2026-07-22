@@ -1,9 +1,6 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingBeginFramePass.h"
 
 #include <algorithm>
-#include <cstdlib>
-
-#include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -15,25 +12,6 @@
 #include "BuiltinResources.h"
 #include "ShaderBuffers.h"
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
-
-namespace {
-bool SarpClodImportDebugLoggingEnabled() {
-    static const bool enabled = [] {
-#if defined(_WIN32)
-        char* env = nullptr;
-        size_t envSize = 0;
-        const errno_t err = _dupenv_s(&env, &envSize, "SARP_DEBUG_CLOD_IMPORT");
-        const bool result = err == 0 && env != nullptr && env[0] != '\0' && env[0] != '0';
-        std::free(env);
-        return result;
-#else
-        const char* env = std::getenv("SARP_DEBUG_CLOD_IMPORT");
-        return env != nullptr && env[0] != '\0' && env[0] != '0';
-#endif
-    }();
-    return enabled;
-}
-}
 
 CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::function<UploadInstance*()> getUploadInstance,
@@ -150,13 +128,6 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         ZoneScopedN("CLodStreamingBeginFramePass::UploadActiveGroupsBits");
         const bool activeGroupsBitsUploadPending = m_getActiveGroupsBitsUpload
             && m_getActiveGroupsBitsUpload(m_activeGroupsBitsUploadScratch, activeGroupScanCount);
-        if (SarpClodImportDebugLoggingEnabled()) {
-            spdlog::info(
-                "SARPDBG CLodBeginFrame activeGroups uploadPending={} scanCount={} uploadWords={}",
-                activeGroupsBitsUploadPending ? 1 : 0,
-                activeGroupScanCount,
-                static_cast<uint32_t>(m_activeGroupsBitsUploadScratch.size()));
-        }
         if (activeGroupsBitsUploadPending && !m_activeGroupsBitsUploadScratch.empty()) {
             BUFFER_UPLOAD(
                 m_activeGroupsBitsUploadScratch.data(),

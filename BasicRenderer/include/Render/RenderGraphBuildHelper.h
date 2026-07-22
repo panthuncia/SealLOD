@@ -993,8 +993,8 @@ void BuildLinearDepthDownsamplePass(RenderGraph* graph) {
     TagPassTechnique(graph, "LinearDepthDownsamplePass", "Depth::Linear Depth");
 }
 
-void BuildLinearDepthHistoryCopyPass(RenderGraph* graph) {
-    graph->BuildRenderPass<LinearDepthHistoryCopyPass>("LinearDepthHistoryCopyPass");
+void BuildLinearDepthHistoryCopyPass(RenderGraph* graph, ViewManager* viewManager) {
+    graph->BuildRenderPass<LinearDepthHistoryCopyPass>("LinearDepthHistoryCopyPass", viewManager);
     TagPassTechnique(graph, "LinearDepthHistoryCopyPass", "Post Process::Depth History");
 }
 

@@ -88,6 +88,7 @@ struct Builtin {
     inline static constexpr std::string_view SpotLightMatrixBuffer = "Builtin::Light::SpotLightMatrixBuffer";
     inline static constexpr std::string_view ViewResourceGroup = "Builtin::Light::ViewResourceGroup";
   };
+  inline static constexpr std::string_view LinearDepthMaps = "Builtin::LinearDepthMaps";
   struct Material {
     inline static constexpr std::string_view TextureGroup = "Builtin::Material::TextureGroup";
     inline static constexpr std::string_view TextureStreamingFeedbackBuffer = "Builtin::Material::TextureStreamingFeedbackBuffer";

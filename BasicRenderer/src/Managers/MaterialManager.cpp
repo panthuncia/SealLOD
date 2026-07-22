@@ -8,7 +8,6 @@
 #include "Render/Runtime/IReadbackService.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <unordered_set>
@@ -16,19 +15,6 @@
 #include <tracy/Tracy.hpp>
 
 namespace {
-	bool MaterialStreamingDebugLoggingEnabled() {
-		static const bool enabled = [] {
-			char* value = nullptr;
-			size_t valueLength = 0;
-			const bool isSet =
-				_dupenv_s(&value, &valueLength, "SARP_GLTF_MATERIAL_LOG") == 0 &&
-				value != nullptr && value[0] != '\0' && value[0] != '0';
-			std::free(value);
-			return isSet;
-		}();
-		return enabled;
-	}
-
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
@@ -659,20 +645,6 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Base");
 			m_perMaterialDataBuffer->UpdateAt(materialSlot, materialData);
-			if (MaterialStreamingDebugLoggingEnabled() &&
-				(materialData.materialFlags & MaterialFlags::MATERIAL_TERRAIN) == 0u) {
-				static std::atomic<uint32_t> loggedWrites{ 0u };
-				if (loggedWrites.fetch_add(1u, std::memory_order_relaxed) < 1024u) {
-					spdlog::info(
-						"SARPDBG material buffer write id={} slot={} baseIndex={} baseStreamingID={} normalIndex={} normalStreamingID={} metallicIndex={} roughnessIndex={} aoIndex={} heightIndex={} opacityIndex={}",
-						material.GetMaterialID(), materialSlot,
-						materialData.baseColorTextureIndex, materialData.baseColorStreamingTextureID,
-						materialData.normalTextureIndex, materialData.normalStreamingTextureID,
-						materialData.metallicTextureIndex, materialData.roughnessTextureIndex,
-						materialData.aoMapIndex, materialData.heightMapIndex,
-						materialData.opacityTextureIndex);
-				}
-			}
 		}
 		{
 			ZoneScopedN("MaterialManager::FlushDirtyMaterial::UploadMaterialCBs::Eval");

@@ -201,6 +201,7 @@ private:
     std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
     std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
 
+    std::shared_ptr<ResourceGroup> m_linearDepthGroup;
     std::shared_ptr<ResourceGroup> m_lastFrameLinearDepthGroup;
     std::unordered_map<uint64_t, std::shared_ptr<PixelBuffer>> m_lastFrameLinearDepthBySource;
 

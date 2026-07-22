@@ -176,28 +176,6 @@ public:
 	bool FreeCLodGroupEviction(uint32_t groupGlobalIndex);
 	bool EvictCLodGroupResidency(uint32_t groupGlobalIndex, bool clearPageMapEntries);
 
-	enum class CLodPageMapWriteReason : uint8_t {
-		Commit,
-		EvictClear,
-		EvictClearSkippedResidentReference,
-	};
-
-	struct CLodPageMapWriteEvent {
-		CLodPageMapWriteReason reason = CLodPageMapWriteReason::Commit;
-		uint32_t groupGlobalIndex = 0u;
-		uint32_t groupLocalIndex = 0u;
-		uint32_t groupsBase = 0u;
-		uint32_t meshPageIndex = 0u;
-		uint32_t pageMapOffset = 0u;
-		uint32_t physicalPage = ~0u;
-		uint32_t slabDescriptorIndex = 0u;
-		uint32_t slabByteOffset = 0u;
-		uint32_t previousSlabDescriptorIndex = 0u;
-		uint32_t previousSlabByteOffset = 0u;
-		uint32_t referencedResidentGroupCount = 0u;
-	};
-
-	void SetCLodPageMapWriteCallback(std::function<void(const CLodPageMapWriteEvent&)> fn);
 	bool CommitCLodGroupResidency(
 		uint32_t groupGlobalIndex,
 		const ClusterLODGroupChunk& chunk,
@@ -382,7 +360,6 @@ private:
 	std::atomic<uint32_t> m_debugResidentGroups{0};
 	std::atomic<uint32_t> m_debugResidentAllocations{0};
 	std::atomic<uint64_t> m_debugTotalStreamedBytes{0};
-	std::function<void(const CLodPageMapWriteEvent&)> m_clodPageMapWriteCallback;
 	std::atomic<uint32_t> m_clodActiveMaxTraversalDepth{0};
 
 	struct CLodDiskStreamingRequest {
@@ -433,8 +410,6 @@ private:
 		uint64_t totalBlobBytes = 0;
 		std::string uploadPathLabel = "DirectStorageGpuDirect";
 		DirectStorageAsyncRequestHandle uploadHandle;
-		uint64_t launchQueuedMs = 0;
-		uint64_t dsReadyMs = 0;
 		std::vector<uint32_t> pageIds;
 		std::vector<CLodPrefetchedChildLayout> prefetchedChildLayouts;
 	};

@@ -269,6 +269,15 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
 add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
 add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
+add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
+target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
+target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
+add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
+target_include_directories(CLodCoordinatorTests PRIVATE
+    "${BASICRENDERER_SOURCE_ROOT}/include"
+    "${BASICRENDERER_REPO_ROOT}/OpenRenderGraph/include")
+target_compile_features(CLodCoordinatorTests PRIVATE cxx_std_23)
+target_link_libraries(CLodCoordinatorTests PRIVATE ${PROJECT_NAME})
 
 set(BASICRENDERER_IMGUI_SOURCE_VERSION "1.91.9" CACHE STRING "ImGui source release used when vcpkg's transient build tree is unavailable.")
 set(_basicrenderer_imgui_vulkan_backend_candidates)
@@ -1316,3 +1325,5 @@ enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
+add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
+add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
