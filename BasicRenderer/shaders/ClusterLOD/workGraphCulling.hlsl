@@ -147,7 +147,8 @@ uint CLodResolveAnimatedNodeCullSphereForPose(
     if (boneCount == 0u)
         return CLOD_NODE_CULL_STATIC_BIND_POSE;
     const uint skinningInstanceSlot =
-        ResolveProceduralWindSkinningSlot(drawRecordIndex, sourceSkinningInstanceSlot);
+        ResolveAssemblyProceduralWindSkinningSlot(
+            drawRecordIndex, sourceSkinningInstanceSlot, assemblyTransformIndex);
     if (!IsValidSkinningInstanceSlot(skinningInstanceSlot) ||
         boneCount > min(metadata.nodeBoneLimit, CLOD_NODE_BONE_LIMIT_HARD_MAX) ||
         nodeInfo.boneListOffset > metadata.nodeBoneIndexCount ||
@@ -1446,7 +1447,8 @@ void CLodAppendVoxelRasterClusterWork(
 
     const PerMeshInstanceBuffer voxelInstanceData = LoadMeshTemplateForDraw(instanceIndex);
     const uint voxelSkinningInstanceSlot =
-        ResolveProceduralWindSkinningSlot(instanceIndex, voxelInstanceData.skinningInstanceSlot);
+        ResolveAssemblyProceduralWindSkinningSlot(
+            instanceIndex, voxelInstanceData.skinningInstanceSlot, assemblyTransformIndex);
 
     StructuredBuffer<CLodVoxelRasterQueueDescriptors> queueDescriptorBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID)];
@@ -3993,7 +3995,6 @@ void ClusterCullBody(
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(b.instanceIndex);
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(b.instanceIndex);
         instanceTransform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, b.assemblyTransformIndex);
-        skinningInstanceSlot = ResolveProceduralWindSkinningSlot(b.instanceIndex, instanceData.skinningInstanceSlot);
         objectModelMatrix = instanceTransform.model;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(b.instanceIndex);
@@ -4041,6 +4042,11 @@ void ClusterCullBody(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[meshBufferIndex];
         meshVertexFlags = perMesh.vertexFlags;
+        if ((meshVertexFlags & VERTEX_SKINNED) != 0u)
+        {
+            skinningInstanceSlot = ResolveAssemblyProceduralWindSkinningSlot(
+                b.instanceIndex, instanceData.skinningInstanceSlot, b.assemblyTransformIndex);
+        }
         StructuredBuffer<MaterialInfo> materialDataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
         const MaterialInfo materialInfo = materialDataBuffer[perMesh.materialDataIndex];

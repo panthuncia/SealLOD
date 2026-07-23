@@ -42,6 +42,22 @@ uint ResolveProceduralWindSkinningSlot(uint drawRecordIndex, uint sourceSlot)
 	return transientInfo.boneCount != 0u ? transientSlot : 0xFFFFFFFFu;
 }
 
+uint ResolveAssemblyProceduralWindSkinningSlot(
+    uint drawRecordIndex,
+    uint sourceSlot,
+    uint assemblyTransformIndex)
+{
+    // Procedural-wind transient skeletons are created only for skinned
+    // assembly placements. Keep ordinary rigid/skinned instances entirely
+    // off the descriptor-heavy resolution path.
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL ||
+        !IsValidSkinningInstanceSlot(sourceSlot))
+    {
+        return sourceSlot;
+    }
+    return ResolveProceduralWindSkinningSlot(drawRecordIndex, sourceSlot);
+}
+
 uint ResolveAssemblyBoneIndex(
     uint localJointId,
     CLodMeshMetadata metadata,

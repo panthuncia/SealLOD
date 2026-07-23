@@ -1350,6 +1350,50 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["pid"] = GetCurrentProcessId();
                     response["profile_active"] = !m_finished;
                     response["experiment_id"] = m_experimentId;
+                    response["pipeline_epoch"] = PSOManager::GetInstance().GetPipelineEpoch();
+                } else if (command == "pso.list") {
+                    response["pipelines"] = nlohmann::json::array();
+                    for (const auto& pipeline : PSOManager::GetInstance().ListPipelines()) {
+                        response["pipelines"].push_back({
+                            { "id", pipeline.id },
+                            { "name", pipeline.displayName },
+                            { "active_generation", pipeline.activeGeneration },
+                            { "source_hash", pipeline.sourceHash },
+                            { "bytecode_hash", pipeline.bytecodeHash },
+                            { "label", pipeline.label },
+                            { "compiling", pipeline.compiling }
+                        });
+                    }
+                } else if (command == "pso.recompile") {
+                    if (!m_finished) throw std::runtime_error("cannot recompile a pipeline while profiling is active");
+                    PSOManager::RecompileOptions options;
+                    options.label = request->document.value("label", "pipe-reload");
+                    response["job_id"] = PSOManager::GetInstance().RequestRecompile(
+                        request->document.at("pipeline_id").get<std::string>(), std::move(options));
+                } else if (command == "pso.activate") {
+                    if (!m_finished) throw std::runtime_error("cannot activate a pipeline while profiling is active");
+                    response["job_id"] = PSOManager::GetInstance().RequestActivation(
+                        request->document.at("pipeline_id").get<std::string>(),
+                        request->document.at("generation").get<std::uint64_t>());
+                } else if (command == "job.status") {
+                    const auto job = PSOManager::GetInstance().GetLiveJob(
+                        request->document.at("job_id").get<std::uint64_t>());
+                    if (!job) throw std::runtime_error("unknown pipeline job");
+                    const auto stateName = [](PSOManager::LiveJobState state) {
+                        switch (state) {
+                        case PSOManager::LiveJobState::Queued: return "queued";
+                        case PSOManager::LiveJobState::Compiling: return "compiling";
+                        case PSOManager::LiveJobState::ReadyToPublish: return "ready_to_publish";
+                        case PSOManager::LiveJobState::Published: return "published";
+                        case PSOManager::LiveJobState::Failed: return "failed";
+                        }
+                        return "unknown";
+                    };
+                    response["job"] = {
+                        { "id", job->id }, { "pipeline_id", job->pipelineId },
+                        { "state", stateName(job->state) }, { "generation", job->generation },
+                        { "error", job->error }
+                    };
                 } else if (command == "profile.run") {
                     if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
                     StartExperiment(request->document.value("label", "experiment"), &renderer);
