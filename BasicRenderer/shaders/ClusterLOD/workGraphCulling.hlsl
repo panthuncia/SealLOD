@@ -1937,7 +1937,7 @@ bool CLodBucketContainsVoxels(CLodClusterRunRecord record)
 void CLodProcessVoxelClusterBucket(CLodClusterRunRecord record)
 {
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(record.instanceIndex);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
     const PerObjectBuffer instanceTransform =
         LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, record.assemblyTransformIndex);
 
@@ -2888,7 +2888,7 @@ void WG_ObjectCull(
 
     if (entryVisible) {
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
@@ -3068,7 +3068,7 @@ void WG_TraverseNodes(
         const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
         const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
         // Mesh upload creates one node-skinning sidecar entry per CLOD node for
@@ -3660,7 +3660,7 @@ void WG_LeafNodes(
         const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
         const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
         const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
         // Mesh upload creates one node-skinning sidecar entry per CLOD node for
@@ -3889,9 +3889,10 @@ void ClusterCullBody(
     out uint reyesPendingOut)
 {
     bool commonPageValid = false;
+    CLodClusterPagePrefix commonPagePrefix = (CLodClusterPagePrefix)0;
     if (hasBucket && b.pageSlabDescriptorIndex != 0u)
     {
-        const CLodClusterPagePrefix prefix =
+        commonPagePrefix =
             CLodLoadClusterPagePrefix(b.pageSlabDescriptorIndex, b.pageSlabByteOffset);
         const uint expectedMagic = CLodBucketContainsVoxels(b)
             ? CLOD_VOXEL_PAGE_MAGIC
@@ -3899,11 +3900,11 @@ void ClusterCullBody(
         const uint firstCluster = UnpackClusterFirstIndex(b.clusterIndexAndCount);
         const uint runClusterCount = UnpackClusterCount(b.clusterIndexAndCount);
         commonPageValid =
-            prefix.formatAndKind == expectedMagic &&
-            prefix.descriptorOffset != 0u &&
+            commonPagePrefix.formatAndKind == expectedMagic &&
+            commonPagePrefix.descriptorOffset != 0u &&
             runClusterCount != 0u &&
-            firstCluster < prefix.clusterCount &&
-            runClusterCount <= prefix.clusterCount - firstCluster;
+            firstCluster < commonPagePrefix.clusterCount &&
+            runClusterCount <= commonPagePrefix.clusterCount - firstCluster;
     }
 
     // Voxel and triangle runs share the same frontier and wave scheduling.  The
@@ -3993,7 +3994,7 @@ void ClusterCullBody(
         pageSlabOff = b.pageSlabByteOffset;
 
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(b.instanceIndex);
-        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(b.instanceIndex);
+        const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
         instanceTransform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, b.assemblyTransformIndex);
         objectModelMatrix = instanceTransform.model;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -4016,11 +4017,15 @@ void ClusterCullBody(
         const ClodViewRasterInfo viewRasterInfo = viewRasterInfoBuffer[b.viewId];
         viewHeightPixels = float(viewRasterInfo.scissorMaxY - viewRasterInfo.scissorMinY);
 
-        // Load the current page header layout through the shared helper.
-        ByteAddressBuffer slab = ResourceDescriptorHeap[pageSlabDesc];
-        pageHeader = LoadPageHeader(pageSlabDesc, pageSlabOff);
-        pageMeshletCount = pageHeader.meshletCount;
-        pageDescriptorOffset = pageHeader.descriptorOffset;
+        // Culling only needs the common 16-byte page prefix. Skinning-bound
+        // evaluation consumes boneIndexStreamOffset but none of the remaining
+        // 48 bytes in CLodPageHeader, so avoid fetching them for every lane.
+        pageHeader.formatAndKind = commonPagePrefix.formatAndKind;
+        pageHeader.meshletCount = commonPagePrefix.clusterCount;
+        pageHeader.descriptorOffset = commonPagePrefix.descriptorOffset;
+        pageHeader.boneIndexStreamOffset = commonPagePrefix.boneIndexStreamOffset;
+        pageMeshletCount = commonPagePrefix.clusterCount;
+        pageDescriptorOffset = commonPagePrefix.descriptorOffset;
 
 #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         if (!cullCameraIsOrtho || CLOD_VSM_OCCLUSION_CULLING) {

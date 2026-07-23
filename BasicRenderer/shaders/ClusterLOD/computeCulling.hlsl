@@ -106,7 +106,7 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     if (CLodReplayRootOcclusionCandidate(record, clodMeshMetadata))
     {
         const PerMeshInstanceBuffer instanceData =
-            LoadMeshTemplateForDraw(record.instanceIndex);
+            LoadMeshTemplateForDrawRecord(drawRecord);
         const PerObjectBuffer instanceTransform =
             LoadInstanceTransformForDrawRecordWithAssemblyTransform(
                 drawRecord,
@@ -193,7 +193,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
     const PerObjectBuffer instanceTransform =
         LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
     const row_major matrix objectModelMatrix = instanceTransform.model;
@@ -201,7 +201,10 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
-    const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
+    // Voxel-root classification only feeds debug telemetry. Avoid fetching the
+    // first group for every object when telemetry is disabled.
+    const bool voxelRootCandidate =
+        CLodWorkGraphTelemetryEnabled() && CLodMeshHasVoxelRootGroup(clodMeshMetadata);
     if (voxelRootCandidate)
     {
         WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_CANDIDATES, 1);
@@ -345,7 +348,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
     const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(rec.instanceIndex);
+    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
     const PerObjectBuffer instanceTransform =
         LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
     // Mesh upload creates one node-skinning sidecar entry per CLOD node for
@@ -388,8 +391,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     {
         WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRAVERSAL_RECORDS, 1);
     }
-    const bool voxelRootCandidate = CLodMeshHasVoxelRootGroup(clodMeshMetadata);
-    if (voxelRootCandidate && nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
+    // Voxel-root classification exists only for debug telemetry. Avoid the
+    // group-buffer read on every traversal record in normal rendering.
+    if (CLodWorkGraphTelemetryEnabled() &&
+        CLodMeshHasVoxelRootGroup(clodMeshMetadata) &&
+        nodeLocalId == CLodResolveTraversalRootNode(clodMeshMetadata))
     {
         WGTelemetryAdd(
             node.range.isLeaf == CLOD_NODE_INTERNAL
@@ -621,12 +627,16 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
                 uint clusterBase = seg.firstMeshletInPage;
                 uint remainingClusters = seg.meshletCount;
+                const uint outputRecordCount =
+                    (remainingClusters + phase2ExpansionFactor - 1u) / phase2ExpansionFactor;
+                uint outputBase = 0u;
+                InterlockedAdd(clusterCounter[0], outputRecordCount, outputBase);
+                uint outputOffset = 0u;
                 [loop]
                 while (remainingClusters > 0u)
                 {
                     const uint chunkCount = min(phase2ExpansionFactor, remainingClusters);
-                    uint outputIndex = 0u;
-                    InterlockedAdd(clusterCounter[0], 1u, outputIndex);
+                    const uint outputIndex = outputBase + outputOffset;
                     if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
                     {
                         CLodClusterRunRecord outRecord = (CLodClusterRunRecord)0;
@@ -643,6 +653,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                     }
                     clusterBase += chunkCount;
                     remainingClusters -= chunkCount;
+                    outputOffset++;
                 }
             }
 #endif
@@ -675,11 +686,20 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             PureComputeNormalizePhase2ExpansionFactor(CLOD_PC_PHASE2_EXPANSION_FACTOR);
         uint meshletBase = seg.firstMeshletInPage;
         uint remainingMeshlets = seg.meshletCount;
+        const uint outputRecordCount =
+            (remainingMeshlets + phase2ExpansionFactor - 1u) / phase2ExpansionFactor;
+        const uint waveOutputOffset = WavePrefixSum(outputRecordCount);
+        const uint waveOutputCount = WaveActiveSum(outputRecordCount);
+        uint outputBase = 0u;
+        if (WaveIsFirstLane()) {
+            InterlockedAdd(clusterCounter[0], waveOutputCount, outputBase);
+        }
+        outputBase = WaveReadLaneFirst(outputBase) + waveOutputOffset;
+        uint outputOffset = 0u;
         [loop]
         while (remainingMeshlets > 0u) {
             const uint chunkCount = min(phase2ExpansionFactor, remainingMeshlets);
-            uint outputIndex = 0u;
-            InterlockedAdd(clusterCounter[0], 1u, outputIndex);
+            const uint outputIndex = outputBase + outputOffset;
             if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
                 CLodClusterRunRecord outRecord = (CLodClusterRunRecord)0;
                 outRecord.instanceIndex = rec.instanceIndex;
@@ -695,6 +715,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             }
             meshletBase += chunkCount;
             remainingMeshlets -= chunkCount;
+            outputOffset++;
         }
         return;
 #if !CLOD_PC_LEAF_ONLY
@@ -916,15 +937,18 @@ void PureComputeDenseClusterWorkCS(
     }
     GroupMemoryBarrierWithGroupSync();
 
-    if (GI == 0u) {
-        uint activeClusterCount = 0u;
-        [loop]
-        for (uint recordIndex = 0u; recordIndex < recordsThisGroup; ++recordIndex) {
-            activeClusterCount += UnpackClusterCount(gs_phase2Records[recordIndex].clusterIndexAndCount);
+    const bool telemetryEnabled = CLodWorkGraphTelemetryEnabled();
+    if (telemetryEnabled) {
+        if (GI == 0u) {
+            uint activeClusterCount = 0u;
+            [loop]
+            for (uint recordIndex = 0u; recordIndex < recordsThisGroup; ++recordIndex) {
+                activeClusterCount += UnpackClusterCount(gs_phase2Records[recordIndex].clusterIndexAndCount);
+            }
+            gs_phase2ActiveClusterCount = activeClusterCount;
         }
-        gs_phase2ActiveClusterCount = activeClusterCount;
+        GroupMemoryBarrierWithGroupSync();
     }
-    GroupMemoryBarrierWithGroupSync();
 
     const uint recordSlotInGroup = GI / phase2ExpansionFactor;
     const uint laneInRecord = GI - recordSlotInGroup * phase2ExpansionFactor;
@@ -953,5 +977,6 @@ void PureComputeDenseClusterWorkCS(
     uint swPending = 0u;
     uint pageJobPending = 0u;
     uint reyesPending = 0u;
-    ClusterCullBody(bucket, true, false, GI, gs_phase2ActiveClusterCount, 1u, swPending, pageJobPending, reyesPending);
+    const uint telemetryActiveClusterCount = telemetryEnabled ? gs_phase2ActiveClusterCount : 0u;
+    ClusterCullBody(bucket, true, false, GI, telemetryActiveClusterCount, 1u, swPending, pageJobPending, reyesPending);
 }
