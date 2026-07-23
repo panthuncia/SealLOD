@@ -1,0 +1,81 @@
+{
+  "name": "BasicRenderer work-graph CLOD hardware metrics",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 3,
+    "maximum_samples": 5,
+    "confidence_level": 0.95,
+    "relative_half_width": 1.0
+  },
+  "output": {
+    "database": "out/hierarchical_culling_workgraph_nvperf.sqlite",
+    "last_run_summary": "out/hierarchical_culling_workgraph_nvperf.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "gpu__time_duration",
+      "output_name": "GPU duration",
+      "unit": "ns",
+      "type": "counter",
+      "rollup": "sum",
+      "submetric": "none"
+    },
+    {
+      "id": "sm_throughput",
+      "name": "sm__throughput",
+      "output_name": "SM throughput",
+      "unit": "%",
+      "type": "throughput",
+      "rollup": "avg",
+      "submetric": "pct_of_peak_sustained_elapsed"
+    },
+    {
+      "id": "l2_throughput",
+      "name": "lts__throughput",
+      "output_name": "L2 throughput",
+      "unit": "%",
+      "type": "throughput",
+      "rollup": "avg",
+      "submetric": "pct_of_peak_sustained_elapsed"
+    },
+    {
+      "id": "dram_throughput",
+      "name": "dram__throughput",
+      "output_name": "DRAM throughput",
+      "unit": "%",
+      "type": "throughput",
+      "rollup": "avg",
+      "submetric": "pct_of_peak_sustained_elapsed"
+    },
+    {
+      "id": "warps_active",
+      "name": "smsp__warps_active",
+      "output_name": "Active warps/cycle",
+      "unit": "warps/cycle",
+      "type": "counter",
+      "rollup": "avg",
+      "submetric": "per_cycle_active",
+      "required": false
+    }
+  ],
+  "passes": [
+    {
+      "id": "hierarchical_culling_pass1",
+      "name": "CLodOpaque::HierarchicalCullingPass1",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time",
+        "sm_throughput",
+        "l2_throughput",
+        "dram_throughput",
+        "warps_active"
+      ]
+    }
+  ]
+}

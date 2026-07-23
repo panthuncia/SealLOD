@@ -682,7 +682,11 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
             ->GetSRVInfo(0)
             .slot.index;
 
-    commandList.SetWorkGraph(m_workGraph->GetHandle(), m_scratchBuffer->GetAPIResource().GetHandle(), true);
+    commandList.SetWorkGraph(
+        m_workGraph->GetHandle(),
+        m_scratchBuffer->GetAPIResource().GetHandle(),
+        m_initializeWorkGraphBackingMemory);
+    m_initializeWorkGraphBackingMemory = false;
 
     BindResourceDescriptorIndices(commandList, m_pipelineResources);
 

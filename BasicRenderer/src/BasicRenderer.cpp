@@ -33,6 +33,7 @@
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include "Telemetry/SamplingControlServer.h"
 #include "Telemetry/StatisticalSampler.h"
@@ -1394,6 +1395,26 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         { "state", stateName(job->state) }, { "generation", job->generation },
                         { "error", job->error }
                     };
+                } else if (command == "clod.phase2_expansion.get") {
+                    const uint32_t pass = request->document.value("pass", 1u);
+                    const char* settingName = pass == 2u
+                        ? CLodPureComputeReplayExpansionFactorSettingName
+                        : CLodPureComputePhase2ExpansionFactorSettingName;
+                    response["value"] = SettingsManager::GetInstance()
+                        .getSettingGetter<uint32_t>(settingName)();
+                    response["pass"] = pass == 2u ? 2u : 1u;
+                } else if (command == "clod.phase2_expansion.set") {
+                    if (!m_finished) throw std::runtime_error("cannot change traversal expansion while profiling is active");
+                    const uint32_t pass = request->document.value("pass", 1u);
+                    const char* settingName = pass == 2u
+                        ? CLodPureComputeReplayExpansionFactorSettingName
+                        : CLodPureComputePhase2ExpansionFactorSettingName;
+                    const uint32_t requested = request->document.at("value").get<uint32_t>();
+                    const uint32_t normalized = CLodNormalizePureComputePhase2ExpansionFactor(requested);
+                    SettingsManager::GetInstance()
+                        .getSettingSetter<uint32_t>(settingName)(normalized);
+                    response["value"] = normalized;
+                    response["pass"] = pass == 2u ? 2u : 1u;
                 } else if (command == "profile.run") {
                     if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
                     StartExperiment(request->document.value("label", "experiment"), &renderer);

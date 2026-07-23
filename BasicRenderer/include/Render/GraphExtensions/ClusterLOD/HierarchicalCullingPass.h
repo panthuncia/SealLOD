@@ -178,6 +178,7 @@ private:
     bool m_hasCachedVoxelQueueDescriptors = false;
     bool m_hasCachedPageJobDescriptors = false;
     bool m_hasUploadedViewDepthSrvIndices = false;
+    bool m_initializeWorkGraphBackingMemory = true;
     bool m_isFirstPass = true;
     bool m_declaredResourcesChanged = true;
     unsigned int m_maxVisibleClusters = 0u;

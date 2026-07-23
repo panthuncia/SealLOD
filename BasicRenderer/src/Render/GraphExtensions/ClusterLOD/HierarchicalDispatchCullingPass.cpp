@@ -637,8 +637,11 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         commandList.Barriers(clearBarrierBatch);
     }
 
+    const char* expansionSettingName = m_isFirstPass
+        ? CLodPureComputePhase2ExpansionFactorSettingName
+        : CLodPureComputeReplayExpansionFactorSettingName;
     const uint32_t phase2ExpansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodPureComputePhase2ExpansionFactorSettingName)());
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(expansionSettingName)());
     const uint32_t phase2RecordsPerGroup = 64u / phase2ExpansionFactor;
 
     uint32_t sharedRootConstants[NumMiscUintRootConstants] = {};

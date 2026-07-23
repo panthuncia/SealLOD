@@ -1718,14 +1718,19 @@ void ReplayReserveMeshletSlotsWave(
     }
 }
 
-uint PackTraverseNodeId(uint nodeId, uint sourceTag, uint allowRefine)
+uint PackTraverseNodeId(uint nodeId, uint sourceTag, uint allowRefine, uint boundsTested)
 {
-    return (sourceTag << 31u) | (allowRefine << 30u) | (nodeId & 0x3FFFFFFFu);
+    return
+        (sourceTag << 31u) |
+        (allowRefine << 30u) |
+        (boundsTested << 29u) |
+        (nodeId & 0x1FFFFFFFu);
 }
 
-uint UnpackNodeId(uint packed)      { return packed & 0x3FFFFFFFu; }
-uint UnpackSourceTag(uint packed)   { return packed >> 31u; }
-uint UnpackAllowRefine(uint packed) { return (packed >> 30u) & 1u; }
+uint UnpackNodeId(uint packed)       { return packed & 0x1FFFFFFFu; }
+uint UnpackSourceTag(uint packed)    { return packed >> 31u; }
+uint UnpackAllowRefine(uint packed)  { return (packed >> 30u) & 1u; }
+uint UnpackBoundsTested(uint packed) { return (packed >> 29u) & 1u; }
 
 uint PackGroupId(uint groupId, uint sourceTag)
 {
@@ -1761,7 +1766,7 @@ bool ReplayTryAppendNode(uint instanceIndex, uint viewId, uint nodeId, uint asse
 
     // TraverseNodeRecord layout: instanceIndex, nodeIdPacked, viewId, assemblyTransformIndex.
     const uint byteOffset = slot * CLOD_NODE_REPLAY_STRIDE_BYTES;
-    const uint packed = PackTraverseNodeId(nodeId, CLOD_RECORD_SOURCE_REPLAY, 1u);
+    const uint packed = PackTraverseNodeId(nodeId, CLOD_RECORD_SOURCE_REPLAY, 1u, 0u);
     replayBuffer.Store4(byteOffset, uint4(instanceIndex, packed, viewId, assemblyTransformIndex));
     return true;
 }
@@ -1896,7 +1901,7 @@ struct ObjectCullRecord
 struct TraverseNodeRecord
 {
     uint instanceIndex;
-    uint nodeIdPacked; // [31]=sourceTag, [30]=allowRefine, [29:0]=nodeId
+    uint nodeIdPacked; // [31]=sourceTag, [30]=allowRefine, [29]=boundsTested, [28:0]=nodeId
     uint viewId;
     uint assemblyTransformIndex;
 };
@@ -1910,82 +1915,7 @@ struct CLodClusterRunRecord
     uint pageSlabDescriptorIndex;
     uint pageSlabByteOffset;
     uint assemblyTransformIndex;
-    uint clusterKindAndPageIndex; // [0]=voxel payload, [31:1]=mesh-local page-map index
 };
-
-uint PackClusterKindAndPageIndex(uint clusterKind, uint pageIndex)
-{
-    return (pageIndex << 1u) | (clusterKind & 1u);
-}
-
-uint UnpackClusterKind(uint packed)
-{
-    return packed & 1u;
-}
-
-uint UnpackClusterPageIndex(uint packed)
-{
-    return packed >> 1u;
-}
-
-bool CLodBucketContainsVoxels(CLodClusterRunRecord record)
-{
-    return UnpackClusterKind(record.clusterKindAndPageIndex) == CLOD_CLUSTER_KIND_VOXEL;
-}
-
-#if CLOD_WG_ENABLE_VOXEL_OUTPUT
-void CLodProcessVoxelClusterBucket(CLodClusterRunRecord record)
-{
-    const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(record.instanceIndex);
-    const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
-    const PerObjectBuffer instanceTransform =
-        LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, record.assemblyTransformIndex);
-
-    StructuredBuffer<CLodMeshMetadata> metadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    const MeshInstanceClodOffsets clodOffsets = LoadCLodOffsetsForDrawRecord(drawRecord);
-    const CLodMeshMetadata metadata = metadataBuffer[clodOffsets.clodMeshMetadataIndex];
-
-    StructuredBuffer<ClusterLODGroup> groups =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const uint localGroupId = UnpackGroupId(record.groupIdPacked);
-    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
-    if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u)
-    {
-        WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_INVALID_PACKED_CLUSTER, 1u);
-        return;
-    }
-
-    ClusterLODGroupSegment segment = (ClusterLODGroupSegment)0;
-    segment.refinedGroup = -1;
-    segment.firstMeshletInPage = UnpackClusterFirstIndex(record.clusterIndexAndCount);
-    segment.meshletCount = UnpackClusterCount(record.clusterIndexAndCount);
-    segment.pageIndex = UnpackClusterPageIndex(record.clusterKindAndPageIndex);
-
-    StructuredBuffer<Camera> cameras =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-    const Camera cullCamera = cameras[record.viewId];
-    const float uniformScale = SkinningMaxAxisScale_RowVector(instanceTransform.model);
-#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    const bool dirtyPageCullingEnabled = CLodWorkGraphShadowDirtyPageCullingEnabled();
-#else
-    const bool dirtyPageCullingEnabled = false;
-#endif
-
-    CLodAppendVoxelRasterClusterWork(
-        metadata,
-        record.instanceIndex,
-        record.assemblyTransformIndex,
-        record.viewId,
-        localGroupId,
-        group,
-        segment,
-        instanceTransform.model,
-        uniformScale,
-        cullCamera,
-        dirtyPageCullingEnabled);
-}
-#endif
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 struct CLodVirtualShadowPredictiveInvalidationCandidate
@@ -2817,9 +2747,6 @@ void CLodHandleRenderableLeaf(
             bucketRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
             bucketRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
             bucketRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
-            bucketRecord.clusterKindAndPageIndex =
-                PackClusterKindAndPageIndex(CLOD_CLUSTER_KIND_TRIANGLE, seg.pageIndex);
-
             // Decompose meshlet count into bucket-sized records (max 8 records)
             uint tail = seg.meshletCount;
             uint budget = MAX_RECORDS_PER_SEGMENT;
@@ -2981,7 +2908,7 @@ void WG_ObjectCull(
         if (!culled && entryVisible) {
             outRecord.viewId = hdr.viewDataIndex;
             outRecord.instanceIndex = drawRecordIndex;
-            outRecord.nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u);
+            outRecord.nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u, 0u);
             outRecord.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
             outCount = 1;
 
@@ -3156,6 +3083,7 @@ void WG_TraverseNodes(
             replayRootOcclusionCulled ||
             (CLodWorkGraphFrustumCullingEnabled() &&
              !replaySource &&
+             UnpackBoundsTested(rec.nodeIdPacked) == 0u &&
              CLodNodeBoundsOutsideFrustum(
                  nodeCullClassification,
                  node.metric.cullCenterAndRadius,
@@ -3224,7 +3152,8 @@ void WG_TraverseNodes(
                             instanceChildRecord.nodeIdPacked = PackTraverseNodeId(
                                 assemblyInstance.targetRootNode,
                                 UnpackSourceTag(rec.nodeIdPacked),
-                                1u);
+                                1u,
+                                0u);
                             instanceChildRecord.assemblyTransformIndex =
                                 assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
                                     ? rec.assemblyTransformIndex
@@ -3497,7 +3426,11 @@ void WG_TraverseNodes(
                                 TraverseNodeRecord childRecord = (TraverseNodeRecord)0;
                                 childRecord.instanceIndex = rec.instanceIndex;
                                 childRecord.viewId = rec.viewId;
-                                childRecord.nodeIdPacked = PackTraverseNodeId(childNodeId, sourceTag, 1u);
+                                childRecord.nodeIdPacked = PackTraverseNodeId(
+                                    childNodeId,
+                                    sourceTag,
+                                    1u,
+                                    isSkinned ? 0u : 1u);
                                 childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
 #if CLOD_WG_SPLIT_LEAF_NODE
                                 if (child.range.isLeaf != CLOD_NODE_INTERNAL && child.range.isLeaf != CLOD_NODE_INSTANCE_ROOT) {
@@ -3709,6 +3642,7 @@ void WG_LeafNodes(
         const bool nodeCulled =
             CLodWorkGraphFrustumCullingEnabled() &&
             !replaySource &&
+            UnpackBoundsTested(rec.nodeIdPacked) == 0u &&
             CLodNodeBoundsOutsideFrustum(
                 nodeCullClassification,
                 node.metric.cullCenterAndRadius,
@@ -3894,33 +3828,14 @@ void ClusterCullBody(
     {
         commonPagePrefix =
             CLodLoadClusterPagePrefix(b.pageSlabDescriptorIndex, b.pageSlabByteOffset);
-        const uint expectedMagic = CLodBucketContainsVoxels(b)
-            ? CLOD_VOXEL_PAGE_MAGIC
-            : CLOD_TRIANGLE_PAGE_MAGIC;
         const uint firstCluster = UnpackClusterFirstIndex(b.clusterIndexAndCount);
         const uint runClusterCount = UnpackClusterCount(b.clusterIndexAndCount);
         commonPageValid =
-            commonPagePrefix.formatAndKind == expectedMagic &&
+            commonPagePrefix.formatAndKind == CLOD_TRIANGLE_PAGE_MAGIC &&
             commonPagePrefix.descriptorOffset != 0u &&
             runClusterCount != 0u &&
             firstCluster < commonPagePrefix.clusterCount &&
             runClusterCount <= commonPagePrefix.clusterCount - firstCluster;
-    }
-
-    // Voxel and triangle runs share the same frontier and wave scheduling.  The
-    // payload tails remain representation-specific, but traversal no longer
-    // launches or executes a separate voxel-leaf cull path.
-    if (hasBucket && commonPageValid && CLodBucketContainsVoxels(b))
-    {
-#if CLOD_WG_ENABLE_VOXEL_OUTPUT
-        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_THREADS, 1u);
-        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_IN_RANGE_THREADS, UnpackClusterCount(b.clusterIndexAndCount));
-        CLodProcessVoxelClusterBucket(b);
-#endif
-        swPendingOut = 0u;
-        pageJobPendingOut = 0u;
-        reyesPendingOut = 0u;
-        return;
     }
 
     hasBucket = hasBucket && commonPageValid;
