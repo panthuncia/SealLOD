@@ -28,6 +28,7 @@ Feature development is driven purely by what I'm interested in at the moment.
 - Low-level RHI (Only DX12 backend implemented, for now, but built to support Vulkan)
 - Shader-instrumentation debugging, using [GPU Reshape](https://github.com/GPUOpen-Tools/GPU-Reshape)'s backend
 - GPU-driven rendering with compute culling & ExecuteIndirect
+- NVPerf pass capture plus a reusable statistical sampler with confidence intervals, convergence checks, SQLite history, and Markdown reports
 - Visibility buffer (UE5-style), Deferred, and forward+ rendering
 - DirectStorage integration for low-latency, high-throughput data streaming
 - GPU BC7 compressor for rapid asset optimization
@@ -121,6 +122,28 @@ Relevant options:
 - `BASICRENDERER_ENABLE_SUBMODULE_FALLBACK` (default `ON`)
 
 ## Standalone consumption quick start
+
+Applications linked to `BasicRenderer::BasicRenderer` can use
+`Telemetry/StatisticalSampler.h` to load a sampling configuration, select
+measurements from `br::telemetry::nvperf::CaptureResult`, test convergence,
+and persist an experiment. Application-specific scene setup and readiness
+policy intentionally remain in the application.
+
+Metrics use the NvPerf source by default. A metric with
+`"source": "render_graph_gpu_time"` samples the render graph's raw GPU
+timestamp for each configured pass instead, so applications can gather pass
+timing distributions without requiring an exclusive hardware-counter session.
+
+The demo app accepts `--sampling-config <path>`. For example,
+`--sampling-config config/hierarchical_culling_sampling.json` profiles both
+opaque hierarchical CLOD culling phases and exits after convergence.
+
+Add `--sampling-control-pipe <name>` to keep the demo alive and control
+multiple experiments through `StatisticalSamplingControl`. The shared
+`Telemetry/SamplingControlServer.h` provides the same named-pipe transport to
+other BasicRenderer applications. Supported core commands are
+`session.status`, `profile.run`, `profile.status`, `profile.cancel`, and
+`shutdown`.
 
 ### 1) Build/install `BasicRHI`
 

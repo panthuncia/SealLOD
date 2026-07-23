@@ -104,6 +104,7 @@ endif()
 find_package(DirectX-Headers CONFIG REQUIRED)
 find_package(flecs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
@@ -245,7 +246,8 @@ set(BASICRENDERER_DEMO_TARGET BasicRendererDemo)
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 set(BASICRENDERER_DEMO_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/BasicRenderer.cpp")
-list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}")
+set(BASICRENDERER_SAMPLING_CONTROL_SOURCE "${BASICRENDERER_SOURCE_ROOT}/src/Telemetry/StatisticalSamplingControl.cpp")
+list(REMOVE_ITEM SOURCES "${BASICRENDERER_DEMO_SOURCE}" "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
 
 if(EXISTS "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
     add_library(xatlas STATIC "${BASICRENDERER_REPO_ROOT}/xatlas/source/xatlas/xatlas.cpp")
@@ -262,6 +264,10 @@ endif()
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
 add_library(BasicRenderer::BasicRenderer ALIAS ${PROJECT_NAME})
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
+add_executable(StatisticalSamplingControl "${BASICRENDERER_SAMPLING_CONTROL_SOURCE}")
+target_compile_features(StatisticalSamplingControl PRIVATE cxx_std_23)
+target_link_libraries(StatisticalSamplingControl PRIVATE nlohmann_json::nlohmann_json)
+target_compile_definitions(StatisticalSamplingControl PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
     OUTPUT_NAME ${PROJECT_NAME}
     ARCHIVE_OUTPUT_NAME ${BASICRENDERER_DEMO_TARGET}
@@ -273,6 +279,11 @@ add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
 target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
 target_compile_features(BoundedSpscQueueTests PRIVATE cxx_std_23)
 add_executable(CLodCoordinatorTests "tests/CLodCoordinatorTests.cpp")
+add_executable(StatisticalSamplerTests "tests/StatisticalSamplerTests.cpp")
+target_compile_features(StatisticalSamplerTests PRIVATE cxx_std_23)
+target_compile_definitions(StatisticalSamplerTests PRIVATE
+    STATISTICAL_SAMPLER_TEST_CONFIG="${BASICRENDERER_SOURCE_ROOT}/tests/data/statistical_sampler.json")
+target_link_libraries(StatisticalSamplerTests PRIVATE ${PROJECT_NAME})
 target_include_directories(CLodCoordinatorTests PRIVATE
     "${BASICRENDERER_SOURCE_ROOT}/include"
     "${BASICRENDERER_REPO_ROOT}/OpenRenderGraph/include")
@@ -1114,6 +1125,7 @@ PRIVATE
     Boost::interprocess
     TBB::tbb
     Tracy::TracyClient
+    unofficial::sqlite3::sqlite3
     slang::slang
     "${BASICRENDERER_SOURCE_ROOT}/WinPixEventRuntime.lib" 
     "${BASICRENDERER_SOURCE_ROOT}/sl.interposer.lib" 
@@ -1327,3 +1339,4 @@ add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)
+add_test(NAME StatisticalSamplerTests COMMAND StatisticalSamplerTests)

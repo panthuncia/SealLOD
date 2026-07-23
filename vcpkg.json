@@ -12,6 +12,8 @@
     "directx12-agility",
     "flecs",
     "nlohmann-json",
+    "sqlite3",
+    "boost-math",
     "lz4",
     "tree-sitter",
     "assimp",

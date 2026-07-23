@@ -17,6 +17,9 @@
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
+#include <optional>
+#include <ranges>
+#include <set>
 //#include <tracy/Tracy.hpp>
 
 #include "Mesh/Mesh.h"
@@ -30,6 +33,9 @@
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
+#include "Telemetry/NvPerfIntegration.h"
+#include "Telemetry/SamplingControlServer.h"
+#include "Telemetry/StatisticalSampler.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Managers/Singletons/DeletionManager.h"
 #include "Import/ModelLoader.h"
@@ -459,6 +465,355 @@ float randomFloat(float min, float max) {
 	return dist(gen);
 }
 
+namespace {
+
+std::optional<std::filesystem::path> FindCommandLinePath(
+    std::string_view commandLine,
+    std::string_view option)
+{
+    const auto optionPosition = commandLine.find(option);
+    if (optionPosition == std::string_view::npos) return std::nullopt;
+    auto valuePosition = commandLine.find_first_not_of(" \t", optionPosition + option.size());
+    if (valuePosition == std::string_view::npos) return std::nullopt;
+    if (commandLine[valuePosition] == '"') {
+        const auto end = commandLine.find('"', valuePosition + 1);
+        if (end == std::string_view::npos) return std::nullopt;
+        return std::filesystem::path(commandLine.substr(valuePosition + 1, end - valuePosition - 1));
+    }
+    const auto end = commandLine.find_first_of(" \t", valuePosition);
+    return std::filesystem::path(commandLine.substr(valuePosition, end - valuePosition));
+}
+
+std::optional<std::string> FindCommandLineValue(std::string_view commandLine, std::string_view option)
+{
+    const auto path = FindCommandLinePath(commandLine, option);
+    return path ? std::optional<std::string>(path->string()) : std::nullopt;
+}
+
+br::telemetry::sampling::ReadinessSnapshot BuildDemoSamplingReadiness(const Renderer& renderer)
+{
+    const auto source = renderer.GetSamplingReadinessSnapshot();
+    br::telemetry::sampling::ReadinessSnapshot result;
+    result.values = {
+        { "scene_task_in_flight", source.sceneTaskInFlight ? 1 : 0 },
+        { "pending_texture_reloads", source.pendingTextureReloads },
+        { "full_resolution_textures", source.fullResolutionTextures },
+        { "resident_clod_groups", source.residentClodGroups },
+        { "queued_clod_requests", source.queuedClodRequests },
+        { "in_flight_clod_groups", source.inFlightClodGroups },
+        { "completed_clod_results", source.completedClodResults },
+        { "pending_direct_storage_launches", source.pendingDirectStorageLaunches },
+        { "pending_direct_storage_uploads", source.pendingDirectStorageUploads },
+        { "io_tasks", source.ioTasks },
+        { "background_tasks", source.backgroundTasks },
+        { "shader_compile_tasks", source.shaderCompileTasks },
+        { "deferred_retire_queue", static_cast<std::int64_t>(source.deferredRetireQueueDepth) },
+        { "draw_records_allocated", static_cast<std::int64_t>(source.drawRecordsAllocated) }
+    };
+    return result;
+}
+
+std::string DemoSamplingSignature(const br::telemetry::sampling::ReadinessSnapshot& snapshot)
+{
+    std::ostringstream output;
+    for (const char* key : {
+        "full_resolution_textures", "resident_clod_groups", "draw_records_allocated" }) {
+        if (const auto found = snapshot.values.find(key); found != snapshot.values.end()) {
+            output << key << '=' << found->second << ';';
+        }
+    }
+    return output.str();
+}
+
+class DemoStatisticalSamplingRun {
+public:
+    bool Initialize(
+        const std::filesystem::path& configurationPath,
+        const std::optional<std::string>& controlPipe,
+        std::string& error)
+    {
+        try {
+            m_configuration = br::telemetry::sampling::LoadConfiguration(configurationPath);
+            br::telemetry::nvperf::CaptureConfiguration captureConfiguration;
+            for (const auto& metric : m_configuration->metrics) {
+                if (metric.source == br::telemetry::sampling::MeasurementSource::NvPerf) {
+                    m_usesNvPerf = true;
+                    captureConfiguration.metrics.push_back(metric.request);
+                } else {
+                    m_usesRenderGraphGpuTime = true;
+                }
+            }
+            if (m_usesNvPerf && m_usesRenderGraphGpuTime) {
+                error = "a sampling run cannot mix NVPerf and render-graph timestamp metrics";
+                return false;
+            }
+            std::set<std::pair<std::string, std::string>> uniquePasses;
+            std::optional<std::string> controllerQueue;
+            if (m_usesNvPerf) {
+                for (const auto& pass : m_configuration->passes) {
+                    if (uniquePasses.emplace(pass.name, pass.queue).second) {
+                        captureConfiguration.passes.push_back({ pass.name, pass.queue });
+                    }
+                    if (!pass.queue.empty()) {
+                        if (controllerQueue && *controllerQueue != pass.queue) {
+                            error = "one sampling run cannot capture passes from multiple queues";
+                            return false;
+                        }
+                        controllerQueue = pass.queue;
+                    }
+                }
+                if (controllerQueue) captureConfiguration.controllerQueue = *controllerQueue;
+                if (!br::telemetry::nvperf::ConfigureCapture(captureConfiguration, error)) return false;
+            }
+
+            m_database = std::make_unique<br::telemetry::sampling::Database>();
+            m_database->Open(*m_configuration);
+            m_configurationPath = std::filesystem::absolute(configurationPath);
+            m_persistent = controlPipe.has_value();
+            if (controlPipe) {
+                const int count = MultiByteToWideChar(CP_UTF8, 0, controlPipe->data(), static_cast<int>(controlPipe->size()), nullptr, 0);
+                std::wstring pipeName(static_cast<std::size_t>(count), L'\0');
+                MultiByteToWideChar(CP_UTF8, 0, controlPipe->data(), static_cast<int>(controlPipe->size()), pipeName.data(), count);
+                m_controlServer.Start(std::move(pipeName));
+                m_finished = true;
+                m_finalized = true;
+                spdlog::info("BasicRenderer sampling control server listening on '{}'", *controlPipe);
+            } else {
+                StartExperiment("command-line");
+            }
+            spdlog::info("BasicRenderer sampling: source={}",
+                m_usesNvPerf ? "NVPerf" : "render-graph GPU timestamps");
+            return true;
+        } catch (const std::exception& exception) {
+            error = exception.what();
+            return false;
+        }
+    }
+
+    bool Enabled() const noexcept { return m_configuration.has_value(); }
+    int ExitCode() const noexcept { return m_exitCode; }
+
+    void AfterFrame(Renderer& renderer, HWND hwnd)
+    {
+        if (!m_configuration) return;
+        PumpControlRequests(renderer, hwnd);
+        if (m_finished) return;
+        switch (m_phase) {
+        case Phase::Warmup:
+        {
+            const auto readiness = BuildDemoSamplingReadiness(renderer);
+            const auto signature = DemoSamplingSignature(readiness);
+            const bool noPendingWork = std::ranges::all_of(readiness.values, [](const auto& entry) {
+                static const std::set<std::string> nonBlocking{
+                    "full_resolution_textures", "resident_clod_groups", "draw_records_allocated"
+                };
+                return nonBlocking.contains(entry.first) || entry.second == 0;
+            });
+            if (noPendingWork && signature == m_readinessSignature) ++m_readyStableFrames;
+            else m_readyStableFrames = 0;
+            m_readinessSignature = signature;
+            if (m_readyStableFrames >= m_configuration->readyFrames) {
+                renderer.SetDeterministicSamplingMode(true);
+                br::telemetry::nvperf::SetStreamingSuppressed(true);
+                m_phase = Phase::Settling;
+                m_phaseFrames = 0;
+                m_readinessDurationMs = ElapsedMs();
+                spdlog::info("BasicRenderer sampling: readiness stable for {} frames after {} ms; deterministic settling started",
+                    m_readyStableFrames, m_readinessDurationMs);
+            } else if (ElapsedMs() >= m_configuration->readinessTimeoutMs) {
+                Finish("failed", "timed out waiting for stable readiness", hwnd, 8);
+            }
+            break;
+        }
+        case Phase::Settling:
+            if (++m_phaseFrames >= m_configuration->settlingFrames) {
+                if (m_usesNvPerf) ArmNextCapture(renderer, hwnd);
+                else m_phase = Phase::RenderGraphSampling;
+            }
+            break;
+        case Phase::Capturing:
+            if (br::telemetry::nvperf::CaptureComplete()) ConsumeCapture(renderer, hwnd);
+            break;
+        case Phase::RenderGraphSampling:
+            ConsumeRenderGraphSample(renderer, hwnd);
+            break;
+        }
+    }
+
+private:
+    enum class Phase { Warmup, Settling, Capturing, RenderGraphSampling };
+
+    std::uint64_t ElapsedMs() const;
+    void StartExperiment(std::string label, Renderer* renderer = nullptr);
+    const char* PhaseName() const;
+    void PumpControlRequests(Renderer& renderer, HWND hwnd);
+
+    void ArmNextCapture(Renderer& renderer, HWND hwnd)
+    {
+        std::string error;
+        m_captureReadiness = BuildDemoSamplingReadiness(renderer);
+        m_captureSignature = DemoSamplingSignature(m_captureReadiness);
+        if (!br::telemetry::nvperf::ArmCapture(m_nextOrdinal, error)) {
+            Finish("failed", "failed to arm NVPerf: " + error, hwnd, 3);
+            return;
+        }
+        m_phase = Phase::Capturing;
+        spdlog::info("BasicRenderer sampling: armed sample {}", m_nextOrdinal);
+    }
+
+    void ConsumeCapture(Renderer& renderer, HWND hwnd)
+    {
+        auto capture = br::telemetry::nvperf::TakeCaptureResult();
+        if (!capture) {
+            Finish("failed", "NVPerf completed without a capture result", hwnd, 4);
+            return;
+        }
+
+        br::telemetry::sampling::SampleRecord sample;
+        sample.ordinal = m_nextOrdinal++;
+        sample.startFrame = capture->startFrame;
+        sample.endFrame = capture->endFrame;
+        sample.before = m_captureReadiness;
+        sample.after = BuildDemoSamplingReadiness(renderer);
+        sample.capture = std::move(*capture);
+        if (!sample.capture.success) {
+            sample.rejectionReason = sample.capture.error.empty() ? "NVPerf capture failed" : sample.capture.error;
+        } else if (DemoSamplingSignature(sample.after) != m_captureSignature) {
+            sample.rejectionReason = "workload-defining state changed during capture";
+        } else {
+            sample.measurements = br::telemetry::sampling::SelectMeasurements(
+                *m_configuration, sample.capture, sample.rejectionReason);
+        }
+        sample.accepted = sample.rejectionReason.empty();
+        CommitSample(std::move(sample), renderer, hwnd);
+    }
+
+    void ConsumeRenderGraphSample(Renderer& renderer, HWND hwnd)
+    {
+        const auto* graph = renderer.GetRenderGraph();
+        const auto* service = graph ? graph->GetStatisticsService() : nullptr;
+        if (!service) {
+            Finish("failed", "render graph statistics service is unavailable", hwnd, 6);
+            return;
+        }
+        const auto& names = service->GetPassNames();
+        const auto& stats = service->GetPassStats();
+        br::telemetry::sampling::SampleRecord sample;
+        sample.ordinal = m_nextOrdinal;
+        sample.before = BuildDemoSamplingReadiness(renderer);
+        sample.after = sample.before;
+        sample.capture.success = true;
+        std::uint64_t sampleSerial = 0;
+        for (const auto& pass : m_configuration->passes) {
+            const auto found = std::ranges::find(names, pass.name);
+            if (found == names.end()) {
+                if (pass.required) sample.rejectionReason = "render graph pass not found: " + pass.name;
+                continue;
+            }
+            const auto index = static_cast<std::size_t>(std::distance(names.begin(), found));
+            if (index >= stats.size() || stats[index].gpuSampleSerial == 0) return;
+            if (sampleSerial == 0) sampleSerial = stats[index].gpuSampleSerial;
+            if (stats[index].gpuSampleSerial != sampleSerial) return;
+            for (const auto& metricId : pass.metricIds) {
+                sample.measurements.push_back({ pass.id, metricId, stats[index].gpuTimeMs });
+            }
+        }
+        if (sampleSerial <= m_lastRenderGraphSampleSerial) {
+            if (std::chrono::steady_clock::now() - m_startedAt >
+                std::chrono::milliseconds(m_configuration->readinessTimeoutMs)) {
+                Finish("failed", "timed out waiting for fresh render-graph GPU timestamps", hwnd, 7);
+            }
+            return;
+        }
+        m_lastRenderGraphSampleSerial = sampleSerial;
+        sample.startFrame = sampleSerial;
+        sample.endFrame = sampleSerial;
+        sample.accepted = sample.rejectionReason.empty();
+        ++m_nextOrdinal;
+        CommitSample(std::move(sample), renderer, hwnd);
+    }
+
+    void CommitSample(br::telemetry::sampling::SampleRecord sample, Renderer& renderer, HWND hwnd)
+    {
+        m_database->RecordSample(m_experimentId, sample);
+        m_samples.push_back(std::move(sample));
+        m_summaries = br::telemetry::sampling::ComputeSummaries(*m_configuration, m_samples);
+        m_database->ReplaceSummaries(m_experimentId, m_summaries);
+
+        const auto accepted = static_cast<std::uint32_t>(std::ranges::count_if(
+            m_samples, [](const auto& item) { return item.accepted; }));
+        const auto& recorded = m_samples.back();
+        spdlog::info(
+            "BasicRenderer sampling: sample {} {} (accepted={}, attempted={}){}",
+            recorded.ordinal,
+            recorded.accepted ? "accepted" : "rejected",
+            accepted,
+            m_samples.size(),
+            recorded.rejectionReason.empty() ? std::string{} : ": " + recorded.rejectionReason);
+
+        if (accepted >= m_configuration->minimumSamples &&
+            br::telemetry::sampling::AllRequiredTargetsConverged(*m_configuration, m_summaries)) {
+            Finish("complete", "all required targets converged", hwnd, 0);
+        } else if (accepted >= m_configuration->maximumSamples) {
+            Finish("complete", "maximum accepted sample count reached", hwnd, 0);
+        } else if (m_samples.size() >= static_cast<std::size_t>(m_configuration->maximumSamples) * 3u) {
+            Finish("failed", "maximum capture attempts reached", hwnd, 5);
+        } else if (m_usesNvPerf) {
+            ArmNextCapture(renderer, hwnd);
+        }
+    }
+
+    void Finish(const char* status, std::string reason, HWND hwnd, int exitCode)
+    {
+        m_finished = true;
+        m_finalized = true;
+        m_stoppingReason = reason;
+        m_exitCode = exitCode;
+        const auto readinessDuration = m_readinessDurationMs;
+        if (m_database) {
+            m_database->ReplaceSummaries(m_experimentId, m_summaries);
+            m_database->FinishExperiment(m_experimentId, status, reason);
+            br::telemetry::sampling::WriteLastRunSummary(
+                *m_configuration,
+                m_experimentId,
+                readinessDuration,
+                m_samples.empty() ? 0 : m_samples.back().capture.scheduledPasses,
+                m_samples,
+                m_summaries,
+                reason);
+        }
+        spdlog::info("BasicRenderer sampling: {} ({}) report='{}'", status, reason, m_configuration->summaryPath.string());
+        if (!m_persistent) PostMessage(hwnd, WM_CLOSE, 0, 0);
+    }
+
+    Phase m_phase{ Phase::Warmup };
+    std::optional<br::telemetry::sampling::Configuration> m_configuration;
+    std::unique_ptr<br::telemetry::sampling::Database> m_database;
+    std::vector<br::telemetry::sampling::SampleRecord> m_samples;
+    std::vector<br::telemetry::sampling::Summary> m_summaries;
+    br::telemetry::sampling::ReadinessSnapshot m_captureReadiness;
+    std::string m_captureSignature;
+    std::chrono::steady_clock::time_point m_startedAt{};
+    std::filesystem::path m_configurationPath;
+    br::telemetry::sampling::ControlServer m_controlServer;
+    std::string m_readinessSignature;
+    std::string m_stoppingReason;
+    std::uint32_t m_phaseFrames{ 0 };
+    std::uint32_t m_readyStableFrames{ 0 };
+    std::uint64_t m_readinessDurationMs{ 0 };
+    std::uint32_t m_nextOrdinal{ 1 };
+    std::int64_t m_experimentId{ 0 };
+    int m_exitCode{ 0 };
+    bool m_finished{ false };
+    bool m_finalized{ false };
+    bool m_persistent{ false };
+    bool m_usesNvPerf{ false };
+    bool m_usesRenderGraphGpuTime{ false };
+    std::uint64_t m_lastRenderGraphSampleSerial{ 0 };
+};
+
+} // namespace
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
     //tracy::SetThreadName("Main");
 
@@ -470,6 +825,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     file_logger->flush_on(spdlog::level::info);
 
     const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
+    DemoStatisticalSamplingRun statisticalSampling;
+    if (const auto samplingConfig = FindCommandLinePath(commandLine, "--sampling-config")) {
+        std::string samplingError;
+        const auto samplingPipe = FindCommandLineValue(commandLine, "--sampling-control-pipe");
+        if (!statisticalSampling.Initialize(*samplingConfig, samplingPipe, samplingError)) {
+            spdlog::critical("BasicRenderer sampling initialization failed: {}", samplingError);
+            return 2;
+        }
+        // Streamline may open its own NVIDIA device-level sampling session.
+        // NVPerf replay capture requires exclusive ownership of that context.
+        _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
+    }
     const bool pipelineReplacementSmokeTest =
         commandLine.find("--pipeline-replacement-smoke-test") != std::string_view::npos;
     const bool clodGraphRebuildSmokeTest =
@@ -874,12 +1241,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 spdlog::info("FPS: {}", 1 / elapsedSeconds.count());
             }
             renderer.Render();
+            statisticalSampling.AfterFrame(renderer, hwnd);
         }
     }
 
     const bool smokeValidationFailed = graphRebuildSmokeTest && D3D12SmokeValidationFailed();
     renderer.Cleanup();
 
+    if (statisticalSampling.ExitCode() != 0) return statisticalSampling.ExitCode();
     return (smokeValidationFailed || clodStressFailed) ? 1 : 0;
 }
 
@@ -925,3 +1294,91 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
     return 0;
 }
+std::uint64_t DemoStatisticalSamplingRun::ElapsedMs() const
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - m_startedAt).count());
+    }
+
+void DemoStatisticalSamplingRun::StartExperiment(std::string label, Renderer* renderer)
+    {
+        if (renderer) renderer->SetDeterministicSamplingMode(false);
+        br::telemetry::nvperf::SetStreamingSuppressed(false);
+        m_phase = Phase::Warmup;
+        m_phaseFrames = 0;
+        m_readyStableFrames = 0;
+        m_readinessSignature.clear();
+        m_lastRenderGraphSampleSerial = 0;
+        m_nextOrdinal = 1;
+        m_samples.clear();
+        m_summaries.clear();
+        m_stoppingReason.clear();
+        m_readinessDurationMs = 0;
+        m_finished = false;
+        m_finalized = false;
+        m_exitCode = 0;
+        m_startedAt = std::chrono::steady_clock::now();
+        m_experimentId = m_database->BeginExperiment(*m_configuration);
+        m_database->RecordDiagnostic(m_experimentId, "configuration_path", m_configurationPath.string());
+        m_database->RecordDiagnostic(m_experimentId, "label", label);
+        m_database->RecordDiagnostic(m_experimentId, "process_id", std::to_string(GetCurrentProcessId()));
+        spdlog::info(
+            "BasicRenderer sampling: experiment={} label='{}' waiting for {} stable frames; settling={} samples={}..{} pid={}",
+            m_experimentId, label, m_configuration->readyFrames, m_configuration->settlingFrames,
+            m_configuration->minimumSamples, m_configuration->maximumSamples, GetCurrentProcessId());
+    }
+
+const char* DemoStatisticalSamplingRun::PhaseName() const
+    {
+        switch (m_phase) {
+        case Phase::Warmup: return "waiting_for_stability";
+        case Phase::Settling: return "settling";
+        case Phase::Capturing: return "capturing_nvperf";
+        case Phase::RenderGraphSampling: return "sampling_render_graph";
+        }
+        return "unknown";
+    }
+
+void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hwnd)
+    {
+        for (const auto& request : m_controlServer.DrainRequests()) {
+            nlohmann::json response;
+            try {
+                response["request_id"] = request->document.at("request_id");
+                const auto command = request->document.value("command", "");
+                if (command == "session.status") {
+                    response["pid"] = GetCurrentProcessId();
+                    response["profile_active"] = !m_finished;
+                    response["experiment_id"] = m_experimentId;
+                } else if (command == "profile.run") {
+                    if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
+                    StartExperiment(request->document.value("label", "experiment"), &renderer);
+                    response["experiment_id"] = m_experimentId;
+                } else if (command == "profile.status") {
+                    response["pid"] = GetCurrentProcessId();
+                    response["experiment_id"] = m_experimentId;
+                    response["active"] = !m_finished;
+                    response["finalized"] = m_finalized;
+                    response["phase"] = PhaseName();
+                    response["readiness_stable_frames"] = m_readyStableFrames;
+                    response["readiness_required_frames"] = m_configuration->readyFrames;
+                    response["readiness_duration_ms"] = m_readinessDurationMs;
+                    response["attempted_samples"] = m_samples.size();
+                    response["accepted_samples"] = std::ranges::count_if(m_samples, [](const auto& sample) { return sample.accepted; });
+                    response["stopping_reason"] = m_stoppingReason;
+                } else if (command == "profile.cancel") {
+                    if (m_finished) throw std::runtime_error("no profiling experiment is active");
+                    Finish("cancelled", "cancelled by control request", hwnd, 0);
+                } else if (command == "shutdown") {
+                    PostMessage(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    throw std::runtime_error("unknown command '" + command + "'");
+                }
+                response["ok"] = true;
+            } catch (const std::exception& exception) {
+                response["ok"] = false;
+                response["error"] = exception.what();
+            }
+            request->response.set_value(std::move(response));
+        }
+    }
