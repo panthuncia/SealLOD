@@ -591,6 +591,8 @@ public:
         }
     }
 
+    [[nodiscard]] bool UsesNvPerf() const noexcept { return m_usesNvPerf; }
+
     bool Enabled() const noexcept { return m_configuration.has_value(); }
     int ExitCode() const noexcept { return m_exitCode; }
 
@@ -837,6 +839,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Streamline may open its own NVIDIA device-level sampling session.
         // NVPerf replay capture requires exclusive ownership of that context.
         _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
+        // Device creation happens after sampling configuration is loaded. Mirror
+        // environment-triggered NVPerf startup so diagnostics builds do not enable
+        // the D3D12 debug layer, which makes Queue_BeginSession invalid.
+        if (statisticalSampling.UsesNvPerf()) {
+            _putenv_s("BASICRENDERER_NVPERF_CAPTURE", "1");
+        }
     }
     const bool pipelineReplacementSmokeTest =
         commandLine.find("--pipeline-replacement-smoke-test") != std::string_view::npos;

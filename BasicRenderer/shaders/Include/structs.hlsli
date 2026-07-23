@@ -32,20 +32,26 @@ struct VisBufferPSInput
     float2 texcoord : TEXCOORD9;
 #endif
     nointerpolation uint visibleClusterIndex : TEXCOORD10;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD11;
+#endif
     nointerpolation uint shadowClipmapIndex : TEXCOORD12;
 #else
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD1;
     nointerpolation uint materialDataIndex : TEXCOORD2;
     nointerpolation uint visibleClusterIndex : TEXCOORD3;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD4;
+#endif
 #if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     nointerpolation uint shadowClipmapIndex : TEXCOORD5;
 #endif
 #else
     nointerpolation uint visibleClusterIndex : TEXCOORD1;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD2;
+#endif
 #if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     nointerpolation uint shadowClipmapIndex : TEXCOORD3;
 #endif

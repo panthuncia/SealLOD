@@ -822,15 +822,18 @@ const PipelineState& PSOManager::GetClusterLODDeepVisibilityResolvePSO(UINT psoF
     });
 }
 
-const PipelineState* PSOManager::TryGetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
-    RasterPSOKey key(materialRasterFlags, wireframe);
+const PipelineState* PSOManager::TryGetClusterLODRasterPSO(
+    MaterialRasterFlags materialRasterFlags,
+    bool wireframe,
+    bool singleView) {
+    RasterPSOKey key(materialRasterFlags, wireframe, singleView);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODRasterPSOCache,
         &PSOManager::m_pendingClusterLODRasterPSOs,
         key,
         "PSOManager::CompileClusterLODRasterPSO",
-        [this, materialRasterFlags, wireframe]() {
-            return CreateClusterLODRasterPSO(materialRasterFlags, wireframe);
+        [this, materialRasterFlags, wireframe, singleView]() {
+            return CreateClusterLODRasterPSO(materialRasterFlags, wireframe, singleView);
         });
 }
 
@@ -1277,8 +1280,11 @@ PipelineState PSOManager::CreateVisibilityBufferMeshPSO(
 }
 
 PipelineState PSOManager::CreateClusterLODRasterPSO(
-    MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
+    if (singleView) {
+        defines.push_back({ L"CLOD_RASTER_SINGLE_VIEW", L"1" });
+    }
 
     Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;

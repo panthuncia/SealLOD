@@ -58,10 +58,14 @@ namespace std {
 struct RasterPSOKey {
 	MaterialRasterFlags materialRasterFlags;
 	bool wireframe;
+	bool singleView;
 
-	RasterPSOKey(MaterialRasterFlags materialRasterFlags, bool wireframe) : materialRasterFlags(materialRasterFlags), wireframe(wireframe) {}
+	RasterPSOKey(MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView = false)
+        : materialRasterFlags(materialRasterFlags), wireframe(wireframe), singleView(singleView) {}
     bool operator==(const RasterPSOKey& other) const {
-        return materialRasterFlags == other.materialRasterFlags && wireframe == other.wireframe;
+        return materialRasterFlags == other.materialRasterFlags &&
+            wireframe == other.wireframe &&
+            singleView == other.singleView;
 	}
 };
 
@@ -74,6 +78,7 @@ namespace std {
 
 			boost::hash_combine(seed, key.materialRasterFlags);
 			boost::hash_combine(seed, key.wireframe);
+			boost::hash_combine(seed, key.singleView);
 
             return seed;
         }
@@ -205,7 +210,10 @@ public:
     const PipelineState& GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     const PipelineState& GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
 
-    const PipelineState* TryGetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODRasterPSO(
+        MaterialRasterFlags materialRasterFlags,
+        bool wireframe = false,
+        bool singleView = false);
     const PipelineState* TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState* TryGetClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
@@ -381,7 +389,10 @@ private:
 	PipelineState CreateVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 	PipelineState CreateVisibilityBufferMeshPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
-    PipelineState CreateClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    PipelineState CreateClusterLODRasterPSO(
+        MaterialRasterFlags materialRasterFlags,
+        bool wireframe = false,
+        bool singleView = false);
     PipelineState CreateClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     PipelineState CreateClusterLODVirtualShadowReyesRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     PipelineState CreateClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);

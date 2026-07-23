@@ -1160,6 +1160,40 @@ void LogHostMetricSmokeTest(rhi::Backend backend)
             firstMetric ? firstMetric : "<none>");
     }
 
+    const std::string metricDumpSetting = ReadEnvString("BASICRENDERER_NVPERF_DUMP_METRICS");
+    if (!metricDumpSetting.empty()) {
+        const std::filesystem::path metricDumpPath =
+            IsTruthyEnv("BASICRENDERER_NVPERF_DUMP_METRICS")
+            ? std::filesystem::path("logs") / "nvperf_available_metrics.csv"
+            : std::filesystem::path(metricDumpSetting);
+        std::filesystem::create_directories(metricDumpPath.parent_path());
+        std::ofstream output(metricDumpPath, std::ios::trunc);
+        output << "type,name\n";
+        const std::array<std::pair<uint8_t, const char*>, 3> metricTypes{ {
+            { NVPW_METRIC_TYPE_COUNTER, "counter" },
+            { NVPW_METRIC_TYPE_RATIO, "ratio" },
+            { NVPW_METRIC_TYPE_THROUGHPUT, "throughput" },
+        } };
+        for (const auto& [metricType, metricTypeName] : metricTypes) {
+            NVPW_MetricsEvaluator_GetMetricNames_Params names{
+                NVPW_MetricsEvaluator_GetMetricNames_Params_STRUCT_SIZE
+            };
+            names.pMetricsEvaluator = evaluator;
+            names.metricType = metricType;
+            if (LogIfFailed(
+                    NVPW_MetricsEvaluator_GetMetricNames(&names),
+                    "NVPW_MetricsEvaluator_GetMetricNames(metric dump)")) {
+                continue;
+            }
+            for (size_t metricIndex = 0; metricIndex < names.numMetrics; ++metricIndex) {
+                const char* metricName =
+                    names.pMetricNames + names.pMetricNameBeginIndices[metricIndex];
+                output << metricTypeName << ',' << CsvEscape(metricName ? metricName : "") << '\n';
+            }
+        }
+        spdlog::info("NVPerf: wrote available metric catalog to '{}'", metricDumpPath.string());
+    }
+
     NVPW_MetricsEvaluator_Destroy_Params destroyParams{ NVPW_MetricsEvaluator_Destroy_Params_STRUCT_SIZE };
     destroyParams.pMetricsEvaluator = evaluator;
     (void)NVPW_MetricsEvaluator_Destroy(&destroyParams);
@@ -1575,7 +1609,30 @@ void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue grap
 #if BASICRENDERER_ENABLE_NVPERF
     auto& profiler = Profiler();
     std::lock_guard<std::mutex> lock(profiler.mutex);
-    (void)PrepareProfilerIfRequested(backend, device, graphicsQueue, frameNumber);
+    if (!PrepareProfilerIfRequested(backend, device, graphicsQueue, frameNumber) ||
+        backend != rhi::Backend::D3D12 ||
+        profiler.failed ||
+        profiler.finished) {
+        return;
+    }
+
+    // NVPerf requires the queue session and replay pass to begin outside command-list
+    // recording.  Deferring this until BeginPassRange means the render graph already
+    // has an open command list, which newer drivers reject with INVALID_CONTEXT_STATE.
+    ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(graphicsQueue);
+    if (!nativeQueue) {
+        profiler.failed = true;
+        profiler.error = "failed to resolve the native D3D12 graphics queue";
+        return;
+    }
+
+    auto& queueCapture = profiler.queues[nativeQueue];
+    if (!queueCapture.nativeQueue) {
+        queueCapture.queue = graphicsQueue;
+        queueCapture.nativeQueue = nativeQueue;
+        queueCapture.queueName = profiler.controllerQueueName;
+    }
+    (void)EnsureQueuePassActive(profiler, queueCapture);
 #else
     (void)backend;
     (void)device;

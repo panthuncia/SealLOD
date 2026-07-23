@@ -472,8 +472,13 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     misc[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_viewRasterInfoBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX] = m_sortedToUnsortedMappingBuffer->GetSRVInfo(0).slot.index;
     misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_COUNTER_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     misc[CLOD_RASTER_SOURCE_GROUP_MISMATCH_DETAILS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
+    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer && m_visibilityBuffers.size() == 1u) {
+        misc[CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX] =
+            m_visibilityBuffers.front()->GetUAVShaderVisibleInfo(0).slot.index;
+    }
     if (m_telemetryBuffer && IsCLodWorkGraphTelemetryEnabled()) {
         misc[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX] = m_telemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     }
@@ -531,7 +536,10 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
     for (uint32_t i = 0; i < numBuckets; ++i) {
         auto flags = context.materialManager->GetRasterFlagsForBucket(i);
         const PipelineState* pso = (m_outputKind == CLodRasterOutputKind::VisibilityBuffer)
-            ? psoManager.TryGetClusterLODRasterPSO(flags, m_wireframe)
+            ? psoManager.TryGetClusterLODRasterPSO(
+                flags,
+                m_wireframe,
+                m_visibilityBuffers.size() == 1u)
             : (m_outputKind == CLodRasterOutputKind::VirtualShadow)
                 ? psoManager.TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITOccupancy)

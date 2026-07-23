@@ -46,6 +46,11 @@ struct MeshletSetup
     PerMeshBuffer meshBuffer;
     PerMeshInstanceBuffer meshInstanceBuffer;
     PerObjectBuffer objectBuffer;
+    // The opaque rigid CLod path only needs these members. Keeping that path out
+    // of the full PerObjectBuffer avoids carrying three matrices through every
+    // mesh-shader lane.
+    row_major float4x4 clodRasterModel;
+    uint clodRasterObjectFlags;
     uint vertCount;
     uint triCount;
     uint vertOffset; // Non-CLod: meshlet.VertOffset; CLod: unused (0)

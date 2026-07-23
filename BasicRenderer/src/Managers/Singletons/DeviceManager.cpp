@@ -133,7 +133,10 @@ void DeviceManager::Initialize() {
     }
 
     bool enableDebug = IsDiagnosticsBuild();
-    if (enableDebug && IsNvPerfCaptureRequestedByEnvironment() && !IsNvPerfD3D12DebugLayerAllowedByEnvironment()) {
+    const bool nvPerfCaptureRequested =
+        IsNvPerfCaptureRequestedByEnvironment() ||
+        telemetry::nvperf::CaptureConfigured();
+    if (enableDebug && nvPerfCaptureRequested && !IsNvPerfD3D12DebugLayerAllowedByEnvironment()) {
         spdlog::info("DeviceManager::Initialize disabling D3D12 debug layer for NVPerf capture");
         enableDebug = false;
     }

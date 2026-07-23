@@ -134,6 +134,28 @@ PerObjectBuffer LoadInstanceTransformForDrawRecordWithAssemblyTransform(Instance
     return ComposeAssemblyTransformForDrawRecord(record, assemblyTransformIndex);
 }
 
+void LoadClodRasterTransformForDrawRecord(
+    InstanceDrawRecordBuffer record,
+    uint assemblyTransformIndex,
+    out row_major float4x4 model,
+    out uint objectFlags)
+{
+    StructuredBuffer<PerObjectBuffer> instanceTransforms =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+    const PerObjectBuffer objectData = instanceTransforms[record.instanceTransformIndex];
+    model = objectData.model;
+    objectFlags = objectData.objectFlags;
+
+    if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+        const row_major float4x4 assemblyLocalToObject =
+            CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]);
+        model = mul(assemblyLocalToObject, model);
+    }
+}
+
 PerObjectBuffer LoadInstanceTransformForDrawWithAssemblyTransform(uint drawRecordIndex, uint assemblyTransformIndex)
 {
     return LoadInstanceTransformForDrawRecordWithAssemblyTransform(LoadInstanceDrawRecord(drawRecordIndex), assemblyTransformIndex);

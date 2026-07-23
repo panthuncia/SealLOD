@@ -20,7 +20,14 @@
 
 static const uint CLOD_TELEMETRY_DISABLED_DESCRIPTOR = 0xFFFFFFFFu;
 #ifndef CLOD_ENABLE_SOURCE_GROUP_VALIDATION
-#define CLOD_ENABLE_SOURCE_GROUP_VALIDATION 1
+#define CLOD_ENABLE_SOURCE_GROUP_VALIDATION 0
+#endif
+#if !defined(PSO_SKINNED) && !defined(PSO_ALPHA_TEST) && \
+    !defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) && \
+    !(defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+#define CLOD_RASTER_MINIMAL_OBJECT_SETUP 1
+#else
+#define CLOD_RASTER_MINIMAL_OBJECT_SETUP 0
 #endif
 static const uint WG_COUNTER_RASTER_MESH_SHADER_GROUPS = 117u;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_IN_RANGE = 118u;
@@ -38,8 +45,13 @@ static const uint CLOD_RASTER_INIT_FAILURE_ZERO_PAGE_SLAB = 1u;
 static const uint CLOD_RASTER_INIT_FAILURE_MESHLET_OOB = 2u;
 static const uint CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS = 3u;
 
+#ifndef CLOD_RASTER_MESH_TELEMETRY
+#define CLOD_RASTER_MESH_TELEMETRY 0
+#endif
+
 void CLodRasterTelemetryAdd(uint counterIndex, uint value)
 {
+#if CLOD_RASTER_MESH_TELEMETRY
     if (CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX == CLOD_TELEMETRY_DISABLED_DESCRIPTOR || value == 0u)
     {
         return;
@@ -47,6 +59,7 @@ void CLodRasterTelemetryAdd(uint counterIndex, uint value)
 
     RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
     InterlockedAdd(telemetryCounters[counterIndex], value);
+#endif
 }
 
 #if CLOD_ENABLE_SOURCE_GROUP_VALIDATION
@@ -274,6 +287,76 @@ float3 DecodeCompressedPosition(
     return CLodLoadPagePosition(slab, quantExp, positionBitstreamBase, positionBitOffset, meshletLocalVertex);
 }
 
+CLodPageHeader LoadRasterPageHeader(uint slabDescriptorIndex, uint pageByteOffset)
+{
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
+    const uint4 d0 = slab.Load4(pageByteOffset);
+
+    CLodPageHeader header = (CLodPageHeader)0;
+    header.formatAndKind = d0.x;
+    header.meshletCount = d0.y;
+    header.descriptorOffset = d0.z;
+    header.compressedPositionQuantExp = slab.Load(pageByteOffset + 16u);
+    header.positionBitstreamOffset = slab.Load(pageByteOffset + 32u);
+    header.triangleStreamOffset = slab.Load(pageByteOffset + 56u);
+
+#if defined(PSO_SKINNED)
+    header.boneIndexStreamOffset = d0.w;
+    header.jointArrayOffset = slab.Load(pageByteOffset + 44u);
+    header.weightArrayOffset = slab.Load(pageByteOffset + 48u);
+#endif
+#if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    header.uvSetCount = slab.Load(pageByteOffset + 24u);
+    header.uvDescriptorOffset = slab.Load(pageByteOffset + 28u);
+    header.uvBitstreamDirectoryOffset = slab.Load(pageByteOffset + 52u);
+#endif
+#if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    header.attributeMask = slab.Load(pageByteOffset + 20u);
+    header.normalArrayOffset = slab.Load(pageByteOffset + 36u);
+    header.colorArrayOffset = slab.Load(pageByteOffset + 40u);
+#elif defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    header.normalArrayOffset = slab.Load(pageByteOffset + 36u);
+#endif
+
+    return header;
+}
+
+CLodMeshletDescriptor LoadRasterMeshletDescriptor(
+    uint slabDescriptorIndex,
+    uint pageByteOffset,
+    uint descriptorOffset,
+    uint meshletIndex)
+{
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
+    const uint address =
+        pageByteOffset + descriptorOffset + meshletIndex * CLOD_MESHLET_DESCRIPTOR_STRIDE;
+
+    CLodMeshletDescriptor descriptor = (CLodMeshletDescriptor)0;
+#if defined(PSO_SKINNED)
+    const uint4 streamAndTopology = slab.Load4(address + 16u);
+    descriptor.positionBitOffset = streamAndTopology.x;
+    descriptor.triangleCountAndRefinedGroup = streamAndTopology.y;
+    descriptor.boneListOffset = streamAndTopology.z;
+    descriptor.boneCount = streamAndTopology.w;
+#else
+    const uint2 streamAndTopology = slab.Load2(address + 16u);
+    descriptor.positionBitOffset = streamAndTopology.x;
+    descriptor.triangleCountAndRefinedGroup = streamAndTopology.y;
+#endif
+    descriptor.triangleByteOffset = slab.Load(address + 36u);
+    descriptor.bitsAndVertexCount = slab.Load(address + 52u);
+
+#if defined(PSO_SKINNED) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT) || \
+    (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
+    descriptor.vertexAttributeOffset = slab.Load(address + 32u);
+#endif
+#if CLOD_ENABLE_SOURCE_GROUP_VALIDATION
+    descriptor.sourceGroupLocalIndex = slab.Load(address + 56u);
+#endif
+
+    return descriptor;
+}
+
 float2 UnpackSnorm16x2(uint packed)
 {
     int signedPacked = asint(packed);
@@ -363,17 +446,6 @@ void ApplyClodSkinningToVertex(uint meshletLocalVertex, MeshletSetup setup, inou
     skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
     ApplyAssemblySkinningToVertex(
         setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, vertex);
-#else
-    if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) == 0u)
-    {
-        return;
-    }
-
-    SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
-    skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
-    skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
-    ApplyAssemblySkinningToVertex(
-        setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, vertex);
 #endif
 }
 
@@ -435,7 +507,9 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     result.color = vertex.color;
     result.materialDataIndex = materialDataIndex;
     result.visibleClusterIndex = clusterIndex;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = viewID;
+#endif
     result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
 #if defined(PSO_ALPHA_TEST)
@@ -446,7 +520,9 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     result.materialDataIndex = materialDataIndex;
 #endif
     result.visibleClusterIndex = clusterIndex;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = viewID;
+#endif
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
@@ -575,7 +651,11 @@ VisBufferPSInput GetVisBufferVertexAttributesForView(
 
 void WriteTriangles(uint uGroupThreadID, MeshletSetup setup, out indices uint3 outputTriangles[MS_MESHLET_SIZE])
 {
+#if CLOD_RASTER_MINIMAL_OBJECT_SETUP
+    bool reverseWinding = (setup.clodRasterObjectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0;
+#else
     bool reverseWinding = (setup.objectBuffer.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0;
+#endif
     for (uint t = uGroupThreadID; t < setup.triCount; t += MS_THREAD_GROUP_SIZE)
     {
         uint3 tri = DecodeTriangle(t, setup);
@@ -687,18 +767,21 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         setup.positionBitOffset,
         setup.compressedPositionQuantExp,
         setup.pagePoolSlabDescriptorIndex);
-    if ((setup.meshBuffer.vertexFlags & VERTEX_SKINNED) != 0u)
-    {
-        SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
-        skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
-        skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
-        position = ApplyAssemblySkinningToPosition(
-            setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, position);
-    }
+#if defined(PSO_SKINNED)
+    SkinningInfluences skinning = DecodePackedJoints(meshletLocalVertex, setup);
+    skinning = DecodePackedWeights(meshletLocalVertex, setup, skinning);
+    skinning = ResolveAssemblySkinningInfluences(skinning, setup.clodMetadata, setup.assemblyTransformIndex);
+    position = ApplyAssemblySkinningToPosition(
+        setup.meshInstanceBuffer.skinningInstanceSlot, skinning, setup.assemblyTransformIndex, position);
+#endif
 
     StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     Camera viewCamera = cameras[viewID];
+#if CLOD_RASTER_MINIMAL_OBJECT_SETUP
+    float4 worldPosition = mul(float4(position, 1.0f), setup.clodRasterModel);
+#else
     float4 worldPosition = mul(float4(position, 1.0f), setup.objectBuffer.model);
+#endif
     float4 viewPosition = mul(worldPosition, viewCamera.view);
 
     VisBufferPSInput result = (VisBufferPSInput)0;
@@ -711,7 +794,9 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     result.materialDataIndex = setup.meshBuffer.materialDataIndex;
 #endif
     result.visibleClusterIndex = clusterIndex;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = viewID;
+#endif
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
@@ -780,7 +865,9 @@ void EmitCachedMeshletVisBufferVerticesForViewCLod(
         vertex.materialDataIndex = setup.meshBuffer.materialDataIndex;
 #endif
         vertex.visibleClusterIndex = clusterIndex;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
         vertex.viewID = viewID;
+#endif
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
         vertex.shadowClipmapIndex = shadowClipmapIndex;
 #endif
@@ -980,7 +1067,9 @@ VisBufferPSInput ReyesShadowVisVertexToPSInput(ReyesShadowVisVertex vertex)
     output.materialDataIndex = gs_reyesShadowSetup.meshBuffer.materialDataIndex;
 #endif
     output.visibleClusterIndex = gs_reyesShadowDiceEntry.visibleClusterIndex;
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
     output.viewID = gs_reyesShadowSetup.viewID;
+#endif
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     output.shadowClipmapIndex = gs_reyesShadowSetup.virtualShadowPayload;
 #endif
@@ -1119,24 +1208,39 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
     setup.meshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
     const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(drawRecordIndex);
+#if !CLOD_RASTER_MINIMAL_OBJECT_SETUP
     setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
-    setup.meshInstanceBuffer.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(
-        drawRecordIndex, setup.meshInstanceBuffer.skinningInstanceSlot);
+#endif
+#if defined(PSO_SKINNED)
+    setup.meshInstanceBuffer.skinningInstanceSlot = ResolveAssemblyProceduralWindSkinningSlot(
+        drawRecordIndex,
+        setup.meshInstanceBuffer.skinningInstanceSlot,
+        assemblyTransformIndex);
+#endif
     setup.viewID = CLodVisibleClusterViewID(packedCluster);
     setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
     setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);
 
+#if !CLOD_RASTER_MINIMAL_OBJECT_SETUP
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-
     setup.meshBuffer = perMeshBuffer[setup.meshInstanceBuffer.perMeshBufferIndex];
     setup.objectBuffer = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, assemblyTransformIndex);
+#else
+    LoadClodRasterTransformForDrawRecord(
+        drawRecord,
+        assemblyTransformIndex,
+        setup.clodRasterModel,
+        setup.clodRasterObjectFlags);
+#endif
     setup.assemblyTransformIndex = assemblyTransformIndex;
+#if defined(PSO_SKINNED)
     {
         const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDrawRecord(drawRecord);
         StructuredBuffer<CLodMeshMetadata> clodMeshMetadataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
         setup.clodMetadata = clodMeshMetadataBuffer[offsets.clodMeshMetadataIndex];
     }
+#endif
 
     // Use pre-resolved page address from VisibleCluster
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
@@ -1147,7 +1251,7 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
         return false;
     }
 
-    const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDesc, pageSlabOff);
+    const CLodPageHeader pageHeader = LoadRasterPageHeader(pageSlabDesc, pageSlabOff);
     if (pageHeader.formatAndKind != CLOD_TRIANGLE_PAGE_MAGIC ||
         pageHeader.descriptorOffset == 0u)
     {
@@ -1162,7 +1266,7 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
         return false;
     }
 
-    const CLodMeshletDescriptor descriptor = LoadMeshletDescriptor(
+    const CLodMeshletDescriptor descriptor = LoadRasterMeshletDescriptor(
         pageSlabDesc,
         pageSlabOff,
         pageHeader.descriptorOffset,
@@ -1426,7 +1530,15 @@ void ClusterLODBucketMSMain(
 #else
     if (draw)
     {
-        viewRasterInfo = viewRasterInfoBuffer[setup.viewID];
+        if (CLOD_RASTER_SINGLE_VIEW_VISIBILITY_UAV_DESCRIPTOR_INDEX == 0xFFFFFFFFu)
+        {
+            viewRasterInfo = viewRasterInfoBuffer[setup.viewID];
+        }
+        else
+        {
+            viewRasterInfo.viewportScaleX = 1.0f;
+            viewRasterInfo.viewportScaleY = 1.0f;
+        }
         outputVertCount = setup.vertCount;
         outputTriCount = setup.triCount;
     }
