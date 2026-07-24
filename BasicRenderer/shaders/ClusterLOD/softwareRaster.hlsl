@@ -28,6 +28,14 @@
 
 #define SW_CLUSTER_RASTER_THREADS 32
 
+#ifndef CLOD_WG_SW_RASTER_THREADS
+#define CLOD_WG_SW_RASTER_THREADS SW_CLUSTER_RASTER_THREADS
+#endif
+
+#ifndef CLOD_WG_RIGID_SW_RASTER
+#define CLOD_WG_RIGID_SW_RASTER CLOD_WG_RIGID_ONLY
+#endif
+
 // Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
 
 #ifndef CLOD_READ_PACKED_BITS32_DEFINED
@@ -451,11 +459,15 @@ void SWRasterCluster(
         const PerMeshBuffer meshData = perMeshBuffer[meshInst.perMeshBufferIndex];
         gs_materialDataIndex = meshData.materialDataIndex;
         gs_vertexFlags = meshData.vertexFlags;
+#if CLOD_WG_RIGID_SW_RASTER
+        gs_skinningInstanceSlot = 0xFFFFFFFFu;
+#else
         gs_skinningInstanceSlot = (meshData.vertexFlags & VERTEX_SKINNED) != 0u
             ? (hasResolvedSkinningInstanceSlot
                 ? resolvedSkinningInstanceSlot
                 : ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot))
             : 0xFFFFFFFFu;
+#endif
 #if defined(PSO_ALPHA_TEST)
         gs_alphaTestEnabled = 1u;
 #elif defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
@@ -473,8 +485,12 @@ void SWRasterCluster(
         gs_singleRemappedJoint = 0u;
         gs_groupFlags = 0u;
         const bool needsAssemblyRemap =
+#if CLOD_WG_RIGID_SW_RASTER
+            false;
+#else
             (meshData.vertexFlags & VERTEX_SKINNED) != 0u &&
             assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+#endif
         const bool needsAssemblyDebug =
             gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE ||
             gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
@@ -551,6 +567,7 @@ void SWRasterCluster(
         localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
             gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
 #else
+#if !CLOD_WG_RIGID_SW_RASTER
         if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
         {
             SkinningInfluences skinning = SWDecodePackedSkinning(v, pageSlabByteOffset, pageSlabDescriptorIndex);
@@ -558,6 +575,7 @@ void SWRasterCluster(
             localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
                 gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
         }
+#endif
 #endif
 
         float4 localPos4 = float4(localPos, 1.0f);
@@ -863,7 +881,7 @@ void SWRasterCluster(
 [NodeID("SWRaster")]
 [NodeLaunch("broadcasting")]
 [NodeMaxDispatchGrid(SW_BATCH_MAX_CLUSTERS * SW_RASTER_GROUPS_PER_CLUSTER, 1, 1)]
-[NumThreads(SW_CLUSTER_RASTER_THREADS, 1, 1)]
+[NumThreads(CLOD_WG_SW_RASTER_THREADS, 1, 1)]
 void WG_SWRaster(
     DispatchNodeInputRecord<SWRasterBatchRecord> inputRecord,
     uint GI : SV_GroupIndex,

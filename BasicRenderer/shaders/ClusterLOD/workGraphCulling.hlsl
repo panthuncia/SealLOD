@@ -59,6 +59,10 @@
 #define CLOD_WG_RIGID_ONLY 0
 #endif
 
+#ifndef CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED
+#define CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED 0
+#endif
+
 // Set to 1 to enable occlusion culling for VSM / shadow cameras (ortho).
 // Defaults to 0 (off): ortho cameras skip occlusion culling entirely.
 #ifndef CLOD_VSM_OCCLUSION_CULLING
@@ -593,7 +597,9 @@ bool CLodWorkGraphUseComputeSWRaster()
 
 bool CLodWorkGraphUseDedicatedComputePageJobBuffer()
 {
-#if CLOD_WG_ENABLE_SW_CLASSIFICATION && CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER
+#if CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED
+    return true;
+#elif CLOD_WG_ENABLE_SW_CLASSIFICATION && CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER
     StructuredBuffer<uint4> pageJobDescriptorBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID)];
     const uint3 descriptorPair = pageJobDescriptorBuffer[0].xyz;
@@ -3801,7 +3807,7 @@ groupshared uint gs_swBatchIndices[SW_BATCH_ACCUM_CAPACITY];
 
 // Page-job batch accumulator (same capacity — worst case identical).
 #define PAGEJOB_BATCH_ACCUM_CAPACITY SW_BATCH_ACCUM_CAPACITY
-#if CLOD_WG_ENABLE_SW_NODE_OUTPUT
+#if CLOD_WG_ENABLE_SW_NODE_OUTPUT && !CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED
 groupshared uint gs_pageJobBatchIndices[PAGEJOB_BATCH_ACCUM_CAPACITY];
 #endif
 
@@ -4926,7 +4932,7 @@ void ClusterCullBody(
                             shadowClipmapIndex);
                         visibleClusterTransformIndices[pjIndex] = b.assemblyTransformIndex;
 
-#if CLOD_WG_ENABLE_SW_NODE_OUTPUT
+#if CLOD_WG_ENABLE_SW_NODE_OUTPUT && !CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED
                         gs_pageJobBatchIndices[pageJobPending + pjRank] = pjIndex;
 #endif
                     }
@@ -4972,15 +4978,13 @@ void ClusterCullBody(
     const uint numBatches = CLodWorkGraphUseComputeSWRaster() ? 0u : ((swPending + SW_BATCH_MAX_CLUSTERS - 1) / SW_BATCH_MAX_CLUSTERS); \
     GroupNodeOutputRecords<SWRasterBatchRecord> swBatchOut = \
         swRasterOutput.GetGroupNodeOutputRecords(numBatches); \
-    if (GI == 0) { \
-        for (uint batch = 0; batch < numBatches; batch++) { \
-            const uint batchStart = batch * SW_BATCH_MAX_CLUSTERS; \
-            const uint batchSize = min(SW_BATCH_MAX_CLUSTERS, swPending - batchStart); \
-            swBatchOut[batch].dispatchGrid = uint3(SW_RASTER_GROUPS_PER_CLUSTER * batchSize, 1, 1); \
-            swBatchOut[batch].numClusters = batchSize; \
-            for (uint i = 0; i < batchSize; i++) \
-                swBatchOut[batch].clusterIndices[i] = gs_swBatchIndices[batchStart + i]; \
-        } \
+    for (uint batch = GI; batch < numBatches; batch += CLUSTER_CULL_BUCKETS_THREADS_PER_GROUP) { \
+        const uint batchStart = batch * SW_BATCH_MAX_CLUSTERS; \
+        const uint batchSize = min(SW_BATCH_MAX_CLUSTERS, swPending - batchStart); \
+        swBatchOut[batch].dispatchGrid = uint3(SW_RASTER_GROUPS_PER_CLUSTER * batchSize, 1, 1); \
+        swBatchOut[batch].numClusters = batchSize; \
+        for (uint i = 0; i < batchSize; i++) \
+            swBatchOut[batch].clusterIndices[i] = gs_swBatchIndices[batchStart + i]; \
     } \
     swBatchOut.OutputComplete()
 #else
@@ -4988,7 +4992,7 @@ void ClusterCullBody(
 #define CLOD_CLUSTER_CULL_SW_EPILOGUE()
 #endif
 
-#if CLOD_WG_ENABLE_SW_NODE_OUTPUT
+#if CLOD_WG_ENABLE_SW_NODE_OUTPUT && !CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED
 #define CLOD_CLUSTER_CULL_PAGEJOB_PARAM(MAX_RECORDS) \
     [NodeID("PageJobBuild")] [AllowSparseNodes] [MaxRecordsSharedWith(swRasterOutput)] NodeOutput<PageJobBuildBatchRecord> pageJobOutput,
 
