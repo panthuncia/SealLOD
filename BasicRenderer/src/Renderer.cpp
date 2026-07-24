@@ -1806,7 +1806,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::WorkGraph);
-    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
+    settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::WorkGraph);
     settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
@@ -3120,7 +3120,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             };
 
 			spdlog::info(
-				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} rejected_occlusion={} replay_rejected_occlusion={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} rigid={} skinned={} cube_candidates={} skin_bone_groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
+				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} rejected_occlusion={} replay_rejected_occlusion={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) stream(request_attempts={} range_rejects={} resident_hits={} request_appends={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} rigid={} skinned={} cube_candidates={} skin_bone_groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
 				requestedFrame,
 				counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
 				counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
@@ -3138,6 +3138,10 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted),
 				counter(CLodWorkGraphCounterIndex::ChildPrefilterFrustumCulled),
 				counter(CLodWorkGraphCounterIndex::ChildPrefilterLodRejected),
+				counter(CLodWorkGraphCounterIndex::StreamRequestAttempts),
+				counter(CLodWorkGraphCounterIndex::StreamRequestRangeRejects),
+				counter(CLodWorkGraphCounterIndex::StreamResidentHits),
+				counter(CLodWorkGraphCounterIndex::StreamRequestAppends),
 				counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
                 counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
                 counter(CLodWorkGraphCounterIndex::ClusterCullThreads),
@@ -3827,6 +3831,7 @@ void Renderer::Render() {
     passExecutionContext.hostData = &hostFrameData;
 
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
+    auto computeQueue = deviceManager.GetComputeQueue();
 
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
 
@@ -3877,7 +3882,12 @@ void Renderer::Render() {
         }
         const rhi::Backend activeBackend = deviceManager.GetBackend();
         try {
-            br::telemetry::nvperf::BeginFrameCapture(activeBackend, deviceManager.GetDevice(), graphicsQueue, m_totalFramesRendered);
+            br::telemetry::nvperf::BeginFrameCapture(
+                activeBackend,
+                deviceManager.GetDevice(),
+                graphicsQueue,
+                computeQueue,
+                m_totalFramesRendered);
             passExecutionContext.beginGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName) {
                 br::telemetry::nvperf::BeginPassRange(activeBackend, commandList, queue, queueName, passName);
             };

@@ -438,6 +438,10 @@ static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_REGION_HITS = 55;
 static const uint WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM = 56;
 static const uint WG_COUNTER_OBJECT_CULL_REJECTED_OCCLUSION = 57;
 static const uint WG_COUNTER_OBJECT_REPLAY_REJECTED_OCCLUSION = 58;
+static const uint WG_COUNTER_STREAM_REQUEST_ATTEMPTS = 59;
+static const uint WG_COUNTER_STREAM_REQUEST_RANGE_REJECTS = 60;
+static const uint WG_COUNTER_STREAM_RESIDENT_HITS = 61;
+static const uint WG_COUNTER_STREAM_REQUEST_APPENDS = 62;
 static const uint WG_COUNTER_OBJECT_CULL_INVALID_BOUNDS = 63;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES = 64;
 static const uint WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES_CLIPPED = 65;
@@ -2299,11 +2303,13 @@ void CLodRequestGroupLoad(
     uint viewId,
     float requestPriorityErrorOverDistance)
 {
+    WGTelemetryAdd(WG_COUNTER_STREAM_REQUEST_ATTEMPTS, 1u);
     StructuredBuffer<CLodStreamingRuntimeState> runtimeState =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::StreamingRuntimeState)];
     const uint activeGroupScanCount = runtimeState[0].activeGroupScanCount;
     if (groupGlobalIndex >= activeGroupScanCount)
     {
+        WGTelemetryAdd(WG_COUNTER_STREAM_REQUEST_RANGE_REJECTS, 1u);
         return;
     }
 
@@ -2317,6 +2323,7 @@ void CLodRequestGroupLoad(
     InterlockedAdd(loadRequestCounter[0], 1u, requestIndex);
     if (requestIndex < CLOD_STREAM_REQUEST_CAPACITY)
     {
+        WGTelemetryAdd(WG_COUNTER_STREAM_REQUEST_APPENDS, 1u);
         CLodStreamingRequest req = (CLodStreamingRequest)0;
         req.groupGlobalIndex = groupGlobalIndex;
         req.meshInstanceIndex = instanceIndex;
@@ -2347,6 +2354,7 @@ bool CLodTouchAndRequestGroupResident(
 
     if (CLodGroupIsResident(groupGlobalIndex))
     {
+        WGTelemetryAdd(WG_COUNTER_STREAM_RESIDENT_HITS, 1u);
         return true;
     }
 
@@ -4076,14 +4084,28 @@ void ClusterCullBody(
             if (localMeshlet < pageMeshletCount) {
                 localMeshletIndex = localMeshlet;
 
-                // Load the common 64-byte descriptor (4 x Load4).
-                CLodMeshletDescriptor desc = LoadMeshletDescriptor(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet);
-                const CLodClusterCullHeader clusterCullHeader = CLodMeshletCullHeader(desc);
+                CLodClusterCullHeader clusterCullHeader;
+                CLodMeshletDescriptor desc = (CLodMeshletDescriptor)0;
+                const bool skinnedMesh = (meshVertexFlags & VERTEX_SKINNED) != 0u;
+                if (skinnedMesh)
+                {
+                    desc = LoadMeshletDescriptor(
+                        pageSlabDesc,
+                        pageSlabOff,
+                        pageDescriptorOffset,
+                        localMeshlet);
+                    clusterCullHeader = CLodMeshletCullHeader(desc);
+                }
+                else
+                {
+                    clusterCullHeader =
+                        LoadMeshletCullHeader(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet);
+                }
                 uint meshletBoundsClassification = CLOD_MESHLET_BOUNDS_STATIC;
                 BoundingSphere meshletBounds;
                 const uint clusterCullFlags = CLodClusterCullFlags(clusterCullHeader);
                 const bool animatedCluster =
-                    (meshVertexFlags & VERTEX_SKINNED) != 0u &&
+                    skinnedMesh &&
                     (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_ANIMATED) != 0u;
                 if (animatedCluster)
                 {
@@ -4173,7 +4195,8 @@ void ClusterCullBody(
                 // the refined child boundary is still above the threshold and
                 // the refined child is resident.
                 if (survives && !forceLodDecision) {
-                    const int refinedGroupId = CLodDescRefinedGroupId(desc);
+                    const int refinedGroupId =
+                        (int)(clusterCullHeader.primitiveCountAndRefinedGroup >> 16u) - 1;
                     if (CLodRefinedChildSuppressesParent(
                         groupsBase,
                         (uint)refinedGroupId,
@@ -4216,15 +4239,23 @@ void ClusterCullBody(
                     } else {
                         // Phase 1: HZB is from previous frame's depth,
                         // so use both the previous object transform and previous bone pose.
-                        const BoundingSphere previousMeshletBounds = CLodComputePreviousMeshletBounds(
-                            desc,
-                            pageHeader,
-                            pageSlabDesc,
-                            pageSlabOff,
-                            meshVertexFlags,
-                            skinningInstanceSlot,
-                            clodMeshMetadata,
-                            b.assemblyTransformIndex);
+                        BoundingSphere previousMeshletBounds;
+                        if (skinnedMesh)
+                        {
+                            previousMeshletBounds = CLodComputePreviousMeshletBounds(
+                                desc,
+                                pageHeader,
+                                pageSlabDesc,
+                                pageSlabOff,
+                                meshVertexFlags,
+                                skinningInstanceSlot,
+                                clodMeshMetadata,
+                                b.assemblyTransformIndex);
+                        }
+                        else
+                        {
+                            previousMeshletBounds.sphere = clusterCullHeader.bounds;
+                        }
                         const row_major matrix prevModelMatrix = instanceTransform.prevModel;
                         const float prevMeshletScale = MaxAxisScale_RowVector(prevModelMatrix);
                         const float3 prevMeshletCenterViewSpace = ToViewSpace(previousMeshletBounds.sphere.xyz, prevModelMatrix, occCameras[b.viewId].prevView);

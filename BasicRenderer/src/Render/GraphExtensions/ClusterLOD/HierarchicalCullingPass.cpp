@@ -37,6 +37,8 @@
 
 namespace {
 
+std::vector<HierarchicalCullingPass*> g_liveHierarchicalCullingPasses;
+
 uint64_t GetNativeBufferDeviceAddress(rhi::Resource resource) noexcept
 {
     if (ID3D12Resource* nativeResource = rhi::dx12::get_resource(resource)) {
@@ -252,9 +254,48 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     m_renderPhase = std::move(inputs.renderPhase);
     m_clodOnlyWorkloads = inputs.clodOnlyWorkloads;
     m_useShadowCascadeViews = inputs.useShadowCascadeViews;
+    g_liveHierarchicalCullingPasses.push_back(this);
 }
 
-HierarchicalCullingPass::~HierarchicalCullingPass() = default;
+HierarchicalCullingPass::~HierarchicalCullingPass()
+{
+    std::erase(g_liveHierarchicalCullingPasses, this);
+}
+
+size_t HierarchicalCullingPass::ReloadAllWorkGraphs()
+{
+    for (HierarchicalCullingPass* pass : g_liveHierarchicalCullingPasses) {
+        pass->ReloadWorkGraph();
+    }
+    return g_liveHierarchicalCullingPasses.size();
+}
+
+void HierarchicalCullingPass::ReloadWorkGraph()
+{
+    rhi::WorkGraphPtr replacement;
+    PipelineState createCommandPipeline;
+    PipelineState clearPipeline;
+    CreatePipelines(
+        DeviceManager::GetInstance().GetDevice(),
+        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        replacement,
+        createCommandPipeline,
+        clearPipeline);
+    if (!replacement) {
+        throw std::runtime_error("live CLOD work-graph compilation returned a null work graph");
+    }
+    const uint64_t replacementScratchSize = replacement->GetRequiredScratchMemorySize();
+    if (replacementScratchSize != m_workGraph->GetRequiredScratchMemorySize()) {
+        m_scratchBuffer = Buffer::CreateShared(
+            rhi::HeapType::DeviceLocal,
+            replacementScratchSize,
+            true);
+        m_scratchBuffer->SetName("CLod Work Graph Scratch Buffer");
+        m_scratchBuffer->SetMemoryUsageHint("Work graph scratch buffer");
+    }
+    m_workGraph = std::move(replacement);
+    m_initializeWorkGraphBackingMemory = true;
+}
 
 void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder) {
     const ResourceState computeReadState{

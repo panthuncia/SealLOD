@@ -26,7 +26,7 @@
 #define CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW 0
 #endif
 
-#define SW_CLUSTER_RASTER_THREADS 64
+#define SW_CLUSTER_RASTER_THREADS 32
 
 // Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
 
@@ -121,11 +121,13 @@ struct SWRasterSharedPageData
 groupshared SWRasterSharedPageData gs_page;
 groupshared uint gs_skinningInstanceSlot;
 groupshared uint gs_materialDataIndex;
+groupshared uint gs_alphaTestEnabled;
 groupshared uint gs_vertexFlags;
 groupshared uint gs_activeBoneRemapIndexBase;
 groupshared uint gs_activeBoneRemapIndexCount;
 groupshared uint gs_singleRemappedJoint;
 groupshared uint gs_groupFlags;
+groupshared uint gs_debugOutputType;
 
 uint SWResolveAssemblyBoneIndex(uint localJointId)
 {
@@ -377,7 +379,6 @@ void SWRasterCluster(
     const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
 
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const uint groupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
 
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
@@ -410,48 +411,77 @@ void SWRasterCluster(
         gs_page.triangleByteOffset = meshletDescriptor.triangleByteOffset;
         gs_page.bitsAndVertexCount = meshletDescriptor.bitsAndVertexCount;
         const PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-        gs_skinningInstanceSlot = hasResolvedSkinningInstanceSlot
-            ? resolvedSkinningInstanceSlot
-            : ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        gs_debugOutputType = perFrameBuffer.outputType;
         StructuredBuffer<PerMeshBuffer> perMeshBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer meshData = perMeshBuffer[meshInst.perMeshBufferIndex];
         gs_materialDataIndex = meshData.materialDataIndex;
         gs_vertexFlags = meshData.vertexFlags;
-        const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
-        StructuredBuffer<CLodMeshMetadata> metadataBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-        const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+        gs_skinningInstanceSlot = (meshData.vertexFlags & VERTEX_SKINNED) != 0u
+            ? (hasResolvedSkinningInstanceSlot
+                ? resolvedSkinningInstanceSlot
+                : ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot))
+            : 0xFFFFFFFFu;
+#if defined(PSO_ALPHA_TEST)
+        gs_alphaTestEnabled = 1u;
+#elif defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
+        StructuredBuffer<MaterialInfo> materialDataBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+        gs_alphaTestEnabled =
+            (materialDataBuffer[meshData.materialDataIndex].materialFlags & MATERIAL_ALPHA_TEST) != 0u
+                ? 1u
+                : 0u;
+#else
+        gs_alphaTestEnabled = 0u;
+#endif
         gs_activeBoneRemapIndexBase = CLOD_ASSEMBLY_BONE_REMAP_SENTINEL;
         gs_activeBoneRemapIndexCount = 0u;
         gs_singleRemappedJoint = 0u;
-        if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL &&
-            assemblyTransformIndex >= metadata.assemblyTransformBase)
+        gs_groupFlags = 0u;
+        const bool needsAssemblyRemap =
+            (meshData.vertexFlags & VERTEX_SKINNED) != 0u &&
+            assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+        const bool needsAssemblyDebug =
+            gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE ||
+            gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
+        if (needsAssemblyRemap || needsAssemblyDebug)
         {
-            const uint localTransformIndex = assemblyTransformIndex - metadata.assemblyTransformBase;
-            if (localTransformIndex < metadata.assemblyBoneRemapCount)
+            const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
+            StructuredBuffer<CLodMeshMetadata> metadataBuffer =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+            const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
+            if (needsAssemblyRemap && assemblyTransformIndex >= metadata.assemblyTransformBase)
             {
-                StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
-                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
-                const ClusterLODAssemblyBoneRemap remap =
-                    remaps[metadata.assemblyBoneRemapBase + localTransformIndex];
-                if (remap.remapIndexBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL &&
-                    remap.remapIndexCount != 0u)
+                const uint localTransformIndex = assemblyTransformIndex - metadata.assemblyTransformBase;
+                if (localTransformIndex < metadata.assemblyBoneRemapCount)
                 {
-                    gs_activeBoneRemapIndexBase = remap.remapIndexBase;
-                    gs_activeBoneRemapIndexCount = remap.remapIndexCount;
-                    if (remap.remapIndexCount == 1u)
+                    StructuredBuffer<ClusterLODAssemblyBoneRemap> remaps =
+                        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemaps)];
+                    const ClusterLODAssemblyBoneRemap remap =
+                        remaps[metadata.assemblyBoneRemapBase + localTransformIndex];
+                    if (remap.remapIndexBase != CLOD_ASSEMBLY_BONE_REMAP_SENTINEL &&
+                        remap.remapIndexCount != 0u)
                     {
-                        StructuredBuffer<uint> remapIndices =
-                            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
-                        gs_singleRemappedJoint = remapIndices[remap.remapIndexBase];
+                        gs_activeBoneRemapIndexBase = remap.remapIndexBase;
+                        gs_activeBoneRemapIndexCount = remap.remapIndexCount;
+                        if (remap.remapIndexCount == 1u)
+                        {
+                            StructuredBuffer<uint> remapIndices =
+                                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyBoneRemapIndices)];
+                            gs_singleRemappedJoint = remapIndices[remap.remapIndexBase];
+                        }
                     }
                 }
             }
+            if (needsAssemblyDebug)
+            {
+                StructuredBuffer<ClusterLODGroup> groups =
+                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+                gs_groupFlags = groups[metadata.groupsBase + groupLocalIndex].flags;
+            }
         }
-        StructuredBuffer<ClusterLODGroup> groups =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-        gs_groupFlags = groups[metadata.groupsBase + groupLocalIndex].flags;
         const PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
         StructuredBuffer<CullingCameraInfo> cullingCameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -515,32 +545,33 @@ void SWRasterCluster(
         gs_screenPos[v] = screen;
         gs_linearDepth[v] = -viewZ;
         gs_invClipW[v] = invW;
-        gs_texcoord[v] = SWDecodeCompressedUV(
-            v,
-            0u,
-            localMeshletIndex,
-            pageSlabByteOffset,
-            gs_page.uvSetCount,
-            gs_page.uvDescriptorOffset,
-            gs_page.uvBitstreamDirectoryOffset,
-            pageSlabDescriptorIndex);
+        if (gs_alphaTestEnabled != 0u)
+        {
+            gs_texcoord[v] = SWDecodeCompressedUV(
+                v,
+                0u,
+                localMeshletIndex,
+                pageSlabByteOffset,
+                gs_page.uvSetCount,
+                gs_page.uvDescriptorOffset,
+                gs_page.uvBitstreamDirectoryOffset,
+                pageSlabDescriptorIndex);
+        }
     }
 
     GroupMemoryBarrierWithGroupSync();
 
     RWTexture2D<uint2> debugVisTex =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::DebugVisualization)];
-    uint2 visDims;
+    const uint2 visDims = uint2(rasterInfo.scissorMaxX, rasterInfo.scissorMaxY);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    visDims = uint2(rasterInfo.scissorMaxX, rasterInfo.scissorMaxY);
 #else
     RWTexture2D<uint64_t> visBuffer =
         ResourceDescriptorHeap[NonUniformResourceIndex(rasterInfo.visibilityUAVDescriptorIndex)];
-    visBuffer.GetDimensions(visDims.x, visDims.y);
 #endif
-    const bool swRasterDebugMode = perFrameBuffer.outputType == OUTPUT_SW_RASTER;
-    const bool assemblyVoxelInheritanceDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE;
-    const bool assemblyPartsDebugMode = perFrameBuffer.outputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
+    const bool swRasterDebugMode = gs_debugOutputType == OUTPUT_SW_RASTER;
+    const bool assemblyVoxelInheritanceDebugMode = gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_VOXEL_INHERITANCE;
+    const bool assemblyPartsDebugMode = gs_debugOutputType == OUTPUT_CLOD_ASSEMBLY_PARTS;
     const bool debugRasterMode = swRasterDebugMode || assemblyVoxelInheritanceDebugMode || assemblyPartsDebugMode;
     float3 assemblyPartDebugColor = float3(0.08f, 0.10f, 0.12f);
     if ((gs_groupFlags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
@@ -695,17 +726,20 @@ void SWRasterCluster(
                     {
                         float b2 = 1.0f - b0 - b1;
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
-                        const float pc0 = b0 * invW0;
-                        const float pc1 = b1 * invW1;
-                        const float pc2 = b2 * invW2;
-                        const float invSum = rcp(pc0 + pc1 + pc2);
-                        const float2 texcoord =
-                            (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
-                        if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
+                        if (gs_alphaTestEnabled != 0u)
                         {
-                            b0 += dx_b0;
-                            b1 += dx_b1;
-                            continue;
+                            const float pc0 = b0 * invW0;
+                            const float pc1 = b1 * invW1;
+                            const float pc2 = b2 * invW2;
+                            const float invSum = rcp(pc0 + pc1 + pc2);
+                            const float2 texcoord =
+                                (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
+                            if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
+                            {
+                                b0 += dx_b0;
+                                b1 += dx_b1;
+                                continue;
+                            }
                         }
 #endif
                         if (debugRasterMode)
@@ -744,17 +778,20 @@ void SWRasterCluster(
                     if (b0 >= 0.0f && b1 >= 0.0f && b2 >= 0.0f)
                     {
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_SW_RASTER_DYNAMIC_ALPHA_TEST)
-                        const float pc0 = b0 * invW0;
-                        const float pc1 = b1 * invW1;
-                        const float pc2 = b2 * invW2;
-                        const float invSum = rcp(pc0 + pc1 + pc2);
-                        const float2 texcoord =
-                            (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
-                        if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
+                        if (gs_alphaTestEnabled != 0u)
                         {
-                            b0 += dx_b0;
-                            b1 += dx_b1;
-                            continue;
+                            const float pc0 = b0 * invW0;
+                            const float pc1 = b1 * invW1;
+                            const float pc2 = b2 * invW2;
+                            const float invSum = rcp(pc0 + pc1 + pc2);
+                            const float2 texcoord =
+                                (gs_texcoord[tri.x] * pc0 + gs_texcoord[tri.y] * pc1 + gs_texcoord[tri.z] * pc2) * invSum;
+                            if (SWAlphaTestFailed(texcoord, gs_materialDataIndex))
+                            {
+                                b0 += dx_b0;
+                                b1 += dx_b1;
+                                continue;
+                            }
                         }
 #endif
                         if (debugRasterMode)

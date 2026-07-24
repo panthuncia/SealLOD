@@ -61,7 +61,25 @@
       "rollup": "avg",
       "submetric": "per_cycle_active",
       "required": false
-    }
+    },
+    { "id": "smsp_throughput", "name": "smsp__throughput", "output_name": "SMSP throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "instructions", "name": "smsp__inst_executed", "output_name": "Instructions executed", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "warps_eligible", "name": "smsp__warps_eligible", "output_name": "Eligible warps", "unit": "warps/cycle", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "stall_barrier", "name": "smsp__warp_issue_stalled_barrier_per_warp_active", "output_name": "Stall: barrier", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_branch", "name": "smsp__warp_issue_stalled_branch_resolving_per_warp_active", "output_name": "Stall: branch resolving", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_dispatch", "name": "smsp__warp_issue_stalled_dispatch_stall_per_warp_active", "output_name": "Stall: dispatch", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_imc_miss", "name": "smsp__warp_issue_stalled_imc_miss_per_warp_active", "output_name": "Stall: IMC miss", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "stall_lg_throttle", "name": "smsp__warp_issue_stalled_lg_throttle_per_warp_active", "output_name": "Stall: LG throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_long_scoreboard", "name": "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", "output_name": "Stall: long scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_math_throttle", "name": "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active", "output_name": "Stall: math-pipe throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_membar", "name": "smsp__warp_issue_stalled_membar_per_warp_active", "output_name": "Stall: memory barrier", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_mio_throttle", "name": "smsp__warp_issue_stalled_mio_throttle_per_warp_active", "output_name": "Stall: MIO throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_no_instruction", "name": "smsp__warp_issue_stalled_no_instruction_per_warp_active", "output_name": "Stall: no instruction", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_not_selected", "name": "smsp__warp_issue_stalled_not_selected_per_warp_active", "output_name": "Stall: not selected", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_short_scoreboard", "name": "smsp__warp_issue_stalled_short_scoreboard_per_warp_active", "output_name": "Stall: short scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_tex_throttle", "name": "smsp__warp_issue_stalled_tex_throttle_per_warp_active", "output_name": "Stall: texture throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_wait", "name": "smsp__warp_issue_stalled_wait_per_warp_active", "output_name": "Stall: wait", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "l1_throughput", "name": "l1tex__throughput", "output_name": "L1/TEX throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" }
   ],
   "passes": [
     {
@@ -74,7 +92,30 @@
         "sm_throughput",
         "l2_throughput",
         "dram_throughput",
-        "warps_active"
+        "warps_active", "smsp_throughput", "instructions", "warps_eligible",
+        "stall_barrier", "stall_branch", "stall_dispatch", "stall_imc_miss",
+        "stall_lg_throttle", "stall_long_scoreboard", "stall_math_throttle",
+        "stall_membar", "stall_mio_throttle", "stall_no_instruction",
+        "stall_not_selected", "stall_short_scoreboard", "stall_tex_throttle",
+        "stall_wait", "l1_throughput"
+      ]
+    },
+    {
+      "id": "hierarchical_culling_pass2",
+      "name": "CLodOpaque::HierarchicalCullingPass2",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time",
+        "sm_throughput",
+        "l2_throughput",
+        "dram_throughput",
+        "warps_active", "smsp_throughput", "instructions", "warps_eligible",
+        "stall_barrier", "stall_branch", "stall_dispatch", "stall_imc_miss",
+        "stall_lg_throttle", "stall_long_scoreboard", "stall_math_throttle",
+        "stall_membar", "stall_mio_throttle", "stall_no_instruction",
+        "stall_not_selected", "stall_short_scoreboard", "stall_tex_throttle",
+        "stall_wait", "l1_throughput"
       ]
     }
   ]

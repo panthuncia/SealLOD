@@ -6,10 +6,10 @@
     "timeout_ms": 300000
   },
   "statistics": {
-    "minimum_samples": 30,
-    "maximum_samples": 60,
+    "minimum_samples": 60,
+    "maximum_samples": 120,
     "confidence_level": 0.95,
-    "relative_half_width": 0.02
+    "relative_half_width": 0.005
   },
   "output": {
     "database": "out/hierarchical_culling_optimization_sampling.sqlite",
@@ -22,7 +22,7 @@
       "output_name": "GPU time",
       "unit": "ms",
       "source": "render_graph_gpu_time",
-      "relative_half_width": 0.02
+      "relative_half_width": 0.005
     }
   ],
   "passes": [

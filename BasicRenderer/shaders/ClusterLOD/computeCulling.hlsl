@@ -297,7 +297,8 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     outFrontier[outputIndex].viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
     outFrontier[outputIndex].instanceIndex = drawRecordIndex;
-    outFrontier[outputIndex].nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u);
+    outFrontier[outputIndex].nodeIdPacked =
+        PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u, 0u);
     outFrontier[outputIndex].assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
@@ -435,6 +436,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const bool nodeCulled =
         CLodWorkGraphFrustumCullingEnabled() &&
         !replaySource &&
+        UnpackBoundsTested(rec.nodeIdPacked) == 0u &&
         CLodNodeBoundsOutsideFrustum(
             nodeCullClassification,
             node.metric.cullCenterAndRadius,
@@ -443,9 +445,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             cullUniformScale,
             cullCamera);
 
+    bool dirtyPageCullingEnabled = false;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
-    const bool dirtyPageCullingEnabled =
+    dirtyPageCullingEnabled =
         !isSkinned && CLodWorkGraphShadowDirtyPageCullingEnabled() && !objectInvalidatedThisFrame;
 #endif
 
@@ -499,7 +502,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                         childRecord.nodeIdPacked = PackTraverseNodeId(
                             assemblyInstance.targetRootNode,
                             UnpackSourceTag(rec.nodeIdPacked),
-                            1u);
+                            1u,
+                            0u);
                         childRecord.assemblyTransformIndex =
                             assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
                                 ? rec.assemblyTransformIndex
@@ -593,69 +597,17 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             {
                 WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_VOXEL_RASTER_WORK_RECORDS, 1);
             }
-            StructuredBuffer<ClusterLODGroupSegment> voxelSegments =
-                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-            const uint firstLocalSegment = (node.range.isLeaf == CLOD_NODE_VOXEL_LEAF)
-                ? node.range.indexOrOffset
-                : 0u;
-            const uint segmentCount = (node.range.isLeaf == CLOD_NODE_VOXEL_LEAF)
-                ? leaf.group.segmentCount - min(firstLocalSegment, leaf.group.segmentCount)
-                : 1u;
-            const int sectionRefinedGroup = int(node.range.countMinusOne) - 1;
-            const uint phase2ExpansionFactor =
-                PureComputeNormalizePhase2ExpansionFactor(CLOD_PC_PHASE2_EXPANSION_FACTOR);
-
-            [loop]
-            for (uint segmentOffset = 0u; segmentOffset < segmentCount; ++segmentOffset)
-            {
-                const uint segmentIndex = (node.range.isLeaf == CLOD_NODE_VOXEL_LEAF)
-                    ? clodMeshMetadata.segmentsBase + leaf.group.firstSegment + firstLocalSegment + segmentOffset
-                    : clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
-                const ClusterLODGroupSegment seg = voxelSegments[segmentIndex];
-                if (node.range.isLeaf == CLOD_NODE_VOXEL_LEAF && seg.refinedGroup != sectionRefinedGroup)
-                {
-                    break;
-                }
-
-                const GroupPageMapEntry pageEntry =
-                    LoadGroupPageMapEntry(clodMeshMetadata.pageMapBase, seg.pageIndex);
-                if (pageEntry.slabDescriptorIndex == 0u)
-                {
-                    WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1u);
-                    continue;
-                }
-
-                uint clusterBase = seg.firstMeshletInPage;
-                uint remainingClusters = seg.meshletCount;
-                const uint outputRecordCount =
-                    (remainingClusters + phase2ExpansionFactor - 1u) / phase2ExpansionFactor;
-                uint outputBase = 0u;
-                InterlockedAdd(clusterCounter[0], outputRecordCount, outputBase);
-                uint outputOffset = 0u;
-                [loop]
-                while (remainingClusters > 0u)
-                {
-                    const uint chunkCount = min(phase2ExpansionFactor, remainingClusters);
-                    const uint outputIndex = outputBase + outputOffset;
-                    if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
-                    {
-                        CLodClusterRunRecord outRecord = (CLodClusterRunRecord)0;
-                        outRecord.instanceIndex = rec.instanceIndex;
-                        outRecord.viewId = rec.viewId;
-                        outRecord.groupIdPacked = PackGroupId(node.range.ownerGroupId, UnpackSourceTag(rec.nodeIdPacked));
-                        outRecord.clusterIndexAndCount = PackClusterIndexAndCount(clusterBase, chunkCount);
-                        outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
-                        outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
-                        outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
-                        outRecord.clusterKindAndPageIndex =
-                            PackClusterKindAndPageIndex(CLOD_CLUSTER_KIND_VOXEL, seg.pageIndex);
-                        clusterFrontier[outputIndex] = outRecord;
-                    }
-                    clusterBase += chunkCount;
-                    remainingClusters -= chunkCount;
-                    outputOffset++;
-                }
-            }
+            CLodAppendVoxelRasterWorkForLeaf(
+                clodMeshMetadata,
+                rec.instanceIndex,
+                rec.assemblyTransformIndex,
+                rec.viewId,
+                node,
+                leaf.group,
+                objectModelMatrix,
+                lodUniformScale,
+                cullCamera,
+                dirtyPageCullingEnabled);
 #endif
             return;
         }
@@ -709,8 +661,6 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
                 outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
                 outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
-                outRecord.clusterKindAndPageIndex =
-                    PackClusterKindAndPageIndex(CLOD_CLUSTER_KIND_TRIANGLE, seg.pageIndex);
                 clusterFrontier[outputIndex] = outRecord;
             }
             meshletBase += chunkCount;
@@ -867,7 +817,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         TraverseNodeRecord childRecord = (TraverseNodeRecord)0;
         childRecord.instanceIndex = rec.instanceIndex;
         childRecord.viewId = rec.viewId;
-        childRecord.nodeIdPacked = PackTraverseNodeId(childNodeId, sourceTag, 1u);
+        childRecord.nodeIdPacked =
+            PackTraverseNodeId(childNodeId, sourceTag, 1u, isSkinned ? 0u : 1u);
         childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
         if (childIsLeaf) {
             nextLeafFrontier[outputIndex] = childRecord;

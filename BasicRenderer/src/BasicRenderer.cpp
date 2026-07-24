@@ -34,6 +34,7 @@
 #include "Render/PSOFlags.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/ClusterLOD/HierarchicalCullingPass.h"
 #include "Telemetry/NvPerfIntegration.h"
 #include "Telemetry/SamplingControlServer.h"
 #include "Telemetry/StatisticalSampler.h"
@@ -1103,7 +1104,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         renderer.SetEnvironment("sky");
 
         XMFLOAT3 pos = XMFLOAT3(2.f, 5.f, 0.f);
-        XMFLOAT3 lookAt = XMFLOAT3(0.0f, 5.0f, 0.0f);
+        XMFLOAT3 lookAt = XMFLOAT3(4.0f, 5.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;
@@ -1423,6 +1424,10 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         .getSettingSetter<uint32_t>(settingName)(normalized);
                     response["value"] = normalized;
                     response["pass"] = pass == 2u ? 2u : 1u;
+                } else if (command == "clod.workgraph.reload") {
+                    if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
+                    response["reloaded_passes"] = HierarchicalCullingPass::ReloadAllWorkGraphs();
+                    response["pipeline_epoch"] = PSOManager::GetInstance().GetPipelineEpoch();
                 } else if (command == "profile.run") {
                     if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
                     StartExperiment(request->document.value("label", "experiment"), &renderer);

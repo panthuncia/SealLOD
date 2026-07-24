@@ -137,6 +137,46 @@ find_package(slang CONFIG REQUIRED)
 option(BASICRENDERER_ENABLE_DIRECTSTORAGE "Enable DirectStorage integration when the SDK is available" ON)
 option(BASICRENDERER_ENABLE_NVPERF "Enable NVIDIA Nsight Perf SDK startup diagnostics and future profiling hooks" OFF)
 set(BASICRENDERER_DIRECTSTORAGE_SDK_ROOT "" CACHE PATH "Optional DirectStorage SDK root containing include/dstorage.h and a dstorage import library")
+set(BASICRENDERER_NVPERF_SDK_ROOT "$ENV{NVPERF_SDK_ROOT}" CACHE PATH "Path to an NVIDIA Nsight Perf SDK installation")
+
+if(WIN32 AND BASICRENDERER_ENABLE_NVPERF AND NOT TARGET NVPerf::Host)
+    find_path(NVPERF_INCLUDE_DIR
+        NAMES nvperf_host.h
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES include
+    )
+    find_path(NVPERF_PLATFORM_INCLUDE_DIR
+        NAMES nvperf_host_impl.h
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES include/windows-desktop-x64
+    )
+    find_file(NVPERF_GRFX_HOST_DLL
+        NAMES nvperf_grfx_host.dll
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES bin/x64
+    )
+    find_library(NVPERF_GRFX_HOST_LIBRARY
+        NAMES nvperf_grfx_host
+        HINTS "${BASICRENDERER_NVPERF_SDK_ROOT}"
+        PATH_SUFFIXES bin/x64
+    )
+
+    if(NVPERF_INCLUDE_DIR AND NVPERF_PLATFORM_INCLUDE_DIR AND NVPERF_GRFX_HOST_DLL AND NVPERF_GRFX_HOST_LIBRARY)
+        add_library(BasicRenderer_NVPerfHost INTERFACE)
+        target_include_directories(BasicRenderer_NVPerfHost INTERFACE
+            "${NVPERF_INCLUDE_DIR}"
+            "${NVPERF_PLATFORM_INCLUDE_DIR}"
+        )
+        target_link_libraries(BasicRenderer_NVPerfHost INTERFACE "${NVPERF_GRFX_HOST_LIBRARY}")
+        add_library(NVPerf::Host ALIAS BasicRenderer_NVPerfHost)
+        message(STATUS "BasicRenderer: NVIDIA Nsight Perf SDK enabled (${BASICRENDERER_NVPERF_SDK_ROOT})")
+    else()
+        message(FATAL_ERROR
+            "BASICRENDERER_ENABLE_NVPERF=ON, but the NVIDIA Nsight Perf SDK was not found. "
+            "Set BASICRENDERER_NVPERF_SDK_ROOT or NVPERF_SDK_ROOT to the SDK's NvPerf directory."
+        )
+    endif()
+endif()
 
 set(BASICRENDERER_HAS_DIRECTSTORAGE FALSE)
 unset(BASICRENDERER_DIRECTSTORAGE_INCLUDE_DIR CACHE)

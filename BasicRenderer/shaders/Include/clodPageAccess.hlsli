@@ -65,6 +65,27 @@ CLodMeshletDescriptor LoadMeshletDescriptor(uint slabDescriptorIndex, uint pageB
     return desc;
 }
 
+// Rigid culling needs only the sphere and packed refined-group word.
+CLodClusterCullHeader LoadMeshletCullHeader(
+    uint slabDescriptorIndex,
+    uint pageByteOffset,
+    uint descriptorOffset,
+    uint meshletIndex)
+{
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
+    const uint addr = pageByteOffset + descriptorOffset + meshletIndex * CLOD_MESHLET_DESCRIPTOR_STRIDE;
+    const uint4 d0 = slab.Load4(addr);
+    const uint triangleCountAndRefinedGroup = slab.Load(addr + 20u);
+
+    CLodClusterCullHeader header;
+    header.bounds = asfloat(d0);
+    header.payloadBase = 0u;
+    header.primitiveCountAndRefinedGroup = triangleCountAndRefinedGroup;
+    header.boneListOffset = 0u;
+    header.kindFlagsAndBoneCount = 0u;
+    return header;
+}
+
 CLodMeshletUvDescriptor LoadMeshletUvDescriptor(
     uint slabDescriptorIndex,
     uint pageByteOffset,

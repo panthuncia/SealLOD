@@ -99,8 +99,10 @@ public:
     void Cleanup() override;
     std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
     std::vector<ResourceIdentifier> GetSupportedKeys() override;
+    static size_t ReloadAllWorkGraphs();
 
 private:
+    void ReloadWorkGraph();
     struct ObjectCullRecord
     {
         uint32_t viewDataIndex;

@@ -1604,7 +1604,12 @@ bool PassIsSelected(const D3D12PassProfiler& profiler, std::string_view queueNam
 }
 #endif
 
-void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue graphicsQueue, uint64_t frameNumber)
+void BeginFrameCapture(
+    rhi::Backend backend,
+    rhi::Device device,
+    rhi::Queue graphicsQueue,
+    rhi::Queue computeQueue,
+    uint64_t frameNumber)
 {
 #if BASICRENDERER_ENABLE_NVPERF
     auto& profiler = Profiler();
@@ -1619,7 +1624,9 @@ void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue grap
     // NVPerf requires the queue session and replay pass to begin outside command-list
     // recording.  Deferring this until BeginPassRange means the render graph already
     // has an open command list, which newer drivers reject with INVALID_CONTEXT_STATE.
-    ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(graphicsQueue);
+    const rhi::Queue profilingQueue =
+        profiler.controllerQueueName == "Compute" ? computeQueue : graphicsQueue;
+    ID3D12CommandQueue* nativeQueue = rhi::dx12::get_queue(profilingQueue);
     if (!nativeQueue) {
         profiler.failed = true;
         profiler.error = "failed to resolve the native D3D12 graphics queue";
@@ -1628,7 +1635,7 @@ void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue grap
 
     auto& queueCapture = profiler.queues[nativeQueue];
     if (!queueCapture.nativeQueue) {
-        queueCapture.queue = graphicsQueue;
+        queueCapture.queue = profilingQueue;
         queueCapture.nativeQueue = nativeQueue;
         queueCapture.queueName = profiler.controllerQueueName;
     }
@@ -1637,6 +1644,7 @@ void BeginFrameCapture(rhi::Backend backend, rhi::Device device, rhi::Queue grap
     (void)backend;
     (void)device;
     (void)graphicsQueue;
+    (void)computeQueue;
     (void)frameNumber;
 #endif
 }
