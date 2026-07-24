@@ -2066,6 +2066,8 @@ PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materialCom
     auto shaderDefines = GetShaderDefines(0, materialCompileFlags);
     shaderDefines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
     shaderDefines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
+    shaderDefines.push_back({ L"VISUTIL_USE_CACHED_VIS_KEY", L"1" });
+    shaderDefines.push_back({ L"MATERIAL_EVAL_COMPILED_UV_REQUIREMENTS", L"1" });
     if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
         shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
     }
@@ -2088,6 +2090,8 @@ void PSOManager::PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags mater
     auto shaderDefines = GetShaderDefines(0, materialCompileFlags);
     shaderDefines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
     shaderDefines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
+    shaderDefines.push_back({ L"VISUTIL_USE_CACHED_VIS_KEY", L"1" });
+    shaderDefines.push_back({ L"MATERIAL_EVAL_COMPILED_UV_REQUIREMENTS", L"1" });
     if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
         shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
     }

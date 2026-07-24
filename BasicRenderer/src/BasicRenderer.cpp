@@ -1378,6 +1378,22 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     if (!m_finished) throw std::runtime_error("cannot recompile a pipeline while profiling is active");
                     PSOManager::RecompileOptions options;
                     options.label = request->document.value("label", "pipe-reload");
+                    if (const auto defines = request->document.find("defines");
+                        defines != request->document.end()) {
+                        if (!defines->is_object()) {
+                            throw std::runtime_error("pso.recompile 'defines' must be an object");
+                        }
+                        for (const auto& [name, value] : defines->items()) {
+                            if (!value.is_string()) {
+                                throw std::runtime_error(
+                                    "pso.recompile define values must be strings");
+                            }
+                            options.defineOverrides.emplace(
+                                std::wstring(name.begin(), name.end()),
+                                std::wstring(value.get_ref<const std::string&>().begin(),
+                                             value.get_ref<const std::string&>().end()));
+                        }
+                    }
                     response["job_id"] = PSOManager::GetInstance().RequestRecompile(
                         request->document.at("pipeline_id").get<std::string>(), std::move(options));
                 } else if (command == "pso.activate") {

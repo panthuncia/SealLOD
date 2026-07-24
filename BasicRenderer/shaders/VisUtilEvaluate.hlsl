@@ -32,5 +32,9 @@ void EvaluateMaterialGroupCS(
     pixel.x = ref.pixelXY & 0xFFFFu;
     pixel.y = ref.pixelXY >> 16;
 
+#if defined(VISUTIL_USE_CACHED_VIS_KEY)
+    EvaluateGBufferOptimized(pixel, (uint64_t(ref.visibilityKey.y) << 32) | ref.visibilityKey.x);
+#else
     EvaluateGBufferOptimized(pixel);
+#endif
 }

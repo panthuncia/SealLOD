@@ -2129,7 +2129,22 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #else
     const bool needsMaterialDebugUv = true;
 #endif
+#if MATERIAL_EVAL_COMPILED_UV_REQUIREMENTS
+#if defined(PSO_BASE_COLOR_TEXTURE) || defined(PSO_OPACITY_TEXTURE) || defined(PSO_METALLIC_TEXTURE) || \
+    defined(PSO_ROUGHNESS_TEXTURE) || defined(PSO_NORMAL_MAP) || defined(PSO_AO_TEXTURE) || \
+    defined(PSO_EMISSIVE_TEXTURE) || defined(PSO_PARALLAX) || defined(PSO_OPENPBR_COAT_TEXTURES) || \
+    defined(PSO_OPENPBR_FUZZ_TEXTURES)
+    const bool hasCompiledMaterialUvConsumer = true;
+#else
+    const bool hasCompiledMaterialUvConsumer = false;
+#endif
+    const bool needsMaterialUvData =
+        needsMaterialDebugUv ||
+        needsObjectSpaceNormalUv ||
+        (!isObjectTriplanarMaterial && hasCompiledMaterialUvConsumer);
+#else
     const bool needsMaterialUvData = !isObjectTriplanarMaterial || needsObjectSpaceNormalUv || needsMaterialDebugUv;
+#endif
     MaterialUvCache uvCache = (MaterialUvCache)0;
     MaterialUvBindings uvBindings;
     if (needsMaterialUvData)

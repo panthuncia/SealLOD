@@ -245,6 +245,7 @@ void BuildPixelListCS(uint3 dtid : SV_DispatchThreadID)
 
     PixelRef ref; //{ pixel.x, pixel.y, 0, 0 }; // pack xy
     ref.pixelXY = (pixel.x & 0xFFFFu) | ((pixel.y & 0xFFFFu) << 16);
+    ref.visibilityKey = uint2(vis & 0xFFFFFFFFu, vis >> 32);
     pixelList[dst] = ref;
 }
 
@@ -352,7 +353,7 @@ void TerrainRegionHistogramFromMaterialRangeCS(uint3 tid : SV_DispatchThreadID)
 
     PixelRef ref = pixelList[baseOffset + idx];
     uint2 pixel = uint2(ref.pixelXY & 0xFFFFu, ref.pixelXY >> 16);
-    uint64_t vis = visibility[pixel];
+    uint64_t vis = (uint64_t(ref.visibilityKey.y) << 32) | ref.visibilityKey.x;
     if (vis == 0xFFFFFFFFFFFFFFFF)
     {
         return;

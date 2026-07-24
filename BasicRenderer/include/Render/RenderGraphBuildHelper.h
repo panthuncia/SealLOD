@@ -208,8 +208,8 @@ inline void RegisterVisUtilResources(RenderGraph* graph, bool terrainRvt, bool r
     rg::memory::SetResourceUsageHint(*totalPixelCountBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::TotalPixelCountBuffer", totalPixelCountBuffer);
 
-	// PixelRef: uint pixelXY; (packed)
-    struct PixelRefPOD { uint32_t pixelXY; };
+	// PixelRef: packed pixel coordinates followed by the cached 64-bit visibility key.
+    struct PixelRefPOD { uint32_t pixelXY; uint32_t visibilityKey[2]; };
     auto pixelListBuffer = Buffer::CreateUnmaterializedStructuredBuffer(
         maxPixels,
         sizeof(PixelRefPOD),

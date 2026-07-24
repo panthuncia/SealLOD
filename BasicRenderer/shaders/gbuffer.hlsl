@@ -135,10 +135,8 @@ bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
     return true;
 }
 
-void EvaluateGBufferOptimized(uint2 pixel)
+void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
 {
-    Texture2D<uint64_t> visibilityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
-    uint64_t vis = visibilityTexture[pixel];
     RWTexture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
     RWTexture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
     RWTexture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
@@ -417,6 +415,12 @@ void EvaluateGBufferOptimized(uint2 pixel)
         WriteDebugPixel(debugVisTex, pixel, payload);
     }
 #endif
+}
+
+void EvaluateGBufferOptimized(uint2 pixel)
+{
+    Texture2D<uint64_t> visibilityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
+    EvaluateGBufferOptimized(pixel, visibilityTexture[pixel]);
 }
 
 [numthreads(8, 8, 1)]
