@@ -18,9 +18,9 @@ models/
 textures/
 /ThirdParty/
 cmake-build-*
-docs/
 Streamline/
 vk_streamline/
 vk_lod_clusters/
 cache/
 reports/
+docs/

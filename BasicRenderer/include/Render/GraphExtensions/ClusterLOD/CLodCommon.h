@@ -25,6 +25,7 @@ inline constexpr const char* CLodReyesTerrainNormalMipBiasSettingName = "clodRey
 inline constexpr const char* CLodReyesDiceRatePixelsSettingName = "clodReyesDiceRatePixels";
 inline constexpr const char* CLodReyesUseAabbOcclusionSettingName = "clodReyesUseAabbOcclusion";
 inline constexpr const char* CLodWorkGraphReyesVisibilitySettingName = "clodWorkGraphReyesVisibility";
+inline constexpr const char* CLodWorkGraphRigidOnlySettingName = "clodWorkGraphRigidOnly";
 inline constexpr const char* CLodReyesResourceBudgetBytesSettingName = "clodReyesResourceBudgetBytes";
 inline constexpr const char* CLodDisableVirtualShadowPageCachingSettingName = "clodDisableVirtualShadowPageCaching";
 inline constexpr const char* CLodEnablePageJobVSMSettingName = "clodEnablePageJobVSM";

@@ -55,6 +55,10 @@
 #define CLOD_WG_ENABLE_VOXEL_OUTPUT 1
 #endif
 
+#ifndef CLOD_WG_RIGID_ONLY
+#define CLOD_WG_RIGID_ONLY 0
+#endif
+
 // Set to 1 to enable occlusion culling for VSM / shadow cameras (ortho).
 // Defaults to 0 (off): ortho cameras skip occlusion culling entirely.
 #ifndef CLOD_VSM_OCCLUSION_CULLING
@@ -3009,6 +3013,9 @@ void WG_TraverseNodes(
         // Mesh upload creates one node-skinning sidecar entry per CLOD node for
         // skinned meshes and none for rigid meshes. Keep the original source for
         // telemetry so live PSO replacement retains the same resource interface.
+#if CLOD_WG_RIGID_ONLY
+        bool isSkinned = false;
+#else
         bool isSkinned = clodMeshMetadata.nodeSkinningInfoCount != 0u;
         if (CLodWorkGraphTelemetryEnabled())
         {
@@ -3017,6 +3024,7 @@ void WG_TraverseNodes(
             const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
             isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
         }
+#endif
         const row_major matrix objectModelMatrix = instanceTransform.model;
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -3607,6 +3615,9 @@ void WG_LeafNodes(
         // Mesh upload creates one node-skinning sidecar entry per CLOD node for
         // skinned meshes and none for rigid meshes. Keep the original source for
         // telemetry so live PSO replacement retains the same resource interface.
+#if CLOD_WG_RIGID_ONLY
+        bool isSkinned = false;
+#else
         bool isSkinned = clodMeshMetadata.nodeSkinningInfoCount != 0u;
         if (CLodWorkGraphTelemetryEnabled())
         {
@@ -3615,6 +3626,7 @@ void WG_LeafNodes(
             const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
             isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
         }
+#endif
         const row_major matrix objectModelMatrix = instanceTransform.model;
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -3970,11 +3982,13 @@ void ClusterCullBody(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[meshBufferIndex];
         meshVertexFlags = perMesh.vertexFlags;
+#if !CLOD_WG_RIGID_ONLY
         if ((meshVertexFlags & VERTEX_SKINNED) != 0u)
         {
             skinningInstanceSlot = ResolveAssemblyProceduralWindSkinningSlot(
                 b.instanceIndex, instanceData.skinningInstanceSlot, b.assemblyTransformIndex);
         }
+#endif
         StructuredBuffer<MaterialInfo> materialDataBuffer =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
         const MaterialInfo materialInfo = materialDataBuffer[perMesh.materialDataIndex];
@@ -4086,7 +4100,11 @@ void ClusterCullBody(
 
                 CLodClusterCullHeader clusterCullHeader;
                 CLodMeshletDescriptor desc = (CLodMeshletDescriptor)0;
+#if CLOD_WG_RIGID_ONLY
+                const bool skinnedMesh = false;
+#else
                 const bool skinnedMesh = (meshVertexFlags & VERTEX_SKINNED) != 0u;
+#endif
                 if (skinnedMesh)
                 {
                     desc = LoadMeshletDescriptor(

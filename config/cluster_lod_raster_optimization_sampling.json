@@ -1,0 +1,44 @@
+{
+  "name": "BasicRenderer CLOD first-pass raster optimization",
+  "readiness": {
+    "stable_frames": 0,
+    "settling_frames": 60,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 60,
+    "maximum_samples": 120,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.005
+  },
+  "output": {
+    "database": "out/cluster_lod_raster_optimization.sqlite",
+    "last_run_summary": "out/cluster_lod_raster_optimization.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.005
+    }
+  ],
+  "passes": [
+    {
+      "id": "hardware_raster_pass1",
+      "name": "CLodOpaque::RasterizeClustersPass1",
+      "queue": "Graphics",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "software_raster_pass1",
+      "name": "CLodOpaque::SoftwareRasterizeClustersPass1",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    }
+  ]
+}

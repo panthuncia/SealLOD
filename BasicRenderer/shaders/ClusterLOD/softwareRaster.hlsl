@@ -92,6 +92,38 @@ uint3 SWDecodeTriangle(ByteAddressBuffer slab, uint triStreamBase, uint triByteO
     return uint3(i0, i1, i2);
 }
 
+uint3 SWDecodeTriangleWave(
+    ByteAddressBuffer slab,
+    uint triStreamBase,
+    uint triByteOffset,
+    uint triangleBlockBase,
+    uint laneIndex)
+{
+    const uint blockByteOffset =
+        triStreamBase + triByteOffset + triangleBlockBase * 3u;
+    const uint alignedBlockOffset = blockByteOffset & ~3u;
+    const uint prefixBytes = blockByteOffset & 3u;
+    const uint blockWordCount =
+        (prefixBytes + SW_CLUSTER_RASTER_THREADS * 3u + 3u) >> 2u;
+    const uint laneWord = laneIndex < blockWordCount
+        ? slab.Load(alignedBlockOffset + laneIndex * 4u)
+        : 0u;
+
+    const uint relativeByteOffset = prefixBytes + laneIndex * 3u;
+    const uint sourceWordLane = relativeByteOffset >> 2u;
+    const uint sourceByteOffset = relativeByteOffset & 3u;
+    const uint firstWord = WaveReadLaneAt(laneWord, sourceWordLane);
+    const uint secondWord = WaveReadLaneAt(laneWord, sourceWordLane + 1u);
+    const uint packedTriangle = sourceByteOffset == 0u
+        ? firstWord
+        : (firstWord >> (sourceByteOffset * 8u)) |
+            (secondWord << ((4u - sourceByteOffset) * 8u));
+    return uint3(
+        packedTriangle & 0xffu,
+        (packedTriangle >> 8u) & 0xffu,
+        (packedTriangle >> 16u) & 0xffu);
+}
+
 groupshared float2  gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float   gs_linearDepth[SW_RASTER_MAX_VERTS];
 groupshared float   gs_invClipW[SW_RASTER_MAX_VERTS];
@@ -609,16 +641,21 @@ void SWRasterCluster(
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
 #endif
 
-    uint globalThread = subGroup * SW_CLUSTER_RASTER_THREADS + GI;
-    uint totalThreads = SW_RASTER_GROUPS_PER_CLUSTER * SW_CLUSTER_RASTER_THREADS;
-
-    for (uint t = globalThread; t < triCount; t += totalThreads)
+    for (uint triangleBlockBase = 0u;
+         triangleBlockBase < triCount;
+         triangleBlockBase += SW_CLUSTER_RASTER_THREADS)
     {
-        uint3 tri = SWDecodeTriangle(
+        const uint t = triangleBlockBase + GI;
+        uint3 tri = SWDecodeTriangleWave(
             slab,
             pageSlabByteOffset + gs_page.triangleStreamOffset,
             gs_page.triangleByteOffset,
-            t);
+            triangleBlockBase,
+            GI);
+        if (t >= triCount)
+        {
+            continue;
+        }
         if (reverseWinding) { uint tmp = tri.y; tri.y = tri.z; tri.z = tmp; }
 
         float2 s0 = gs_screenPos[tri.x];

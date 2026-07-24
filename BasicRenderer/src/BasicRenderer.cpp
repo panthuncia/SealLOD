@@ -1424,6 +1424,46 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         .getSettingSetter<uint32_t>(settingName)(normalized);
                     response["value"] = normalized;
                     response["pass"] = pass == 2u ? 2u : 1u;
+                } else if (command == "clod.mode.get") {
+                    auto& settings = SettingsManager::GetInstance();
+                    const auto culling =
+                        settings.getSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)();
+                    const auto softwareRaster =
+                        settings.getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
+                    response["culling"] =
+                        culling == CLodCullingBackend::WorkGraph ? "work_graph" : "pure_compute";
+                    response["software_raster"] =
+                        softwareRaster == CLodSoftwareRasterMode::WorkGraph ? "work_graph" :
+                        softwareRaster == CLodSoftwareRasterMode::Compute ? "compute" : "disabled";
+                    response["rigid_only"] =
+                        settings.getSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+                } else if (command == "clod.mode.set") {
+                    if (!m_finished) throw std::runtime_error("cannot change CLOD mode while profiling is active");
+                    const std::string cullingName = request->document.at("culling").get<std::string>();
+                    const std::string softwareRasterName =
+                        request->document.at("software_raster").get<std::string>();
+                    const CLodCullingBackend culling =
+                        cullingName == "work_graph" ? CLodCullingBackend::WorkGraph :
+                        cullingName == "pure_compute" ? CLodCullingBackend::PureCompute :
+                        throw std::runtime_error("culling must be 'pure_compute' or 'work_graph'");
+                    const CLodSoftwareRasterMode softwareRaster =
+                        softwareRasterName == "work_graph" ? CLodSoftwareRasterMode::WorkGraph :
+                        softwareRasterName == "compute" ? CLodSoftwareRasterMode::Compute :
+                        softwareRasterName == "disabled" ? CLodSoftwareRasterMode::Disabled :
+                        throw std::runtime_error(
+                            "software_raster must be 'disabled', 'compute', or 'work_graph'");
+                    auto& settings = SettingsManager::GetInstance();
+                    settings.getSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName)(culling);
+                    settings.getSettingSetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)(
+                        softwareRaster);
+                    if (request->document.contains("rigid_only")) {
+                        settings.getSettingSetter<bool>(CLodWorkGraphRigidOnlySettingName)(
+                            request->document.at("rigid_only").get<bool>());
+                    }
+                    response["culling"] = cullingName;
+                    response["software_raster"] = softwareRasterName;
+                    response["rigid_only"] =
+                        settings.getSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
                 } else if (command == "clod.workgraph.reload") {
                     if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
                     response["reloaded_passes"] = HierarchicalCullingPass::ReloadAllWorkGraphs();

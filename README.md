@@ -145,6 +145,14 @@ other BasicRenderer applications. Supported core commands are
 `session.status`, `profile.run`, `profile.status`, `profile.cancel`, and
 `shutdown`.
 
+The demo also exposes `clod.mode.get` and `clod.mode.set` for paired CLOD
+experiments without restarting the process. `clod.mode.set` accepts
+`culling` (`pure_compute` or `work_graph`) and `software_raster`
+(`disabled`, `compute`, or `work_graph`). It also accepts the optional
+`rigid_only` boolean. Enable that specialization only when the loaded workload
+contains no skinned geometry; the default general variant remains
+skinned-capable.
+
 ### 1) Build/install `BasicRHI`
 
 ```powershell
