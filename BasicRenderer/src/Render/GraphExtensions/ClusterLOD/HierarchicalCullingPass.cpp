@@ -495,6 +495,35 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
     commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
 
+    if (m_isFirstPass && IsCLodWorkGraphTelemetryEnabled()) {
+        BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_clearPipelineState.GetAPIPipelineState().GetHandle());
+
+        uint32_t clearRootConstants[NumMiscUintRootConstants] = {};
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
+            m_workGraphTelemetryBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_VALUE] = 0u;
+        clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodWorkGraphCounterCount;
+        commandList.PushConstants(
+            rhi::ShaderStage::Compute,
+            0,
+            MiscUintRootSignatureIndex,
+            0,
+            NumMiscUintRootConstants,
+            clearRootConstants);
+        commandList.Dispatch((CLodWorkGraphCounterCount + 63u) / 64u, 1u, 1u);
+
+        rhi::BufferBarrier telemetryBarrier{};
+        telemetryBarrier.buffer = m_workGraphTelemetryBuffer->GetAPIResource().GetHandle();
+        telemetryBarrier.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+        telemetryBarrier.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
+        telemetryBarrier.beforeSync = rhi::ResourceSyncState::ComputeShading;
+        telemetryBarrier.afterSync = rhi::ResourceSyncState::ComputeShading;
+        rhi::BarrierBatch telemetryBarrierBatch{};
+        telemetryBarrierBatch.buffers = { &telemetryBarrier };
+        commandList.Barriers(telemetryBarrierBatch);
+    }
+
     if (m_pageJobVisibleClustersCounterBuffer) {
         BindResourceDescriptorIndices(commandList, m_clearPipelineState.GetResourceDescriptorSlots());
         commandList.BindPipeline(m_clearPipelineState.GetAPIPipelineState().GetHandle());

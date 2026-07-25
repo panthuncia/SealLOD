@@ -22,7 +22,7 @@ void TestDemoPreset()
     Require(!recipe.Contains<br::pipeline::ClusterLodVoxelTechnique>(),
         "demo recipe must omit CLod voxel rasterization");
     Require(!recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>(), "demo recipe must omit CLod alpha");
-    Require(!recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "demo recipe must omit CLod shadows");
+    Require(recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "demo recipe must include CLod shadows");
     Require(recipe.Contains<br::pipeline::GtaoTechnique>(), "demo recipe must include GTAO");
     Require(recipe.Contains<br::pipeline::ClusteredLightingTechnique>(), "demo recipe must include clustered lighting");
     Require(recipe.Contains<br::pipeline::TonemappingTechnique>(), "demo recipe must include tonemapping");

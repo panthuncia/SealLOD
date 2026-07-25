@@ -8,16 +8,14 @@
 class Buffer;
 class PixelBuffer;
 
-class VirtualShadowMapConsumePredictedPagesPass final : public ComputePass {
+class VirtualShadowMapAdmitPagesPass final : public ComputePass {
 public:
-    VirtualShadowMapConsumePredictedPagesPass(
-        std::shared_ptr<Buffer> predictedPagesBuffer,
-        std::shared_ptr<Buffer> predictedPageCountBuffer,
-        std::shared_ptr<Buffer> clipmapInfoBuffer,
+    VirtualShadowMapAdmitPagesPass(
         std::shared_ptr<PixelBuffer> pageTableTexture,
         std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
+        std::shared_ptr<Buffer> upgradeInputsBuffer,
+        std::shared_ptr<Buffer> upgradeInputCountBuffer,
         std::shared_ptr<Buffer> pageMetadataBuffer,
-        std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
         std::shared_ptr<Buffer> statsBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -26,14 +24,11 @@ public:
     void Cleanup() override;
 
 private:
-    PipelineState m_consumePso;
-    PipelineState m_clearCountPso;
-    std::shared_ptr<Buffer> m_predictedPagesBuffer;
-    std::shared_ptr<Buffer> m_predictedPageCountBuffer;
-    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
+    PipelineState m_pso;
     std::shared_ptr<PixelBuffer> m_pageTableTexture;
     std::shared_ptr<Buffer> m_dirtyPageFlagsBuffer;
+    std::shared_ptr<Buffer> m_upgradeInputsBuffer;
+    std::shared_ptr<Buffer> m_upgradeInputCountBuffer;
     std::shared_ptr<Buffer> m_pageMetadataBuffer;
-    std::shared_ptr<Buffer> m_directionalPageViewInfoBuffer;
     std::shared_ptr<Buffer> m_statsBuffer;
 };

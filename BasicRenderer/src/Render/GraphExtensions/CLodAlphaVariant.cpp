@@ -177,7 +177,7 @@ TextureDescription CreateAVBOITEarlyDepthDescription()
 RenderGraph::ExternalInsertPoint MakeTransparentTailInsertPoint()
 {
     auto insertPoint = RenderGraph::ExternalInsertPoint::After("LightCullingPass");
-    insertPoint.after.push_back("CLodShadow::VirtualShadowDeduplicatePredictedPagesPass");
+    insertPoint.after.push_back("CLodShadow::VirtualShadowClearDirtyBitsPass");
     insertPoint.before.push_back("Screen-Space Reflections Pass");
     insertPoint.before.push_back("UpscalingPass");
     insertPoint.before.push_back("luminanceHistogramPass");

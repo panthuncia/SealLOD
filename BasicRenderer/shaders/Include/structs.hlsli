@@ -18,6 +18,9 @@ struct PSInput {
 struct VisBufferPSInput
 {
     float4 position : SV_POSITION; // Screen-space position, required for rasterization
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    float4 virtualShadowClipDistances : SV_ClipDistance0;
+#endif
     float linearDepth : TEXCOORD0;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     float3 positionWorldSpace : TEXCOORD1;

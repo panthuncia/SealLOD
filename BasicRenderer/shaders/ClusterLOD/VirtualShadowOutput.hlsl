@@ -20,8 +20,15 @@ void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
         return;
     }
 
-    RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
-    InterlockedAdd(telemetryCounters[counterIndex], value);
+    // Pixel-frequency global atomics can dominate the very raster pass that
+    // this instrumentation is intended to diagnose.  Aggregate each
+    // divergent call over its active wave lanes and issue one atomic.
+    const uint waveValue = WaveActiveSum(value);
+    if (WaveIsFirstLane())
+    {
+        RWStructuredBuffer<uint> telemetryCounters = ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
+        InterlockedAdd(telemetryCounters[counterIndex], waveValue);
+    }
 }
 
 ClodViewRasterInfo WaveLoadClodViewRasterInfo(StructuredBuffer<ClodViewRasterInfo> buffer, uint viewID)
@@ -150,8 +157,7 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if ((pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) !=
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask))
+    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
     {
         CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED, 1u);
         return;

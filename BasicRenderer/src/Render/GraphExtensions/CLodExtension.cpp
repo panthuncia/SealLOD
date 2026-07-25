@@ -58,7 +58,6 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapBuildMarkTilesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearDirtyBitsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearPagesPass.h"
-#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapConsumePredictedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapFreeWrappedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapGatherStatsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDirtyHierarchyPass.h"
@@ -1130,6 +1129,8 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_shadowPageMetadataBuffer);
     releaseBufferBacking(m_shadowInvalidationInputsBuffer);
     releaseBufferBacking(m_shadowInvalidationCountBuffer);
+    releaseBufferBacking(m_shadowUpgradeInvalidationInputsBuffer);
+    releaseBufferBacking(m_shadowUpgradeInvalidationCountBuffer);
     releaseBufferBacking(m_shadowInvalidatedInstancesBitsetBuffer);
     releaseBufferBacking(m_shadowPredictiveInvalidationCandidatesBuffer);
     releaseBufferBacking(m_shadowPredictiveInvalidationCandidateCountBuffer);
@@ -1515,8 +1516,9 @@ CLodExtension::CLodExtension(
     , m_maxVisibleClusters(maxVisibleClusters) {
     const auto& traits = GetVariantTraits(type);
 
-    if (traits.ownsStreaming) {
-        m_streamingSystem = std::make_unique<CLodStreamingSystem>();
+    m_streamingSystem = std::move(m_options.streamingSystem);
+    if (traits.ownsStreaming && !m_streamingSystem) {
+        m_streamingSystem = std::make_shared<CLodStreamingSystem>();
     }
 
     if (m_type == CLodExtensionType::Shadow) {
@@ -1563,7 +1565,7 @@ void CLodExtension::Initialize(RenderGraph& rg)
 {
     PrepareForBuild(rg);
 
-    if (m_streamingSystem) {
+    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
         m_streamingSystem->Initialize(rg);
     }
 }
@@ -1571,7 +1573,7 @@ void CLodExtension::Initialize(RenderGraph& rg)
 void CLodExtension::Shutdown(RenderGraph& rg)
 {
     (void)rg;
-    if (m_streamingSystem) {
+    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
         m_streamingSystem->ShutdownGraphResources();
     }
 }
@@ -1586,7 +1588,7 @@ void CLodExtension::OnRegistryReset(ResourceRegistry* reg)
 
     SyncReyesResourceEntities(!IsReyesTessellationDisabled());
 
-    if (m_streamingSystem) {
+    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
         m_streamingSystem->OnRegistryReset(reg);
     }
 }
@@ -1606,13 +1608,13 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
     PrepareForBuild(rg);
 
     const auto& traits = GetVariantTraits(m_type);
-    if (m_streamingSystem) {
+    if (traits.ownsStreaming && m_streamingSystem) {
         m_streamingSystem->GatherStructuralPasses(rg, outPasses);
     }
 
     bool streamingTailAppended = false;
     const auto appendStreamingTailPasses = [&]() {
-        if (m_streamingSystem && !streamingTailAppended) {
+        if (traits.ownsStreaming && m_streamingSystem && !streamingTailAppended) {
             // Keep after-present streaming passes at the extension tail. If they
             // are emitted before CLod raster passes, extension-local chaining can
             // create Present -> streaming tail -> CLod raster -> Present cycles.
@@ -2360,7 +2362,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
 
 void CLodExtension::GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses)
 {
-    if (m_streamingSystem) {
+    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
         m_streamingSystem->GatherFramePasses(rg, outPasses);
     }
 }

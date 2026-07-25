@@ -78,6 +78,7 @@
 #include "Render/GraphExtensions/IOExtension.h"
 #include "Render/GraphExtensions/CLodExtension.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodStreamingSystem.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "RenderPasses/DebugGridPass.h"
@@ -129,6 +130,7 @@ void D3D12DebugCallback(
 namespace {
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
+constexpr const char* CLodVirtualShadowTelemetryDebugSettingName = "clodVirtualShadowTelemetryDebug";
 constexpr const char* ObjectReyesAtlasTelemetryDebugSettingName = "objectReyesAtlasTelemetryDebug";
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
 
@@ -392,6 +394,28 @@ bool IsCLodVisibilityTelemetryEnabledByEnvironment() {
 bool IsCLodVisibilityTelemetryDebugEnabled() {
 	return IsCLodVisibilityTelemetryEnabledByEnvironment() ||
 		SettingsManager::GetInstance().getSettingGetter<bool>(CLodVisibilityTelemetryDebugSettingName)();
+}
+
+uint32_t ReadUintEnvironmentValue(const char* name, uint32_t fallback)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return fallback;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    const bool valid = end != value && *end == '\0' && parsed <= UINT32_MAX;
+    free(value);
+    return valid ? static_cast<uint32_t>(parsed) : fallback;
+}
+
+bool IsCLodVirtualShadowTelemetryDebugEnabled()
+{
+    return ReadTruthyEnvironmentFlag("SARP_CLOD_VSM_TELEMETRY") ||
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodVirtualShadowTelemetryDebugSettingName)() ||
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)() != 0u ||
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)() != 0u;
 }
 
 bool DefaultEnableReShapeForBuild() {
@@ -1807,7 +1831,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
-    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::HardwareOnly);
+    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::Standard);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
@@ -1890,6 +1914,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
+    settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodStreamingCpuUploadBudgetSettingName, 500u);
     settingsManager.registerSetting<bool>(CLodStreamingEnableDirectStorageSettingName, true);
@@ -1902,7 +1927,13 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowLodBiasSettingName, CLodVirtualShadowDefaultDirectionalLodBias);
     settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName, true);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName, 1.0f);
-    settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName, false);
+    settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName, true);
+    settingsManager.registerSetting<uint32_t>(
+        CLodDirectionalVirtualShadowPageRenderBudgetSettingName,
+        ReadUintEnvironmentValue("SARP_CLOD_VSM_PAGE_BUDGET", 10u));
+    settingsManager.registerSetting<uint32_t>(
+        CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName,
+        ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 10u));
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
@@ -3311,6 +3342,252 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 
 }
 
+void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
+{
+    if (!currentRenderGraph || !IsCLodVirtualShadowTelemetryDebugEnabled()) {
+        m_loggedCLodVirtualShadowTelemetryEnabled = false;
+        return;
+    }
+
+    if (!m_loggedCLodVirtualShadowTelemetryEnabled) {
+        spdlog::info(
+            "CLOD VSM telemetry enabled (setting '{}', SARP_CLOD_VSM_TELEMETRY, or a finite page budget).",
+            CLodVirtualShadowTelemetryDebugSettingName);
+        m_loggedCLodVirtualShadowTelemetryEnabled = true;
+    }
+    SetCLodWorkGraphTelemetryEnabled(true);
+
+    constexpr uint64_t kCaptureIntervalFrames = 30u;
+    // Startup and resize can replace the aliased shadow resources after the
+    // ECS query has found them but before the readback pass is compiled.
+    // Wait for one full capture interval so the graph/resource generation is
+    // stable before arming the first capture.
+    if (m_totalFramesRendered < kCaptureIntervalFrames) {
+        return;
+    }
+    if (m_lastCLodVirtualShadowTelemetryRequestFrame != UINT64_MAX &&
+        m_totalFramesRendered - m_lastCLodVirtualShadowTelemetryRequestFrame < kCaptureIntervalFrames) {
+        return;
+    }
+    if (m_clodVirtualShadowTelemetryReadbackPending ||
+        m_clodVirtualShadowWorkTelemetryReadbackPending ||
+        m_clodVirtualShadowVisibleCounterReadbackPending) {
+        return;
+    }
+
+    auto* readbackService = currentRenderGraph->GetReadbackService();
+    if (!readbackService) {
+        return;
+    }
+
+    auto& world = RendererECSManager::GetInstance().GetWorld();
+    const auto shadowTag = world.component<CLodExtensionShadowTag>();
+    std::shared_ptr<Resource> statsResource;
+    std::shared_ptr<Resource> workTelemetryResource;
+    std::shared_ptr<Resource> visibleCounterResource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodVirtualShadowStatsTag>()
+        .with<CLodExtensionTypeTag>(shadowTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!statsResource) {
+                statsResource = component.resource.lock();
+            }
+        });
+    if (!statsResource) {
+        return;
+    }
+    world.query_builder<const Components::Resource>()
+        .with<CLodWorkGraphTelemetryBufferTag>()
+        .with<CLodExtensionTypeTag>(shadowTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!workTelemetryResource) {
+                workTelemetryResource = component.resource.lock();
+            }
+        });
+    world.query_builder<const Components::Resource>()
+        .with<VisibleClustersCounterTag>()
+        .with<CLodExtensionTypeTag>(shadowTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!visibleCounterResource) {
+                visibleCounterResource = component.resource.lock();
+            }
+        });
+
+    const uint64_t requestedFrame = m_totalFramesRendered;
+    m_lastCLodVirtualShadowTelemetryRequestFrame = requestedFrame;
+    m_clodVirtualShadowTelemetryReadbackPending = true;
+    readbackService->RequestReadbackCapture(
+        "CLodShadow::VirtualShadowClearDirtyBitsPass",
+        statsResource.get(),
+        RangeSpec{},
+        [this, requestedFrame](ReadbackCaptureResult&& result) {
+            m_clodVirtualShadowTelemetryReadbackPending = false;
+            if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
+                spdlog::error(
+                    "CLOD VSM telemetry frame={}: payload too small ({} < {}).",
+                    requestedFrame,
+                    result.data.size(),
+                    sizeof(CLodVirtualShadowStats));
+                return;
+            }
+
+            CLodVirtualShadowStats stats{};
+            std::memcpy(&stats, result.data.data(), sizeof(stats));
+            const bool normalBudgetValid =
+                stats.configuredPageRenderBudget == 0u ||
+                stats.normalAdmittedPageCount <= stats.configuredPageRenderBudget;
+            const bool upgradeBudgetValid =
+                stats.configuredUpgradePageRenderBudget == 0u ||
+                stats.upgradeAdmittedPageCount <= stats.configuredUpgradePageRenderBudget;
+            const bool renderedWithinAdmission =
+                stats.normalRenderedPageCount + stats.upgradeRenderedPageCount <= stats.admittedPageCount;
+            const uint32_t admittedNotRendered =
+                stats.admittedPageCount > stats.normalRenderedPageCount + stats.upgradeRenderedPageCount
+                ? stats.admittedPageCount - stats.normalRenderedPageCount - stats.upgradeRenderedPageCount
+                : 0u;
+
+            spdlog::info(
+                "CLOD VSM budget frame={}: totalBudget={} upgradeBudget={} eligible(normal={},upgrade={}) admitted(total={},normal={},upgrade={}) deferred(normal={},upgrade={}) rendered(normal={},upgrade={}) admittedNotRendered={} valid(total={},upgrade={},rendered={})",
+                requestedFrame,
+                stats.configuredPageRenderBudget,
+                stats.configuredUpgradePageRenderBudget,
+                stats.normalEligiblePageCount,
+                stats.upgradeEligiblePageCount,
+                stats.admittedPageCount,
+                stats.normalAdmittedPageCount,
+                stats.upgradeAdmittedPageCount,
+                stats.normalDeferredPageCount,
+                stats.upgradeDeferredPageCount,
+                stats.normalRenderedPageCount,
+                stats.upgradeRenderedPageCount,
+                admittedNotRendered,
+                normalBudgetValid,
+                upgradeBudgetValid,
+                renderedWithinAdmission);
+            spdlog::info(
+                "CLOD VSM exact recovery frame={}: fallbackCandidates={} candidateOverflow={} finalizedRaw={} rawOverflow={} finalizedDependencies={} dedupOverflow={} upgradeInputs(accepted={},rejected={},pageTouches={}) upgradePages(eligible={},admitted={},deferred={},rendered={}) cumulative(inputs={},touches={},admitted={},rendered={})",
+                requestedFrame,
+                stats.upgradeCandidateInputCount,
+                stats.upgradeCandidateAppendOverflowCount,
+                stats.upgradeRawPageCount,
+                stats.upgradeRawPageOverflowCount,
+                stats.readyUpgradePageCount,
+                stats.readyUpgradePageOverflowCount,
+                stats.upgradeInvalidationInputCount,
+                stats.upgradeInvalidationRejectedInputCount,
+                stats.upgradeInvalidationAllocatedPageTouchCount,
+                stats.upgradeEligiblePageCount,
+                stats.upgradeAdmittedPageCount,
+                stats.upgradeDeferredPageCount,
+                stats.upgradeRenderedPageCount,
+                stats.cumulativeUpgradeInvalidationInputCount,
+                stats.cumulativeUpgradeInvalidationAllocatedPageTouchCount,
+                stats.cumulativeUpgradePageAdmittedCount,
+                stats.cumulativeUpgradePageRenderedCount);
+            spdlog::info(
+                "CLOD VSM ownership frame={}: pageTableMismatches={} contentValidMismatches={} newlyAllocated={} physicalClears={} admitted={}",
+                requestedFrame,
+                stats.pageTableOwnerMismatchCount,
+                stats.contentValidOwnerMismatchCount,
+                stats.newlyAllocatedPageCount,
+                stats.physicalPageClearCount,
+                stats.admittedPageCount);
+
+            if (!normalBudgetValid || !upgradeBudgetValid || !renderedWithinAdmission) {
+                spdlog::error(
+                    "CLOD VSM budget invariant violation frame={}: totalValid={} upgradeValid={} renderedWithinAdmission={}.",
+                    requestedFrame,
+                    normalBudgetValid,
+                    upgradeBudgetValid,
+                    renderedWithinAdmission);
+            }
+        });
+
+    if (workTelemetryResource) {
+        m_clodVirtualShadowWorkTelemetryReadbackPending = true;
+        readbackService->RequestReadbackCapture(
+            "CLodShadow::RasterizeClustersPass1",
+            workTelemetryResource.get(),
+            RangeSpec{},
+            [this, requestedFrame](ReadbackCaptureResult&& result) {
+                m_clodVirtualShadowWorkTelemetryReadbackPending = false;
+                constexpr size_t telemetryBytes =
+                    sizeof(uint32_t) *
+                    static_cast<size_t>(CLodWorkGraphCounterCount);
+                if (result.data.size() < telemetryBytes) {
+                    spdlog::warn(
+                        "CLOD VSM work telemetry frame={}: payload too small.",
+                        requestedFrame);
+                    return;
+                }
+                CLodWorkGraphTelemetryCounters decoded{};
+                std::memcpy(
+                    decoded.counters.data(),
+                    result.data.data(),
+                    telemetryBytes);
+                const auto counter = [&](CLodWorkGraphCounterIndex index) {
+                    return decoded.counters[static_cast<size_t>(index)];
+                };
+                spdlog::info(
+                    "CLOD VSM work frame={}: object(threads={},inRange={},visible={},emitted={}) traverse(threads={},internal={},leaf={},culled={},errorRejected={},activeChildren={},emitted={}) cluster(inRange={},visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},clipmapMisses={}) sort(histInputs={},histContributors={},compactInputs={},compactEmitted={}) raster(groups={},inRange={},initFailed={},zeroTris={},outTris={},pixels={},scissorRejected={},clipmapRejected={},pageRejected={},vsmWrites={})",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullTraverseRecordsEmitted),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesThreads),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesInternalNodeRecords),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesActiveChildThreads),
+                    counter(CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyQueries),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyRegionHits),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCleanPages),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullShadowClipmapMisses),
+                    counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs),
+                    counter(CLodWorkGraphCounterIndex::RasterSortHistogramTriangleContributors),
+                    counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
+                    counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderInRange),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderZeroTriangleOutputs),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelScissorRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowClipmapRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+            });
+    }
+    if (visibleCounterResource) {
+        m_clodVirtualShadowVisibleCounterReadbackPending = true;
+        readbackService->RequestReadbackCapture(
+            "CLodShadow::RasterizeClustersPass1",
+            visibleCounterResource.get(),
+            RangeSpec{},
+            [this, requestedFrame](ReadbackCaptureResult&& result) {
+                m_clodVirtualShadowVisibleCounterReadbackPending = false;
+                if (result.data.size() < sizeof(uint32_t)) {
+                    return;
+                }
+                uint32_t count = 0u;
+                std::memcpy(&count, result.data.data(), sizeof(count));
+                spdlog::info(
+                    "CLOD VSM phase1 visible clusters frame={}: {}",
+                    requestedFrame,
+                    count);
+            });
+    }
+}
+
 void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     if (!currentRenderGraph) {
         return;
@@ -3878,6 +4155,7 @@ void Renderer::Render() {
     {
         ZoneScopedN("Renderer::Render::CLodVisibilityTelemetry");
         MaybeRequestCLodVisibilityTelemetry();
+        MaybeRequestCLodVirtualShadowTelemetry();
     }
     runCapturedStage("RenderGraphExecute", [&]() {
         ZoneScopedN("Renderer::Render::RenderGraphExecute");
@@ -4305,11 +4583,12 @@ void Renderer::RegisterPipelineExtensions() {
         currentRenderGraph->GetReadbackService()),
         "BuiltinReadbackCapture");
 
+    auto clodStreamingSystem = std::make_shared<CLodStreamingSystem>();
     br::pipeline::PipelineBuildContext extensionContext(
         *currentRenderGraph,
         m_pipelineRecipe.Bindings(),
         {},
-        [this](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions& optionsVariant) {
+        [this, clodStreamingSystem](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions& optionsVariant) {
             CLodExtensionType extensionType{};
             const char* extensionId = nullptr;
             switch (id) {
@@ -4346,7 +4625,8 @@ void Renderer::RegisterPipelineExtensions() {
                     CLodExtensionOptions{
                         .enableReyes = options.reyes == br::pipeline::ReyesMode::Enabled,
                         .enableVoxelRasterization = voxelRasterizationEnabled,
-                        .voxelRasterWorkCapacity = voxelRasterWorkCapacity }),
+                        .voxelRasterWorkCapacity = voxelRasterWorkCapacity,
+                        .streamingSystem = clodStreamingSystem }),
                 extensionId);
         });
     for (const auto& entry : m_pipelineRecipe.Techniques()) {

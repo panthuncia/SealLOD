@@ -14,11 +14,13 @@ VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
     std::shared_ptr<PixelBuffer> physicalPagesTexture,
     std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
     std::shared_ptr<PixelBuffer> pageTableTexture,
-    std::shared_ptr<Buffer> pageMetadataBuffer)
+    std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> statsBuffer)
     : m_physicalPagesTexture(std::move(physicalPagesTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
     , m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_statsBuffer(std::move(statsBuffer))
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
@@ -30,7 +32,11 @@ VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
 
 void VirtualShadowMapClearPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
-    builder->WithUnorderedAccess(m_physicalPagesTexture, m_dirtyPageFlagsBuffer, m_pageTableTexture);
+    builder->WithUnorderedAccess(
+        m_physicalPagesTexture,
+        m_dirtyPageFlagsBuffer,
+        m_pageTableTexture,
+        m_statsBuffer);
     builder->WithShaderResource(m_pageMetadataBuffer);
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -60,6 +66,8 @@ PassReturn VirtualShadowMapClearPagesPass::Execute(PassExecutionContext& executi
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PHYSICAL_PAGE_COUNT] = virtualShadowConfig.maxPhysicalPages;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PHYSICAL_ATLAS_PAGES_WIDE] = virtualShadowConfig.physicalAtlasPagesWide;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_STATS_DESCRIPTOR_INDEX] =
+        m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

@@ -295,6 +295,8 @@ namespace {
         std::shared_ptr<Buffer> usedGroupsBufferStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
+        std::shared_ptr<Buffer> virtualShadowDependencyCountStaging;
+        std::shared_ptr<Buffer> virtualShadowDependenciesStaging;
         uint32_t selectedSlot = UINT32_MAX;
     };
 
@@ -333,6 +335,10 @@ namespace {
                     nextSnapshot.usedGroupsBufferStaging ? nextSnapshot.usedGroupsBufferStaging->GetGlobalResourceID() : 0ull,
                     nextSnapshot.sourceGroupMismatchCounterStaging ? nextSnapshot.sourceGroupMismatchCounterStaging->GetGlobalResourceID() : 0ull,
                     nextSnapshot.sourceGroupMismatchDetailsStaging ? nextSnapshot.sourceGroupMismatchDetailsStaging->GetGlobalResourceID() : 0ull,
+                    nextSnapshot.inputs.virtualShadowDependencyCountSource ? nextSnapshot.inputs.virtualShadowDependencyCountSource->GetGlobalResourceID() : 0ull,
+                    nextSnapshot.inputs.virtualShadowDependenciesSource ? nextSnapshot.inputs.virtualShadowDependenciesSource->GetGlobalResourceID() : 0ull,
+                    nextSnapshot.virtualShadowDependencyCountStaging ? nextSnapshot.virtualShadowDependencyCountStaging->GetGlobalResourceID() : 0ull,
+                    nextSnapshot.virtualShadowDependenciesStaging ? nextSnapshot.virtualShadowDependenciesStaging->GetGlobalResourceID() : 0ull,
                     nextSnapshot.selectedSlot,
                 };
             }
@@ -358,6 +364,12 @@ namespace {
                 if (m_snapshot.inputs.sourceGroupMismatchDetailsSource) {
                     builder->WithCopySource(m_snapshot.inputs.sourceGroupMismatchDetailsSource);
                 }
+                if (m_snapshot.inputs.virtualShadowDependencyCountSource) {
+                    builder->WithCopySource(m_snapshot.inputs.virtualShadowDependencyCountSource);
+                }
+                if (m_snapshot.inputs.virtualShadowDependenciesSource) {
+                    builder->WithCopySource(m_snapshot.inputs.virtualShadowDependenciesSource);
+                }
                 builder->WithCopyDest(
                     m_snapshot.counterStaging,
                     m_snapshot.requestsStaging,
@@ -368,6 +380,12 @@ namespace {
                 }
                 if (m_snapshot.sourceGroupMismatchDetailsStaging) {
                     builder->WithCopyDest(m_snapshot.sourceGroupMismatchDetailsStaging);
+                }
+                if (m_snapshot.virtualShadowDependencyCountStaging) {
+                    builder->WithCopyDest(m_snapshot.virtualShadowDependencyCountStaging);
+                }
+                if (m_snapshot.virtualShadowDependenciesStaging) {
+                    builder->WithCopyDest(m_snapshot.virtualShadowDependenciesStaging);
                 }
             }
             builder->PreferQueue(QueueKind::Graphics);
@@ -386,6 +404,8 @@ namespace {
             CopyWholeBuffer(context, m_snapshot.usedGroupsBufferStaging, m_snapshot.inputs.usedGroupsBufferSource);
             CopyWholeBuffer(context, m_snapshot.sourceGroupMismatchCounterStaging, m_snapshot.inputs.sourceGroupMismatchCounterSource);
             CopyWholeBuffer(context, m_snapshot.sourceGroupMismatchDetailsStaging, m_snapshot.inputs.sourceGroupMismatchDetailsSource);
+            CopyWholeBuffer(context, m_snapshot.virtualShadowDependencyCountStaging, m_snapshot.inputs.virtualShadowDependencyCountSource);
+            CopyWholeBuffer(context, m_snapshot.virtualShadowDependenciesStaging, m_snapshot.inputs.virtualShadowDependenciesSource);
         }
 
         PassReturn Execute(PassExecutionContext&) override {
@@ -883,6 +903,10 @@ CLodStreamingSystem::CLodStreamingSystem() {
     const uint64_t requestsStagingBytes = static_cast<uint64_t>(CLodStreamingRequestCapacity) * sizeof(CLodStreamingRequest);
     const uint64_t usedGroupsCounterStagingBytes = sizeof(uint32_t);
     const uint64_t usedGroupsBufferStagingBytes = static_cast<uint64_t>(CLodUsedGroupsCapacity) * sizeof(uint32_t);
+    const uint64_t virtualShadowDependencyCountStagingBytes = sizeof(uint32_t);
+    const uint64_t virtualShadowDependenciesStagingBytes =
+        static_cast<uint64_t>(CLodVirtualShadowPredictedPageListCapacity()) *
+        sizeof(CLodVirtualShadowPredictedPage);
     m_readbackStagingSlots.resize(m_streamingReadbackRingSize);
     for (uint32_t i = 0; i < m_streamingReadbackRingSize; ++i) {
         auto& slot = m_readbackStagingSlots[i];
@@ -907,6 +931,16 @@ CLodStreamingSystem::CLodStreamingSystem() {
         slot.sourceGroupMismatchDetailsStaging = Buffer::CreateShared(rhi::HeapType::Readback, sourceGroupMismatchDetailsStagingBytes);
         slot.sourceGroupMismatchDetailsStaging->SetName(("CLodReadbackSourceGroupMismatchDetails_" + std::to_string(i)).c_str());
         tagBufferUsage(slot.sourceGroupMismatchDetailsStaging, "Cluster LOD diagnostics readback");
+        slot.virtualShadowDependencyCountStaging =
+            Buffer::CreateShared(rhi::HeapType::Readback, virtualShadowDependencyCountStagingBytes);
+        slot.virtualShadowDependencyCountStaging->SetName(
+            ("CLodReadbackVsmFallbackDependencyCount_" + std::to_string(i)).c_str());
+        tagBufferUsage(slot.virtualShadowDependencyCountStaging, "Cluster LOD virtual shadow dependency readback");
+        slot.virtualShadowDependenciesStaging =
+            Buffer::CreateShared(rhi::HeapType::Readback, virtualShadowDependenciesStagingBytes);
+        slot.virtualShadowDependenciesStaging->SetName(
+            ("CLodReadbackVsmFallbackDependencies_" + std::to_string(i)).c_str());
+        tagBufferUsage(slot.virtualShadowDependenciesStaging, "Cluster LOD virtual shadow dependency readback");
     }
 
     StartStreamingWorker();
@@ -957,6 +991,7 @@ void CLodStreamingSystem::Shutdown() {
 void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
     (void)reg;
     StopStreamingWorker();
+    ClearVirtualShadowUpgradeState();
 
     // The registry and the alias placements are graph-local, but CLod residency
     // is not. Keep the CPU domain, page ownership, resident groups, LRU and
@@ -1017,6 +1052,7 @@ void CLodStreamingSystem::OnRegistryReset(ResourceRegistry* reg) {
 }
 
 void CLodStreamingSystem::ResetStreamingStateForShutdown() {
+    ClearVirtualShadowUpgradeState();
     StopStreamingWorker();
 
     auto releaseBufferBacking = [](const std::shared_ptr<Buffer>& buffer) {
@@ -1635,12 +1671,20 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
             snapshot.inputs.usedGroupsBufferSource = m_usedGroupsBuffer;
             snapshot.inputs.sourceGroupMismatchCounterSource = m_sourceGroupMismatchCounter;
             snapshot.inputs.sourceGroupMismatchDetailsSource = m_sourceGroupMismatchDetails;
+            snapshot.inputs.virtualShadowDependencyCountSource =
+                m_virtualShadowFallbackDependencyCountBuffer;
+            snapshot.inputs.virtualShadowDependenciesSource =
+                m_virtualShadowFallbackDependenciesBuffer;
             snapshot.counterStaging = slot.counterStaging;
             snapshot.requestsStaging = slot.requestsStaging;
             snapshot.usedGroupsCounterStaging = slot.usedGroupsCounterStaging;
             snapshot.usedGroupsBufferStaging = slot.usedGroupsBufferStaging;
             snapshot.sourceGroupMismatchCounterStaging = slot.sourceGroupMismatchCounterStaging;
             snapshot.sourceGroupMismatchDetailsStaging = slot.sourceGroupMismatchDetailsStaging;
+            snapshot.virtualShadowDependencyCountStaging =
+                slot.virtualShadowDependencyCountStaging;
+            snapshot.virtualShadowDependenciesStaging =
+                slot.virtualShadowDependenciesStaging;
             snapshot.selectedSlot = selectedSlot;
             return true;
         },
@@ -2076,6 +2120,196 @@ bool CLodStreamingSystem::IsGroupResident(uint32_t groupIndex) const {
     return (m_streamingNonResidentBitsCpu[wordAddress] & BitMask(groupIndex)) == 0u;
 }
 
+void CLodStreamingSystem::RecordVirtualShadowUpgradeDependency(
+    const CLodVirtualShadowPredictedPage& request) {
+    if (!SettingsManager::GetInstance()
+             .getSettingGetter<bool>(
+                 CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
+        return;
+    }
+    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+    uint32_t groupIndex = request.sourceGroupGlobalIndex;
+    for (uint32_t hop = 0u; hop < 64u; ++hop) {
+        if (groupIndex >= m_virtualShadowResidencyGenerationByGroup.size()) {
+            m_virtualShadowResidencyGenerationByGroup.resize(
+                static_cast<size_t>(groupIndex) + 1u,
+                1u);
+        }
+        if (IsGroupResident(groupIndex)) {
+            // Readback trails the authoritative streaming promotion by several
+            // frames.  If the originally missing group is already resident when
+            // its finalized fallback-page dependency reaches the CPU, the
+            // promotion callback has necessarily already run.  Queue the exact
+            // token now instead of silently losing the recovery event.
+            if (hop == 0u) {
+                ++m_virtualShadowUpgradeStats.dependenciesObserved;
+                const bool alreadyQueued = std::ranges::any_of(
+                    m_virtualShadowUpgradeEvents,
+                    [&](const QueuedVirtualShadowUpgrade& queued) {
+                        return queued.input.page.physicalPageIndex ==
+                                request.physicalPageIndex &&
+                            queued.input.page.allocationGeneration ==
+                                request.allocationGeneration &&
+                            queued.input.page.contentGeneration ==
+                                request.contentGeneration;
+                    });
+                if (alreadyQueued) {
+                    ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+                }
+                else {
+                    QueuedVirtualShadowUpgrade queued{};
+                    queued.input.page = CLodVirtualShadowPageToken{
+                        request.physicalPageIndex,
+                        request.allocationGeneration,
+                        request.contentGeneration,
+                        request.clipmapIndex,
+                        request.virtualAddress };
+                    queued.input.sourceGroupGlobalIndex = groupIndex;
+                    queued.input.residencyGeneration =
+                        m_virtualShadowResidencyGenerationByGroup[groupIndex];
+                    queued.queuedTick = m_streamingDiagnosticTick;
+                    m_virtualShadowUpgradeEvents.push_back(queued);
+                    ++m_virtualShadowUpgradeStats.lateResidentDependencies;
+                    ++m_virtualShadowUpgradeStats.eventsQueued;
+                }
+                break;
+            }
+            uint32_t parentGroup = 0u;
+            if (!TryGetCachedParentGroup(groupIndex, parentGroup) ||
+                parentGroup == groupIndex) {
+                break;
+            }
+            groupIndex = parentGroup;
+            continue;
+        }
+        const VirtualShadowPageKey dependencyKey{
+            request.physicalPageIndex,
+            request.allocationGeneration,
+            request.contentGeneration
+        };
+        auto& dependencies = m_virtualShadowDependencies[groupIndex];
+        ++m_virtualShadowUpgradeStats.dependenciesObserved;
+        const auto [it, inserted] = dependencies.try_emplace(
+            dependencyKey,
+            VirtualShadowDependency{
+                CLodVirtualShadowPageToken{
+                    request.physicalPageIndex,
+                    request.allocationGeneration,
+                    request.contentGeneration,
+                    request.clipmapIndex,
+                    request.virtualAddress },
+                m_virtualShadowResidencyGenerationByGroup[groupIndex] });
+        if (!inserted) {
+            ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+        }
+
+        uint32_t parentGroup = 0u;
+        if (!TryGetCachedParentGroup(groupIndex, parentGroup) || parentGroup == groupIndex) {
+            break;
+        }
+        groupIndex = parentGroup;
+    }
+}
+
+void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex) {
+    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+    auto dependencyIt = m_virtualShadowDependencies.find(groupIndex);
+    if (dependencyIt == m_virtualShadowDependencies.end() || dependencyIt->second.empty()) {
+        ++m_virtualShadowUpgradeStats.promotionsWithoutDependencies;
+        return;
+    }
+
+    ++m_virtualShadowUpgradeStats.promotionsWithDependencies;
+    const uint32_t generation =
+        groupIndex < m_virtualShadowResidencyGenerationByGroup.size()
+        ? m_virtualShadowResidencyGenerationByGroup[groupIndex]
+        : 1u;
+    for (const auto& [key, dependency] : dependencyIt->second) {
+        (void)key;
+        if (dependency.residencyGeneration != generation) {
+            ++m_virtualShadowUpgradeStats.staleEvents;
+            continue;
+        }
+        const bool alreadyQueued = std::ranges::any_of(
+            m_virtualShadowUpgradeEvents,
+            [&](const QueuedVirtualShadowUpgrade& queued) {
+                return queued.input.page.physicalPageIndex ==
+                        dependency.page.physicalPageIndex &&
+                    queued.input.page.allocationGeneration ==
+                        dependency.page.allocationGeneration &&
+                    queued.input.page.contentGeneration ==
+                        dependency.page.contentGeneration;
+            });
+        if (alreadyQueued) {
+            ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+            continue;
+        }
+        QueuedVirtualShadowUpgrade queued{};
+        queued.input.page = dependency.page;
+        queued.input.sourceGroupGlobalIndex = groupIndex;
+        queued.input.residencyGeneration = generation;
+        queued.queuedTick = m_streamingDiagnosticTick;
+        m_virtualShadowUpgradeEvents.push_back(queued);
+        ++m_virtualShadowUpgradeStats.eventsQueued;
+    }
+    m_virtualShadowDependencies.erase(dependencyIt);
+}
+
+std::vector<CLodVirtualShadowUpgradeInvalidationInput>
+CLodStreamingSystem::DrainVirtualShadowUpgradeEvents(uint32_t maxEvents) {
+    std::vector<CLodVirtualShadowUpgradeInvalidationInput> result;
+    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+    const uint32_t count = std::min<uint32_t>(
+        maxEvents,
+        static_cast<uint32_t>(m_virtualShadowUpgradeEvents.size()));
+    result.reserve(count);
+    for (uint32_t index = 0u; index < count; ++index) {
+        result.push_back(m_virtualShadowUpgradeEvents.front().input);
+        m_virtualShadowUpgradeEvents.pop_front();
+    }
+    m_virtualShadowUpgradeStats.eventsUploaded += count;
+    return result;
+}
+
+CLodVirtualShadowUpgradeQueueStats CLodStreamingSystem::GetVirtualShadowUpgradeQueueStats() const {
+    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+    auto stats = m_virtualShadowUpgradeStats;
+    stats.activeDependencyGroups = static_cast<uint32_t>(m_virtualShadowDependencies.size());
+    uint64_t dependencyPairCount = 0u;
+    for (const auto& [groupIndex, dependencies] : m_virtualShadowDependencies) {
+        (void)groupIndex;
+        dependencyPairCount += dependencies.size();
+    }
+    stats.activeDependencyPairs = static_cast<uint32_t>(
+        std::min<uint64_t>(dependencyPairCount, std::numeric_limits<uint32_t>::max()));
+    stats.queuedEvents = static_cast<uint32_t>(
+        std::min<size_t>(m_virtualShadowUpgradeEvents.size(), std::numeric_limits<uint32_t>::max()));
+    stats.oldestQueuedTick = m_virtualShadowUpgradeEvents.empty()
+        ? 0u
+        : m_virtualShadowUpgradeEvents.front().queuedTick;
+    return stats;
+}
+
+void CLodStreamingSystem::SetVirtualShadowFallbackFeedbackResources(
+    std::shared_ptr<Buffer> dependencies,
+    std::shared_ptr<Buffer> dependencyCount) {
+    m_virtualShadowFallbackDependenciesBuffer = std::move(dependencies);
+    m_virtualShadowFallbackDependencyCountBuffer = std::move(dependencyCount);
+}
+
+void CLodStreamingSystem::ClearVirtualShadowUpgradeState() {
+    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+    uint64_t cleared = m_virtualShadowUpgradeEvents.size();
+    for (const auto& [groupIndex, dependencies] : m_virtualShadowDependencies) {
+        (void)groupIndex;
+        cleared += dependencies.size();
+    }
+    m_virtualShadowUpgradeStats.clearedDependencies += cleared;
+    m_virtualShadowDependencies.clear();
+    m_virtualShadowUpgradeEvents.clear();
+    m_virtualShadowResidencyGenerationByGroup.clear();
+}
+
 bool CLodStreamingSystem::SetGroupResidentBit(uint32_t groupIndex, bool resident) {
     const uint32_t wordAddress = BitWordAddress(groupIndex);
     if (wordAddress >= m_streamingNonResidentBitsCpu.size()) {
@@ -2096,6 +2330,25 @@ bool CLodStreamingSystem::SetGroupResidentBit(uint32_t groupIndex, bool resident
         m_streamingNonResidentBitsCpu[wordAddress] |= bitMask;
         if (m_streamingResidentGroupsCount > 0u) {
             --m_streamingResidentGroupsCount;
+        }
+        {
+            std::scoped_lock lock(m_virtualShadowUpgradeMutex);
+            if (groupIndex >= m_virtualShadowResidencyGenerationByGroup.size()) {
+                m_virtualShadowResidencyGenerationByGroup.resize(
+                    static_cast<size_t>(groupIndex) + 1u,
+                    1u);
+            }
+            ++m_virtualShadowResidencyGenerationByGroup[groupIndex];
+            if (m_virtualShadowResidencyGenerationByGroup[groupIndex] == 0u) {
+                m_virtualShadowResidencyGenerationByGroup[groupIndex] = 1u;
+            }
+            if (auto dependencyIt =
+                    m_virtualShadowDependencies.find(groupIndex);
+                dependencyIt != m_virtualShadowDependencies.end()) {
+                m_virtualShadowUpgradeStats.clearedDependencies +=
+                    dependencyIt->second.size();
+                m_virtualShadowDependencies.erase(dependencyIt);
+            }
         }
     }
     MarkStreamingNonResidentBitsDirtyWord(wordAddress);
@@ -4066,7 +4319,7 @@ bool CLodStreamingSystem::ValidateRenderableCompletion(
     return true;
 }
 
-void CLodStreamingSystem::CommitPendingResidencyPromotions() {
+void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshManager) {
     ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions");
 
     if (m_pendingResidencyCommitGroups.empty()) {
@@ -4140,7 +4393,9 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions() {
                 continue;
             }
 
-            SetGroupResidentBit(groupIndex, true);
+            if (SetGroupResidentBit(groupIndex, true)) {
+                QueueVirtualShadowUpgradeForPromotion(groupIndex);
+            }
             m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
             RecordStreamingPromoted(groupIndex);
             ClearStreamingRequestInProgress(groupIndex);
@@ -4724,6 +4979,7 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
     for (const auto& event : m_streamingDomainEventScratch) {
         if (event.kind == MeshManager::CLodStreamingDomainEventKind::FullReset) {
             spdlog::warn("CLod streaming: processing full domain reset fallback event");
+            ClearVirtualShadowUpgradeState();
             RebuildStreamingDomainFromSnapshot(meshManager);
             continue;
         }
@@ -5776,6 +6032,42 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     }
                     decodedAnyCompletedSlot = true;
 
+                    uint32_t virtualShadowDependencyCount = 0u;
+                    if (slot.virtualShadowDependencyCountStaging) {
+                        auto apiResource =
+                            slot.virtualShadowDependencyCountStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            std::memcpy(
+                                &virtualShadowDependencyCount,
+                                mapped,
+                                sizeof(uint32_t));
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+                    virtualShadowDependencyCount = std::min<uint32_t>(
+                        virtualShadowDependencyCount,
+                        CLodVirtualShadowPredictedPageListCapacity());
+                    if (virtualShadowDependencyCount > 0u &&
+                        slot.virtualShadowDependenciesStaging) {
+                        auto apiResource =
+                            slot.virtualShadowDependenciesStaging->GetAPIResource();
+                        void* mapped = nullptr;
+                        apiResource.Map(&mapped);
+                        if (mapped) {
+                            const auto* dependencies =
+                                static_cast<const CLodVirtualShadowPredictedPage*>(mapped);
+                            for (uint32_t dependencyIndex = 0u;
+                                dependencyIndex < virtualShadowDependencyCount;
+                                ++dependencyIndex) {
+                                RecordVirtualShadowUpgradeDependency(
+                                    dependencies[dependencyIndex]);
+                            }
+                            apiResource.Unmap(0, 0);
+                        }
+                    }
+
                     // Map and read the load counter
                     uint32_t requestCount = 0;
                     {
@@ -6042,7 +6334,7 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::CommitPendingResidencyPromotions");
-            CommitPendingResidencyPromotions();
+            CommitPendingResidencyPromotions(meshManager);
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ProcessDiskStreamingIO");

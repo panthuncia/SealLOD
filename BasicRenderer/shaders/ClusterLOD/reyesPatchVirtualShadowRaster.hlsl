@@ -45,8 +45,7 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if ((pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) !=
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask))
+    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
     {
         return;
     }

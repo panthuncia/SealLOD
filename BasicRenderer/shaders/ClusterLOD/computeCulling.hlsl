@@ -181,6 +181,20 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    bool viewHasDirtyPages = true;
+    if (WaveIsFirstLane())
+    {
+        viewHasDirtyPages =
+            CLodVirtualShadowViewHasDirtyPages(CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX);
+    }
+    viewHasDirtyPages = WaveReadLaneFirst(viewHasDirtyPages);
+    if (!viewHasDirtyPages)
+    {
+        return;
+    }
+#endif
+
     StructuredBuffer<uint2> activeDrawSetIndicesBuffer =
         ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX];
     StructuredBuffer<uint> drawRecordVisibilityGenerations =
@@ -252,6 +266,22 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     if (culled) {
         return;
     }
+
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // Gate traversal at object granularity.  The coarse draw bounds are
+    // conservative, so a miss here guarantees that no descendant can touch
+    // an admitted dirty page.
+    const float3 worldCenter = mul(float4(objectSpaceCenter, 1.0f), objectModelMatrix).xyz;
+    if (CLodWorkGraphShadowDirtyPageCullingEnabled() &&
+        !CLodVirtualShadowBoundsTouchDirtyPages(
+            worldCenter,
+            worldRadius,
+            CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX))
+    {
+        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
+        return;
+    }
+#endif
 
     const uint rootNodeId = CLodResolveTraversalRootNode(clodMeshMetadata);
     bool occlusionCulled = false;

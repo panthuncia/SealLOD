@@ -127,9 +127,7 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
     std::shared_ptr<Buffer> compactShadowCameraBuffer,
     std::shared_ptr<Buffer> statsBuffer,
     std::shared_ptr<Buffer> runtimeStateBuffer,
-    std::shared_ptr<Buffer> predictiveCandidateCountBuffer,
-    std::shared_ptr<Buffer> predictiveRawPageCountBuffer,
-    std::shared_ptr<Buffer> predictedPageCountBuffer,
+    std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
     bool forceResetResources)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
@@ -141,9 +139,7 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
     , m_compactShadowCameraBuffer(std::move(compactShadowCameraBuffer))
     , m_statsBuffer(std::move(statsBuffer))
     , m_runtimeStateBuffer(std::move(runtimeStateBuffer))
-    , m_predictiveCandidateCountBuffer(std::move(predictiveCandidateCountBuffer))
-    , m_predictiveRawPageCountBuffer(std::move(predictiveRawPageCountBuffer))
-    , m_predictedPageCountBuffer(std::move(predictedPageCountBuffer))
+    , m_fallbackCandidateCountBuffer(std::move(fallbackCandidateCountBuffer))
     , m_forceResetResources(forceResetResources)
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -167,9 +163,7 @@ void VirtualShadowMapSetupPass::DeclareResourceUsages(ComputePassBuilder* builde
         m_compactShadowCameraBuffer,
         m_statsBuffer,
         m_runtimeStateBuffer,
-        m_predictiveCandidateCountBuffer,
-        m_predictiveRawPageCountBuffer,
-        m_predictedPageCountBuffer);
+        m_fallbackCandidateCountBuffer);
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 }
@@ -291,6 +285,10 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 clipmapInfo.pageTableResolution = virtualShadowPageTableResolution;
                 clipmapInfo.physicalAtlasPagesWide = virtualShadowPhysicalAtlasPagesWide;
                 clipmapInfo.physicalAtlasPagesHigh = virtualShadowPhysicalAtlasPagesHigh;
+                clipmapInfo.unwrappedPageOffsetX =
+                    static_cast<int32_t>(pageOffsetX);
+                clipmapInfo.unwrappedPageOffsetY =
+                    static_cast<int32_t>(pageOffsetY);
 
                 auto& markData = markClipmapData[clipmapIndex];
                 markData.texelWorldSize = clipmapInfo.texelWorldSize;
@@ -303,6 +301,10 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 markData.pageTableResolution = clipmapInfo.pageTableResolution;
                 markData.physicalAtlasPagesWide = clipmapInfo.physicalAtlasPagesWide;
                 markData.physicalAtlasPagesHigh = clipmapInfo.physicalAtlasPagesHigh;
+                markData.unwrappedPageOffsetX =
+                    clipmapInfo.unwrappedPageOffsetX;
+                markData.unwrappedPageOffsetY =
+                    clipmapInfo.unwrappedPageOffsetY;
                 const DirectX::XMVECTOR directionalPageViewRow = view->cameraInfo.view.r[3];
                 markData.directionalPageViewRow = DirectX::XMFLOAT4(
                     DirectX::XMVectorGetX(directionalPageViewRow),
@@ -359,6 +361,8 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
         markData.pageTableResolution = info.pageTableResolution;
         markData.physicalAtlasPagesWide = info.physicalAtlasPagesWide;
         markData.physicalAtlasPagesHigh = info.physicalAtlasPagesHigh;
+        markData.unwrappedPageOffsetX = info.unwrappedPageOffsetX;
+        markData.unwrappedPageOffsetY = info.unwrappedPageOffsetY;
 
         if (!m_resetResources && !ClipmapStructureEquals(info, g_previousClipmapInfos[clipmapIndex])) {
             m_resetReasonStructureMismatch = true;
@@ -452,14 +456,13 @@ PassReturn VirtualShadowMapSetupPass::Execute(PassExecutionContext& executionCon
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_clipmapInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PACKED_FLAGS] = packedFlags;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PREDICTIVE_CANDIDATE_COUNT_DESCRIPTOR_INDEX] = m_predictiveCandidateCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PREDICTIVE_RAW_PAGE_COUNT_DESCRIPTOR_INDEX] = m_predictiveRawPageCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PREDICTED_PAGE_COUNT_DESCRIPTOR_INDEX] = m_predictedPageCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_MARK_CLIPMAP_DATA_DESCRIPTOR_INDEX] = m_markClipmapDataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_RUNTIME_STATE_DESCRIPTOR_INDEX] = m_runtimeStateBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_SCALE_AS_UINT] =
         std::bit_cast<uint32_t>(
             SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName)());
+    rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] =
+        m_fallbackCandidateCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

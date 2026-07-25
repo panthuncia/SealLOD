@@ -2091,7 +2091,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_clodDirectionalVirtualShadowAutoLodBiasScale = std::max(m_clodDirectionalVirtualShadowAutoLodBiasScale, 0.0f);
             setCLodDirectionalVirtualShadowAutoLodBiasScale(m_clodDirectionalVirtualShadowAutoLodBiasScale);
         }
-        if (ImGui::Checkbox("Predictive VSM LOD Invalidation", &m_clodDirectionalVirtualShadowPredictiveLodInvalidation)) {
+        if (ImGui::Checkbox("Invalidate shadows on streaming upgrade", &m_clodDirectionalVirtualShadowPredictiveLodInvalidation)) {
             setCLodDirectionalVirtualShadowPredictiveLodInvalidation(m_clodDirectionalVirtualShadowPredictiveLodInvalidation);
         }
         if (ImGui::SliderFloat("Directional VSM Source Angle", &m_clodDirectionalVirtualShadowSourceAngleDegrees, 0.0f, 10.0f, "%.2f deg")) {
@@ -3848,7 +3848,7 @@ inline void Menu::DrawCLodTelemetryWindow() {
         const uint64_t captureId = m_shadowVirtualShadowTelemetry.captureId;
 
         readbackService->RequestReadbackCapture(
-            "CLodShadow::VirtualShadowGatherStatsPass",
+            "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowVirtualShadowStatsResource,
             RangeSpec{},
             [this, captureId](ReadbackCaptureResult&& result) {
@@ -4778,6 +4778,37 @@ inline void Menu::DrawCLodTelemetryWindow() {
             stats.reusablePhysicalPageCount,
             allocatablePhysicalPages,
             unbackedAllocationRequests);
+        ImGui::Text(
+            "Page budgets: total=%s%u upgrade=%s%u | admittedTotal=%u | normal eligible=%u admitted=%u deferred=%u | upgrade eligible=%u admitted=%u deferred=%u",
+            stats.configuredPageRenderBudget == 0u ? "unlimited/" : "",
+            stats.configuredPageRenderBudget,
+            stats.configuredUpgradePageRenderBudget == 0u ? "unlimited/" : "",
+            stats.configuredUpgradePageRenderBudget,
+            stats.admittedPageCount,
+            stats.normalEligiblePageCount,
+            stats.normalAdmittedPageCount,
+            stats.normalDeferredPageCount,
+            stats.upgradeEligiblePageCount,
+            stats.upgradeAdmittedPageCount,
+            stats.upgradeDeferredPageCount);
+        ImGui::Text(
+            "Streaming upgrades: pendingDependencies=%u invalidDependencies=%u",
+            stats.pendingUpgradeDependencyCount,
+            stats.invalidUpgradeDependencyCount);
+        ImGui::Text(
+            "Rendered pages: normal=%u upgrade=%u | candidates input=%u retainedNonResident=%u becameResident=%u invalid=%u",
+            stats.normalRenderedPageCount,
+            stats.upgradeRenderedPageCount,
+            stats.upgradeCandidateInputCount,
+            stats.upgradeCandidateRetainedCount,
+            stats.upgradeCandidateResidentCount,
+            stats.upgradeCandidateInvalidCount);
+        ImGui::Text(
+            "Upgrade queues: raw=%u rawOverflow=%u ready=%u readyOverflow=%u",
+            stats.upgradeRawPageCount,
+            stats.upgradeRawPageOverflowCount,
+            stats.readyUpgradePageCount,
+            stats.readyUpgradePageOverflowCount);
         ImGui::Text(
             "Controller: requestAllocation=%.1f%% targetBias=%.2f smoothedBias=%.2f recoveryStableFrames=%u",
             stats.currentAllocationPercentage * 100.0f,

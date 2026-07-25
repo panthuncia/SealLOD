@@ -477,6 +477,42 @@ float2 DecodeCompressedUV(
         uvDesc.uvMinV + float(encodedV) * uvDesc.uvScaleV);
 }
 
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+float4 CLodVirtualShadowBuildBlockClipDistances(
+    float4 clipPosition,
+    uint shadowVsmPayload)
+{
+    if (!CLodVisibleClusterHasVsmBlockDataFromPayload(shadowVsmPayload))
+    {
+        return clipPosition.w.xxxx;
+    }
+
+    const uint2 blockOrigin =
+        CLodVisibleClusterVsmBlockOriginPageCoordFromPayload(shadowVsmPayload);
+    const uint packedActiveRect =
+        CLodVisibleClusterVsmActiveRectFromPayload(shadowVsmPayload);
+    const uint2 rectMin =
+        CLodVirtualShadowUnpackBlockActiveRectMin(packedActiveRect);
+    const uint2 rectMax =
+        CLodVirtualShadowUnpackBlockActiveRectMax(packedActiveRect);
+    const float pageTableResolution =
+        max((float)CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION, 1.0f);
+    const float2 uvMin =
+        float2(blockOrigin + rectMin) / pageTableResolution;
+    const float2 uvMax =
+        float2(blockOrigin + rectMax + 1u) / pageTableResolution;
+    const float ndcMinX = uvMin.x * 2.0f - 1.0f;
+    const float ndcMaxX = uvMax.x * 2.0f - 1.0f;
+    const float ndcMaxY = 1.0f - uvMin.y * 2.0f;
+    const float ndcMinY = 1.0f - uvMax.y * 2.0f;
+    return float4(
+        clipPosition.x - ndcMinX * clipPosition.w,
+        ndcMaxX * clipPosition.w - clipPosition.x,
+        ndcMaxY * clipPosition.w - clipPosition.y,
+        clipPosition.y - ndcMinY * clipPosition.w);
+}
+#endif
+
 VisBufferPSInput BuildVisBufferVertexAttributesForView(
     Vertex vertex,
     uint3 vGroupID,
@@ -498,6 +534,10 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     result.position = mul(worldPosition, viewCamera.viewProjection);
     result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
     result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    result.virtualShadowClipDistances =
+        CLodVirtualShadowBuildBlockClipDistances(result.position, shadowClipmapIndex);
+#endif
     result.linearDepth = -viewPosition.z;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     StructuredBuffer<SingleMatrix> normalMatrixBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::NormalMatrixBuffer)];
@@ -788,6 +828,10 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
     result.position = mul(worldPosition, viewCamera.viewProjection);
     result.position.x = result.position.x * rasterInfo.viewportScaleX + result.position.w * (rasterInfo.viewportScaleX - 1.0f);
     result.position.y = result.position.y * rasterInfo.viewportScaleY + result.position.w * (1.0f - rasterInfo.viewportScaleY);
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    result.virtualShadowClipDistances =
+        CLodVirtualShadowBuildBlockClipDistances(result.position, shadowClipmapIndex);
+#endif
     result.linearDepth = -viewPosition.z;
 #if defined(PSO_ALPHA_TEST)
     result.texcoord = DecodeCompressedUV(meshletLocalVertex, 0u, setup);
@@ -859,6 +903,8 @@ void EmitCachedMeshletVisBufferVerticesForViewCLod(
     {
         VisBufferPSInput vertex = (VisBufferPSInput)0;
         vertex.position = gs_clodVsmVertexPosition[i];
+        vertex.virtualShadowClipDistances =
+            CLodVirtualShadowBuildBlockClipDistances(vertex.position, shadowClipmapIndex);
         vertex.linearDepth = gs_clodVsmLinearDepth[i];
 #if defined(PSO_ALPHA_TEST)
         vertex.texcoord = gs_clodVsmTexcoord[i];

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -29,6 +30,22 @@ struct CLodActiveGroupsSnapshot {
     uint64_t generation = 0;
 };
 
+struct CLodVirtualShadowUpgradeQueueStats {
+    uint64_t dependenciesObserved = 0u;
+    uint64_t dependenciesDeduplicated = 0u;
+    uint64_t lateResidentDependencies = 0u;
+    uint64_t promotionsWithDependencies = 0u;
+    uint64_t promotionsWithoutDependencies = 0u;
+    uint64_t eventsQueued = 0u;
+    uint64_t eventsUploaded = 0u;
+    uint64_t staleEvents = 0u;
+    uint64_t clearedDependencies = 0u;
+    uint32_t activeDependencyGroups = 0u;
+    uint32_t activeDependencyPairs = 0u;
+    uint32_t queuedEvents = 0u;
+    uint64_t oldestQueuedTick = 0u;
+};
+
 class CLodStreamingSystem {
 public:
     CLodStreamingSystem();
@@ -46,6 +63,11 @@ public:
     void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
     std::shared_ptr<Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
     std::shared_ptr<Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
+    std::vector<CLodVirtualShadowUpgradeInvalidationInput> DrainVirtualShadowUpgradeEvents(uint32_t maxEvents);
+    CLodVirtualShadowUpgradeQueueStats GetVirtualShadowUpgradeQueueStats() const;
+    void SetVirtualShadowFallbackFeedbackResources(
+        std::shared_ptr<Buffer> dependencies,
+        std::shared_ptr<Buffer> dependencyCount);
 
 private:
     enum class CLodPhysicalPageState : uint8_t {
@@ -116,7 +138,10 @@ private:
     bool PopHighestPriorityPendingStreamingRequest(PendingStreamingRequest& outRequest);
     void SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage);
     void ApplyDiskStreamingCompletions(MeshManager* meshManager);
-    void CommitPendingResidencyPromotions();
+    void CommitPendingResidencyPromotions(MeshManager* meshManager);
+    void RecordVirtualShadowUpgradeDependency(const CLodVirtualShadowPredictedPage& dependency);
+    void QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex);
+    void ClearVirtualShadowUpgradeState();
     void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
     void EnsureStreamingDiagnosticsCapacity(uint32_t requiredGroupCount);
@@ -379,6 +404,36 @@ private:
     CLodPriorityMode m_priorityMode = CLodPriorityMode::Max;
     uint64_t m_streamingDiagnosticTick = 0;
 
+    struct VirtualShadowPageKey {
+        uint32_t physicalPageIndex = 0u;
+        uint32_t allocationGeneration = 0u;
+        uint32_t contentGeneration = 0u;
+        bool operator==(const VirtualShadowPageKey&) const = default;
+    };
+    struct VirtualShadowPageKeyHash {
+        size_t operator()(const VirtualShadowPageKey& key) const noexcept {
+            size_t hash = key.physicalPageIndex;
+            hash ^= static_cast<size_t>(key.allocationGeneration) * 0x9e3779b9u;
+            hash ^= static_cast<size_t>(key.contentGeneration) * 0x85ebca6bu;
+            return hash;
+        }
+    };
+    struct VirtualShadowDependency {
+        CLodVirtualShadowPageToken page{};
+        uint32_t residencyGeneration = 0u;
+    };
+    struct QueuedVirtualShadowUpgrade {
+        CLodVirtualShadowUpgradeInvalidationInput input{};
+        uint64_t queuedTick = 0u;
+    };
+    mutable std::mutex m_virtualShadowUpgradeMutex;
+    std::unordered_map<uint32_t, std::unordered_map<VirtualShadowPageKey, VirtualShadowDependency, VirtualShadowPageKeyHash>> m_virtualShadowDependencies;
+    std::deque<QueuedVirtualShadowUpgrade> m_virtualShadowUpgradeEvents;
+    std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
+    CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
+    std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;
+    std::shared_ptr<Buffer> m_virtualShadowFallbackDependencyCountBuffer;
+
     std::vector<MeshManager::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
     uint64_t m_lastStreamingDomainEventGeneration = 0;
@@ -429,6 +484,8 @@ private:
         std::shared_ptr<Buffer> usedGroupsBufferStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchCounterStaging;
         std::shared_ptr<Buffer> sourceGroupMismatchDetailsStaging;
+        std::shared_ptr<Buffer> virtualShadowDependencyCountStaging;
+        std::shared_ptr<Buffer> virtualShadowDependenciesStaging;
         uint64_t fenceValue = 0;
         std::atomic<State> state{State::Free};
 
@@ -442,6 +499,8 @@ private:
             , usedGroupsBufferStaging(std::move(other.usedGroupsBufferStaging))
             , sourceGroupMismatchCounterStaging(std::move(other.sourceGroupMismatchCounterStaging))
             , sourceGroupMismatchDetailsStaging(std::move(other.sourceGroupMismatchDetailsStaging))
+            , virtualShadowDependencyCountStaging(std::move(other.virtualShadowDependencyCountStaging))
+            , virtualShadowDependenciesStaging(std::move(other.virtualShadowDependenciesStaging))
             , fenceValue(other.fenceValue)
             , state(other.state.load(std::memory_order_relaxed)) {}
         ReadbackStagingSlot& operator=(ReadbackStagingSlot&& other) noexcept {
@@ -451,6 +510,8 @@ private:
             usedGroupsBufferStaging = std::move(other.usedGroupsBufferStaging);
             sourceGroupMismatchCounterStaging = std::move(other.sourceGroupMismatchCounterStaging);
             sourceGroupMismatchDetailsStaging = std::move(other.sourceGroupMismatchDetailsStaging);
+            virtualShadowDependencyCountStaging = std::move(other.virtualShadowDependencyCountStaging);
+            virtualShadowDependenciesStaging = std::move(other.virtualShadowDependenciesStaging);
             fenceValue = other.fenceValue;
             state.store(other.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
             return *this;

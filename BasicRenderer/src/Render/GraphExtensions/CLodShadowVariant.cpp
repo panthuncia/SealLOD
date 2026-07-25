@@ -1,6 +1,7 @@
 #include "Render/GraphExtensions/CLodShadowVariant.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
@@ -30,14 +31,15 @@
 #include "Render/GraphExtensions/ClusterLOD/ReyesVirtualShadowHardwareRasterPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ReyesVirtualShadowRasterizationPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapAllocatePagesPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapApplyUpgradesPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDeduplicatePredictedPagesPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapExpandPredictedPagesPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapAdmitPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapBuildMarkTilesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapBuildPageListsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearDirtyBitsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearPagesPass.h"
-#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapConsumePredictedPagesPass.h"
-#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDeduplicatePredictedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDirtyHierarchyPass.h"
-#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapExpandPredictedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapFreeWrappedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapGatherStatsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapInvalidatePagesPass.h"
@@ -45,6 +47,7 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapNonRasterableHierarchyPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapResolveMarkedBlocksPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapSetupPass.h"
+#include "Render/GraphExtensions/ClusterLOD/CLodStreamingSystem.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -451,8 +454,19 @@ void CLodShadowVariant::RefreshConfiguredSettings(CLodExtension& extension)
     const uint32_t vsmBlockSoftCap = std::max(
         1u,
         std::min(extension.m_shadowConfiguredPageJobMaxPages, CLodVirtualShadowBlockMaxTrackedPerCluster));
-    extension.m_shadowConfiguredExpandedRecordCapacity =
-        std::max(1u, extension.m_shadowConfiguredComputeClusterCapacity * vsmBlockSoftCap);
+    const uint64_t worstCaseExpandedRecordCapacity =
+        static_cast<uint64_t>(extension.m_shadowConfiguredComputeClusterCapacity) *
+        static_cast<uint64_t>(vsmBlockSoftCap);
+    const uint64_t budgetedExpandedRecordCapacity =
+        static_cast<uint64_t>(extension.m_shadowConfiguredComputeClusterCapacity) *
+        static_cast<uint64_t>(CLodVirtualShadowExpandedRecordCapacityMultiplier);
+    extension.m_shadowConfiguredExpandedRecordCapacity = static_cast<uint32_t>(
+        std::max<uint64_t>(
+            1u,
+            std::min({
+                worstCaseExpandedRecordCapacity,
+                budgetedExpandedRecordCapacity,
+                static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) })));
 }
 
 uint32_t CLodShadowVariant::GetVisibleClusterCapacity(const CLodExtension& extension)
@@ -484,8 +498,6 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowStatsBuffer,
             extension.m_shadowRuntimeStateBuffer,
             extension.m_shadowPredictiveInvalidationCandidateCountBuffer,
-            extension.m_shadowPredictiveRawPageCountBuffer,
-            extension.m_shadowPredictedInvalidationPageCountBufferA,
             extension.m_shadowVirtualResourcesNeedReset));
     shadowSetupPassDesc.At(RenderGraph::ExternalInsertPoint::After("CLod::StreamingBeginFramePass"));
     outPasses.push_back(std::move(shadowSetupPassDesc));
@@ -502,21 +514,6 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
     shadowFreeWrappedPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowSetupPassName));
     outPasses.push_back(std::move(shadowFreeWrappedPagesPassDesc));
 
-    const std::string shadowConsumePredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowConsumePredictedPagesPass");
-    auto shadowConsumePredictedPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
-        shadowConsumePredictedPagesPassName,
-        std::make_shared<VirtualShadowMapConsumePredictedPagesPass>(
-            extension.m_shadowPredictedInvalidationPagesBufferA,
-            extension.m_shadowPredictedInvalidationPageCountBufferA,
-            extension.m_shadowClipmapInfoBuffer,
-            extension.m_shadowPageTableTexture,
-            extension.m_shadowDirtyPageFlagsBuffer,
-            extension.m_shadowPageMetadataBuffer,
-            extension.m_shadowDirectionalPageViewInfoBuffer,
-            extension.m_shadowStatsBuffer));
-    shadowConsumePredictedPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowFreeWrappedPagesPassName));
-    outPasses.push_back(std::move(shadowConsumePredictedPagesPassDesc));
-
     const std::string shadowInvalidatePagesPassName = MakeVariantPassName(traits, "VirtualShadowInvalidatePagesPass");
     auto shadowInvalidatePagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowInvalidatePagesPassName,
@@ -530,7 +527,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
-    shadowInvalidatePagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowConsumePredictedPagesPassName));
+    shadowInvalidatePagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowFreeWrappedPagesPassName));
     outPasses.push_back(std::move(shadowInvalidatePagesPassDesc));
 
     const std::string shadowMarkPagesPassName = MakeVariantPassName(traits, "VirtualShadowMarkPagesPass");
@@ -640,9 +637,33 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowFreePhysicalPagesBuffer,
             extension.m_shadowReusablePhysicalPagesBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
-            extension.m_shadowPageListHeaderBuffer));
+            extension.m_shadowPageListHeaderBuffer,
+            extension.m_shadowStatsBuffer));
     shadowAllocationPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowPreAllocateStatsPassName));
     outPasses.push_back(std::move(shadowAllocationPassDesc));
+
+    const std::string shadowApplyUpgradesPassName = MakeVariantPassName(traits, "VirtualShadowApplyUpgradesPass");
+    auto shadowApplyUpgradesPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        shadowApplyUpgradesPassName,
+        std::make_shared<VirtualShadowMapApplyUpgradesPass>(
+            extension.m_shadowUpgradeInvalidationInputsBuffer,
+            extension.m_shadowUpgradeInvalidationCountBuffer,
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowDirtyPageFlagsBuffer,
+            extension.m_shadowStatsBuffer,
+            [&extension](uint32_t maxEvents) {
+                return extension.m_streamingSystem
+                    ? extension.m_streamingSystem->DrainVirtualShadowUpgradeEvents(maxEvents)
+                    : std::vector<CLodVirtualShadowUpgradeInvalidationInput>{};
+            },
+            [&extension]() {
+                return extension.m_streamingSystem
+                    ? extension.m_streamingSystem->GetVirtualShadowUpgradeQueueStats()
+                    : CLodVirtualShadowUpgradeQueueStats{};
+            }));
+    shadowApplyUpgradesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowAllocationPassName));
+    outPasses.push_back(std::move(shadowApplyUpgradesPassDesc));
 
     const std::string shadowGatherStatsPassName = MakeVariantPassName(traits, "VirtualShadowGatherStatsPass");
     auto shadowGatherStatsPassDesc = RenderGraph::ExternalPassDesc::Compute(
@@ -656,8 +677,21 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowStatsBuffer,
             false));
-    shadowGatherStatsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowAllocationPassName));
+    shadowGatherStatsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowApplyUpgradesPassName));
     outPasses.push_back(std::move(shadowGatherStatsPassDesc));
+
+    const std::string shadowAdmitPagesPassName = MakeVariantPassName(traits, "VirtualShadowAdmitPagesPass");
+    auto shadowAdmitPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        shadowAdmitPagesPassName,
+        std::make_shared<VirtualShadowMapAdmitPagesPass>(
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowDirtyPageFlagsBuffer,
+            extension.m_shadowUpgradeInvalidationInputsBuffer,
+            extension.m_shadowUpgradeInvalidationCountBuffer,
+            extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowStatsBuffer));
+    shadowAdmitPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowGatherStatsPassName));
+    outPasses.push_back(std::move(shadowAdmitPagesPassDesc));
 
     const std::string shadowClearPagesPassName = MakeVariantPassName(traits, "VirtualShadowClearPagesPass");
     auto shadowClearPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
@@ -666,8 +700,9 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPhysicalPagesTexture,
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowPageTableTexture,
-            extension.m_shadowPageMetadataBuffer));
-    shadowClearPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowGatherStatsPassName));
+            extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowStatsBuffer));
+    shadowClearPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowAdmitPagesPassName));
     outPasses.push_back(std::move(shadowClearPagesPassDesc));
 
     const std::string shadowDirtyHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowDirtyHierarchyPass");
@@ -703,18 +738,7 @@ void CLodShadowVariant::AppendStructuralTail(
         return;
     }
 
-    const std::string shadowClearDirtyBitsPassName = MakeVariantPassName(traits, "VirtualShadowClearDirtyBitsPass");
-    auto shadowClearDirtyBitsPassDesc = RenderGraph::ExternalPassDesc::Compute(
-        shadowClearDirtyBitsPassName,
-        std::make_shared<VirtualShadowMapClearDirtyBitsPass>(
-            extension.m_shadowPageTableTexture,
-            extension.m_shadowAllocationRequestsBuffer,
-            extension.m_shadowAllocationCountBuffer,
-            extension.m_shadowAllocationIndirectArgsBuffer));
-    shadowClearDirtyBitsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
-    outPasses.push_back(std::move(shadowClearDirtyBitsPassDesc));
-
-    const std::string shadowExpandPredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowExpandPredictedPagesPass");
+    const std::string shadowExpandPredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowFinalizeFallbackPagesPass");
     auto shadowExpandPredictedPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowExpandPredictedPagesPassName,
         std::make_shared<VirtualShadowMapExpandPredictedPagesPass>(
@@ -722,11 +746,17 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPredictiveInvalidationCandidateCountBuffer,
             extension.m_shadowPredictiveRawPagesBuffer,
             extension.m_shadowPredictiveRawPageCountBuffer,
-            extension.m_shadowClipmapInfoBuffer));
-    shadowExpandPredictedPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsPassName));
+            extension.m_shadowClipmapInfoBuffer,
+            extension.m_shadowPredictedInvalidationScratchBitsetBuffer,
+            extension.m_shadowStatsBuffer,
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowConfiguredMaxPhysicalPageCount));
+    shadowExpandPredictedPagesPassDesc.At(
+        RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
     outPasses.push_back(std::move(shadowExpandPredictedPagesPassDesc));
 
-    const std::string shadowDeduplicatePredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowDeduplicatePredictedPagesPass");
+    const std::string shadowDeduplicatePredictedPagesPassName = MakeVariantPassName(traits, "VirtualShadowDeduplicateFallbackPagesPass");
     auto shadowDeduplicatePredictedPagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowDeduplicatePredictedPagesPassName,
         std::make_shared<VirtualShadowMapDeduplicatePredictedPagesPass>(
@@ -734,9 +764,27 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPredictiveRawPageCountBuffer,
             extension.m_shadowPredictedInvalidationScratchBitsetBuffer,
             extension.m_shadowPredictedInvalidationPagesBufferA,
-            extension.m_shadowPredictedInvalidationPageCountBufferA));
-    shadowDeduplicatePredictedPagesPassDesc.At(MakeShadowTailInsertPoint(shadowExpandPredictedPagesPassName));
+            extension.m_shadowPredictedInvalidationPageCountBufferA,
+            extension.m_shadowStatsBuffer,
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowDirtyPageFlagsBuffer,
+            extension.m_shadowConfiguredMaxPhysicalPageCount));
+    shadowDeduplicatePredictedPagesPassDesc.At(
+        RenderGraph::ExternalInsertPoint::After(shadowExpandPredictedPagesPassName));
     outPasses.push_back(std::move(shadowDeduplicatePredictedPagesPassDesc));
+
+    const std::string shadowClearDirtyBitsPassName = MakeVariantPassName(traits, "VirtualShadowClearDirtyBitsPass");
+    auto shadowClearDirtyBitsPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        shadowClearDirtyBitsPassName,
+        std::make_shared<VirtualShadowMapClearDirtyBitsPass>(
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowAllocationRequestsBuffer,
+            extension.m_shadowAllocationCountBuffer,
+            extension.m_shadowAllocationIndirectArgsBuffer,
+            extension.m_shadowStatsBuffer));
+    shadowClearDirtyBitsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowDeduplicatePredictedPagesPassName));
+    outPasses.push_back(std::move(shadowClearDirtyBitsPassDesc));
 }
 
 std::string CLodShadowVariant::AppendPhase1PageJobRasterPasses(
@@ -1319,6 +1367,26 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false);
     extension.m_shadowInvalidatedInstancesBitsetBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Invalidated Instances Bitset Buffer"));
 
+    extension.m_shadowUpgradeInvalidationInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodVirtualShadowMaxInvalidationInputs,
+        sizeof(CLodVirtualShadowUpgradeInvalidationInput),
+        false,
+        false,
+        false);
+    extension.m_shadowUpgradeInvalidationInputsBuffer->SetName(
+        MakeVariantResourceName(traits, "Virtual Shadow Upgrade Invalidation Inputs Buffer"));
+    extension.m_shadowUpgradeInvalidationInputsBuffer->GetECSEntity()
+        .set<Components::Resource>({ extension.m_shadowUpgradeInvalidationInputsBuffer })
+        .add<CLodExtensionTypeTag>(typeEntity);
+
+    extension.m_shadowUpgradeInvalidationCountBuffer =
+        CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), false, false, false);
+    extension.m_shadowUpgradeInvalidationCountBuffer->SetName(
+        MakeVariantResourceName(traits, "Virtual Shadow Upgrade Invalidation Count Buffer"));
+    extension.m_shadowUpgradeInvalidationCountBuffer->GetECSEntity()
+        .set<Components::Resource>({ extension.m_shadowUpgradeInvalidationCountBuffer })
+        .add<CLodExtensionTypeTag>(typeEntity);
+
     extension.m_shadowPredictiveInvalidationCandidatesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowPredictiveCandidateCapacity,
         sizeof(CLodVirtualShadowPredictiveInvalidationCandidate),
@@ -1354,8 +1422,8 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         .add<CLodExtensionTypeTag>(typeEntity);
 
     extension.m_shadowPredictedInvalidationScratchBitsetBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowPredictedPageBitsetWordCount(),
-        sizeof(uint32_t),
+        CLodVirtualShadowFallbackDependencyHashCapacity,
+        sizeof(uint64_t),
         true,
         false,
         false,
@@ -1382,6 +1450,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_shadowPredictedInvalidationPageCountBufferA->GetECSEntity()
         .set<Components::Resource>({ extension.m_shadowPredictedInvalidationPageCountBufferA })
         .add<CLodExtensionTypeTag>(typeEntity);
+    if (extension.m_streamingSystem) {
+        extension.m_streamingSystem->SetVirtualShadowFallbackFeedbackResources(
+            extension.m_shadowPredictedInvalidationPagesBufferA,
+            extension.m_shadowPredictedInvalidationPageCountBufferA);
+    }
 
     extension.m_shadowAllocationRequestsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxAllocationRequests,
@@ -1678,6 +1751,8 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_shadowPageMetadataBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowInvalidationInputsBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowInvalidationCountBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_shadowUpgradeInvalidationInputsBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_shadowUpgradeInvalidationCountBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowInvalidatedInstancesBitsetBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowPredictiveInvalidationCandidatesBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowPredictiveInvalidationCandidateCountBuffer, "Cluster LOD virtual shadow maps");

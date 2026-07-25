@@ -15,8 +15,10 @@ VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> allocationRequestsBuffer,
     std::shared_ptr<Buffer> allocationCountBuffer,
-    std::shared_ptr<Buffer> indirectArgsBuffer)
+    std::shared_ptr<Buffer> indirectArgsBuffer,
+    std::shared_ptr<Buffer> statsBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
+    , m_statsBuffer(std::move(statsBuffer))
 {
     (void)allocationRequestsBuffer;
     (void)allocationCountBuffer;
@@ -32,7 +34,7 @@ VirtualShadowMapClearDirtyBitsPass::VirtualShadowMapClearDirtyBitsPass(
 
 void VirtualShadowMapClearDirtyBitsPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
-    builder->WithUnorderedAccess(m_pageTableTexture);
+    builder->WithUnorderedAccess(m_pageTableTexture, m_statsBuffer);
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 }
@@ -56,6 +58,7 @@ PassReturn VirtualShadowMapClearDirtyBitsPass::Execute(PassExecutionContext& exe
     uint32_t rootConstants[NumMiscUintRootConstants] = {};
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

@@ -21,6 +21,7 @@ struct CLodExtensionOptions {
     bool enableReyes = true;
     bool enableVoxelRasterization = false;
     uint32_t voxelRasterWorkCapacity = 0u;
+    std::shared_ptr<CLodStreamingSystem> streamingSystem;
 };
 
 class CLodExtension final : public RenderGraph::IRenderGraphExtension, public IResourceProvider {
@@ -225,6 +226,8 @@ private:
     std::shared_ptr<Buffer> m_shadowInvalidationInputsBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
+    std::shared_ptr<Buffer> m_shadowUpgradeInvalidationInputsBuffer;
+    std::shared_ptr<Buffer> m_shadowUpgradeInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveRawPagesBuffer;
@@ -278,7 +281,7 @@ private:
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClustersBufferSw;
     std::shared_ptr<Buffer> m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
 
-    std::unique_ptr<CLodStreamingSystem> m_streamingSystem;
+    std::shared_ptr<CLodStreamingSystem> m_streamingSystem;
     bool m_providerRegisteredForCurrentRegistry = false;
     bool m_shadowVirtualResourcesNeedReset = true;
     uint32_t m_transparencyConfiguredRenderWidth = 0u;

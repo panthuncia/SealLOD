@@ -968,6 +968,27 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
 #define CLOD_VSM_USE_AABB_DIRTY_QUERY 0
 #endif
 
+// Hardware block records feed mesh-shader clip distances that constrain fixed-
+// function rasterization to the record's active page rectangle.
+#define CLOD_VSM_HW_BLOCK_RECORDS 1
+
+bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
+{
+    uint clipmapIndex = 0u;
+    CLodVirtualShadowClipmapInfo clipmapInfo;
+    if (!CLodVirtualShadowFindClipmapForView(viewId, clipmapIndex, clipmapInfo))
+    {
+        return true;
+    }
+
+    Texture2DArray<uint> dirtyHierarchy =
+        ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
+    const uint hierarchyTopMip =
+        firstbithigh(max(clipmapInfo.pageTableResolution, 1u));
+    return dirtyHierarchy.Load(
+        int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) != 0u;
+}
+
 bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorld, uint viewId)
 {
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES, 1);
@@ -980,10 +1001,17 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
         return true;
     }
 
+    Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
+    const uint hierarchyTopMip =
+        firstbithigh(max(clipmapInfo.pageTableResolution, 1u));
+    if (dirtyHierarchy.Load(int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) == 0u)
+    {
+        return false;
+    }
+
     StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
     const CLodVirtualShadowCompactShadowCameraInfo shadowCamera = shadowCameras[clipmapIndex];
-    Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
 
     uint sampledMipLevel = 0u;
     bool queryClipped = false;
@@ -1935,18 +1963,26 @@ struct CLodClusterRunRecord
 struct CLodVirtualShadowPredictiveInvalidationCandidate
 {
     float4 worldCenterAndRadius;
-    uint shadowViewId;
+    uint shadowClipmapIndex;
     uint sourceGroupGlobalIndex;
-    uint pad0;
-    uint pad1;
+    uint perMeshInstanceBufferIndex;
+    uint observedFrameIndex;
 };
 
 void CLodAppendVirtualShadowPredictiveInvalidationCandidate(
     float3 worldCenter,
     float radiusWorld,
     uint shadowViewId,
-    uint sourceGroupGlobalIndex)
+    uint sourceGroupGlobalIndex,
+    uint perMeshInstanceBufferIndex)
 {
+    uint clipmapIndex = 0u;
+    CLodVirtualShadowClipmapInfo clipmapInfo;
+    if (!CLodVirtualShadowFindClipmapForView(shadowViewId, clipmapIndex, clipmapInfo))
+    {
+        return;
+    }
+
     RWStructuredBuffer<CLodVirtualShadowPredictiveInvalidationCandidate> candidateBuffer =
         ResourceDescriptorHeap[CLOD_WG_SHADOW_PREDICTIVE_INVALIDATION_CANDIDATES_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> candidateCount =
@@ -1956,12 +1992,14 @@ void CLodAppendVirtualShadowPredictiveInvalidationCandidate(
     InterlockedAdd(candidateCount[0], 1u, candidateIndex);
     if (candidateIndex < CLOD_VIRTUAL_SHADOW_PREDICTIVE_CANDIDATE_CAPACITY)
     {
+        ConstantBuffer<PerFrameBuffer> perFrameBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         CLodVirtualShadowPredictiveInvalidationCandidate candidate;
         candidate.worldCenterAndRadius = float4(worldCenter, radiusWorld);
-        candidate.shadowViewId = shadowViewId;
+        candidate.shadowClipmapIndex = clipmapIndex;
         candidate.sourceGroupGlobalIndex = sourceGroupGlobalIndex;
-        candidate.pad0 = 0u;
-        candidate.pad1 = 0u;
+        candidate.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
+        candidate.observedFrameIndex = perFrameBuffer.frameIndex;
         candidateBuffer[candidateIndex] = candidate;
     }
 }
@@ -2448,7 +2486,8 @@ bool CLodRefinedChildSuppressesParent(
             useChildPredictiveBounds ? childWorldCenter : predictiveCenterWorld,
             useChildPredictiveBounds ? childWorldRadius : predictiveRadiusWorld,
             viewId,
-            childGroupGlobalIndex);
+            childGroupGlobalIndex,
+            instanceIndex);
     }
 #endif
 
@@ -2806,6 +2845,15 @@ void WG_ObjectCull(
     const ObjectCullRecord hdr = inRec.Get();
     const bool inRange = (vDispatchThreadID.x < hdr.activeDrawCount);
     bool entryVisible = inRange;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    bool viewHasDirtyPages = true;
+    if (WaveIsFirstLane())
+    {
+        viewHasDirtyPages = CLodVirtualShadowViewHasDirtyPages(hdr.viewDataIndex);
+    }
+    viewHasDirtyPages = WaveReadLaneFirst(viewHasDirtyPages);
+    entryVisible = entryVisible && viewHasDirtyPages;
+#endif
     uint drawRecordIndex = 0u;
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_THREADS, 1);
@@ -2890,6 +2938,25 @@ void WG_ObjectCull(
                 }
             }
         }
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        // Reject the instance before opening its CLOD hierarchy when its
+        // conservative object bounds cannot touch any admitted dirty page.
+        // Previously this test first happened at the root node, which made
+        // every visible instance launch traversal work even for a tiny page
+        // budget (and even when there were no rasterable pages).
+        if (!culled && CLodWorkGraphShadowDirtyPageCullingEnabled())
+        {
+            const float3 worldCenter = mul(float4(objectSpaceCenter, 1.0f), objectModelMatrix).xyz;
+            if (!CLodVirtualShadowBoundsTouchDirtyPages(
+                    worldCenter,
+                    worldRadius,
+                    hdr.viewDataIndex))
+            {
+                WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
+                culled = true;
+            }
+        }
+#endif
         if (!culled) {
             bool occlusionCulled = false;
             if (CLodWorkGraphOcclusionEnabled() && !camera.isOrtho) {
@@ -4338,6 +4405,7 @@ void ClusterCullBody(
         uint2 hwMinBlockCoord = uint2(0u, 0u);
         uint2 hwBlockCount = uint2(0u, 0u);
         const bool hwUsesVsmBlocks =
+            CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
             contributes &&
             shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
             CLodVirtualShadowComputeMeshletBlockCoverage(
@@ -4453,6 +4521,7 @@ void ClusterCullBody(
             uint2 hwMinBlockCoord = uint2(0u, 0u);
             uint2 hwBlockCount = uint2(0u, 0u);
             const bool hwUsesVsmBlocks =
+                CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
                 contributes &&
                 shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
                 CLodVirtualShadowComputeMeshletBlockCoverage(
@@ -4626,6 +4695,7 @@ void ClusterCullBody(
             uint2 hwMinBlockCoord = uint2(0u, 0u);
             uint2 hwBlockCount = uint2(0u, 0u);
             const bool hwUsesVsmBlocks =
+                CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
                 isHW &&
                 shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
                 CLodVirtualShadowComputeMeshletBlockCoverage(

@@ -365,10 +365,16 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
             wrappedPageCoords.y * clipmapInfo.pageTableResolution +
             wrappedPageCoords.x;
         const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
+        const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
+            virtualPageCoords,
+            clipmapInfo.unwrappedPageOffsetX,
+            clipmapInfo.unwrappedPageOffsetY);
+        if (asuint(cachedPageViewRow.w) != expectedPageTag)
+            continue;
         cachedPageView[3][0] = cachedPageViewRow.x;
         cachedPageView[3][1] = cachedPageViewRow.y;
         cachedPageView[3][2] = cachedPageViewRow.z;
-        cachedPageView[3][3] = cachedPageViewRow.w;
+        cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
         const float linearLightDepth =
             -samplePosCachedPageLightView.z +
@@ -597,10 +603,16 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
             wrappedPageCoords.y * clipmapInfo.pageTableResolution +
             wrappedPageCoords.x;
         const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
+        const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
+            virtualPageCoords,
+            clipmapInfo.unwrappedPageOffsetX,
+            clipmapInfo.unwrappedPageOffsetY);
+        if (asuint(cachedPageViewRow.w) != expectedPageTag)
+            continue;
         cachedPageView[3][0] = cachedPageViewRow.x;
         cachedPageView[3][1] = cachedPageViewRow.y;
         cachedPageView[3][2] = cachedPageViewRow.z;
-        cachedPageView[3][3] = cachedPageViewRow.w;
+        cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
         const float linearLightDepth =
             -samplePosCachedPageLightView.z +

@@ -8,8 +8,23 @@ static const uint kCLodVirtualShadowDirtyMask = 0x40000000u;
 static const uint kCLodVirtualShadowContentValidMask = 0x20000000u;
 static const uint kCLodVirtualShadowVisitedMask = 0x10000000u;
 static const uint kCLodVirtualShadowRerenderedThisFrameMask = 0x08000000u;
-static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x07FFFFFFu;
+static const uint kCLodVirtualShadowAdmittedThisFrameMask = 0x04000000u;
+static const uint kCLodVirtualShadowUpgradePendingMask = 0x02000000u;
+static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
 static const uint kCLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
+static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
+static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationMask = 0xFFFFFFFEu;
+
+uint CLodVirtualShadowPhysicalPageAllocationGeneration(uint metadataFlags)
+{
+    return metadataFlags >> kCLodVirtualShadowPhysicalPageAllocationGenerationShift;
+}
+
+uint CLodVirtualShadowPhysicalPageMetadataFlags(uint allocationGeneration, bool resident)
+{
+    return (allocationGeneration << kCLodVirtualShadowPhysicalPageAllocationGenerationShift) |
+        (resident ? kCLodVirtualShadowPhysicalPageResidentFlag : 0u);
+}
 static const uint kCLodVirtualShadowDefaultClipmapCount = 22u;
 static const uint kCLodVirtualShadowClipmapCount = 22u;
 static const uint CLodVirtualShadowDefaultClipmapCount = kCLodVirtualShadowDefaultClipmapCount;
@@ -68,6 +83,8 @@ struct CLodVirtualShadowClipmapInfo
     uint pageTableResolution;
     uint physicalAtlasPagesWide;
     uint physicalAtlasPagesHigh;
+    int unwrappedPageOffsetX;
+    int unwrappedPageOffsetY;
 };
 
 struct CLodVirtualShadowMainCameraInfo
@@ -98,7 +115,8 @@ struct CLodVirtualShadowMarkClipmapData
     uint physicalAtlasPagesWide;
     uint physicalAtlasPagesHigh;
     float directionalLodBias;
-    uint2 pad0;
+    int unwrappedPageOffsetX;
+    int unwrappedPageOffsetY;
     float4 directionalPageViewRow;
     row_major matrix shadowViewProjection;
 };
@@ -152,6 +170,46 @@ struct CLodVirtualShadowStats
     float targetPressureLodBias;
     float smoothedPressureLodBias;
     uint framesSinceOverBudget;
+    uint configuredPageRenderBudget;
+    uint configuredUpgradePageRenderBudget;
+    uint normalEligiblePageCount;
+    uint normalAdmittedPageCount;
+    uint normalDeferredPageCount;
+    uint upgradeEligiblePageCount;
+    uint upgradeAdmittedPageCount;
+    uint upgradeDeferredPageCount;
+    uint pendingUpgradeDependencyCount;
+    uint invalidUpgradeDependencyCount;
+    uint admittedPageCount;
+    uint admissionTicketCount;
+    uint normalRenderedPageCount;
+    uint upgradeRenderedPageCount;
+    uint upgradeCandidateInputCount;
+    uint upgradeCandidateRetainedCount;
+    uint upgradeCandidateResidentCount;
+    uint upgradeCandidateInvalidCount;
+    uint upgradeRawPageCount;
+    uint upgradeRawPageOverflowCount;
+    uint readyUpgradePageCount;
+    uint readyUpgradePageOverflowCount;
+    uint upgradeCandidateAppendOverflowCount;
+    uint cumulativeUpgradeCandidateResidentCount;
+    uint cumulativeUpgradePageAdmittedCount;
+    uint cumulativeUpgradePageRenderedCount;
+    uint cumulativeUpgradeCandidateAppendOverflowCount;
+    uint cumulativeUpgradeQueueOverflowCount;
+    uint upgradeReadyConsumedAllocatedCount;
+    uint upgradeReadyDroppedUnallocatedCount;
+    uint upgradeInvalidationInputCount;
+    uint upgradeInvalidationRejectedInputCount;
+    uint upgradeInvalidationAllocatedPageTouchCount;
+    uint upgradeInvalidationUnallocatedPageTouchCount;
+    uint cumulativeUpgradeInvalidationInputCount;
+    uint cumulativeUpgradeInvalidationAllocatedPageTouchCount;
+    uint pageTableOwnerMismatchCount;
+    uint contentValidOwnerMismatchCount;
+    uint newlyAllocatedPageCount;
+    uint physicalPageClearCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];
@@ -216,8 +274,24 @@ bool CLodVirtualShadowTryGetClipmapInfoForView(
 
 bool CLodVirtualShadowPageEntryCanRaster(uint pageEntry)
 {
-    return (pageEntry & (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask)) ==
-        (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowDirtyMask);
+    const uint requiredMask =
+        kCLodVirtualShadowAllocatedMask |
+        kCLodVirtualShadowDirtyMask |
+        kCLodVirtualShadowAdmittedThisFrameMask;
+    return (pageEntry & requiredMask) == requiredMask;
+}
+
+uint CLodVirtualShadowPackAbsolutePageTag(
+    uint2 logicalPageCoords,
+    int unwrappedPageOffsetX,
+    int unwrappedPageOffsetY)
+{
+    const int2 absolutePageCoords =
+        int2(logicalPageCoords) -
+        int2(unwrappedPageOffsetX, unwrappedPageOffsetY);
+    return
+        (uint(absolutePageCoords.x) & 0xFFFFu) |
+        ((uint(absolutePageCoords.y) & 0xFFFFu) << 16u);
 }
 
 uint CLodVirtualShadowWrapPageCoord(uint coord, uint offset, uint pageTableResolution)

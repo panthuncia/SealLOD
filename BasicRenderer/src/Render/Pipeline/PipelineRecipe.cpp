@@ -211,7 +211,8 @@ namespace {
 PipelineRecipe MakeStandardPipeline(
     bool terrainRvt,
     ReyesMode reyes,
-    bool clodAlphaAndShadows,
+    bool clodAlpha,
+    bool clodShadows,
     std::optional<ClusterLodVoxelOptions> clodVoxel)
 {
     PipelineRecipe recipe;
@@ -220,9 +221,11 @@ PipelineRecipe MakeStandardPipeline(
         .Add<EnvironmentTechnique>()
         .Add<ClusterLodTechnique>(ClusterLodOptions{
             .reyes = reyes });
-    if (clodAlphaAndShadows) {
-        recipe.Add<ClusterLodAlphaTechnique>(ClusterLodOptions{ .reyes = reyes })
-            .Add<ClusterLodShadowTechnique>(ClusterLodOptions{ .reyes = reyes });
+    if (clodAlpha) {
+        recipe.Add<ClusterLodAlphaTechnique>(ClusterLodOptions{ .reyes = reyes });
+    }
+    if (clodShadows) {
+        recipe.Add<ClusterLodShadowTechnique>(ClusterLodOptions{ .reyes = reyes });
     }
     if (clodVoxel) {
         recipe.Add<ClusterLodVoxelTechnique>(*clodVoxel);
@@ -251,9 +254,8 @@ PipelineRecipe MakeStandardPipeline(
 
 PipelineRecipe MakeBasicRendererDemoPipeline()
 {
-    // The demo intentionally uses only the opaque path. Hosts opt into
-    // the independently owned alpha and shadow CLod variants as needed.
-    return MakeStandardPipeline(false, ReyesMode::Disabled, false, std::nullopt);
+    // Keep alpha opt-in while exercising the independently owned shadow variant.
+    return MakeStandardPipeline(false, ReyesMode::Disabled, false, true, std::nullopt);
 }
 
 PipelineRecipe MakeSarpPipeline()
@@ -261,6 +263,7 @@ PipelineRecipe MakeSarpPipeline()
     return MakeStandardPipeline(
         true,
         ReyesMode::Enabled,
+        true,
         true,
         ClusterLodVoxelOptions{ .workRecordCapacity = 1u << 20 });
 }
