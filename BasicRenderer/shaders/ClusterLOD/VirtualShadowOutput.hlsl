@@ -12,6 +12,12 @@ static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 126u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED = 129u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED = 130u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_WRITES = 131u;
+// Shadow raster does not execute the primary-visibility target/write paths, so
+// their two telemetry slots can carry shadow-write provenance in this pass.
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_FIRST_EXPECTED_TAG = 127u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_FIRST_CACHED_TAG = 128u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_OWNER_MISMATCH = 132u;
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_VIEW_MISMATCH = 133u;
 
 void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
 {
@@ -164,11 +170,42 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     }
 
     const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+    StructuredBuffer<uint4> pageMetadata =
+        ResourceDescriptorHeap[
+            CLOD_RASTER_VIRTUAL_SHADOW_PAGE_METADATA_DESCRIPTOR_INDEX];
+    const uint4 physicalMeta = pageMetadata[physicalPageIndex];
+    const uint expectedVirtualAddress =
+        wrappedPageCoords.y * clipmapInfo.pageTableResolution +
+        wrappedPageCoords.x;
+    const bool metaNotResident =
+        (physicalMeta.z &
+            kCLodVirtualShadowPhysicalPageResidentFlag) == 0u;
+    const bool metaAddressMismatch =
+        physicalMeta.x != expectedVirtualAddress;
+    const bool metaClipmapMismatch =
+        physicalMeta.w != clipmapInfo.pageTableLayer;
+    if (metaNotResident || metaAddressMismatch || metaClipmapMismatch)
+    {
+        CLodRasterPixelTelemetryAdd(
+            WG_COUNTER_RASTER_PIXEL_VSM_OWNER_MISMATCH,
+            1u);
+        return;
+    }
+
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
-    InterlockedMin(physicalPages[atlasPixel], asuint(input.linearDepth));
+    if (!isfinite(input.linearDepth) || input.linearDepth <= 0.0f)
+    {
+        return;
+    }
+    uint previousDepthBits = 0u;
+    const uint newDepthBits = asuint(input.linearDepth);
+    InterlockedMin(
+        physicalPages[atlasPixel],
+        newDepthBits,
+        previousDepthBits);
     uint ignored = 0u;
     InterlockedOr(
         pageTable[pageCoords],

@@ -58,7 +58,7 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
 void VirtualShadowMapAllocatePagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     builder->WithShaderResource(
-            Builtin::Shadows::CLodCompactShadowCameras,
+            Builtin::CameraBuffer,
             m_allocationRequestsBuffer,
             m_allocationCountBuffer,
             m_clipmapInfoBuffer,

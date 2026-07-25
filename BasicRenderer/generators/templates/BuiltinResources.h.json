@@ -143,6 +143,7 @@
       "CLodClipmapInfo": {},
       "CLodPhysicalPages": {},
       "CLodPageTable": {},
+      "CLodPageMetadata": {},
       "CLodDirectionalPageViewInfo": {},
       "CLodCompactMainCamera": {},
       "CLodCompactShadowCameras": {}

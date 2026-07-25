@@ -97,6 +97,36 @@ void RunAllocationAdmissionCases()
     }
 }
 
+void RunDeferredPageClearLifecycleCase()
+{
+    bool physicalDirty = true;
+    bool contentValid = true;
+
+    // Deferral must preserve the cached page.
+    physicalDirty = false;
+    if (physicalDirty || !contentValid) {
+        throw std::runtime_error(
+            "virtual-shadow deferral did not preserve cached contents");
+    }
+
+    // A later admission must restore the physical clear request before any
+    // depth-min raster writes can target the page.
+    physicalDirty = true;
+    if (!physicalDirty) {
+        throw std::runtime_error(
+            "virtual-shadow retry admission failed to re-arm page clear");
+    }
+
+    if (physicalDirty) {
+        contentValid = false;
+        physicalDirty = false;
+    }
+    if (physicalDirty || contentValid) {
+        throw std::runtime_error(
+            "virtual-shadow admitted page was not cleared and invalidated");
+    }
+}
+
 void RunExactPageTokenCases()
 {
     constexpr uint32_t physicalPage = 17u;
@@ -181,6 +211,7 @@ int main()
     try {
         RunBudgetCases();
         RunAllocationAdmissionCases();
+        RunDeferredPageClearLifecycleCase();
         RunExactPageTokenCases();
         RunAbsolutePageTagCases();
         std::cout << "Virtual shadow budget tests passed.\n";

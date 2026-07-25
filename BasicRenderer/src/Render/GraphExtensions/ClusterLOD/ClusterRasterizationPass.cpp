@@ -50,7 +50,9 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     std::shared_ptr<PixelBuffer> AVBOITEarlyDepthTexture,
     std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<Buffer> sourceGroupMismatchCounterBuffer,
-    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer)
+    std::shared_ptr<Buffer> sourceGroupMismatchDetailsBuffer,
+    std::shared_ptr<Buffer> virtualShadowPageMetadataBuffer,
+    std::shared_ptr<Buffer> virtualShadowDirectionalPageViewInfoBuffer)
     : m_compactedVisibleClustersBuffer(std::move(compactedVisibleClustersBuffer))
     , m_compactedVisibleClusterTransformIndicesBuffer(std::move(compactedVisibleClusterTransformIndicesBuffer))
     , m_rasterBucketsHistogramBuffer(std::move(rasterBucketsHistogramBuffer))
@@ -74,6 +76,8 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
+    , m_virtualShadowPageMetadataBuffer(std::move(virtualShadowPageMetadataBuffer))
+    , m_virtualShadowDirectionalPageViewInfoBuffer(std::move(virtualShadowDirectionalPageViewInfoBuffer))
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_sourceGroupMismatchCounterBuffer(std::move(sourceGroupMismatchCounterBuffer))
     , m_sourceGroupMismatchDetailsBuffer(std::move(sourceGroupMismatchDetailsBuffer))
@@ -219,6 +223,7 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
             builder->WithShaderResource(
                 Builtin::Shadows::CLodClipmapInfo,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
+                Builtin::Shadows::CLodPageMetadata,
                 Builtin::Shadows::CLodPageTable,
                 Builtin::Shadows::CLodPhysicalPages,
                 Builtin::Shadows::CLodCompactMainCamera,
@@ -229,8 +234,13 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
         }
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        builder->WithShaderResource(m_virtualShadowClipmapInfoBuffer)
-            .WithUnorderedAccess(m_virtualShadowPageTableTexture, m_virtualShadowPhysicalPagesTexture);
+        builder->WithShaderResource(
+                m_virtualShadowClipmapInfoBuffer,
+                m_virtualShadowPageMetadataBuffer,
+                m_virtualShadowDirectionalPageViewInfoBuffer)
+            .WithUnorderedAccess(
+                m_virtualShadowPageTableTexture,
+                m_virtualShadowPhysicalPagesTexture);
     }
 
     // Declare page pool slabs for bindless access (auto-invalidates when new slabs are added).
@@ -496,6 +506,10 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_METADATA_DESCRIPTOR_INDEX] =
+            m_virtualShadowPageMetadataBuffer->GetSRVInfo(0).slot.index;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
+            m_virtualShadowDirectionalPageViewInfoBuffer->GetSRVInfo(0).slot.index;
     }
     if (m_outputKind == CLodRasterOutputKind::DeepVisibility) {
         misc[CLOD_RASTER_DEEP_VISIBILITY_NODE_BUFFER_DESCRIPTOR_INDEX] = m_deepVisibilityNodesBuffer->GetUAVShaderVisibleInfo(0).slot.index;

@@ -20,6 +20,7 @@ public:
         std::shared_ptr<Buffer> statsBuffer,
         std::shared_ptr<PixelBuffer> pageTableTexture,
         std::shared_ptr<Buffer> pageMetadataBuffer,
+        std::shared_ptr<Buffer> pageViewInfoBuffer,
         uint32_t physicalPageCount);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -40,5 +41,6 @@ private:
     std::shared_ptr<Buffer> m_statsBuffer;
     std::shared_ptr<PixelBuffer> m_pageTableTexture;
     std::shared_ptr<Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<Buffer> m_pageViewInfoBuffer;
     uint32_t m_physicalPageCount = 0u;
 };

@@ -856,6 +856,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     const bool clodStreamingStressTest =
         commandLine.find("--clod-streaming-stress-test") != std::string_view::npos ||
         clodStreamingCleanupTest;
+    const bool vsmOrbitTest =
+        commandLine.find("--vsm-orbit-test") != std::string_view::npos;
     const bool graphRebuildSmokeTest =
         pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest || clodStreamingStressTest;
 
@@ -1148,6 +1150,43 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             lastUpdateTime = currentTime;
 
             frameIndex += 1;
+            if (vsmOrbitTest) {
+                constexpr float kOrbitRadius = 8.0f;
+                constexpr float kOrbitCenterY = 5.0f;
+                // About one revolution every twelve seconds at 60 Hz. This
+                // remains centered on the scene instead of eventually flying
+                // beyond its geometry like a held movement key.
+                const float angle =
+                    static_cast<float>(frameIndex % 720u) *
+                    (XM_2PI / 720.0f);
+                const XMFLOAT3 orbitPosition{
+                    std::cos(angle) * kOrbitRadius,
+                    kOrbitCenterY + std::sin(angle * 2.0f) * 1.5f,
+                    std::sin(angle) * kOrbitRadius};
+                const XMFLOAT3 orbitTarget{
+                    0.0f,
+                    kOrbitCenterY,
+                    0.0f};
+                const XMFLOAT3 orbitUp{0.0f, 1.0f, 0.0f};
+                const XMMATRIX orbitView = XMMatrixLookAtRH(
+                    XMLoadFloat3(&orbitPosition),
+                    XMLoadFloat3(&orbitTarget),
+                    XMLoadFloat3(&orbitUp));
+                const XMMATRIX orbitModel =
+                    XMMatrixInverse(nullptr, orbitView);
+                const XMVECTOR orbitRotation =
+                    XMQuaternionNormalize(
+                        XMQuaternionRotationMatrix(orbitModel));
+                auto& orbitCamera =
+                    renderer.GetCurrentScene()->GetPrimaryCamera();
+                orbitCamera
+                    .set<Components::Position>(
+                        {orbitPosition.x,
+                         orbitPosition.y,
+                         orbitPosition.z})
+                    .set<Components::Rotation>(orbitRotation)
+                    .set<Components::Matrix>(orbitModel);
+            }
             if (clodStreamingStressTest) {
                 constexpr float kStressFov = 80.0f * (XM_PI / 180.0f);
                 constexpr float kStressAspect = 16.0f / 9.0f;

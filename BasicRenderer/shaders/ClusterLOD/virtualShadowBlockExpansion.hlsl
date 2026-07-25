@@ -329,7 +329,13 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     if (GI == 0u && gs_activeBlockCount != 0u)
     {
-        const uint emittedCount = gs_activeBlockCount > CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP ? 1u : gs_activeBlockCount;
+        // Never fall back to one unscoped cluster when block coverage exceeds
+        // the tracking cap. That cluster can rasterize every admitted page its
+        // triangles touch, defeating both page-local ownership and the work
+        // budget. Emit the bounded tracked subset; deferred pages remain dirty
+        // and will be covered by later frames.
+        const uint emittedCount =
+            min(gs_activeBlockCount, CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP);
         RWStructuredBuffer<uint> expandedHistogram = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX];
         InterlockedAdd(expandedHistogram[bucketID], emittedCount);
     }
@@ -422,10 +428,14 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
     GroupMemoryBarrierWithGroupSync();
 
-    const bool overflowedBlockTracking = gs_activeBlockCount > CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP;
     if (GI == 0u)
     {
-        const uint requestedCount = overflowedBlockTracking ? 1u : min(gs_activeBlockCount, kVsmBlockTrackedCapacity);
+        const uint requestedCount =
+            min(
+                gs_activeBlockCount,
+                min(
+                    CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP,
+                    kVsmBlockTrackedCapacity));
         if (requestedCount != 0u)
         {
             StructuredBuffer<uint> expandedOffsets = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_OFFSETS_DESCRIPTOR_INDEX];
@@ -452,22 +462,43 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     RWStructuredBuffer<uint> expandedClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
 
-    if (overflowedBlockTracking)
-    {
-        if (GI == 0u)
-        {
-            CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex, packedCluster);
-            expandedClusterTransformIndices[gs_outputBaseIndex] = sourceClusterTransformIndex;
-        }
-        return;
-    }
-
     if (GI >= gs_committedCount)
     {
         return;
     }
 
-    CLodStoreVisibleClusterPackedWordsRW(expandedClusters, gs_outputBaseIndex + GI, packedCluster);
+    const CLodVirtualShadowBlockMeta blockMeta =
+        VsmLoadTrackedBlockMeta(GI);
+    const uint2 virtualBlockOrigin =
+        CLodVirtualShadowUnpackBlockPageCoords(
+            blockMeta.packedVirtualBlockOrigin);
+    const uint2 blockCoord =
+        CLodVirtualShadowBlockCoordFromPageCoord(
+            virtualBlockOrigin);
+    const uint2 minLocalPageCoord =
+        CLodVirtualShadowUnpackBlockActiveRectMin(
+            blockMeta.packedActiveRectAndFlags);
+    const uint2 maxLocalPageCoord =
+        CLodVirtualShadowUnpackBlockActiveRectMax(
+            blockMeta.packedActiveRectAndFlags);
+    uint blockPayload =
+        CLodPackVisibleClusterVsmPayloadForBlock(
+            CLodVisibleClusterShadowClipmapIndex(packedCluster),
+            blockCoord,
+            minLocalPageCoord,
+            maxLocalPageCoord,
+            false);
+    if (CLodVisibleClusterIsVoxel(packedCluster))
+    {
+        blockPayload =
+            CLodVisibleClusterMarkVoxelPayload(blockPayload);
+    }
+    uint4 expandedCluster = packedCluster;
+    expandedCluster.w = blockPayload;
+    CLodStoreVisibleClusterPackedWordsRW(
+        expandedClusters,
+        gs_outputBaseIndex + GI,
+        expandedCluster);
     expandedClusterTransformIndices[gs_outputBaseIndex + GI] = sourceClusterTransformIndex;
 }
 

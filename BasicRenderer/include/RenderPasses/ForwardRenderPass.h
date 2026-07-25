@@ -81,6 +81,7 @@ public:
                 Builtin::Shadows::CLodCompactMainCamera,
                 Builtin::Shadows::CLodCompactShadowCameras,
                 Builtin::Shadows::CLodDirectionalPageViewInfo,
+                Builtin::Shadows::CLodPageMetadata,
                 Builtin::Shadows::CLodPageTable,
                 Builtin::Shadows::CLodPhysicalPages);
         }

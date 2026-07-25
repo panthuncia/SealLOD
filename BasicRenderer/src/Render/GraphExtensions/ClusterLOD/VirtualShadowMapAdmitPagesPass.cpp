@@ -4,6 +4,7 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
+#include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 
@@ -15,12 +16,18 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
     std::shared_ptr<Buffer> upgradeInputsBuffer,
     std::shared_ptr<Buffer> upgradeInputCountBuffer,
     std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> clipmapInfoBuffer,
+    std::shared_ptr<Buffer> compactShadowCamerasBuffer,
+    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
     std::shared_ptr<Buffer> statsBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
     , m_upgradeInputsBuffer(std::move(upgradeInputsBuffer))
     , m_upgradeInputCountBuffer(std::move(upgradeInputCountBuffer))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
+    , m_compactShadowCamerasBuffer(std::move(compactShadowCamerasBuffer))
+    , m_directionalPageViewInfoBuffer(std::move(directionalPageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -33,12 +40,18 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
 
 void VirtualShadowMapAdmitPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
-    builder->WithShaderResource(m_upgradeInputsBuffer, m_upgradeInputCountBuffer)
+    builder->WithShaderResource(
+            m_upgradeInputsBuffer,
+            m_upgradeInputCountBuffer,
+            m_clipmapInfoBuffer,
+            m_compactShadowCamerasBuffer,
+            Builtin::CameraBuffer)
         .WithUnorderedAccess(
             m_pageTableTexture,
             m_dirtyPageFlagsBuffer,
             m_pageMetadataBuffer,
-            m_statsBuffer);
+            m_statsBuffer,
+            m_directionalPageViewInfoBuffer);
 }
 
 void VirtualShadowMapAdmitPagesPass::Setup() {}
@@ -87,8 +100,14 @@ PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executi
             m_upgradeInputsBuffer->GetSRVInfo(0).slot.index;
         rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_INPUT_COUNT_DESCRIPTOR_INDEX] =
             m_upgradeInputCountBuffer->GetSRVInfo(0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX] =
-            m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX] =
+                m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INFO_DESCRIPTOR_INDEX] =
+                m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
+            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_SHADOW_CAMERAS_DESCRIPTOR_INDEX] =
+                m_compactShadowCamerasBuffer->GetSRVInfo(0).slot.index;
+            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
+                m_directionalPageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_APPLY_UPGRADES_ONLY] = 1u;
         commandList.PushConstants(
             rhi::ShaderStage::Compute,

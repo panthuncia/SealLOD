@@ -19,6 +19,7 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     std::shared_ptr<Buffer> statsBuffer,
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> pageViewInfoBuffer,
     uint32_t physicalPageCount)
     : m_predictiveCandidatesBuffer(std::move(predictiveCandidatesBuffer))
     , m_predictiveCandidateCountBuffer(std::move(predictiveCandidateCountBuffer))
@@ -29,6 +30,7 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     , m_statsBuffer(std::move(statsBuffer))
     , m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_physicalPageCount(physicalPageCount)
 {
     m_stampContentGenerationPso = PSOManager::GetInstance().MakeComputePipeline(
@@ -55,6 +57,7 @@ void VirtualShadowMapExpandPredictedPagesPass::DeclareResourceUsages(ComputePass
 {
     builder->WithShaderResource(
             Builtin::Shadows::CLodCompactShadowCameras,
+            Builtin::CameraBuffer,
             m_clipmapInfoBuffer)
         .WithUnorderedAccess(
             m_predictiveCandidatesBuffer,
@@ -64,7 +67,8 @@ void VirtualShadowMapExpandPredictedPagesPass::DeclareResourceUsages(ComputePass
             m_scratchBitsetBuffer,
             m_statsBuffer,
             m_pageTableTexture,
-            m_pageMetadataBuffer);
+            m_pageMetadataBuffer,
+            m_pageViewInfoBuffer);
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 }
@@ -97,6 +101,8 @@ PassReturn VirtualShadowMapExpandPredictedPagesPass::Execute(PassExecutionContex
     rootConstants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PHYSICAL_PAGE_COUNT] = m_physicalPageCount;
     rootConstants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_CLIPMAP_COUNT] =
         CLodVirtualShadowMaxSupportedClipmapCount;
+    rootConstants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
+        m_pageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
     commandList.BindPipeline(m_stampContentGenerationPso.GetAPIPipelineState().GetHandle());
     BindResourceDescriptorIndices(commandList, m_stampContentGenerationPso.GetResourceDescriptorSlots());

@@ -14,6 +14,7 @@ static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
 static const uint kCLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
 static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
 static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationMask = 0xFFFFFFFEu;
+static const uint kCLodVirtualShadowClearEpochPendingMask = 0x80000000u;
 
 uint CLodVirtualShadowPhysicalPageAllocationGeneration(uint metadataFlags)
 {
@@ -210,6 +211,8 @@ struct CLodVirtualShadowStats
     uint contentValidOwnerMismatchCount;
     uint newlyAllocatedPageCount;
     uint physicalPageClearCount;
+    uint markResidentTagMismatchCount;
+    uint renderedWithoutMatchingClearCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];

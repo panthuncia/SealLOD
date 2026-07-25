@@ -689,6 +689,9 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowUpgradeInvalidationInputsBuffer,
             extension.m_shadowUpgradeInvalidationCountBuffer,
             extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowClipmapInfoBuffer,
+            extension.m_shadowCompactShadowCameraBuffer,
+            extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
     shadowAdmitPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowGatherStatsPassName));
     outPasses.push_back(std::move(shadowAdmitPagesPassDesc));
@@ -751,6 +754,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowStatsBuffer,
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowConfiguredMaxPhysicalPageCount));
     shadowExpandPredictedPagesPassDesc.At(
         RenderGraph::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
@@ -785,6 +789,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowStatsBuffer));
     shadowClearDirtyBitsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowDeduplicatePredictedPagesPassName));
     outPasses.push_back(std::move(shadowClearDirtyBitsPassDesc));
+
 }
 
 std::string CLodShadowVariant::AppendPhase1PageJobRasterPasses(
@@ -1258,6 +1263,10 @@ std::shared_ptr<Resource> CLodShadowVariant::ProvideResource(CLodExtension& exte
         return extension.m_shadowDirectionalPageViewInfoBuffer;
     }
 
+    if (key == Builtin::Shadows::CLodPageMetadata) {
+        return extension.m_shadowPageMetadataBuffer;
+    }
+
     return nullptr;
 }
 
@@ -1274,6 +1283,7 @@ std::vector<ResourceIdentifier> CLodShadowVariant::GetSupportedKeys(const CLodEx
         Builtin::Shadows::CLodCompactMainCamera,
         Builtin::Shadows::CLodCompactShadowCameras,
         Builtin::Shadows::CLodDirectionalPageViewInfo,
+        Builtin::Shadows::CLodPageMetadata,
     };
 }
 

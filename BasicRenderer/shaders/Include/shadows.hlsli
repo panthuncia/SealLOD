@@ -12,6 +12,8 @@ static const uint kCLodVirtualShadowDebugFlagSampledDepthMissing = 0x4u;
 static const uint kCLodVirtualShadowDebugFlagSampledPageUnwritten = 0x8u;
 static const uint kCLodVirtualShadowDebugFlagSampledTexelCleared = 0x10u;
 static const uint kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame = 0x20u;
+static const uint kCLodVirtualShadowDebugFlagCachedPageTagMismatch = 0x40u;
+static const uint kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch = 0x80u;
 static const float kCLodVirtualShadowPi = 3.14159265359f;
 static const float kCLodVirtualShadowTwoPi = 6.28318530718f;
 static const float kCLodVirtualShadowDegreesToRadians = kCLodVirtualShadowPi / 180.0f;
@@ -154,6 +156,18 @@ float3 CLodVirtualShadowDebugClipmapColor(uint clipmapIndex)
 
 float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo)
 {
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch) != 0u)
+    {
+        return float3(1.0f, 0.0f, 0.6f);
+    }
+
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagCachedPageTagMismatch) != 0u)
+    {
+        return float3(1.0f, 0.25f, 0.0f);
+    }
+
     if ((debugInfo.flags & kCLodVirtualShadowDebugFlagSampledDepthMissing) != 0u)
     {
         return float3(1.0f, 0.0f, 1.0f);
@@ -353,6 +367,23 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         }
 
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        StructuredBuffer<uint4> pageMetadata =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodPageMetadata)];
+        const uint4 physicalMeta = pageMetadata[physicalPageIndex];
+        const uint expectedVirtualAddress =
+            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
+            wrappedPageCoords.x;
+        if ((physicalMeta.z &
+                kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
+            physicalMeta.x != expectedVirtualAddress ||
+            physicalMeta.w != clipmapInfo.pageTableLayer)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
+            continue;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
@@ -360,19 +391,22 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
             debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame;
 
         row_major matrix cachedPageView = lightCamera.view;
-        const uint pageViewInfoIndex =
-            clipmapInfo.pageTableLayer * (clipmapInfo.pageTableResolution * clipmapInfo.pageTableResolution) +
-            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
-            wrappedPageCoords.x;
-        const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
+        const float4 cachedPageViewRow =
+            directionalPageViewInfo[physicalPageIndex];
         const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
             virtualPageCoords,
             clipmapInfo.unwrappedPageOffsetX,
             clipmapInfo.unwrappedPageOffsetY);
         if (asuint(cachedPageViewRow.w) != expectedPageTag)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
-        cachedPageView[3][0] = cachedPageViewRow.x;
-        cachedPageView[3][1] = cachedPageViewRow.y;
+        }
+        // Only the cached depth origin is required here.  Projected page
+        // selection already used the current clipmap transform, and X/Y view
+        // translation cannot contribute to view-space Z.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
@@ -591,6 +625,23 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         }
 
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        StructuredBuffer<uint4> pageMetadata =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodPageMetadata)];
+        const uint4 physicalMeta = pageMetadata[physicalPageIndex];
+        const uint expectedVirtualAddress =
+            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
+            wrappedPageCoords.x;
+        if ((physicalMeta.z &
+                kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
+            physicalMeta.x != expectedVirtualAddress ||
+            physicalMeta.w != clipmapInfo.pageTableLayer)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
+            continue;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
@@ -598,19 +649,22 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
             debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame;
 
         row_major matrix cachedPageView = lightCamera.view;
-        const uint pageViewInfoIndex =
-            clipmapInfo.pageTableLayer * (clipmapInfo.pageTableResolution * clipmapInfo.pageTableResolution) +
-            wrappedPageCoords.y * clipmapInfo.pageTableResolution +
-            wrappedPageCoords.x;
-        const float4 cachedPageViewRow = directionalPageViewInfo[pageViewInfoIndex];
+        const float4 cachedPageViewRow =
+            directionalPageViewInfo[physicalPageIndex];
         const uint expectedPageTag = CLodVirtualShadowPackAbsolutePageTag(
             virtualPageCoords,
             clipmapInfo.unwrappedPageOffsetX,
             clipmapInfo.unwrappedPageOffsetY);
         if (asuint(cachedPageViewRow.w) != expectedPageTag)
+        {
+            if (attempt == 0u)
+                debugInfo.flags |=
+                    kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
-        cachedPageView[3][0] = cachedPageViewRow.x;
-        cachedPageView[3][1] = cachedPageViewRow.y;
+        }
+        // Only the cached depth origin is required here.  Projected page
+        // selection already used the current clipmap transform, and X/Y view
+        // translation cannot contribute to view-space Z.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);

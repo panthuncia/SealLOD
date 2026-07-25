@@ -1923,9 +1923,16 @@ void Renderer::SetSettings() {
         m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
 	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
-    settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName, CLodVirtualShadowDefaultPhysicalPageCount);
+    settingsManager.registerSetting<uint32_t>(
+        CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName,
+        ReadUintEnvironmentValue(
+            "SARP_CLOD_VSM_MAX_PHYSICAL_PAGES",
+            CLodVirtualShadowDefaultPhysicalPageCount));
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowLodBiasSettingName, CLodVirtualShadowDefaultDirectionalLodBias);
-    settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName, true);
+    settingsManager.registerSetting<bool>(
+        CLodDirectionalVirtualShadowAutoLodBiasSettingName,
+        !ReadTruthyEnvironmentFlag(
+            "SARP_CLOD_VSM_DISABLE_AUTO_LOD_BIAS"));
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowAutoLodBiasScaleSettingName, 1.0f);
     settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName, true);
     settingsManager.registerSetting<uint32_t>(
@@ -3448,6 +3455,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.admittedPageCount > stats.normalRenderedPageCount + stats.upgradeRenderedPageCount
                 ? stats.admittedPageCount - stats.normalRenderedPageCount - stats.upgradeRenderedPageCount
                 : 0u;
+            const bool admittedPagesCleared =
+                stats.physicalPageClearCount == stats.admittedPageCount;
 
             spdlog::info(
                 "CLOD VSM budget frame={}: totalBudget={} upgradeBudget={} eligible(normal={},upgrade={}) admitted(total={},normal={},upgrade={}) deferred(normal={},upgrade={}) rendered(normal={},upgrade={}) admittedNotRendered={} valid(total={},upgrade={},rendered={})",
@@ -3488,21 +3497,29 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.cumulativeUpgradePageAdmittedCount,
                 stats.cumulativeUpgradePageRenderedCount);
             spdlog::info(
-                "CLOD VSM ownership frame={}: pageTableMismatches={} contentValidMismatches={} newlyAllocated={} physicalClears={} admitted={}",
+                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} newlyAllocated={} physicalClears={} admitted={} clearAdmissionInvariant={}",
                 requestedFrame,
+                stats.freePhysicalPageCount,
+                stats.reusablePhysicalPageCount,
+                stats.allocationRequestCount,
                 stats.pageTableOwnerMismatchCount,
                 stats.contentValidOwnerMismatchCount,
+                stats.markResidentTagMismatchCount,
+                stats.renderedWithoutMatchingClearCount,
                 stats.newlyAllocatedPageCount,
                 stats.physicalPageClearCount,
-                stats.admittedPageCount);
+                stats.admittedPageCount,
+                admittedPagesCleared);
 
-            if (!normalBudgetValid || !upgradeBudgetValid || !renderedWithinAdmission) {
+            if (!normalBudgetValid || !upgradeBudgetValid || !renderedWithinAdmission ||
+                !admittedPagesCleared) {
                 spdlog::error(
-                    "CLOD VSM budget invariant violation frame={}: totalValid={} upgradeValid={} renderedWithinAdmission={}.",
+                    "CLOD VSM budget invariant violation frame={}: totalValid={} upgradeValid={} renderedWithinAdmission={} admittedPagesCleared={}.",
                     requestedFrame,
                     normalBudgetValid,
                     upgradeBudgetValid,
-                    renderedWithinAdmission);
+                    renderedWithinAdmission,
+                    admittedPagesCleared);
             }
         });
 
@@ -3532,7 +3549,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     return decoded.counters[static_cast<size_t>(index)];
                 };
                 spdlog::info(
-                    "CLOD VSM work frame={}: object(threads={},inRange={},visible={},emitted={}) traverse(threads={},internal={},leaf={},culled={},errorRejected={},activeChildren={},emitted={}) cluster(inRange={},visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},clipmapMisses={}) sort(histInputs={},histContributors={},compactInputs={},compactEmitted={}) raster(groups={},inRange={},initFailed={},zeroTris={},outTris={},pixels={},scissorRejected={},clipmapRejected={},pageRejected={},vsmWrites={})",
+                    "CLOD VSM work frame={}: object(threads={},inRange={},visible={},emitted={}) traverse(threads={},internal={},leaf={},culled={},errorRejected={},activeChildren={},emitted={}) cluster(inRange={},visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},clipmapMisses={}) sort(histInputs={},histContributors={},compactInputs={},compactEmitted={}) raster(groups={},inRange={},initFailed={},zeroTris={},outTris={},pixels={},scissorRejected={},clipmapRejected={},pageRejected={},vsmWrites={},firstExpectedTag=0x{:08X},firstCachedTag=0x{:08X},writeOwnerMismatch={},preWriteViewMismatch={})",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
@@ -3564,7 +3581,11 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::RasterPixelScissorRejected),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowClipmapRejected),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelTargetBoundsRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVisibilityWrites),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration));
             });
     }
     if (visibleCounterResource) {

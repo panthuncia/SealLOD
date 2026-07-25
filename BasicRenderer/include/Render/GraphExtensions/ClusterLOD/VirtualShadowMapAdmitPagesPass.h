@@ -16,6 +16,9 @@ public:
         std::shared_ptr<Buffer> upgradeInputsBuffer,
         std::shared_ptr<Buffer> upgradeInputCountBuffer,
         std::shared_ptr<Buffer> pageMetadataBuffer,
+        std::shared_ptr<Buffer> clipmapInfoBuffer,
+        std::shared_ptr<Buffer> compactShadowCamerasBuffer,
+        std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
         std::shared_ptr<Buffer> statsBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -30,5 +33,8 @@ private:
     std::shared_ptr<Buffer> m_upgradeInputsBuffer;
     std::shared_ptr<Buffer> m_upgradeInputCountBuffer;
     std::shared_ptr<Buffer> m_pageMetadataBuffer;
+    std::shared_ptr<Buffer> m_clipmapInfoBuffer;
+    std::shared_ptr<Buffer> m_compactShadowCamerasBuffer;
+    std::shared_ptr<Buffer> m_directionalPageViewInfoBuffer;
     std::shared_ptr<Buffer> m_statsBuffer;
 };
