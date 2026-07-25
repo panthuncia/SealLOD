@@ -118,7 +118,6 @@ struct CLodVirtualShadowMarkClipmapData
     float directionalLodBias;
     int unwrappedPageOffsetX;
     int unwrappedPageOffsetY;
-    float4 directionalPageViewRow;
     row_major matrix shadowViewProjection;
 };
 

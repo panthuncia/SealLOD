@@ -240,6 +240,7 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     NodeBoundsExplicitBoneCount3To4,
     NodeBoundsExplicitBoneCount5To8,
     NodeBoundsExplicitBoneCount9Plus,
+    VirtualShadowBlockSoftCapFallbacks,
 
     Count
 };

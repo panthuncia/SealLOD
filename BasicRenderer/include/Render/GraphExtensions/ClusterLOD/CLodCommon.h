@@ -870,11 +870,10 @@ struct CLodVirtualShadowMarkClipmapData
     float directionalLodBias = CLodVirtualShadowDefaultDirectionalLodBias;
     int32_t unwrappedPageOffsetX = 0;
     int32_t unwrappedPageOffsetY = 0;
-    DirectX::XMFLOAT4 directionalPageViewRow{};
     DirectX::XMMATRIX shadowViewProjection{};
 };
 
-static_assert(sizeof(CLodVirtualShadowMarkClipmapData) == 128u, "CLodVirtualShadowMarkClipmapData size must match HLSL");
+static_assert(sizeof(CLodVirtualShadowMarkClipmapData) == 112u, "CLodVirtualShadowMarkClipmapData size must match HLSL");
 
 struct CLodVirtualShadowMarkTileWorkItem
 {

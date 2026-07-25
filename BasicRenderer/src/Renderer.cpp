@@ -413,9 +413,8 @@ uint32_t ReadUintEnvironmentValue(const char* name, uint32_t fallback)
 bool IsCLodVirtualShadowTelemetryDebugEnabled()
 {
     return ReadTruthyEnvironmentFlag("SARP_CLOD_VSM_TELEMETRY") ||
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodVirtualShadowTelemetryDebugSettingName)() ||
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)() != 0u ||
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)() != 0u;
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodVirtualShadowTelemetryDebugSettingName)();
 }
 
 bool DefaultEnableReShapeForBuild() {
@@ -1831,7 +1830,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
-    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::Standard);
+    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::PageJob);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
@@ -1921,7 +1920,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         CLodDisableReyesRasterizationSettingName,
         m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
-	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
+	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, true);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName,
@@ -1937,10 +1936,10 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName, true);
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowPageRenderBudgetSettingName,
-        ReadUintEnvironmentValue("SARP_CLOD_VSM_PAGE_BUDGET", 10u));
+        ReadUintEnvironmentValue("SARP_CLOD_VSM_PAGE_BUDGET", 500u));
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName,
-        ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 10u));
+        ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 500u));
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
@@ -3358,7 +3357,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
 
     if (!m_loggedCLodVirtualShadowTelemetryEnabled) {
         spdlog::info(
-            "CLOD VSM telemetry enabled (setting '{}', SARP_CLOD_VSM_TELEMETRY, or a finite page budget).",
+            "CLOD VSM telemetry enabled (setting '{}' or SARP_CLOD_VSM_TELEMETRY).",
             CLodVirtualShadowTelemetryDebugSettingName);
         m_loggedCLodVirtualShadowTelemetryEnabled = true;
     }
@@ -3549,43 +3548,37 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     return decoded.counters[static_cast<size_t>(index)];
                 };
                 spdlog::info(
-                    "CLOD VSM work frame={}: object(threads={},inRange={},visible={},emitted={}) traverse(threads={},internal={},leaf={},culled={},errorRejected={},activeChildren={},emitted={}) cluster(inRange={},visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},clipmapMisses={}) sort(histInputs={},histContributors={},compactInputs={},compactEmitted={}) raster(groups={},inRange={},initFailed={},zeroTris={},outTris={},pixels={},scissorRejected={},clipmapRejected={},pageRejected={},vsmWrites={},firstExpectedTag=0x{:08X},firstCachedTag=0x{:08X},writeOwnerMismatch={},preWriteViewMismatch={})",
+                    "CLOD VSM work frame={}: object(visible={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},blockCapFallbacks={}) sort(inputs={},emitted={}) raster(groups={},triangles={},pixels={},pageRejected={},writes={})",
                     requestedFrame,
-                    counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
-                    counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullTraverseRecordsEmitted),
-                    counter(CLodWorkGraphCounterIndex::TraverseNodesThreads),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesInternalNodeRecords),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
-                    counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords),
-                    counter(CLodWorkGraphCounterIndex::TraverseNodesActiveChildThreads),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted),
-                    counter(CLodWorkGraphCounterIndex::ClusterCullInRangeThreads),
                     counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyQueries),
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyRegionHits),
                     counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCleanPages),
-                    counter(CLodWorkGraphCounterIndex::ClusterCullShadowClipmapMisses),
-                    counter(CLodWorkGraphCounterIndex::RasterSortHistogramInputs),
-                    counter(CLodWorkGraphCounterIndex::RasterSortHistogramTriangleContributors),
+                    counter(CLodWorkGraphCounterIndex::VirtualShadowBlockSoftCapFallbacks),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
-                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderInRange),
-                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
-                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderZeroTriangleOutputs),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
                     counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelScissorRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowClipmapRejected),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelTargetBoundsRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVisibilityWrites),
-                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch),
-                    counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration));
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+                spdlog::info(
+                    "CLOD VSM routing frame={}: contributing={} hardware={} software={} pageJob={} pageJobReject(alpha={},reyes={},threshold={},disabled={})",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ClassifyContributing),
+                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedHW),
+                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW),
+                    counter(CLodWorkGraphCounterIndex::ClassifyRoutedPageJob),
+                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectAlphaTested),
+                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectReyesDisplacement),
+                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectBelowThreshold),
+                    counter(CLodWorkGraphCounterIndex::ClassifyPJRejectDisabled));
             });
     }
     if (visibleCounterResource) {

@@ -1519,6 +1519,66 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["software_raster"] = softwareRasterName;
                     response["rigid_only"] =
                         settings.getSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+                } else if (command == "clod.vsm_perf.get" || command == "clod.vsm_perf.set") {
+                    if (command == "clod.vsm_perf.set" && !m_finished) {
+                        throw std::runtime_error("cannot change VSM performance settings while profiling is active");
+                    }
+                    auto& settings = SettingsManager::GetInstance();
+                    if (command == "clod.vsm_perf.set") {
+                        if (request->document.contains("page_budget")) {
+                            settings.getSettingSetter<uint32_t>(
+                                CLodDirectionalVirtualShadowPageRenderBudgetSettingName)(
+                                request->document.at("page_budget").get<uint32_t>());
+                        }
+                        if (request->document.contains("upgrade_budget")) {
+                            settings.getSettingSetter<uint32_t>(
+                                CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)(
+                                request->document.at("upgrade_budget").get<uint32_t>());
+                        }
+                        if (request->document.contains("cache_disabled")) {
+                            settings.getSettingSetter<bool>(
+                                CLodDisableVirtualShadowPageCachingSettingName)(
+                                request->document.at("cache_disabled").get<bool>());
+                        }
+                        if (request->document.contains("block_soft_cap")) {
+                            settings.getSettingSetter<uint32_t>(
+                                CLodPageJobMaxPagesPerClusterSettingName)(
+                                request->document.at("block_soft_cap").get<uint32_t>());
+                        }
+                        if (request->document.contains("page_job_force_all")) {
+                            settings.getSettingSetter<bool>(
+                                CLodPageJobForceAllSettingName)(
+                                request->document.at("page_job_force_all").get<bool>());
+                        }
+                        if (request->document.contains("raster_mode")) {
+                            const std::string mode = request->document.at("raster_mode").get<std::string>();
+                            const CLodVSMRasterMode rasterMode =
+                                mode == "hardware" ? CLodVSMRasterMode::HardwareOnly :
+                                mode == "standard" ? CLodVSMRasterMode::Standard :
+                                mode == "page_job" ? CLodVSMRasterMode::PageJob :
+                                mode == "reyes" ? CLodVSMRasterMode::Reyes :
+                                throw std::runtime_error(
+                                    "raster_mode must be 'hardware', 'standard', 'page_job', or 'reyes'");
+                            settings.getSettingSetter<CLodVSMRasterMode>(
+                                CLodVSMRasterModeSettingName)(rasterMode);
+                        }
+                    }
+                    response["page_budget"] = settings.getSettingGetter<uint32_t>(
+                        CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
+                    response["upgrade_budget"] = settings.getSettingGetter<uint32_t>(
+                        CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
+                    response["cache_disabled"] = settings.getSettingGetter<bool>(
+                        CLodDisableVirtualShadowPageCachingSettingName)();
+                    response["block_soft_cap"] = settings.getSettingGetter<uint32_t>(
+                        CLodPageJobMaxPagesPerClusterSettingName)();
+                    response["page_job_force_all"] = settings.getSettingGetter<bool>(
+                        CLodPageJobForceAllSettingName)();
+                    const CLodVSMRasterMode rasterMode = settings.getSettingGetter<CLodVSMRasterMode>(
+                        CLodVSMRasterModeSettingName)();
+                    response["raster_mode"] =
+                        rasterMode == CLodVSMRasterMode::HardwareOnly ? "hardware" :
+                        rasterMode == CLodVSMRasterMode::PageJob ? "page_job" :
+                        rasterMode == CLodVSMRasterMode::Reyes ? "reyes" : "standard";
                 } else if (command == "clod.workgraph.reload") {
                     if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
                     response["reloaded_passes"] = HierarchicalCullingPass::ReloadAllWorkGraphs();

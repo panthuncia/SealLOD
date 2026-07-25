@@ -636,7 +636,6 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowFreePhysicalPagesBuffer,
             extension.m_shadowReusablePhysicalPagesBuffer,
-            extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowPageListHeaderBuffer,
             extension.m_shadowStatsBuffer));
     shadowAllocationPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowPreAllocateStatsPassName));
@@ -691,7 +690,6 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowClipmapInfoBuffer,
             extension.m_shadowCompactShadowCameraBuffer,
-            extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
     shadowAdmitPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowGatherStatsPassName));
     outPasses.push_back(std::move(shadowAdmitPagesPassDesc));

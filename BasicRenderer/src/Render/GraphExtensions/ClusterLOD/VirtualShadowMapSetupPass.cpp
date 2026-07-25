@@ -305,12 +305,6 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                     clipmapInfo.unwrappedPageOffsetX;
                 markData.unwrappedPageOffsetY =
                     clipmapInfo.unwrappedPageOffsetY;
-                const DirectX::XMVECTOR directionalPageViewRow = view->cameraInfo.view.r[3];
-                markData.directionalPageViewRow = DirectX::XMFLOAT4(
-                    DirectX::XMVectorGetX(directionalPageViewRow),
-                    DirectX::XMVectorGetY(directionalPageViewRow),
-                    DirectX::XMVectorGetZ(directionalPageViewRow),
-                    DirectX::XMVectorGetW(directionalPageViewRow));
                 markData.shadowViewProjection = view->cameraInfo.viewProjection;
 
                 compactShadowCameras[clipmapIndex].view = view->cameraInfo.view;

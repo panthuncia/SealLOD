@@ -18,7 +18,6 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
     std::shared_ptr<Buffer> pageMetadataBuffer,
     std::shared_ptr<Buffer> clipmapInfoBuffer,
     std::shared_ptr<Buffer> compactShadowCamerasBuffer,
-    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
     std::shared_ptr<Buffer> statsBuffer)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
@@ -27,7 +26,6 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
     , m_compactShadowCamerasBuffer(std::move(compactShadowCamerasBuffer))
-    , m_directionalPageViewInfoBuffer(std::move(directionalPageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -44,14 +42,12 @@ void VirtualShadowMapAdmitPagesPass::DeclareResourceUsages(ComputePassBuilder* b
             m_upgradeInputsBuffer,
             m_upgradeInputCountBuffer,
             m_clipmapInfoBuffer,
-            m_compactShadowCamerasBuffer,
-            Builtin::CameraBuffer)
+            m_compactShadowCamerasBuffer)
         .WithUnorderedAccess(
             m_pageTableTexture,
             m_dirtyPageFlagsBuffer,
             m_pageMetadataBuffer,
-            m_statsBuffer,
-            m_directionalPageViewInfoBuffer);
+            m_statsBuffer);
 }
 
 void VirtualShadowMapAdmitPagesPass::Setup() {}
@@ -106,8 +102,6 @@ PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executi
                 m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
             rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_SHADOW_CAMERAS_DESCRIPTOR_INDEX] =
                 m_compactShadowCamerasBuffer->GetSRVInfo(0).slot.index;
-            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
-                m_directionalPageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_APPLY_UPGRADES_ONLY] = 1u;
         commandList.PushConstants(
             rhi::ShaderStage::Compute,

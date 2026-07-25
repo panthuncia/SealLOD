@@ -21,7 +21,6 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
     std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
     std::shared_ptr<Buffer> freePhysicalPagesBuffer,
     std::shared_ptr<Buffer> reusablePhysicalPagesBuffer,
-    std::shared_ptr<Buffer> directionalPageViewInfoBuffer,
     std::shared_ptr<Buffer> pageListHeaderBuffer,
     std::shared_ptr<Buffer> statsBuffer)
     : m_allocationRequestsBuffer(std::move(allocationRequestsBuffer))
@@ -33,7 +32,6 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
     , m_freePhysicalPagesBuffer(std::move(freePhysicalPagesBuffer))
     , m_reusablePhysicalPagesBuffer(std::move(reusablePhysicalPagesBuffer))
-    , m_directionalPageViewInfoBuffer(std::move(directionalPageViewInfoBuffer))
     , m_pageListHeaderBuffer(std::move(pageListHeaderBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
@@ -58,7 +56,6 @@ VirtualShadowMapAllocatePagesPass::VirtualShadowMapAllocatePagesPass(
 void VirtualShadowMapAllocatePagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     builder->WithShaderResource(
-            Builtin::CameraBuffer,
             m_allocationRequestsBuffer,
             m_allocationCountBuffer,
             m_clipmapInfoBuffer,
@@ -66,7 +63,7 @@ void VirtualShadowMapAllocatePagesPass::DeclareResourceUsages(ComputePassBuilder
             m_reusablePhysicalPagesBuffer,
             m_pageListHeaderBuffer)
         .WithIndirectArguments(m_indirectArgsBuffer)
-        .WithUnorderedAccess(m_pageTableTexture, m_pageMetadataBuffer, m_dirtyPageFlagsBuffer, m_directionalPageViewInfoBuffer, m_statsBuffer);
+        .WithUnorderedAccess(m_pageTableTexture, m_pageMetadataBuffer, m_dirtyPageFlagsBuffer, m_statsBuffer);
 
     builder->WithConstantBuffer(Builtin::PerFrameBuffer);
 }
@@ -98,7 +95,6 @@ PassReturn VirtualShadowMapAllocatePagesPass::Execute(PassExecutionContext& exec
     rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
     rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT] = virtualShadowConfig.maxPhysicalPages;
-    rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = m_directionalPageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_RENDER_BUDGET] =
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
     rootConstants[CLOD_VIRTUAL_SHADOW_ALLOCATE_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;

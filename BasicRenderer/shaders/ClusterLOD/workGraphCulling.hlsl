@@ -399,6 +399,7 @@ static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_2 = 255u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_3_TO_4 = 256u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_5_TO_8 = 257u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_9_PLUS = 258u;
+static const uint WG_COUNTER_VSM_BLOCK_SOFT_CAP_FALLBACKS = 259u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -1208,6 +1209,7 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
             activeBlockCount++;
             if (activeBlockCount > blockSoftCap)
             {
+                WGTelemetryAdd(WG_COUNTER_VSM_BLOCK_SOFT_CAP_FALLBACKS, 1u);
                 return 1u;
             }
         }

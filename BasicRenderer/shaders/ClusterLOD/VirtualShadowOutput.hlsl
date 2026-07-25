@@ -6,18 +6,22 @@
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 
+#ifndef CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE
+// 0: complete output, 1: execute page validation but suppress depth atomics,
+// 2: suppress all virtual-shadow pixel work after invocation telemetry.
+#define CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE 0
+#endif
+
+#ifndef CLOD_VSM_WAVE_PAGE_STAMP
+#define CLOD_VSM_WAVE_PAGE_STAMP 1
+#endif
+
 static const uint CLOD_TELEMETRY_DISABLED_DESCRIPTOR = 0xFFFFFFFFu;
 static const uint WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS = 125u;
 static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 126u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED = 129u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED = 130u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_WRITES = 131u;
-// Shadow raster does not execute the primary-visibility target/write paths, so
-// their two telemetry slots can carry shadow-write provenance in this pass.
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_FIRST_EXPECTED_TAG = 127u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_FIRST_CACHED_TAG = 128u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_OWNER_MISMATCH = 132u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_VIEW_MISMATCH = 133u;
 
 void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
 {
@@ -103,6 +107,10 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     (void)primID;
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS, 1u);
 
+#if CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE == 2
+    return;
+#endif
+
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     const ClodViewRasterInfo viewRasterInfo = WaveLoadClodViewRasterInfo(viewRasterInfoBuffer, input.viewID);
 
@@ -170,30 +178,12 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     }
 
     const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-    StructuredBuffer<uint4> pageMetadata =
-        ResourceDescriptorHeap[
-            CLOD_RASTER_VIRTUAL_SHADOW_PAGE_METADATA_DESCRIPTOR_INDEX];
-    const uint4 physicalMeta = pageMetadata[physicalPageIndex];
-    const uint expectedVirtualAddress =
-        wrappedPageCoords.y * clipmapInfo.pageTableResolution +
-        wrappedPageCoords.x;
-    const bool metaNotResident =
-        (physicalMeta.z &
-            kCLodVirtualShadowPhysicalPageResidentFlag) == 0u;
-    const bool metaAddressMismatch =
-        physicalMeta.x != expectedVirtualAddress;
-    const bool metaClipmapMismatch =
-        physicalMeta.w != clipmapInfo.pageTableLayer;
-    if (metaNotResident || metaAddressMismatch || metaClipmapMismatch)
-    {
-        CLodRasterPixelTelemetryAdd(
-            WG_COUNTER_RASTER_PIXEL_VSM_OWNER_MISMATCH,
-            1u);
-        return;
-    }
-
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+
+#if CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE == 1
+    return;
+#endif
 
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
     if (!isfinite(input.linearDepth) || input.linearDepth <= 0.0f)
@@ -206,10 +196,46 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
         physicalPages[atlasPixel],
         newDepthBits,
         previousDepthBits);
+    // Stamp page completion once per unique page in the wave. The old
+    // per-fragment InterlockedOr serialized thousands of lanes on a single
+    // page-table word after every depth atomic.
+#if CLOD_VSM_WAVE_PAGE_STAMP
+    const uint packedPageCoords =
+        (pageCoords.x & 0xFFFu) |
+        ((pageCoords.y & 0xFFFu) << 12u) |
+        ((pageCoords.z & 0xFFu) << 24u);
+    const uint4 pageMatchMask = WaveMatch(packedPageCoords);
+    uint pageLeaderLane = 0u;
+    if (pageMatchMask.x != 0u)
+    {
+        pageLeaderLane = firstbitlow(pageMatchMask.x);
+    }
+    else if (pageMatchMask.y != 0u)
+    {
+        pageLeaderLane = 32u + firstbitlow(pageMatchMask.y);
+    }
+    else if (pageMatchMask.z != 0u)
+    {
+        pageLeaderLane = 64u + firstbitlow(pageMatchMask.z);
+    }
+    else
+    {
+        pageLeaderLane = 96u + firstbitlow(pageMatchMask.w);
+    }
+    if (WaveGetLaneIndex() == pageLeaderLane)
+    {
+        uint ignored = 0u;
+        InterlockedOr(
+            pageTable[pageCoords],
+            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            ignored);
+    }
+#else
     uint ignored = 0u;
     InterlockedOr(
         pageTable[pageCoords],
         kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
         ignored);
+#endif
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);
 }

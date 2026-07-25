@@ -1,0 +1,63 @@
+{
+  "name": "BasicRenderer VSM large-rerender pipeline",
+  "readiness": {
+    "stable_frames": 0,
+    "settling_frames": 120,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 80,
+    "maximum_samples": 160,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.005
+  },
+  "output": {
+    "database": "out/vsm_large_rerender_v2.sqlite",
+    "last_run_summary": "out/vsm_large_rerender.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.005
+    }
+  ],
+  "passes": [
+    { "id": "setup", "name": "CLodShadow::VirtualShadowSetupPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "mark", "name": "CLodShadow::VirtualShadowMarkPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "mark_tiles", "name": "CLodShadow::VirtualShadowBuildMarkTilesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_lists", "name": "CLodShadow::VirtualShadowBuildPageListsPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "allocate", "name": "CLodShadow::VirtualShadowAllocatePagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "admit", "name": "CLodShadow::VirtualShadowAdmitPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "clear_pages", "name": "CLodShadow::VirtualShadowClearPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "dirty_hierarchy", "name": "CLodShadow::VirtualShadowDirtyHierarchyPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "cull1", "name": "CLodShadow::HierarchicalCullingPass1", "queue": "", "metrics": ["gpu_time"] },
+    { "id": "hw_hist1", "name": "CLodShadow::RasterBucketsHistogramPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "hw_scan1", "name": "CLodShadow::RasterBucketsPrefixScanPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "hw_offsets1", "name": "CLodShadow::RasterBucketsPrefixOffsetsPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "hw_compact1", "name": "CLodShadow::RasterBucketsCompactAndArgsPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "hw_raster1", "name": "CLodShadow::RasterizeClustersPass1", "queue": "", "metrics": ["gpu_time"] },
+    { "id": "sw_block_hist1", "name": "CLodShadow::VirtualShadowBlockHistogramPassSW1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_block_scan1", "name": "CLodShadow::VirtualShadowBlockPrefixScanPassSW1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_block_offsets1", "name": "CLodShadow::VirtualShadowBlockPrefixOffsetsPassSW1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_block_emit1", "name": "CLodShadow::VirtualShadowBlockEmitPassSW1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_args1", "name": "CLodShadow::VirtualShadowBuildArgsPassSW1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_raster1", "name": "CLodShadow::SoftwareRasterizeClustersPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_job_expand1", "name": "CLodShadow::SoftwareRasterPageJobExpandPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_job_args1", "name": "CLodShadow::SoftwareRasterPageJobBuildArgsPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_job_raster1", "name": "CLodShadow::SoftwareRasterPageJobRasterPass1", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "cull2", "name": "CLodShadow::HierarchicalCullingPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "hw_raster2", "name": "CLodShadow::RasterizeClustersPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_block_hist2", "name": "CLodShadow::VirtualShadowBlockHistogramPassSW2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_block_emit2", "name": "CLodShadow::VirtualShadowBlockEmitPassSW2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "sw_raster2", "name": "CLodShadow::SoftwareRasterizeClustersPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_job_expand2", "name": "CLodShadow::SoftwareRasterPageJobExpandPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "page_job_raster2", "name": "CLodShadow::SoftwareRasterPageJobRasterPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "finalize", "name": "CLodShadow::VirtualShadowFinalizeRenderedPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "clear_dirty", "name": "CLodShadow::VirtualShadowClearDirtyBitsPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "clock_reference", "name": "EvaluateMaterialGroupsPass", "queue": "", "metrics": ["gpu_time"], "required": false }
+  ]
+}

@@ -59,6 +59,12 @@ PassReturn VirtualShadowMapClearDirtyBitsPass::Execute(PassExecutionContext& exe
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_COMPLETE_EMPTY_ADMITTED_PAGES] =
+        CLodVSMRasterModeUsesLargeClusterPageJob(
+            SettingsManager::GetInstance().getSettingGetter<CLodVSMRasterMode>(
+                CLodVSMRasterModeSettingName)())
+        ? 1u
+        : 0u;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
