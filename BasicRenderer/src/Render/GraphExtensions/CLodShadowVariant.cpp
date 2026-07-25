@@ -39,6 +39,7 @@
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapBuildPageListsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearDirtyBitsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapClearPagesPass.h"
+#include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapBuildActiveBlocksPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapDirtyHierarchyPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapFreeWrappedPagesPass.h"
 #include "Render/GraphExtensions/ClusterLOD/VirtualShadowMapGatherStatsPass.h"
@@ -706,6 +707,16 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
     shadowClearPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowAdmitPagesPassName));
     outPasses.push_back(std::move(shadowClearPagesPassDesc));
 
+    const std::string shadowBuildActiveBlocksPassName = MakeVariantPassName(traits, "VirtualShadowBuildActiveBlocksPass");
+    auto shadowBuildActiveBlocksPassDesc = RenderGraph::ExternalPassDesc::Compute(
+        shadowBuildActiveBlocksPassName,
+        std::make_shared<VirtualShadowMapBuildActiveBlocksPass>(
+            extension.m_shadowPageTableTexture,
+            extension.m_shadowClipmapInfoBuffer,
+            extension.m_shadowActiveBlockMetadataBuffer));
+    shadowBuildActiveBlocksPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowClearPagesPassName));
+    outPasses.push_back(std::move(shadowBuildActiveBlocksPassDesc));
+
     const std::string shadowDirtyHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowDirtyHierarchyPass");
     auto shadowDirtyHierarchyPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowDirtyHierarchyPassName,
@@ -713,7 +724,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPageTableTexture,
             extension.m_shadowDirtyPageHierarchyTexture,
             extension.m_shadowClipmapInfoBuffer));
-    shadowDirtyHierarchyPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowClearPagesPassName));
+    shadowDirtyHierarchyPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowBuildActiveBlocksPassName));
     outPasses.push_back(std::move(shadowDirtyHierarchyPassDesc));
 
     const std::string shadowNonRasterableHierarchyPassName = MakeVariantPassName(traits, "VirtualShadowNonRasterableHierarchyPass");
@@ -1523,6 +1534,24 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_shadowMarkedBlocksCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowMarkedBlocksCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Marked Blocks Count Buffer"));
 
+    extension.m_shadowActiveBlockMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodVirtualShadowMaxMarkedBlockCount,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    extension.m_shadowActiveBlockMetadataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Active Block Metadata Buffer"));
+
+    extension.m_shadowBlockClusterCoverageBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        extension.m_shadowConfiguredComputeClusterCapacity,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    extension.m_shadowBlockClusterCoverageBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Block Cluster Coverage Buffer"));
+
     extension.m_shadowFreePhysicalPagesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         maxShadowPhysicalPageCount,
         sizeof(uint32_t),
@@ -1778,6 +1807,8 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_shadowMarkedBlocksMaskBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowMarkedBlocksListBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowMarkedBlocksCountBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_shadowActiveBlockMetadataBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_shadowBlockClusterCoverageBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowFreePhysicalPagesBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowReusablePhysicalPagesBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowPageListHeaderBuffer, "Cluster LOD virtual shadow maps");

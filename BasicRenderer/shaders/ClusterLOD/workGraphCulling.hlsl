@@ -69,12 +69,6 @@
 #define CLOD_VSM_OCCLUSION_CULLING 0
 #endif
 
-// Set to 1 to reuse the current primary camera for VSM LOD decisions.
-// Defaults to 0 so shadow views use their own camera for both culling and LOD.
-#ifndef CLOD_VSM_USE_PRIMARY_CAMERA_FOR_LOD
-#define CLOD_VSM_USE_PRIMARY_CAMERA_FOR_LOD 0
-#endif
-
 // meshopt_Meshlet layout on GPU
 struct Meshlet
 {
@@ -399,7 +393,6 @@ static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_2 = 255u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_3_TO_4 = 256u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_5_TO_8 = 257u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_9_PLUS = 258u;
-static const uint WG_COUNTER_VSM_BLOCK_SOFT_CAP_FALLBACKS = 259u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -745,20 +738,7 @@ bool CLodVirtualShadowFindClipmapForView(uint viewId, out uint outClipmapIndex, 
 
 uint CLodResolveLodViewId(uint cullViewId)
 {
-#if !CLOD_VSM_USE_PRIMARY_CAMERA_FOR_LOD
     return cullViewId;
-#else
-    uint clipmapIndex = 0u;
-    CLodVirtualShadowClipmapInfo clipmapInfo;
-    if (!CLodVirtualShadowFindClipmapForView(cullViewId, clipmapIndex, clipmapInfo))
-    {
-        return cullViewId;
-    }
-
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    return perFrameBuffer.mainCameraIndex;
-#endif
 }
 
 bool CLodVirtualShadowComputeSphereAabbUvBounds(
@@ -832,87 +812,6 @@ bool CLodVirtualShadowComputeSphereAabbUvBounds(
     return true;
 }
 
-bool CLodVirtualShadowConservativeAnyHitTexture2DArraySphereQuery(
-    Texture2DArray<uint> queryTexture,
-    uint arrayLayer,
-    uint2 baseResolution,
-    in const CLodVirtualShadowCompactShadowCameraInfo camera,
-    float3 viewSpaceCenter,
-    float scaledBoundingRadius,
-    out uint sampledMipLevel,
-    out bool queryClipped)
-{
-    viewSpaceCenter.y = -viewSpaceCenter.y;
-
-    float4 vLBRT;
-    if (CLodVirtualShadowCompactCameraIsOrtho(camera))
-    {
-        viewSpaceCenter.y = -viewSpaceCenter.y;
-        vLBRT = sphere_screen_extents_ortho(viewSpaceCenter.xyz, scaledBoundingRadius, camera.projection);
-    }
-    else
-    {
-        vLBRT = sphere_screen_extents(viewSpaceCenter.xyz, scaledBoundingRadius, camera.projection);
-        vLBRT.x = -vLBRT.x;
-        vLBRT.z = -vLBRT.z;
-    }
-
-    const float4 vToUV = float4(0.5f, -0.5f, 0.5f, -0.5f);
-    const float4 vUV = vLBRT.xwzy * vToUV + 0.5f;
-    const float2 uvMin = vUV.xy;
-    const float2 uvMax = vUV.zw;
-
-    if (uvMax.x < 0.0f || uvMin.x > 1.0f ||
-        uvMax.y < 0.0f || uvMin.y > 1.0f)
-    {
-        sampledMipLevel = 0u;
-        queryClipped = false;
-        return false;
-    }
-
-    queryClipped = any(uvMin < 0.0f.xx) || any(uvMax > 1.0f.xx);
-
-    const float2 clampedUvMin = saturate(uvMin);
-    const float2 clampedUvMax = saturate(uvMax);
-    const float2 baseResolutionF = float2(baseResolution);
-    const float2 minTexel = clamp(baseResolutionF * clampedUvMin, 0.0f.xx, baseResolutionF - 1.0f.xx);
-    const float2 maxTexel = clamp(baseResolutionF * clampedUvMax, 0.0f.xx, baseResolutionF - 1.0f.xx);
-    const float pixelWidth = max(maxTexel.x - minTexel.x, maxTexel.y - minTexel.y);
-    const uint sampleWidth = 2u;
-    const uint maxMipLevel = firstbithigh(max(baseResolution.x, baseResolution.y));
-
-    sampledMipLevel = min(
-        (uint)clamp(ceil(log2(max(pixelWidth, 1.0f))) - log2((float)sampleWidth), 0.0f, (float)maxMipLevel),
-        maxMipLevel);
-
-    const int2 quadCornerTexel = int2(minTexel) >> sampledMipLevel;
-    const int2 minCornerTexel = int2(minTexel) >> sampledMipLevel;
-    const int2 maxCornerTexel = int2(maxTexel) >> sampledMipLevel;
-    const int2 atMipPixelWidth = maxCornerTexel - minCornerTexel + 1;
-    const int2 texelBounds = max(int2(0, 0), (int2(baseResolution) >> sampledMipLevel) - 1);
-
-    [loop]
-    for (uint x = 0u; x <= sampleWidth; ++x)
-    {
-        [loop]
-        for (uint y = 0u; y <= sampleWidth; ++y)
-        {
-            if ((int)x >= atMipPixelWidth.x || (int)y >= atMipPixelWidth.y)
-            {
-                continue;
-            }
-
-            const int2 sampleTexel = clamp(quadCornerTexel + int2(x, y), int2(0, 0), texelBounds);
-            if (queryTexture.Load(int4(sampleTexel, arrayLayer, sampledMipLevel)) != 0u)
-            {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 bool CLodVirtualShadowDirtyHierarchyAnyHit(
     Texture2DArray<uint> queryTexture,
     uint arrayLayer,
@@ -962,17 +861,6 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
     return false;
 }
 
-// Set to 1 to use AABB-from-sphere projection for the dirty page query,
-// 0 to use the original projected bounding sphere footprint directly.
-#define CLOD_VSM_USE_AABB_DIRTY_QUERY 1
-#ifndef CLOD_VSM_USE_AABB_DIRTY_QUERY
-#define CLOD_VSM_USE_AABB_DIRTY_QUERY 0
-#endif
-
-// Hardware block records feed mesh-shader clip distances that constrain fixed-
-// function rasterization to the record's active page rectangle.
-#define CLOD_VSM_HW_BLOCK_RECORDS 1
-
 bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
 {
     uint clipmapIndex = 0u;
@@ -1017,7 +905,6 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
     uint sampledMipLevel = 0u;
     bool queryClipped = false;
 
-#if CLOD_VSM_USE_AABB_DIRTY_QUERY
     float2 uvMin = 0.0f.xx;
     float2 uvMax = 0.0f.xx;
     const bool queryValid = CLodVirtualShadowComputeSphereAabbUvBounds(
@@ -1036,18 +923,6 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
             uvMax,
             sampledMipLevel)
         : false;
-#else
-    const float3 meshletCenterViewSpace = mul(float4(worldCenter, 1.0f), shadowCamera.view).xyz;
-    const bool touchesDirtyPages = CLodVirtualShadowConservativeAnyHitTexture2DArraySphereQuery(
-        dirtyHierarchy,
-        clipmapInfo.pageTableLayer,
-        uint2(clipmapInfo.pageTableResolution, clipmapInfo.pageTableResolution),
-        shadowCamera,
-        meshletCenterViewSpace,
-        radiusWorld,
-        sampledMipLevel,
-        queryClipped);
-#endif
 
     if (queryClipped)
     {
@@ -1207,10 +1082,9 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
                 vsmPayload))
         {
             activeBlockCount++;
-            if (activeBlockCount > blockSoftCap)
+            if (activeBlockCount == blockSoftCap)
             {
-                WGTelemetryAdd(WG_COUNTER_VSM_BLOCK_SOFT_CAP_FALLBACKS, 1u);
-                return 1u;
+                return activeBlockCount;
             }
         }
     }
@@ -1241,44 +1115,7 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
     const uint blockSoftCap = min(
         max(1u, CLodPageJobMaxPagesPerCluster()),
         kCLodVirtualShadowBlockMaxTrackedPerCluster);
-    uint activeBlockCount = 0u;
     const uint totalBlockCount = blockCount.x * blockCount.y;
-    [loop]
-    for (uint blockLinearIndex = 0u; blockLinearIndex < totalBlockCount; ++blockLinearIndex)
-    {
-        const uint2 blockCoord = uint2(blockLinearIndex % blockCount.x, blockLinearIndex / blockCount.x) + minBlockCoord;
-        uint vsmPayload = 0u;
-        if (CLodVirtualShadowBuildVisibleClusterBlockPayload(
-                shadowClipmapIndex,
-                clipmapInfo,
-                pageTable,
-                meshletMinPageCoord,
-                meshletMaxPageCoord,
-                blockCoord,
-                vsmPayload))
-        {
-            activeBlockCount++;
-            if (activeBlockCount > blockSoftCap)
-            {
-                if (maxWriteCount != 0u)
-                {
-                    CLodStoreVisibleClusterGloballyCoherent(
-                        visibleClusters,
-                        writeBase,
-                        viewId,
-                        instanceIndex,
-                        localMeshletIndex,
-                        visibleGroupId,
-                        pageSlabDescriptorIndex,
-                        pageSlabByteOffset,
-                        shadowClipmapIndex);
-                    visibleClusterTransformIndices[writeBase] = assemblyTransformIndex;
-                }
-                return;
-            }
-        }
-    }
-
     uint emittedCount = 0u;
     [loop]
     for (uint blockLinearIndex = 0u; blockLinearIndex < totalBlockCount; ++blockLinearIndex)
@@ -1312,6 +1149,10 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
             visibleClusterTransformIndices[writeBase + emittedCount] = assemblyTransformIndex;
         }
         emittedCount++;
+        if (emittedCount == min(maxWriteCount, blockSoftCap))
+        {
+            return;
+        }
     }
 }
 
@@ -4407,7 +4248,6 @@ void ClusterCullBody(
         uint2 hwMinBlockCoord = uint2(0u, 0u);
         uint2 hwBlockCount = uint2(0u, 0u);
         const bool hwUsesVsmBlocks =
-            CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
             contributes &&
             shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
             CLodVirtualShadowComputeMeshletBlockCoverage(
@@ -4523,7 +4363,6 @@ void ClusterCullBody(
             uint2 hwMinBlockCoord = uint2(0u, 0u);
             uint2 hwBlockCount = uint2(0u, 0u);
             const bool hwUsesVsmBlocks =
-                CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
                 contributes &&
                 shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
                 CLodVirtualShadowComputeMeshletBlockCoverage(
@@ -4697,7 +4536,6 @@ void ClusterCullBody(
             uint2 hwMinBlockCoord = uint2(0u, 0u);
             uint2 hwBlockCount = uint2(0u, 0u);
             const bool hwUsesVsmBlocks =
-                CLOD_VSM_HW_BLOCK_RECORDS != 0 &&
                 isHW &&
                 shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
                 CLodVirtualShadowComputeMeshletBlockCoverage(

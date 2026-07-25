@@ -6,16 +6,6 @@
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
 
-#ifndef CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE
-// 0: complete output, 1: execute page validation but suppress depth atomics,
-// 2: suppress all virtual-shadow pixel work after invocation telemetry.
-#define CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE 0
-#endif
-
-#ifndef CLOD_VSM_WAVE_PAGE_STAMP
-#define CLOD_VSM_WAVE_PAGE_STAMP 1
-#endif
-
 static const uint CLOD_TELEMETRY_DISABLED_DESCRIPTOR = 0xFFFFFFFFu;
 static const uint WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS = 125u;
 static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 126u;
@@ -107,10 +97,6 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     (void)primID;
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS, 1u);
 
-#if CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE == 2
-    return;
-#endif
-
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     const ClodViewRasterInfo viewRasterInfo = WaveLoadClodViewRasterInfo(viewRasterInfoBuffer, input.viewID);
 
@@ -181,10 +167,6 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
-#if CLOD_VSM_HARDWARE_RASTER_DIAGNOSTIC_MODE == 1
-    return;
-#endif
-
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
     if (!isfinite(input.linearDepth) || input.linearDepth <= 0.0f)
     {
@@ -199,7 +181,6 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     // Stamp page completion once per unique page in the wave. The old
     // per-fragment InterlockedOr serialized thousands of lanes on a single
     // page-table word after every depth atomic.
-#if CLOD_VSM_WAVE_PAGE_STAMP
     const uint packedPageCoords =
         (pageCoords.x & 0xFFFu) |
         ((pageCoords.y & 0xFFFu) << 12u) |
@@ -230,12 +211,5 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
             kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
-#else
-    uint ignored = 0u;
-    InterlockedOr(
-        pageTable[pageCoords],
-        kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-        ignored);
-#endif
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);
 }

@@ -33,6 +33,7 @@
     { "id": "allocate", "name": "CLodShadow::VirtualShadowAllocatePagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "admit", "name": "CLodShadow::VirtualShadowAdmitPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "clear_pages", "name": "CLodShadow::VirtualShadowClearPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "build_active_blocks", "name": "CLodShadow::VirtualShadowBuildActiveBlocksPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "dirty_hierarchy", "name": "CLodShadow::VirtualShadowDirtyHierarchyPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "cull1", "name": "CLodShadow::HierarchicalCullingPass1", "queue": "", "metrics": ["gpu_time"] },
     { "id": "hw_hist1", "name": "CLodShadow::RasterBucketsHistogramPass1", "queue": "", "metrics": ["gpu_time"], "required": false },

@@ -1148,6 +1148,8 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_shadowMarkedBlocksMaskBuffer);
     releaseBufferBacking(m_shadowMarkedBlocksListBuffer);
     releaseBufferBacking(m_shadowMarkedBlocksCountBuffer);
+    releaseBufferBacking(m_shadowActiveBlockMetadataBuffer);
+    releaseBufferBacking(m_shadowBlockClusterCoverageBuffer);
     releaseBufferBacking(m_shadowFreePhysicalPagesBuffer);
     releaseBufferBacking(m_shadowReusablePhysicalPagesBuffer);
     releaseBufferBacking(m_shadowPageListHeaderBuffer);
@@ -2056,8 +2058,9 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         nullptr,
                         nullptr,
                         nullptr,
-                        m_shadowPageTableTexture,
                         m_shadowClipmapInfoBuffer,
+                        m_shadowActiveBlockMetadataBuffer,
+                        m_shadowBlockClusterCoverageBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
                         vsmBlockSoftCap,
                         slabGroup,
@@ -2096,8 +2099,9 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         blockWriteCursorBuffer,
                         m_vsmExpandedVisibleClustersBufferSw,
                         m_vsmExpandedVisibleClusterTransformIndicesBufferSw,
-                        m_shadowPageTableTexture,
                         m_shadowClipmapInfoBuffer,
+                        m_shadowActiveBlockMetadataBuffer,
+                        m_shadowBlockClusterCoverageBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
                         vsmBlockSoftCap,
                         slabGroup,

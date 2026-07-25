@@ -3548,7 +3548,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     return decoded.counters[static_cast<size_t>(index)];
                 };
                 spdlog::info(
-                    "CLOD VSM work frame={}: object(visible={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={},blockCapFallbacks={}) sort(inputs={},emitted={}) raster(groups={},triangles={},pixels={},pageRejected={},writes={})",
+                    "CLOD VSM work frame={}: object(visible={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={}) sort(inputs={},emitted={}) raster(groups={},triangles={},pixels={},pageRejected={},writes={})",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullTraverseRecordsEmitted),
@@ -3560,7 +3560,6 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyQueries),
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyRegionHits),
                     counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCleanPages),
-                    counter(CLodWorkGraphCounterIndex::VirtualShadowBlockSoftCapFallbacks),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),

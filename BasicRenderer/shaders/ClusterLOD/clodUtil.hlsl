@@ -16,6 +16,7 @@
 #include "PerPassRootConstants/clodVirtualShadowAdmitPagesRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowBuildPageListsRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowClearDirtyBitsRootConstants.h"
+#include "PerPassRootConstants/clodVirtualShadowBuildActiveBlocksRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowApplyUpgradesRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowClearRootConstants.h"
 #include "PerPassRootConstants/clodVirtualShadowFreeWrappedRootConstants.h"
@@ -3301,6 +3302,74 @@ void CLodVirtualShadowClearDirtyBitsCSMain(uint3 dispatchThreadId : SV_DispatchT
             kCLodVirtualShadowAdmittedThisFrameMask |
             kCLodVirtualShadowUpgradePendingMask),
         ignoredPrev);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void CLodVirtualShadowBuildActiveBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    const uint blockLinearIndex = dispatchThreadId.x;
+    if (blockLinearIndex >= CLOD_VSM_BUILD_ACTIVE_BLOCKS_COUNT)
+    {
+        return;
+    }
+
+    uint2 blockCoord;
+    uint clipmapIndex;
+    CLodVirtualShadowUnpackBlockLinearIndex(blockLinearIndex, blockCoord, clipmapIndex);
+
+    RWStructuredBuffer<uint> output =
+        ResourceDescriptorHeap[CLOD_VSM_BUILD_ACTIVE_BLOCKS_OUTPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[CLOD_VSM_BUILD_ACTIVE_BLOCKS_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
+    const uint blocksPerAxis =
+        (clipmapInfo.pageTableResolution + kCLodVirtualShadowBlockPagesPerAxis - 1u) /
+        kCLodVirtualShadowBlockPagesPerAxis;
+    if (!CLodVirtualShadowClipmapIsValid(clipmapInfo) ||
+        blockCoord.x >= blocksPerAxis ||
+        blockCoord.y >= blocksPerAxis)
+    {
+        output[blockLinearIndex] = 0xFFFFFFFFu;
+        return;
+    }
+
+    Texture2DArray<uint> pageTable =
+        ResourceDescriptorHeap[CLOD_VSM_BUILD_ACTIVE_BLOCKS_PAGE_TABLE_DESCRIPTOR_INDEX];
+    const uint2 blockOriginPageCoord =
+        CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
+    uint2 minLocalPageCoord = uint2(3u, 3u);
+    uint2 maxLocalPageCoord = uint2(0u, 0u);
+    bool anyActive = false;
+    [unroll]
+    for (uint localY = 0u; localY < kCLodVirtualShadowBlockPagesPerAxis; ++localY)
+    {
+        [unroll]
+        for (uint localX = 0u; localX < kCLodVirtualShadowBlockPagesPerAxis; ++localX)
+        {
+            const uint2 localPageCoord = uint2(localX, localY);
+            const uint2 pageCoord = blockOriginPageCoord + localPageCoord;
+            if (pageCoord.x >= clipmapInfo.pageTableResolution ||
+                pageCoord.y >= clipmapInfo.pageTableResolution)
+            {
+                continue;
+            }
+            const uint2 wrappedPageCoord =
+                CLodVirtualShadowWrappedPageCoords(pageCoord, clipmapInfo);
+            const uint pageEntry =
+                pageTable[uint3(wrappedPageCoord, clipmapInfo.pageTableLayer)];
+            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+            {
+                anyActive = true;
+                minLocalPageCoord = min(minLocalPageCoord, localPageCoord);
+                maxLocalPageCoord = max(maxLocalPageCoord, localPageCoord);
+            }
+        }
+    }
+    output[blockLinearIndex] = anyActive
+        ? CLodVirtualShadowPackBlockActiveRect(
+            minLocalPageCoord, maxLocalPageCoord, false)
+        : 0xFFFFFFFFu;
 }
 
 uint CLodGetHistogramVisibleClusterReadIndex(uint linearizedID)
