@@ -2034,7 +2034,6 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
         std::shared_ptr<Buffer> swRasterIndirectArgsBuffer = swIndirectArgsBuffer;
 
         if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow) {
-            const uint32_t vsmBlockSoftCap = std::max(1u, std::min(m_shadowConfiguredPageJobMaxPages, CLodVirtualShadowBlockMaxTrackedPerCluster));
             const std::shared_ptr<Buffer> blockHistogramBuffer =
                 isPhase1 ? m_rasterBucketsHistogramBufferPhase2Sw : m_rasterBucketsHistogramBufferSw;
             const std::shared_ptr<Buffer> blockWriteCursorBuffer =
@@ -2061,8 +2060,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         m_shadowClipmapInfoBuffer,
                         m_shadowActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
+                        m_shadowStatsBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
-                        vsmBlockSoftCap,
                         slabGroup,
                         true)));
 
@@ -2102,8 +2101,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         m_shadowClipmapInfoBuffer,
                         m_shadowActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
+                        m_shadowStatsBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
-                        vsmBlockSoftCap,
                         slabGroup,
                         true)));
 

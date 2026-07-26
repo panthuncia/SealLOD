@@ -1830,7 +1830,7 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
-    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::PageJob);
+    settingsManager.registerSetting<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, CLodVSMRasterMode::Standard);
     settingsManager.registerSetting<CLodTransparencyMode>(CLodTransparencyModeSettingName, CLodTransparencyMode::Disabled);
     settingsManager.registerSetting<CLodLodHeightMode>(CLodLodHeightModeSettingName, CLodLodHeightMode::RenderHeight);
     settingsManager.registerSetting<bool>(CLodEnablePageJobVSMSettingName, true);
@@ -1920,7 +1920,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         CLodDisableReyesRasterizationSettingName,
         m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
-	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, true);
+	settingsManager.registerSetting<bool>(CLodDisableVirtualShadowPageCachingSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, CLodVirtualShadowDefaultBackingResolution);
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName,
@@ -3509,6 +3509,30 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.physicalPageClearCount,
                 stats.admittedPageCount,
                 admittedPagesCleared);
+            spdlog::info(
+                "CLOD VSM raster expansion frame={}: swBlocks(requested={},committed={},dropped={}) pageJobs(requested={},committed={},dropped={},doubleSided={})",
+                requestedFrame,
+                stats.blockExpandedRequestedRecordCount,
+                stats.blockExpandedCommittedRecordCount,
+                stats.blockExpandedDroppedRecordCount,
+                stats.pageJobRequestedRecordCount,
+                stats.pageJobCommittedRecordCount,
+                stats.pageJobDroppedRecordCount,
+                stats.pageJobDoubleSidedRecordCount);
+            spdlog::info(
+                "CLOD VSM page-job raster frame={}: jobs={} clusterBoundsOverlap={} triangles(total={},depthRejected={},backfaceRejected={},bboxRejected={}) coveredPixels={} pageWrites={} emptyJobs={}",
+                requestedFrame,
+                stats.pageJobRasterJobCount,
+                stats.pageJobRasterClusterBoundsOverlapCount,
+                stats.pageJobRasterTriangleCount,
+                stats.pageJobRasterDepthRejectedTriangleCount,
+                stats.pageJobRasterBackfaceRejectedTriangleCount,
+                stats.pageJobRasterBboxRejectedTriangleCount,
+                stats.pageJobRasterCoveredPixelCount,
+                stats.pageJobRasterPageWriteCount,
+                stats.pageJobRasterJobCount > stats.pageJobRasterPageWriteCount
+                    ? stats.pageJobRasterJobCount - stats.pageJobRasterPageWriteCount
+                    : 0u);
 
             if (!normalBudgetValid || !upgradeBudgetValid || !renderedWithinAdmission ||
                 !admittedPagesCleared) {

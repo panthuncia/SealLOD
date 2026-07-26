@@ -57,7 +57,6 @@ static const uint kCLodVirtualShadowMarkTileSize = 16u;
 static const uint kCLodVirtualShadowBlockPagesPerAxis = 4u;
 static const uint kCLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (kCLodVirtualShadowBlockPagesPerAxis * kCLodVirtualShadowBlockPagesPerAxis) / 2u;
-static const uint kCLodVirtualShadowBlockMaxTrackedPerCluster = 32u;
 static const uint kCLodVirtualShadowMaxBlocksPerAxis =
     (kCLodVirtualShadowMaxPageTableResolution + kCLodVirtualShadowBlockPagesPerAxis - 1u) / kCLodVirtualShadowBlockPagesPerAxis;
 static const uint kCLodVirtualShadowMaxBlocksPerClipmap =
@@ -212,6 +211,21 @@ struct CLodVirtualShadowStats
     uint physicalPageClearCount;
     uint markResidentTagMismatchCount;
     uint renderedWithoutMatchingClearCount;
+    uint blockExpandedRequestedRecordCount;
+    uint blockExpandedCommittedRecordCount;
+    uint blockExpandedDroppedRecordCount;
+    uint pageJobRequestedRecordCount;
+    uint pageJobCommittedRecordCount;
+    uint pageJobDroppedRecordCount;
+    uint pageJobDoubleSidedRecordCount;
+    uint pageJobRasterJobCount;
+    uint pageJobRasterTriangleCount;
+    uint pageJobRasterDepthRejectedTriangleCount;
+    uint pageJobRasterBackfaceRejectedTriangleCount;
+    uint pageJobRasterCoveredPixelCount;
+    uint pageJobRasterPageWriteCount;
+    uint pageJobRasterClusterBoundsOverlapCount;
+    uint pageJobRasterBboxRejectedTriangleCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];

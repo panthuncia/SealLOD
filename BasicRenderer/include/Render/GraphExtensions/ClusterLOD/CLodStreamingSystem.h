@@ -429,6 +429,7 @@ private:
     mutable std::mutex m_virtualShadowUpgradeMutex;
     std::unordered_map<uint32_t, std::unordered_map<VirtualShadowPageKey, VirtualShadowDependency, VirtualShadowPageKeyHash>> m_virtualShadowDependencies;
     std::deque<QueuedVirtualShadowUpgrade> m_virtualShadowUpgradeEvents;
+    std::unordered_set<VirtualShadowPageKey, VirtualShadowPageKeyHash> m_virtualShadowQueuedPageKeys;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
     std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;

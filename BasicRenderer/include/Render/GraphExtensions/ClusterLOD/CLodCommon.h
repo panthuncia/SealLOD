@@ -296,9 +296,10 @@ struct CLodSoftwareRasterPageJobRecord
     uint32_t clipmapLayer = 0u;
     uint32_t wrappedPageX = 0u;
     uint32_t wrappedPageY = 0u;
+    uint32_t flags = 0u;
 };
 
-static_assert(sizeof(CLodSoftwareRasterPageJobRecord) == 28u, "CLodSoftwareRasterPageJobRecord size must match HLSL");
+static_assert(sizeof(CLodSoftwareRasterPageJobRecord) == 32u, "CLodSoftwareRasterPageJobRecord size must match HLSL");
 
 struct CLodWorkGraphComputePageJobDescriptors
 {
@@ -487,7 +488,7 @@ inline constexpr uint32_t CLodVirtualShadowMaxPhysicalPageCount =
 // Block expansion is a transient routing buffer, not a Cartesian allocation.
 // Reserving maxVisibleClusters * maxBlocksPerCluster can consume several GiB.
 inline constexpr uint32_t CLodVirtualShadowExpandedRecordCapacityMultiplier = 4u;
-inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 3.0f;
+inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 2.0f;
 inline constexpr float CLodVirtualShadowDefaultDirectionalSourceAngleDegrees = 6.0f;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtRayCountDirectional = 2u;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional = 2u;
@@ -498,7 +499,6 @@ inline constexpr uint32_t CLodVirtualShadowMarkTileSize = 16u;
 inline constexpr uint32_t CLodVirtualShadowBlockPagesPerAxis = 4u;
 inline constexpr uint32_t CLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (CLodVirtualShadowBlockPagesPerAxis * CLodVirtualShadowBlockPagesPerAxis) / 2u;
-inline constexpr uint32_t CLodVirtualShadowBlockMaxTrackedPerCluster = 32u;
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerAxis =
     (CLodVirtualShadowMaxPageTableResolution + CLodVirtualShadowBlockPagesPerAxis - 1u) / CLodVirtualShadowBlockPagesPerAxis;
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerClipmap =
@@ -1089,6 +1089,21 @@ struct CLodVirtualShadowStats
     uint32_t physicalPageClearCount = 0u;
     uint32_t markResidentTagMismatchCount = 0u;
     uint32_t renderedWithoutMatchingClearCount = 0u;
+    uint32_t blockExpandedRequestedRecordCount = 0u;
+    uint32_t blockExpandedCommittedRecordCount = 0u;
+    uint32_t blockExpandedDroppedRecordCount = 0u;
+    uint32_t pageJobRequestedRecordCount = 0u;
+    uint32_t pageJobCommittedRecordCount = 0u;
+    uint32_t pageJobDroppedRecordCount = 0u;
+    uint32_t pageJobDoubleSidedRecordCount = 0u;
+    uint32_t pageJobRasterJobCount = 0u;
+    uint32_t pageJobRasterTriangleCount = 0u;
+    uint32_t pageJobRasterDepthRejectedTriangleCount = 0u;
+    uint32_t pageJobRasterBackfaceRejectedTriangleCount = 0u;
+    uint32_t pageJobRasterCoveredPixelCount = 0u;
+    uint32_t pageJobRasterPageWriteCount = 0u;
+    uint32_t pageJobRasterClusterBoundsOverlapCount = 0u;
+    uint32_t pageJobRasterBboxRejectedTriangleCount = 0u;
     uint32_t setupWrappedClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t setupStaleDirtyClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t markResidentCleanHits[CLodVirtualShadowMaxSupportedClipmapCount] = {};
@@ -1111,7 +1126,7 @@ struct CLodVirtualShadowStats
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (58u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (73u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

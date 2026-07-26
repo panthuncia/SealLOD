@@ -10,6 +10,7 @@
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
+#include "include/materialFlags.hlsli"
 #include "PerPassRootConstants/clodWorkGraphRootConstants.h"
 #include "include/clodStructs.hlsli"
 #include "include/clodPageAccess.hlsli"
@@ -116,10 +117,10 @@ void WG_PageJobBuild(
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
-    const float visWidth  = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
-    const float scissorMinXf = float(rasterInfo.scissorMinX);
-    const float scissorMinYf = float(rasterInfo.scissorMinY);
+    const float visWidth  = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
+    const float scissorMinXf = 0.0f;
+    const float scissorMinYf = 0.0f;
 
     StructuredBuffer<CullingCameraInfo> cullingCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
@@ -367,6 +368,14 @@ void WG_PageJobRasterPage(
     meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    StructuredBuffer<MaterialInfo> materialDataBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    const MaterialInfo materialInfo =
+        materialDataBuffer[perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex];
+    const bool doubleSided =
+        (materialInfo.materialFlags & MATERIAL_DOUBLE_SIDED) != 0u;
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
@@ -381,10 +390,13 @@ void WG_PageJobRasterPage(
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
-    const float visWidth  = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
-    const float scissorMinXf = float(rasterInfo.scissorMinX);
-    const float scissorMinYf = float(rasterInfo.scissorMinY);
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
+    const float visWidth  = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
+    const float scissorMinXf = 0.0f;
+    const float scissorMinYf = 0.0f;
 
     const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
     row_major matrix modelViewProjection = mul(objData.model, cam.viewProjection);
@@ -446,7 +458,23 @@ void WG_PageJobRasterPage(
         float2 e01 = s1 - s0;
         float2 e02 = s2 - s0;
         float twiceArea = e01.x * e02.y - e01.y * e02.x;
-        if (twiceArea >= 0.0f) continue;
+        if (doubleSided)
+        {
+            if (abs(twiceArea) <= 1.0e-8f) continue;
+            if (twiceArea > 0.0f)
+            {
+                float2 tmpPos = s1;
+                s1 = s2;
+                s2 = tmpPos;
+                float tmpDepth = depth1;
+                depth1 = depth2;
+                depth2 = tmpDepth;
+                e01 = s1 - s0;
+                e02 = s2 - s0;
+                twiceArea = e01.x * e02.y - e01.y * e02.x;
+            }
+        }
+        else if (twiceArea >= 0.0f) continue;
 
         float invTwiceArea = -1.0f / twiceArea;
         float2 bbMinF = min(min(s0, s1), s2);

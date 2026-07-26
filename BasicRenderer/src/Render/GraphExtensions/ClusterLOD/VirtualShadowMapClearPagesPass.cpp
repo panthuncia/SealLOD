@@ -15,11 +15,15 @@ VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
     std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> pageMetadataBuffer,
+    std::shared_ptr<Buffer> clipmapInfoBuffer,
+    std::shared_ptr<Buffer> pageViewInfoBuffer,
     std::shared_ptr<Buffer> statsBuffer)
     : m_physicalPagesTexture(std::move(physicalPagesTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
     , m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
+    , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
+    , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -37,9 +41,13 @@ void VirtualShadowMapClearPagesPass::DeclareResourceUsages(ComputePassBuilder* b
         m_dirtyPageFlagsBuffer,
         m_pageTableTexture,
         m_pageMetadataBuffer,
+        m_pageViewInfoBuffer,
         m_statsBuffer);
 
-    builder->WithConstantBuffer(Builtin::PerFrameBuffer);
+    builder->WithShaderResource(
+            m_clipmapInfoBuffer,
+            Builtin::CameraBuffer)
+        .WithConstantBuffer(Builtin::PerFrameBuffer);
 }
 
 void VirtualShadowMapClearPagesPass::Setup()
@@ -69,6 +77,10 @@ PassReturn VirtualShadowMapClearPagesPass::Execute(PassExecutionContext& executi
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PHYSICAL_ATLAS_PAGES_WIDE] = virtualShadowConfig.physicalAtlasPagesWide;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_STATS_DESCRIPTOR_INDEX] =
         m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_CLIPMAP_INFO_DESCRIPTOR_INDEX] =
+        m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
+        m_pageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -44,8 +43,8 @@ public:
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<Buffer> virtualShadowActiveBlockMetadataBuffer,
         std::shared_ptr<Buffer> virtualShadowBlockClusterCoverageBuffer,
+        std::shared_ptr<Buffer> virtualShadowStatsBuffer,
         uint32_t expandedRecordCapacity,
-        uint32_t blockSoftCap,
         std::shared_ptr<ResourceGroup> slabResourceGroup = nullptr,
         bool runWhenComputeSWRasterEnabledOnly = false)
         : m_mode(mode)
@@ -61,8 +60,8 @@ public:
         , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
         , m_virtualShadowActiveBlockMetadataBuffer(std::move(virtualShadowActiveBlockMetadataBuffer))
         , m_virtualShadowBlockClusterCoverageBuffer(std::move(virtualShadowBlockClusterCoverageBuffer))
+        , m_virtualShadowStatsBuffer(std::move(virtualShadowStatsBuffer))
         , m_expandedRecordCapacity(expandedRecordCapacity)
-        , m_blockSoftCap(std::min(blockSoftCap, CLodVirtualShadowBlockMaxTrackedPerCluster))
         , m_slabResourceGroup(std::move(slabResourceGroup))
         , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
     {
@@ -130,6 +129,7 @@ public:
                 m_virtualShadowClipmapInfoBuffer,
                 m_virtualShadowActiveBlockMetadataBuffer)
             .WithUnorderedAccess(m_expandedHistogramBuffer)
+            .WithUnorderedAccess(m_virtualShadowStatsBuffer)
             .WithIndirectArguments(m_sourceIndirectArgsBuffer)
             .WithConstantBuffer(Builtin::PerFrameBuffer);
 
@@ -230,7 +230,8 @@ public:
                 ? m_virtualShadowBlockClusterCoverageBuffer->GetUAVShaderVisibleInfo(0).slot.index
                 : m_virtualShadowBlockClusterCoverageBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_RECORD_CAPACITY] = m_expandedRecordCapacity;
-        misc[CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP] = m_blockSoftCap;
+        misc[CLOD_VSM_BLOCK_EXPAND_STATS_DESCRIPTOR_INDEX] =
+            m_virtualShadowStatsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 
         if (m_mode == VirtualShadowBlockExpandMode::Emit) {
             misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_OFFSETS_DESCRIPTOR_INDEX] = m_expandedOffsetsBuffer->GetSRVInfo(0).slot.index;
@@ -282,8 +283,8 @@ private:
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<Buffer> m_virtualShadowActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_virtualShadowBlockClusterCoverageBuffer;
+    std::shared_ptr<Buffer> m_virtualShadowStatsBuffer;
     uint32_t m_expandedRecordCapacity = 0u;
-    uint32_t m_blockSoftCap = 1u;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
 };

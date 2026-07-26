@@ -20,7 +20,7 @@ struct RasterizeClustersCommand
     uint dispatchZ;
 };
 
-static const uint kVsmBlockTrackedCapacity = kCLodVirtualShadowBlockMaxTrackedPerCluster;
+static const uint kVsmBlockTrackedCapacity = kCLodVirtualShadowMaxBlocksPerClipmap;
 
 groupshared float2 gs_screenPos[SW_RASTER_MAX_VERTS];
 groupshared float2 gs_coverageMin;
@@ -300,10 +300,12 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
         // triangles touch, defeating both page-local ownership and the work
         // budget. Emit the bounded tracked subset; deferred pages remain dirty
         // and will be covered by later frames.
-        const uint emittedCount =
-            min(gs_activeBlockCount, CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP);
+        const uint emittedCount = gs_activeBlockCount;
         RWStructuredBuffer<uint> expandedHistogram = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX];
         InterlockedAdd(expandedHistogram[bucketID], emittedCount);
+        RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+            ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_STATS_DESCRIPTOR_INDEX];
+        InterlockedAdd(statsBuffer[0].blockExpandedRequestedRecordCount, emittedCount);
     }
 }
 
@@ -387,12 +389,7 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
 
     if (GI == 0u)
     {
-        const uint requestedCount =
-            min(
-                gs_activeBlockCount,
-                min(
-                    CLOD_VSM_BLOCK_EXPAND_BLOCK_SOFT_CAP,
-                    kVsmBlockTrackedCapacity));
+        const uint requestedCount = gs_activeBlockCount;
         if (requestedCount != 0u)
         {
             StructuredBuffer<uint> expandedOffsets = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_OFFSETS_DESCRIPTOR_INDEX];
@@ -406,6 +403,26 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
                 (gs_outputBaseIndex < recordCapacity)
                     ? min(requestedCount, recordCapacity - gs_outputBaseIndex)
                     : 0u;
+
+            RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+                ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_STATS_DESCRIPTOR_INDEX];
+            InterlockedAdd(
+                statsBuffer[0].blockExpandedCommittedRecordCount,
+                gs_committedCount);
+            const uint droppedCount = requestedCount - gs_committedCount;
+            if (droppedCount != 0u)
+            {
+                // The prefix offsets intentionally retain their original
+                // allocation, but raster must consume only records that were
+                // actually written. Otherwise it reads stale records beyond
+                // the capacity clamp.
+                RWStructuredBuffer<uint> expandedHistogram =
+                    ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX];
+                InterlockedAdd(expandedHistogram[bucketID], 0u - droppedCount);
+                InterlockedAdd(
+                    statsBuffer[0].blockExpandedDroppedRecordCount,
+                    droppedCount);
+            }
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -419,42 +436,43 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     RWStructuredBuffer<uint> expandedClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
 
-    if (GI >= gs_committedCount)
+    for (uint outputIndex = GI;
+         outputIndex < gs_committedCount;
+         outputIndex += SW_RASTER_THREADS)
     {
-        return;
+        const uint2 virtualBlockOrigin =
+            CLodVirtualShadowUnpackBlockPageCoords(
+                gs_emitPackedVirtualBlockOrigins[outputIndex]);
+        const uint2 blockCoord =
+            CLodVirtualShadowBlockCoordFromPageCoord(
+                virtualBlockOrigin);
+        const uint2 minLocalPageCoord =
+            CLodVirtualShadowUnpackBlockActiveRectMin(
+                gs_emitPackedActiveRects[outputIndex]);
+        const uint2 maxLocalPageCoord =
+            CLodVirtualShadowUnpackBlockActiveRectMax(
+                gs_emitPackedActiveRects[outputIndex]);
+        uint blockPayload =
+            CLodPackVisibleClusterVsmPayloadForBlock(
+                CLodVisibleClusterShadowClipmapIndex(packedCluster),
+                blockCoord,
+                minLocalPageCoord,
+                maxLocalPageCoord,
+                false);
+        if (CLodVisibleClusterIsVoxel(packedCluster))
+        {
+            blockPayload =
+                CLodVisibleClusterMarkVoxelPayload(blockPayload);
+        }
+        uint4 expandedCluster = packedCluster;
+        expandedCluster.w = blockPayload;
+        CLodStoreVisibleClusterPackedWordsRW(
+            expandedClusters,
+            gs_outputBaseIndex + outputIndex,
+            expandedCluster);
+        expandedClusterTransformIndices[gs_outputBaseIndex + outputIndex] =
+            sourceClusterTransformIndex;
     }
-
-    const uint2 virtualBlockOrigin =
-        CLodVirtualShadowUnpackBlockPageCoords(
-            gs_emitPackedVirtualBlockOrigins[GI]);
-    const uint2 blockCoord =
-        CLodVirtualShadowBlockCoordFromPageCoord(
-            virtualBlockOrigin);
-    const uint2 minLocalPageCoord =
-        CLodVirtualShadowUnpackBlockActiveRectMin(
-            gs_emitPackedActiveRects[GI]);
-    const uint2 maxLocalPageCoord =
-        CLodVirtualShadowUnpackBlockActiveRectMax(
-            gs_emitPackedActiveRects[GI]);
-    uint blockPayload =
-        CLodPackVisibleClusterVsmPayloadForBlock(
-            CLodVisibleClusterShadowClipmapIndex(packedCluster),
-            blockCoord,
-            minLocalPageCoord,
-            maxLocalPageCoord,
-            false);
-    if (CLodVisibleClusterIsVoxel(packedCluster))
-    {
-        blockPayload =
-            CLodVisibleClusterMarkVoxelPayload(blockPayload);
-    }
-    uint4 expandedCluster = packedCluster;
-    expandedCluster.w = blockPayload;
-    CLodStoreVisibleClusterPackedWordsRW(
-        expandedClusters,
-        gs_outputBaseIndex + GI,
-        expandedCluster);
-    expandedClusterTransformIndices[gs_outputBaseIndex + GI] = sourceClusterTransformIndex;
 }
 
 [shader("compute")]

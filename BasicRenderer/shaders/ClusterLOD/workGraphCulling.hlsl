@@ -1063,9 +1063,6 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
     uint2 blockCount)
 {
     uint activeBlockCount = 0u;
-    const uint blockSoftCap = min(
-        max(1u, CLodPageJobMaxPagesPerCluster()),
-        kCLodVirtualShadowBlockMaxTrackedPerCluster);
     const uint totalBlockCount = blockCount.x * blockCount.y;
     [loop]
     for (uint blockLinearIndex = 0u; blockLinearIndex < totalBlockCount; ++blockLinearIndex)
@@ -1082,10 +1079,6 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
                 vsmPayload))
         {
             activeBlockCount++;
-            if (activeBlockCount == blockSoftCap)
-            {
-                return activeBlockCount;
-            }
         }
     }
 
@@ -1112,9 +1105,6 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
     uint2 minBlockCoord,
     uint2 blockCount)
 {
-    const uint blockSoftCap = min(
-        max(1u, CLodPageJobMaxPagesPerCluster()),
-        kCLodVirtualShadowBlockMaxTrackedPerCluster);
     const uint totalBlockCount = blockCount.x * blockCount.y;
     uint emittedCount = 0u;
     [loop]
@@ -1149,7 +1139,7 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
             visibleClusterTransformIndices[writeBase + emittedCount] = assemblyTransformIndex;
         }
         emittedCount++;
-        if (emittedCount == min(maxWriteCount, blockSoftCap))
+        if (emittedCount == maxWriteCount)
         {
             return;
         }

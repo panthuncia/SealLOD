@@ -289,6 +289,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass2"),
                 std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     histogramBuffer,
                     indirectArgsBuffer,
                     extension.m_viewRasterInfoBuffer,
@@ -299,6 +300,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     pageJobRecordsBufferSkinned,
                     pageJobCountBufferSkinned,
                     pageJobClusterTagsBuffer,
+                    extension.m_shadowStatsBuffer,
                     extension.m_shadowConfiguredPageJobRecordCapacity,
                     slabGroup,
                     true)));
@@ -309,6 +311,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 MakeVariantPassName(traits, "SoftwareRasterPageJobExpandPass1"),
                 std::make_shared<ClusterSoftwareRasterPageJobExpandPass>(
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     histogramBuffer,
                     indirectArgsBuffer,
                     extension.m_viewRasterInfoBuffer,
@@ -319,6 +322,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     pageJobRecordsBufferSkinned,
                     pageJobCountBufferSkinned,
                     pageJobClusterTagsBuffer,
+                    extension.m_shadowStatsBuffer,
                     extension.m_shadowConfiguredPageJobRecordCapacity,
                     slabGroup)));
     }
@@ -354,6 +358,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 shadowRasterPassName,
                 std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     extension.m_viewRasterInfoBuffer,
                     extension.m_shadowPageTableTexture,
                     extension.m_shadowPhysicalPagesTexture,
@@ -364,6 +369,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     pageJobCountBufferSkinned,
                     pageJobRecordsBufferSkinned,
                     pageJobIndirectArgsBufferSkinned,
+                    extension.m_shadowStatsBuffer,
                     slabGroup,
                     true)));
     }
@@ -373,6 +379,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                 shadowRasterPassName,
                 std::make_shared<ClusterSoftwareRasterPageJobRasterPass>(
                     extension.m_compactedVisibleClustersBuffer,
+                    extension.m_compactedVisibleClusterTransformIndicesBuffer,
                     extension.m_viewRasterInfoBuffer,
                     extension.m_shadowPageTableTexture,
                     extension.m_shadowPhysicalPagesTexture,
@@ -383,6 +390,7 @@ std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
                     pageJobCountBufferSkinned,
                     pageJobRecordsBufferSkinned,
                     pageJobIndirectArgsBufferSkinned,
+                    extension.m_shadowStatsBuffer,
                     slabGroup)));
     }
 
@@ -452,12 +460,6 @@ void CLodShadowVariant::RefreshConfiguredSettings(CLodExtension& extension)
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodPageJobRecordCapacitySettingName)());
     extension.m_shadowConfiguredComputeClusterCapacity =
         CLodVirtualShadowGetConfiguredComputeClusterCapacity(extension.m_maxVisibleClusters);
-    const uint32_t vsmBlockSoftCap = std::max(
-        1u,
-        std::min(extension.m_shadowConfiguredPageJobMaxPages, CLodVirtualShadowBlockMaxTrackedPerCluster));
-    const uint64_t worstCaseExpandedRecordCapacity =
-        static_cast<uint64_t>(extension.m_shadowConfiguredComputeClusterCapacity) *
-        static_cast<uint64_t>(vsmBlockSoftCap);
     const uint64_t budgetedExpandedRecordCapacity =
         static_cast<uint64_t>(extension.m_shadowConfiguredComputeClusterCapacity) *
         static_cast<uint64_t>(CLodVirtualShadowExpandedRecordCapacityMultiplier);
@@ -465,7 +467,6 @@ void CLodShadowVariant::RefreshConfiguredSettings(CLodExtension& extension)
         std::max<uint64_t>(
             1u,
             std::min({
-                worstCaseExpandedRecordCapacity,
                 budgetedExpandedRecordCapacity,
                 static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) })));
 }
@@ -703,6 +704,8 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowClipmapInfoBuffer,
+            extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer));
     shadowClearPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowAdmitPagesPassName));
     outPasses.push_back(std::move(shadowClearPagesPassDesc));

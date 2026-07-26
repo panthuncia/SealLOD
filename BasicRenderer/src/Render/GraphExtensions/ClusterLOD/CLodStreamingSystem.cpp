@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <unordered_set>
 
@@ -2143,17 +2144,12 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependency(
             // token now instead of silently losing the recovery event.
             if (hop == 0u) {
                 ++m_virtualShadowUpgradeStats.dependenciesObserved;
-                const bool alreadyQueued = std::ranges::any_of(
-                    m_virtualShadowUpgradeEvents,
-                    [&](const QueuedVirtualShadowUpgrade& queued) {
-                        return queued.input.page.physicalPageIndex ==
-                                request.physicalPageIndex &&
-                            queued.input.page.allocationGeneration ==
-                                request.allocationGeneration &&
-                            queued.input.page.contentGeneration ==
-                                request.contentGeneration;
-                    });
-                if (alreadyQueued) {
+                const VirtualShadowPageKey queuedKey{
+                    request.physicalPageIndex,
+                    request.allocationGeneration,
+                    request.contentGeneration
+                };
+                if (!m_virtualShadowQueuedPageKeys.insert(queuedKey).second) {
                     ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
                 }
                 else {
@@ -2212,11 +2208,21 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependency(
 }
 
 void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex) {
-    std::scoped_lock lock(m_virtualShadowUpgradeMutex);
-    auto dependencyIt = m_virtualShadowDependencies.find(groupIndex);
-    if (dependencyIt == m_virtualShadowDependencies.end() || dependencyIt->second.empty()) {
-        ++m_virtualShadowUpgradeStats.promotionsWithoutDependencies;
-        return;
+    ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion");
+    std::unique_lock lock(m_virtualShadowUpgradeMutex, std::defer_lock);
+    {
+        ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion::AcquireMutex");
+        lock.lock();
+    }
+
+    decltype(m_virtualShadowDependencies)::iterator dependencyIt;
+    {
+        ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion::ResolveDependencies");
+        dependencyIt = m_virtualShadowDependencies.find(groupIndex);
+        if (dependencyIt == m_virtualShadowDependencies.end() || dependencyIt->second.empty()) {
+            ++m_virtualShadowUpgradeStats.promotionsWithoutDependencies;
+            return;
+        }
     }
 
     ++m_virtualShadowUpgradeStats.promotionsWithDependencies;
@@ -2224,35 +2230,32 @@ void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIn
         groupIndex < m_virtualShadowResidencyGenerationByGroup.size()
         ? m_virtualShadowResidencyGenerationByGroup[groupIndex]
         : 1u;
-    for (const auto& [key, dependency] : dependencyIt->second) {
-        (void)key;
-        if (dependency.residencyGeneration != generation) {
-            ++m_virtualShadowUpgradeStats.staleEvents;
-            continue;
+
+    {
+        ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion::EnqueueExactPageTokens");
+        for (const auto& [key, dependency] : dependencyIt->second) {
+            if (dependency.residencyGeneration != generation) {
+                ++m_virtualShadowUpgradeStats.staleEvents;
+                continue;
+            }
+            if (!m_virtualShadowQueuedPageKeys.insert(key).second) {
+                ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+                continue;
+            }
+            QueuedVirtualShadowUpgrade queued{};
+            queued.input.page = dependency.page;
+            queued.input.sourceGroupGlobalIndex = groupIndex;
+            queued.input.residencyGeneration = generation;
+            queued.queuedTick = m_streamingDiagnosticTick;
+            m_virtualShadowUpgradeEvents.push_back(queued);
+            ++m_virtualShadowUpgradeStats.eventsQueued;
         }
-        const bool alreadyQueued = std::ranges::any_of(
-            m_virtualShadowUpgradeEvents,
-            [&](const QueuedVirtualShadowUpgrade& queued) {
-                return queued.input.page.physicalPageIndex ==
-                        dependency.page.physicalPageIndex &&
-                    queued.input.page.allocationGeneration ==
-                        dependency.page.allocationGeneration &&
-                    queued.input.page.contentGeneration ==
-                        dependency.page.contentGeneration;
-            });
-        if (alreadyQueued) {
-            ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
-            continue;
-        }
-        QueuedVirtualShadowUpgrade queued{};
-        queued.input.page = dependency.page;
-        queued.input.sourceGroupGlobalIndex = groupIndex;
-        queued.input.residencyGeneration = generation;
-        queued.queuedTick = m_streamingDiagnosticTick;
-        m_virtualShadowUpgradeEvents.push_back(queued);
-        ++m_virtualShadowUpgradeStats.eventsQueued;
     }
-    m_virtualShadowDependencies.erase(dependencyIt);
+
+    {
+        ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion::EraseDependencies");
+        m_virtualShadowDependencies.erase(dependencyIt);
+    }
 }
 
 std::vector<CLodVirtualShadowUpgradeInvalidationInput>
@@ -2264,6 +2267,12 @@ CLodStreamingSystem::DrainVirtualShadowUpgradeEvents(uint32_t maxEvents) {
         static_cast<uint32_t>(m_virtualShadowUpgradeEvents.size()));
     result.reserve(count);
     for (uint32_t index = 0u; index < count; ++index) {
+        const auto& page = m_virtualShadowUpgradeEvents.front().input.page;
+        m_virtualShadowQueuedPageKeys.erase(VirtualShadowPageKey{
+            page.physicalPageIndex,
+            page.allocationGeneration,
+            page.contentGeneration
+        });
         result.push_back(m_virtualShadowUpgradeEvents.front().input);
         m_virtualShadowUpgradeEvents.pop_front();
     }
@@ -2307,6 +2316,7 @@ void CLodStreamingSystem::ClearVirtualShadowUpgradeState() {
     m_virtualShadowUpgradeStats.clearedDependencies += cleared;
     m_virtualShadowDependencies.clear();
     m_virtualShadowUpgradeEvents.clear();
+    m_virtualShadowQueuedPageKeys.clear();
     m_virtualShadowResidencyGenerationByGroup.clear();
 }
 
@@ -4336,46 +4346,98 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
         m_pendingResidencyCommitGroups.clear();
     }
 
+    TracyPlot(
+        "CLodStreaming.ApplyPromotions.InputGroups",
+        static_cast<int64_t>(groups.size()));
+
     {
         ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions");
-        for (uint32_t groupIndex : groups) {
-            if (groupIndex >= m_streamingStorageGroupCapacity || !IsGroupActive(groupIndex)) {
-                m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
-                ClearStreamingRequestInProgress(groupIndex);
-                ClearPendingLoadPriority(groupIndex);
-                continue;
-            }
-            if (m_groupOwnedPages.find(groupIndex) == m_groupOwnedPages.end()) {
-                m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
-                ClearStreamingRequestInProgress(groupIndex);
-                ClearPendingLoadPriority(groupIndex);
-                continue;
-            }
-            const auto resolvedUploadFenceIt = m_pendingResidencyUploadFenceByGroup.find(groupIndex);
-            const bool hasUploadFence = resolvedUploadFenceIt != m_pendingResidencyUploadFenceByGroup.end();
-            const uint64_t completedUploadFence = m_streamingUploadCompletionFenceHandle.IsValid()
+        const uint64_t completedUploadFence = [&]() {
+            ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::ReadCompletedUploadFence");
+            return m_streamingUploadCompletionFenceHandle.IsValid()
                 ? m_streamingUploadCompletionFenceHandle.GetCompletedValue()
                 : UINT64_MAX;
-            const bool uploadBatchReady = hasUploadFence &&
-                completedUploadFence >= resolvedUploadFenceIt->second;
+        }();
+
+        uint32_t inactiveGroups = 0u;
+        uint32_t missingOwnedPages = 0u;
+        uint32_t uploadFenceDeferrals = 0u;
+        uint32_t pagePromotionDeferrals = 0u;
+        uint32_t promotedGroups = 0u;
+        uint64_t promotedPageSlots = 0u;
+        uint32_t shadowPromotionGroups = 0u;
+        std::optional<std::unordered_set<uint32_t>> groupsAwaitingFenceSeal;
+        std::optional<std::unordered_set<uint32_t>> groupsWithRetainedUploadBatch;
+
+        for (uint32_t groupIndex : groups) {
+            {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::ValidateGroup");
+                if (groupIndex >= m_streamingStorageGroupCapacity || !IsGroupActive(groupIndex)) {
+                    ++inactiveGroups;
+                    m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
+                    ClearStreamingRequestInProgress(groupIndex);
+                    ClearPendingLoadPriority(groupIndex);
+                    continue;
+                }
+            }
+
+            const auto ownedPagesIt = m_groupOwnedPages.find(groupIndex);
+            if (ownedPagesIt == m_groupOwnedPages.end()) {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::DiscardMissingOwnedPages");
+                ++missingOwnedPages;
+                m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
+                ClearStreamingRequestInProgress(groupIndex);
+                ClearPendingLoadPriority(groupIndex);
+                continue;
+            }
+
+            bool hasUploadFence = false;
+            bool uploadBatchReady = false;
+            {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::ResolveGroupFence");
+                const auto resolvedUploadFenceIt =
+                    m_pendingResidencyUploadFenceByGroup.find(groupIndex);
+                hasUploadFence =
+                    resolvedUploadFenceIt != m_pendingResidencyUploadFenceByGroup.end();
+                uploadBatchReady = hasUploadFence &&
+                    completedUploadFence >= resolvedUploadFenceIt->second;
+            }
+
             bool pagesReady = false;
             if (uploadBatchReady) {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::PromotePhysicalPages");
+                promotedPageSlots += ownedPagesIt->second.size();
                 pagesReady = PromoteGroupPagesAfterUploadDrain(groupIndex);
             }
+
             if (!uploadBatchReady || !pagesReady) {
                 if (!hasUploadFence) {
-                    const bool awaitingSeal = std::find(
-                        m_residencyGroupsAwaitingUploadFence.begin(),
-                        m_residencyGroupsAwaitingUploadFence.end(),
-                        groupIndex) != m_residencyGroupsAwaitingUploadFence.end();
-                    const bool hasBatchTicket = std::any_of(
-                        m_outstandingUploadBatches.begin(),
-                        m_outstandingUploadBatches.end(),
-                        [groupIndex](const auto& batch) {
-                            return batch && batch->ticket &&
-                                std::find(batch->affectedGroups.begin(), batch->affectedGroups.end(), groupIndex) !=
-                                    batch->affectedGroups.end();
-                        });
+                    ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::DiagnoseMissingFence");
+                    if (!groupsAwaitingFenceSeal) {
+                        ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::BuildMissingFenceLookup");
+                        groupsAwaitingFenceSeal.emplace(
+                            m_residencyGroupsAwaitingUploadFence.begin(),
+                            m_residencyGroupsAwaitingUploadFence.end());
+                        groupsWithRetainedUploadBatch.emplace();
+                        size_t affectedGroupCount = 0u;
+                        for (const auto& batch : m_outstandingUploadBatches) {
+                            if (batch && batch->ticket) {
+                                affectedGroupCount += batch->affectedGroups.size();
+                            }
+                        }
+                        groupsWithRetainedUploadBatch->reserve(affectedGroupCount);
+                        for (const auto& batch : m_outstandingUploadBatches) {
+                            if (!batch || !batch->ticket) {
+                                continue;
+                            }
+                            groupsWithRetainedUploadBatch->insert(
+                                batch->affectedGroups.begin(),
+                                batch->affectedGroups.end());
+                        }
+                    }
+                    const bool awaitingSeal = groupsAwaitingFenceSeal->contains(groupIndex);
+                    const bool hasBatchTicket =
+                        groupsWithRetainedUploadBatch->contains(groupIndex);
                     if (!awaitingSeal && !hasBatchTicket) {
                         spdlog::critical(
                             "CLod streaming invariant: pending-commit group {} has no published or retained upload batch",
@@ -4385,22 +4447,48 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
 #endif
                     }
                 }
-                m_pendingResidencyCommitGroups.insert(groupIndex);
-                if (groupIndex < m_streamingDiagnosticsByGroup.size()) {
-                    ++m_streamingDiagnosticsByGroup[groupIndex].promotionDeferrals;
+
+                {
+                    ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::RequeueDeferred");
+                    m_pendingResidencyCommitGroups.insert(groupIndex);
+                    if (groupIndex < m_streamingDiagnosticsByGroup.size()) {
+                        ++m_streamingDiagnosticsByGroup[groupIndex].promotionDeferrals;
+                    }
+                    ++m_streamingDiagnosticsPromotionDeferralsThisFrame;
                 }
-                ++m_streamingDiagnosticsPromotionDeferralsThisFrame;
+                uploadFenceDeferrals += !uploadBatchReady ? 1u : 0u;
+                pagePromotionDeferrals += uploadBatchReady && !pagesReady ? 1u : 0u;
                 continue;
             }
 
-            if (SetGroupResidentBit(groupIndex, true)) {
-                QueueVirtualShadowUpgradeForPromotion(groupIndex);
+            bool residencyChanged = false;
+            {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::SetResident");
+                residencyChanged = SetGroupResidentBit(groupIndex, true);
             }
-            m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
-            RecordStreamingPromoted(groupIndex);
-            ClearStreamingRequestInProgress(groupIndex);
-            ClearPendingLoadPriority(groupIndex);
+            if (residencyChanged) {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::QueueVirtualShadowUpgrade");
+                QueueVirtualShadowUpgradeForPromotion(groupIndex);
+                ++shadowPromotionGroups;
+            }
+
+            {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::FinalizeBookkeeping");
+                m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
+                RecordStreamingPromoted(groupIndex);
+                ClearStreamingRequestInProgress(groupIndex);
+                ClearPendingLoadPriority(groupIndex);
+            }
+            ++promotedGroups;
         }
+
+        TracyPlot("CLodStreaming.ApplyPromotions.InactiveGroups", static_cast<int64_t>(inactiveGroups));
+        TracyPlot("CLodStreaming.ApplyPromotions.MissingOwnedPages", static_cast<int64_t>(missingOwnedPages));
+        TracyPlot("CLodStreaming.ApplyPromotions.UploadFenceDeferrals", static_cast<int64_t>(uploadFenceDeferrals));
+        TracyPlot("CLodStreaming.ApplyPromotions.PagePromotionDeferrals", static_cast<int64_t>(pagePromotionDeferrals));
+        TracyPlot("CLodStreaming.ApplyPromotions.PromotedGroups", static_cast<int64_t>(promotedGroups));
+        TracyPlot("CLodStreaming.ApplyPromotions.PageSlotsVisited", static_cast<int64_t>(promotedPageSlots));
+        TracyPlot("CLodStreaming.ApplyPromotions.ShadowPromotionGroups", static_cast<int64_t>(shadowPromotionGroups));
     }
 }
 
@@ -4461,11 +4549,14 @@ void CLodStreamingSystem::ReconcileStaleDiskIoRequests(MeshManager* meshManager)
 }
 
 bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex) {
+    ZoneScopedN("CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain");
+
     const auto pagesIt = m_groupOwnedPages.find(groupIndex);
     if (pagesIt == m_groupOwnedPages.end()) {
         return true;
     }
 
+    const auto keysIt = m_groupOwnedMeshPageKeys.find(groupIndex);
     bool waitingForSharedPendingPage = false;
     for (uint32_t seg = 0; seg < static_cast<uint32_t>(pagesIt->second.size()); ++seg) {
         const uint32_t page = pagesIt->second[seg];
@@ -4473,12 +4564,12 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
             continue;
         }
 
-        const auto keysIt = m_groupOwnedMeshPageKeys.find(groupIndex);
         const uint64_t key = keysIt != m_groupOwnedMeshPageKeys.end() && seg < static_cast<uint32_t>(keysIt->second.size())
             ? keysIt->second[seg]
             : kInvalidCLodMeshPageKey;
 
         if (IsPhysicalPageResidentForKey(page, key)) {
+            ZoneScopedN("CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain::AttachSharedResidentPage");
             bool insertedGroup = false;
             if (page < m_pageResidentGroups.size()) {
                 insertedGroup = m_pageResidentGroups[page].insert(groupIndex).second;
@@ -4501,6 +4592,7 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
         if (page < m_pendingPageOwnerGroup.size() &&
             m_pendingPageOwnerGroup[page] != ~0u &&
             m_pendingPageOwnerGroup[page] != groupIndex) {
+            ZoneScopedN("CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain::WaitForSharedPendingPage");
             if (IsPhysicalPagePendingForKey(page, key)) {
                 waitingForSharedPendingPage = true;
                 spdlog::debug(
@@ -4513,6 +4605,7 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
             continue;
         }
 
+        ZoneScopedN("CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain::CommitPhysicalPage");
         m_pageState[page] = CLodPhysicalPageState::Resident;
         if (page < m_pendingPageOwnerGroup.size()) {
             m_pendingPageOwnerGroup[page] = ~0u;
@@ -5086,6 +5179,8 @@ void CLodStreamingSystem::MarkStreamingRequestDiskIo(uint32_t groupIndex) {
 }
 
 void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
+    ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress");
+
     if (groupIndex >= m_streamingRequestStateByGroup.size()) {
         return;
     }
@@ -5097,6 +5192,7 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
 
     if (state == StreamingRequestState::PendingCpu
         && groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()) {
+        ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress::RemovePendingHeapEntry");
         const uint32_t heapIndex = m_pendingStreamingRequestHeapIndexByGroup[groupIndex];
         if (heapIndex != UINT32_MAX
             && heapIndex < m_pendingStreamingRequests.size()
@@ -5171,7 +5267,10 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
         --m_streamingRequestsInProgressCount;
     }
     state = StreamingRequestState::None;
-    m_readyStreamingCompletionsByGroup.erase(groupIndex);
+    {
+        ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress::EraseReadyCompletion");
+        m_readyStreamingCompletionsByGroup.erase(groupIndex);
+    }
     if (groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()) {
         m_pendingStreamingRequestHeapIndexByGroup[groupIndex] = UINT32_MAX;
     }
@@ -5179,6 +5278,7 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
         ++m_pendingStreamingRequestGenerationByGroup[groupIndex];
     }
     if (groupIndex < m_waitingForPagesRequestIndexByGroup.size()) {
+        ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress::RemoveWaitingForPagesEntry");
         const uint32_t waitingIndex = m_waitingForPagesRequestIndexByGroup[groupIndex];
         if (waitingIndex != UINT32_MAX &&
             waitingIndex < m_waitingForPagesRequests.size() &&

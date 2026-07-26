@@ -21,7 +21,10 @@ struct CLodSoftwareRasterPageJobRecord
     uint clipmapLayer;
     uint wrappedPageX;
     uint wrappedPageY;
+    uint flags;
 };
+
+static const uint kCLodSoftwareRasterPageJobDoubleSidedFlag = 1u;
 
 struct RasterizeClustersCommand
 {
@@ -52,6 +55,13 @@ groupshared uint gs_expandPhysicalPageIndices[PAGEJOB_MAX_PAGES_PER_TILE];
 
 groupshared float2 gs_pageRasterScreenPos[SW_RASTER_MAX_VERTS];
 groupshared float gs_pageRasterLinearDepth[SW_RASTER_MAX_VERTS];
+groupshared uint gs_pageRasterTriangleCount;
+groupshared uint gs_pageRasterDepthRejectedTriangleCount;
+groupshared uint gs_pageRasterBackfaceRejectedTriangleCount;
+groupshared uint gs_pageRasterCoveredPixelCount;
+groupshared uint gs_pageRasterAnyWrite;
+groupshared uint gs_pageRasterClusterBoundsOverlap;
+groupshared uint gs_pageRasterBboxRejectedTriangleCount;
 
 [shader("compute")]
 [numthreads(SW_RASTER_THREADS, 1, 1)]
@@ -116,10 +126,10 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
         ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     ClodViewRasterInfo rasterInfo = viewRasterInfoBuf[viewID];
 
-    const float visWidth = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
-    const float scissorMinXf = float(rasterInfo.scissorMinX);
-    const float scissorMinYf = float(rasterInfo.scissorMinY);
+    const float visWidth = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
+    const float scissorMinXf = 0.0f;
+    const float scissorMinYf = 0.0f;
     const uint positionBitstreamBase = pageSlabByteOffset + hdr.positionBitstreamOffset;
     row_major matrix modelViewProjection = mul(objData.model, cam.viewProjection);
 
@@ -266,6 +276,18 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
                 (gs_expandBaseIndex < recordCapacity)
                     ? min(dirtyCount, recordCapacity - gs_expandBaseIndex)
                     : 0u;
+            RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+                ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_STATS_DESCRIPTOR_INDEX];
+            InterlockedAdd(statsBuffer[0].pageJobRequestedRecordCount, dirtyCount);
+            InterlockedAdd(statsBuffer[0].pageJobCommittedRecordCount, gs_expandCommittedCount);
+            InterlockedAdd(
+                statsBuffer[0].pageJobDroppedRecordCount,
+                dirtyCount - gs_expandCommittedCount);
+#if defined(PSO_DOUBLE_SIDED)
+            InterlockedAdd(
+                statsBuffer[0].pageJobDoubleSidedRecordCount,
+                gs_expandCommittedCount);
+#endif
 
             if (gs_expandCommittedCount > 0u)
             {
@@ -302,6 +324,9 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
         const uint2 wrappedCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
         rec.wrappedPageX = wrappedCoords.x;
         rec.wrappedPageY = wrappedCoords.y;
+#if defined(PSO_DOUBLE_SIDED)
+        rec.flags = kCLodSoftwareRasterPageJobDoubleSidedFlag;
+#endif
         pageJobRecords[gs_expandBaseIndex + GI] = rec;
     }
 }
@@ -356,6 +381,10 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint wrappedPageX = rec.wrappedPageX;
     const uint wrappedPageY = rec.wrappedPageY;
     const uint clipmapLayer = rec.clipmapLayer;
+    const bool doubleSided =
+        (rec.flags & kCLodSoftwareRasterPageJobDoubleSidedFlag) != 0u;
+    const bool telemetryEnabled =
+        CLOD_RASTER_VIRTUAL_SHADOW_TELEMETRY_ENABLED != 0u;
     ByteAddressBuffer compactedVisibleClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
@@ -414,12 +443,15 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
-    const float visWidth = float(rasterInfo.scissorMaxX - rasterInfo.scissorMinX);
-    const float visHeight = float(rasterInfo.scissorMaxY - rasterInfo.scissorMinY);
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
+    const float visWidth = float(max(clipmapInfo.virtualResolution, 1u));
+    const float visHeight = visWidth;
     const float screenScaleX = 0.5f * visWidth;
     const float screenScaleY = -0.5f * visHeight;
-    const float screenBiasX = screenScaleX + float(rasterInfo.scissorMinX);
-    const float screenBiasY = -screenScaleY + float(rasterInfo.scissorMinY);
+    const float screenBiasX = screenScaleX;
+    const float screenBiasY = -screenScaleY;
 
     for (uint v = GI; v < vertCount; v += SW_RASTER_THREADS)
     {
@@ -469,11 +501,43 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint pagePixelMaxX = pagePixelMinX + kCLodVirtualShadowPhysicalPageSize - 1u;
     const uint pagePixelMaxY = pagePixelMinY + kCLodVirtualShadowPhysicalPageSize - 1u;
 
-    bool anyPixelWritten = false;
+    if (GI == 0u)
+    {
+        gs_pageRasterTriangleCount = 0u;
+        gs_pageRasterDepthRejectedTriangleCount = 0u;
+        gs_pageRasterBackfaceRejectedTriangleCount = 0u;
+        gs_pageRasterCoveredPixelCount = 0u;
+        gs_pageRasterAnyWrite = 0u;
+        gs_pageRasterBboxRejectedTriangleCount = 0u;
+        float2 clusterMin;
+        float2 clusterMax;
+        PJ_ComputeScreenBounds(gs_pageRasterScreenPos, vertCount, clusterMin, clusterMax);
+        gs_pageRasterClusterBoundsOverlap =
+            clusterMax.x >= float(pagePixelMinX) &&
+            clusterMax.y >= float(pagePixelMinY) &&
+            clusterMin.x <= float(pagePixelMaxX) &&
+            clusterMin.y <= float(pagePixelMaxY)
+                ? 1u
+                : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint localTriangleCount = 0u;
+    uint localDepthRejectedTriangleCount = 0u;
+    uint localBackfaceRejectedTriangleCount = 0u;
+    uint localCoveredPixelCount = 0u;
+    uint localBboxRejectedTriangleCount = 0u;
+    bool localAnyPixelWritten = false;
 
     for (uint t = GI; t < triCount; t += SW_RASTER_THREADS)
     {
+        if (telemetryEnabled) localTriangleCount++;
         uint3 tri = PJ_DecodeTriangle(slab, triangleStreamBase, triangleByteOffset, t);
+        if (any(tri >= vertCount))
+        {
+            if (telemetryEnabled) localBackfaceRejectedTriangleCount++;
+            continue;
+        }
         if (reverseWinding) { uint tmp = tri.y; tri.y = tri.z; tri.z = tmp; }
 
         float2 s0 = gs_pageRasterScreenPos[tri.x];
@@ -482,27 +546,58 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
         float depth0 = gs_pageRasterLinearDepth[tri.x];
         float depth1 = gs_pageRasterLinearDepth[tri.y];
         float depth2 = gs_pageRasterLinearDepth[tri.z];
-        if (depth0 <= 0.0f || depth1 <= 0.0f || depth2 <= 0.0f) continue;
+        if (depth0 <= 0.0f || depth1 <= 0.0f || depth2 <= 0.0f)
+        {
+            if (telemetryEnabled) localDepthRejectedTriangleCount++;
+            continue;
+        }
 
-        const float twiceArea =
+        float twiceArea =
             (s1.x - s0.x) * (s2.y - s0.y) -
             (s1.y - s0.y) * (s2.x - s0.x);
-        if (twiceArea >= 0.0f) continue;
-
-        const float invTwiceArea = -1.0f / twiceArea;
+        if (abs(twiceArea) <= 1.0e-8f)
+        {
+            continue;
+        }
+        if (doubleSided)
+        {
+            if (twiceArea > 0.0f)
+            {
+                float2 tmpPos = s1;
+                s1 = s2;
+                s2 = tmpPos;
+                float tmpDepth = depth1;
+                depth1 = depth2;
+                depth2 = tmpDepth;
+                twiceArea = -twiceArea;
+            }
+        }
+        else if (twiceArea >= 0.0f)
+        {
+            if (telemetryEnabled) localBackfaceRejectedTriangleCount++;
+            continue;
+        }
+        const float invTwiceArea = -rcp(twiceArea);
         const float2 bbMinF = min(min(s0, s1), s2);
         const float2 bbMaxF = max(max(s0, s1), s2);
         int2 minPx = max(int2(floor(bbMinF)), int2(pagePixelMinX, pagePixelMinY));
         int2 maxPx = min(int2(floor(bbMaxF)), int2(pagePixelMaxX, pagePixelMaxY));
-        if (minPx.x > maxPx.x || minPx.y > maxPx.y) continue;
-
+        if (minPx.x > maxPx.x || minPx.y > maxPx.y)
+        {
+            if (telemetryEnabled) localBboxRejectedTriangleCount++;
+            continue;
+        }
         const float2 origin = float2(float(minPx.x) + 0.5f, float(minPx.y) + 0.5f);
         const float2 e12 = s2 - s1;
         const float2 e20 = s0 - s2;
         const float dx_b0 = e12.y * invTwiceArea;
         const float dx_b1 = e20.y * invTwiceArea;
-        float scanline_b0 = ((origin.x - s1.x) * e12.y - (origin.y - s1.y) * e12.x) * invTwiceArea;
-        float scanline_b1 = ((origin.x - s2.x) * e20.y - (origin.y - s2.y) * e20.x) * invTwiceArea;
+        float scanline_b0 =
+            ((origin.x - s1.x) * e12.y - (origin.y - s1.y) * e12.x) *
+            invTwiceArea;
+        float scanline_b1 =
+            ((origin.x - s2.x) * e20.y - (origin.y - s2.y) * e20.x) *
+            invTwiceArea;
 
         for (int py = minPx.y; py <= maxPx.y; ++py)
         {
@@ -519,7 +614,8 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
                             atlasBaseX + uint(px - int(pagePixelMinX)),
                             atlasBaseY + uint(py - int(pagePixelMinY)))],
                         asuint(depth));
-                    anyPixelWritten = true;
+                    localAnyPixelWritten = true;
+                    if (telemetryEnabled) localCoveredPixelCount++;
                 }
                 b0 += dx_b0;
                 b1 += dx_b1;
@@ -529,12 +625,55 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
         }
     }
 
-    if (anyPixelWritten)
+    if (telemetryEnabled && localTriangleCount != 0u)
+        InterlockedAdd(gs_pageRasterTriangleCount, localTriangleCount);
+    if (telemetryEnabled && localDepthRejectedTriangleCount != 0u)
+        InterlockedAdd(gs_pageRasterDepthRejectedTriangleCount, localDepthRejectedTriangleCount);
+    if (telemetryEnabled && localBackfaceRejectedTriangleCount != 0u)
+        InterlockedAdd(gs_pageRasterBackfaceRejectedTriangleCount, localBackfaceRejectedTriangleCount);
+    if (telemetryEnabled && localCoveredPixelCount != 0u)
     {
-        uint ignored = 0u;
-        InterlockedOr(
-            pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-            ignored);
+        InterlockedAdd(gs_pageRasterCoveredPixelCount, localCoveredPixelCount);
+    }
+    if (localAnyPixelWritten)
+        InterlockedOr(gs_pageRasterAnyWrite, 1u);
+    if (telemetryEnabled && localBboxRejectedTriangleCount != 0u)
+        InterlockedAdd(gs_pageRasterBboxRejectedTriangleCount, localBboxRejectedTriangleCount);
+    GroupMemoryBarrierWithGroupSync();
+
+    if (GI == 0u)
+    {
+        RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+            ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_STATS_DESCRIPTOR_INDEX];
+        if (telemetryEnabled)
+        {
+            InterlockedAdd(statsBuffer[0].pageJobRasterJobCount, 1u);
+            InterlockedAdd(statsBuffer[0].pageJobRasterTriangleCount, gs_pageRasterTriangleCount);
+            InterlockedAdd(
+                statsBuffer[0].pageJobRasterDepthRejectedTriangleCount,
+                gs_pageRasterDepthRejectedTriangleCount);
+            InterlockedAdd(
+                statsBuffer[0].pageJobRasterBackfaceRejectedTriangleCount,
+                gs_pageRasterBackfaceRejectedTriangleCount);
+            InterlockedAdd(
+                statsBuffer[0].pageJobRasterCoveredPixelCount,
+                gs_pageRasterCoveredPixelCount);
+            InterlockedAdd(
+                statsBuffer[0].pageJobRasterClusterBoundsOverlapCount,
+                gs_pageRasterClusterBoundsOverlap);
+            InterlockedAdd(
+                statsBuffer[0].pageJobRasterBboxRejectedTriangleCount,
+                gs_pageRasterBboxRejectedTriangleCount);
+        }
+        if (gs_pageRasterAnyWrite != 0u)
+        {
+            uint ignored = 0u;
+            InterlockedOr(
+                pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
+                kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+                ignored);
+            if (telemetryEnabled)
+                InterlockedAdd(statsBuffer[0].pageJobRasterPageWriteCount, 1u);
+        }
     }
 }

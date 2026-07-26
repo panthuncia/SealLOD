@@ -1175,6 +1175,33 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
                 const uint clipmapIndex = meta.w;
                 const uint pageX = virtualAddress % CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION;
                 const uint pageY = virtualAddress / CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION;
+                StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+                    ResourceDescriptorHeap[
+                        CLOD_VIRTUAL_SHADOW_CLEAR_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+                const CLodVirtualShadowClipmapInfo clipmapInfo =
+                    clipmapInfos[clipmapIndex];
+                const uint2 logicalPageCoords =
+                    CLodVirtualShadowUnwrappedPageCoords(
+                        uint2(pageX, pageY),
+                        clipmapInfo);
+                const uint pageTag =
+                    CLodVirtualShadowPackAbsolutePageTag(
+                        logicalPageCoords,
+                        clipmapInfo.unwrappedPageOffsetX,
+                        clipmapInfo.unwrappedPageOffsetY);
+                StructuredBuffer<Camera> shadowCameras =
+                    ResourceDescriptorHeap[
+                        ResourceDescriptorIndex(Builtin::CameraBuffer)];
+                RWStructuredBuffer<float4> pageViewInfo =
+                    ResourceDescriptorHeap[
+                        CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_VIEW_INFO_DESCRIPTOR_INDEX];
+                pageViewInfo[physicalPageIndex] =
+                    float4(
+                        0.0f,
+                        0.0f,
+                        shadowCameras[
+                            clipmapInfo.shadowCameraBufferIndex].view[3].z,
+                        asfloat(pageTag));
                 uint ignoredAnd = 0u;
                 InterlockedAnd(
                     pageTable[uint3(pageX, pageY, clipmapIndex)],
