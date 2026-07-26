@@ -7,26 +7,32 @@
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
+#include <tracy/Tracy.hpp>
 
 #include "../shaders/PerPassRootConstants/clodVirtualShadowAdmitPagesRootConstants.h"
+#include "../shaders/PerPassRootConstants/clodVirtualShadowApplyUpgradesRootConstants.h"
 
 VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
-    std::shared_ptr<Buffer> upgradeInputsBuffer,
-    std::shared_ptr<Buffer> upgradeInputCountBuffer,
+    std::vector<std::shared_ptr<Buffer>> upgradeInputBuffers,
     std::shared_ptr<Buffer> pageMetadataBuffer,
     std::shared_ptr<Buffer> clipmapInfoBuffer,
     std::shared_ptr<Buffer> compactShadowCamerasBuffer,
-    std::shared_ptr<Buffer> statsBuffer)
+    std::shared_ptr<Buffer> statsBuffer,
+    AcquireUpgradeUploadFn acquireUpgradeUpload,
+    ReleaseUpgradeUploadFn releaseUpgradeUpload,
+    uint32_t framesInFlight)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
-    , m_upgradeInputsBuffer(std::move(upgradeInputsBuffer))
-    , m_upgradeInputCountBuffer(std::move(upgradeInputCountBuffer))
+    , m_upgradeInputBuffers(std::move(upgradeInputBuffers))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
     , m_compactShadowCamerasBuffer(std::move(compactShadowCamerasBuffer))
     , m_statsBuffer(std::move(statsBuffer))
+    , m_acquireUpgradeUpload(std::move(acquireUpgradeUpload))
+    , m_releaseUpgradeUpload(std::move(releaseUpgradeUpload))
+    , m_inFlightSlotByFrame(std::max(framesInFlight, 1u), UINT32_MAX)
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
@@ -34,13 +40,17 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
         L"CLodVirtualShadowAdmitPagesCSMain",
         {},
         "CLod.VirtualShadow.AdmitPages.PSO");
+    m_applyUpgradesPso = PSOManager::GetInstance().MakeComputePipeline(
+        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        L"Shaders/ClusterLOD/clodUtil.hlsl",
+        L"CLodVirtualShadowApplyExactUpgradesCSMain",
+        {},
+        "CLod.VirtualShadow.ApplyUpgrades.PSO");
 }
 
 void VirtualShadowMapAdmitPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     builder->WithShaderResource(
-            m_upgradeInputsBuffer,
-            m_upgradeInputCountBuffer,
             m_clipmapInfoBuffer,
             m_compactShadowCamerasBuffer)
         .WithUnorderedAccess(
@@ -48,9 +58,33 @@ void VirtualShadowMapAdmitPagesPass::DeclareResourceUsages(ComputePassBuilder* b
             m_dirtyPageFlagsBuffer,
             m_pageMetadataBuffer,
             m_statsBuffer);
+    for (const auto& buffer : m_upgradeInputBuffers) {
+        builder->WithShaderResource(buffer);
+    }
 }
 
 void VirtualShadowMapAdmitPagesPass::Setup() {}
+
+void VirtualShadowMapAdmitPagesPass::Update(
+    const UpdateExecutionContext& executionContext)
+{
+    ZoneScopedN("VirtualShadowMapAdmitPagesPass::Update");
+    const uint32_t frameSlot =
+        executionContext.frameIndex %
+        static_cast<uint32_t>(m_inFlightSlotByFrame.size());
+    if (m_inFlightSlotByFrame[frameSlot] != UINT32_MAX) {
+        m_releaseUpgradeUpload(m_inFlightSlotByFrame[frameSlot]);
+        m_inFlightSlotByFrame[frameSlot] = UINT32_MAX;
+    }
+    if (m_pendingUpgradeSlot == UINT32_MAX && m_acquireUpgradeUpload) {
+        uint32_t slotIndex = UINT32_MAX;
+        uint32_t inputCount = 0u;
+        if (m_acquireUpgradeUpload(slotIndex, inputCount)) {
+            m_pendingUpgradeSlot = slotIndex;
+            m_pendingUpgradeInputCount = inputCount;
+        }
+    }
+}
 
 PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executionContext)
 {
@@ -60,9 +94,6 @@ PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executi
         renderContext->textureDescriptorHeap.GetHandle(),
         renderContext->samplerDescriptorHeap.GetHandle());
     commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
-    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
-    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
-
     const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
     const uint32_t normalBudget =
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
@@ -79,30 +110,28 @@ PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executi
     rhi::BarrierBatch barrierBatch{};
     barrierBatch.globals = rhi::Span<rhi::GlobalBarrier>(&globalBarrier, 1);
 
-    // Apply exact CPU upgrade tokens in this known-always-executed pass before
-    // admission. The standalone upload pass owns CPU queue draining; this
-    // phase consumes its persistent GPU batch and closes the scheduling gap
-    // that previously allowed uploads without page-table application.
-    {
+    if (m_pendingUpgradeSlot < m_upgradeInputBuffers.size() &&
+        m_pendingUpgradeInputCount != 0u) {
+        commandList.BindPipeline(
+            m_applyUpgradesPso.GetAPIPipelineState().GetHandle());
+        BindResourceDescriptorIndices(
+            commandList,
+            m_applyUpgradesPso.GetResourceDescriptorSlots());
         uint32_t rootConstants[NumMiscUintRootConstants] = {};
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] =
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUTS_DESCRIPTOR_INDEX] =
+            m_upgradeInputBuffers[m_pendingUpgradeSlot]->GetSRVInfo(0).slot.index;
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUT_COUNT] =
+            m_pendingUpgradeInputCount;
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX] =
             m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_DIRTY_FLAGS_DESCRIPTOR_INDEX] =
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_DIRTY_FLAGS_DESCRIPTOR_INDEX] =
             m_dirtyPageFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_STATS_DESCRIPTOR_INDEX] =
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX] =
             m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_RESOLUTION] = config.pageTableResolution;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_INPUTS_DESCRIPTOR_INDEX] =
-            m_upgradeInputsBuffer->GetSRVInfo(0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_INPUT_COUNT_DESCRIPTOR_INDEX] =
-            m_upgradeInputCountBuffer->GetSRVInfo(0).slot.index;
-            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX] =
-                m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INFO_DESCRIPTOR_INDEX] =
-                m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
-            rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_SHADOW_CAMERAS_DESCRIPTOR_INDEX] =
-                m_compactShadowCamerasBuffer->GetSRVInfo(0).slot.index;
-        rootConstants[CLOD_VIRTUAL_SHADOW_ADMIT_APPLY_UPGRADES_ONLY] = 1u;
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_METADATA_DESCRIPTOR_INDEX] =
+            m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        rootConstants[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_CLIPMAP_COUNT] =
+            CLodVirtualShadowMaxSupportedClipmapCount;
         commandList.PushConstants(
             rhi::ShaderStage::Compute,
             0,
@@ -110,9 +139,22 @@ PassReturn VirtualShadowMapAdmitPagesPass::Execute(PassExecutionContext& executi
             0,
             NumMiscUintRootConstants,
             rootConstants);
-        commandList.Dispatch((pageCount + threadsPerGroup - 1u) / threadsPerGroup, 1u, 1u);
+        commandList.Dispatch(
+            (m_pendingUpgradeInputCount + threadsPerGroup - 1u) /
+                threadsPerGroup,
+            1u,
+            1u);
         commandList.Barriers(barrierBatch);
+        const uint32_t frameSlot =
+            executionContext.frameIndex %
+            static_cast<uint32_t>(m_inFlightSlotByFrame.size());
+        m_inFlightSlotByFrame[frameSlot] = m_pendingUpgradeSlot;
+        m_pendingUpgradeSlot = UINT32_MAX;
+        m_pendingUpgradeInputCount = 0u;
     }
+
+    commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+    BindResourceDescriptorIndices(commandList, m_pso.GetResourceDescriptorSlots());
 
     // Upgrade work receives its reserved share first. Dispatching clipmaps
     // individually makes near-clipmap priority deterministic across classes.

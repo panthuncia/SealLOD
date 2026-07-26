@@ -2870,8 +2870,6 @@ void CLodVirtualShadowApplyExactUpgradesCSMain(uint3 dispatchThreadId : SV_Dispa
 {
     StructuredBuffer<CLodVirtualShadowUpgradeInvalidationInput> inputs =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUTS_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> inputCountBuffer =
-        ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUT_COUNT_DESCRIPTOR_INDEX];
     RWTexture2DArray<uint> pageTable =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_TABLE_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint4> pageMetadata =
@@ -2881,7 +2879,7 @@ void CLodVirtualShadowApplyExactUpgradesCSMain(uint3 dispatchThreadId : SV_Dispa
     RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX];
     const uint inputIndex = dispatchThreadId.x;
-    const uint inputCount = inputCountBuffer[0];
+    const uint inputCount = CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_INPUT_COUNT;
     if (inputIndex == 0u)
     {
         InterlockedAdd(
@@ -2967,95 +2965,6 @@ void CLodVirtualShadowAdmitPagesCSMain(uint3 dispatchThreadId : SV_DispatchThrea
 
     const uint2 pageCoords = uint2(virtualAddress % resolution, virtualAddress / resolution);
     const uint3 tableCoords = uint3(pageCoords, CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INDEX);
-    if (CLOD_VIRTUAL_SHADOW_ADMIT_APPLY_UPGRADES_ONLY != 0u)
-    {
-        StructuredBuffer<CLodVirtualShadowUpgradeInvalidationInput> inputs =
-            ResourceDescriptorHeap[
-                CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_INPUTS_DESCRIPTOR_INDEX];
-        StructuredBuffer<uint> inputCountBuffer =
-            ResourceDescriptorHeap[
-                CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_INPUT_COUNT_DESCRIPTOR_INDEX];
-        RWStructuredBuffer<uint4> pageMetadata =
-            ResourceDescriptorHeap[
-                CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX];
-        const uint inputCount = min(
-            inputCountBuffer[0],
-            kCLodVirtualShadowPredictiveCandidateCapacity);
-        if (virtualAddress == 0u)
-        {
-            InterlockedAdd(
-                statsBuffer[0].upgradeInvalidationInputCount,
-                inputCount);
-            InterlockedAdd(
-                statsBuffer[0].cumulativeUpgradeInvalidationInputCount,
-                inputCount);
-        }
-        const uint inputStride = resolution * resolution;
-        for (uint inputIndex = virtualAddress;
-            inputIndex < inputCount;
-            inputIndex += inputStride)
-        {
-            const CLodVirtualShadowUpgradeInvalidationInput input =
-                inputs[inputIndex];
-            if (input.physicalPageIndex >= kCLodVirtualShadowMaxPhysicalPageCount ||
-                input.ownerClipmapIndex >= kCLodVirtualShadowClipmapCount ||
-                input.ownerVirtualAddress >= resolution * resolution)
-            {
-                InterlockedAdd(
-                    statsBuffer[0].upgradeInvalidationRejectedInputCount,
-                    1u);
-                continue;
-            }
-            const uint4 meta = pageMetadata[input.physicalPageIndex];
-            if ((meta.z & kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
-                meta.x != input.ownerVirtualAddress ||
-                meta.w != input.ownerClipmapIndex ||
-                CLodVirtualShadowPhysicalPageAllocationGeneration(meta.z) !=
-                    input.allocationGeneration ||
-                meta.y != input.contentGeneration)
-            {
-                InterlockedAdd(
-                    statsBuffer[0].upgradeInvalidationRejectedInputCount,
-                    1u);
-                continue;
-            }
-            const uint2 ownerPageCoords = uint2(
-                input.ownerVirtualAddress % resolution,
-                input.ownerVirtualAddress / resolution);
-            const uint3 ownerTableCoords = uint3(
-                ownerPageCoords,
-                input.ownerClipmapIndex);
-            const uint previousEntry = pageTable[ownerTableCoords];
-            if ((previousEntry & (kCLodVirtualShadowAllocatedMask |
-                    kCLodVirtualShadowContentValidMask)) !=
-                    (kCLodVirtualShadowAllocatedMask |
-                        kCLodVirtualShadowContentValidMask) ||
-                (previousEntry & kCLodVirtualShadowPhysicalPageIndexMask) !=
-                    input.physicalPageIndex)
-            {
-                InterlockedAdd(
-                    statsBuffer[0].upgradeInvalidationRejectedInputCount,
-                    1u);
-                continue;
-            }
-            uint ignored = 0u;
-            InterlockedOr(
-                pageTable[ownerTableCoords],
-                kCLodVirtualShadowDirtyMask |
-                    kCLodVirtualShadowUpgradePendingMask,
-                ignored);
-            InterlockedOr(
-                dirtyFlags[input.physicalPageIndex >> 5u],
-                1u << (input.physicalPageIndex & 31u));
-            InterlockedAdd(
-                statsBuffer[0].upgradeInvalidationAllocatedPageTouchCount,
-                1u);
-            InterlockedAdd(
-                statsBuffer[0].cumulativeUpgradeInvalidationAllocatedPageTouchCount,
-                1u);
-        }
-        return;
-    }
     if (virtualAddress == 0u &&
         CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INDEX == 0u &&
         CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_PHASE != 0u)

@@ -1,12 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -63,8 +63,9 @@ public:
     void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
     std::shared_ptr<Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
     std::shared_ptr<Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
-    std::vector<CLodVirtualShadowUpgradeInvalidationInput> DrainVirtualShadowUpgradeEvents(uint32_t maxEvents);
-    CLodVirtualShadowUpgradeQueueStats GetVirtualShadowUpgradeQueueStats() const;
+    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<Buffer>> buffers);
+    bool TryAcquireVirtualShadowUpgradeUpload(uint32_t& slotIndex, uint32_t& inputCount);
+    void ReleaseVirtualShadowUpgradeUpload(uint32_t slotIndex);
     void SetVirtualShadowFallbackFeedbackResources(
         std::shared_ptr<Buffer> dependencies,
         std::shared_ptr<Buffer> dependencyCount);
@@ -141,6 +142,8 @@ private:
     void CommitPendingResidencyPromotions(MeshManager* meshManager);
     void RecordVirtualShadowUpgradeDependency(const CLodVirtualShadowPredictedPage& dependency);
     void QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex);
+    void PublishVirtualShadowUpgradeUpload();
+    void PublishVirtualShadowUpgradeCpuTiming();
     void ClearVirtualShadowUpgradeState();
     void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
@@ -410,26 +413,49 @@ private:
         uint32_t contentGeneration = 0u;
         bool operator==(const VirtualShadowPageKey&) const = default;
     };
-    struct VirtualShadowPageKeyHash {
-        size_t operator()(const VirtualShadowPageKey& key) const noexcept {
-            size_t hash = key.physicalPageIndex;
-            hash ^= static_cast<size_t>(key.allocationGeneration) * 0x9e3779b9u;
-            hash ^= static_cast<size_t>(key.contentGeneration) * 0x85ebca6bu;
-            return hash;
-        }
-    };
     struct VirtualShadowDependency {
         CLodVirtualShadowPageToken page{};
         uint32_t residencyGeneration = 0u;
     };
-    struct QueuedVirtualShadowUpgrade {
-        CLodVirtualShadowUpgradeInvalidationInput input{};
-        uint64_t queuedTick = 0u;
+    enum class VirtualShadowUpgradeUploadState : uint8_t {
+        Free,
+        Filling,
+        Ready,
+        InFlight,
     };
-    mutable std::mutex m_virtualShadowUpgradeMutex;
-    std::unordered_map<uint32_t, std::unordered_map<VirtualShadowPageKey, VirtualShadowDependency, VirtualShadowPageKeyHash>> m_virtualShadowDependencies;
-    std::deque<QueuedVirtualShadowUpgrade> m_virtualShadowUpgradeEvents;
-    std::unordered_set<VirtualShadowPageKey, VirtualShadowPageKeyHash> m_virtualShadowQueuedPageKeys;
+    struct VirtualShadowUpgradeUploadSlot {
+        std::shared_ptr<Buffer> buffer;
+        void* mapped = nullptr;
+        std::atomic<VirtualShadowUpgradeUploadState> state{
+            VirtualShadowUpgradeUploadState::Free};
+        std::atomic<uint32_t> inputCount{0u};
+    };
+    static constexpr uint32_t VirtualShadowUpgradeUploadSlotCapacity = 8u;
+    std::unordered_map<uint32_t, std::vector<VirtualShadowDependency>> m_virtualShadowDependencies;
+    std::deque<std::vector<VirtualShadowDependency>> m_virtualShadowReadyDependencyBuckets;
+    std::vector<std::vector<VirtualShadowDependency>> m_virtualShadowDependencyBucketPool;
+    std::vector<int32_t> m_virtualShadowReadyIndexByPhysicalPage;
+    std::vector<uint32_t> m_virtualShadowReadyTouchedPhysicalPages;
+    std::array<VirtualShadowUpgradeUploadSlot, VirtualShadowUpgradeUploadSlotCapacity>
+        m_virtualShadowUpgradeUploadSlots;
+    uint32_t m_virtualShadowUpgradeUploadSlotCount = 0u;
+    BoundedSpscQueue<uint32_t, VirtualShadowUpgradeUploadSlotCapacity>
+        m_virtualShadowReadyUploadSlots;
+    struct VirtualShadowUpgradeCpuTimingSeries {
+        std::array<uint32_t, 256> samples{};
+        uint32_t sampleCount = 0u;
+        uint64_t totalUs = 0u;
+        uint32_t maxUs = 0u;
+        void Add(uint64_t elapsedUs);
+        void Reset();
+    };
+    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowDependencyTiming;
+    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowPromotionTiming;
+    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowPublishTiming;
+    std::atomic<uint64_t> m_virtualShadowAcquireTimingTotalUs{0u};
+    std::atomic<uint64_t> m_virtualShadowAcquireTimingMaxUs{0u};
+    std::atomic<uint64_t> m_virtualShadowAcquireTimingCalls{0u};
+    uint64_t m_virtualShadowTimingLastLogTick = 0u;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
     std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;

@@ -226,8 +226,7 @@ private:
     std::shared_ptr<Buffer> m_shadowInvalidationInputsBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
-    std::shared_ptr<Buffer> m_shadowUpgradeInvalidationInputsBuffer;
-    std::shared_ptr<Buffer> m_shadowUpgradeInvalidationCountBuffer;
+    std::vector<std::shared_ptr<Buffer>> m_shadowUpgradeInvalidationUploadBuffers;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveRawPagesBuffer;

@@ -1129,8 +1129,9 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_shadowPageMetadataBuffer);
     releaseBufferBacking(m_shadowInvalidationInputsBuffer);
     releaseBufferBacking(m_shadowInvalidationCountBuffer);
-    releaseBufferBacking(m_shadowUpgradeInvalidationInputsBuffer);
-    releaseBufferBacking(m_shadowUpgradeInvalidationCountBuffer);
+    for (const auto& buffer : m_shadowUpgradeInvalidationUploadBuffers) {
+        releaseBufferBacking(buffer);
+    }
     releaseBufferBacking(m_shadowInvalidatedInstancesBitsetBuffer);
     releaseBufferBacking(m_shadowPredictiveInvalidationCandidatesBuffer);
     releaseBufferBacking(m_shadowPredictiveInvalidationCandidateCountBuffer);
