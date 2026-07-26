@@ -44,13 +44,6 @@ VirtualShadowMapDeduplicatePredictedPagesPass::VirtualShadowMapDeduplicatePredic
         L"CLodVirtualShadowDeduplicatePredictedPagesCSMain",
         {},
         "CLod.VirtualShadow.DeduplicatePredictedPages.PSO");
-    m_retryIncompleteCapturePso = PSOManager::GetInstance().MakeComputePipeline(
-        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
-        L"Shaders/ClusterLOD/clodUtil.hlsl",
-        L"CLodVirtualShadowRetryIncompleteFallbackCaptureCSMain",
-        {},
-        "CLod.VirtualShadow.RetryIncompleteFallbackCapture.PSO");
-
 }
 
 void VirtualShadowMapDeduplicatePredictedPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
@@ -130,23 +123,6 @@ PassReturn VirtualShadowMapDeduplicatePredictedPagesPass::Execute(PassExecutionC
         rootConstants);
     commandList.Dispatch((CLodVirtualShadowPredictiveRawPageCapacity + kThreadsPerGroup - 1u) / kThreadsPerGroup, 1u, 1u);
     commandList.Barriers(barrierBatch);
-
-    BindResourceDescriptorIndices(
-        commandList,
-        m_retryIncompleteCapturePso.GetResourceDescriptorSlots());
-    commandList.BindPipeline(
-        m_retryIncompleteCapturePso.GetAPIPipelineState().GetHandle());
-    commandList.PushConstants(
-        rhi::ShaderStage::Compute,
-        0,
-        MiscUintRootSignatureIndex,
-        0,
-        NumMiscUintRootConstants,
-        rootConstants);
-    commandList.Dispatch(
-        (m_physicalPageCount + kThreadsPerGroup - 1u) / kThreadsPerGroup,
-        1u,
-        1u);
 
     return {};
 }

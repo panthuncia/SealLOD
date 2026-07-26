@@ -30,7 +30,6 @@ public:
 private:
     PipelineState m_clearStatePso;
     PipelineState m_deduplicatePso;
-    PipelineState m_retryIncompleteCapturePso;
     std::shared_ptr<Buffer> m_predictiveRawPagesBuffer;
     std::shared_ptr<Buffer> m_predictiveRawPageCountBuffer;
     std::shared_ptr<Buffer> m_predictedScratchBitsetBuffer;

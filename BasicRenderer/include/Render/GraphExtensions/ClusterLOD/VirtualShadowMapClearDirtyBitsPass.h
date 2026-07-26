@@ -17,6 +17,7 @@ public:
         std::shared_ptr<Buffer> allocationRequestsBuffer,
         std::shared_ptr<Buffer> allocationCountBuffer,
         std::shared_ptr<Buffer> indirectArgsBuffer,
+        std::shared_ptr<Buffer> dirtyFlagsBuffer,
         std::shared_ptr<Buffer> statsBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -27,5 +28,6 @@ public:
 private:
     PipelineState m_pso;
     std::shared_ptr<PixelBuffer> m_pageTableTexture;
+    std::shared_ptr<Buffer> m_dirtyFlagsBuffer;
     std::shared_ptr<Buffer> m_statsBuffer;
 };

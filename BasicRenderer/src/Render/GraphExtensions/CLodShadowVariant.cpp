@@ -788,6 +788,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowAllocationRequestsBuffer,
             extension.m_shadowAllocationCountBuffer,
             extension.m_shadowAllocationIndirectArgsBuffer,
+            extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowStatsBuffer));
     shadowClearDirtyBitsPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowDeduplicatePredictedPagesPassName));
     outPasses.push_back(std::move(shadowClearDirtyBitsPassDesc));

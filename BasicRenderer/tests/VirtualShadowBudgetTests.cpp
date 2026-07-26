@@ -127,6 +127,39 @@ void RunDeferredPageClearLifecycleCase()
     }
 }
 
+void RunFallbackDependencyOverflowLifecycleCase()
+{
+    uint32_t pageEntry =
+        23u |
+        CLodVirtualShadowPageAllocatedMask |
+        CLodVirtualShadowPageDirtyMask |
+        CLodVirtualShadowPageContentValidMask |
+        CLodVirtualShadowPageRerenderedThisFrameMask;
+    bool physicalDirty = true;
+
+    // Dependency-output overflow is auxiliary bookkeeping failure. The
+    // successfully rendered contents must remain visible while the exact page
+    // is queued for another capture attempt.
+    pageEntry &= ~CLodVirtualShadowPageRerenderedThisFrameMask;
+    if ((pageEntry & CLodVirtualShadowPageContentValidMask) == 0u ||
+        (pageEntry & CLodVirtualShadowPageDirtyMask) == 0u ||
+        !physicalDirty) {
+        throw std::runtime_error(
+            "fallback dependency overflow invalidated rendered shadow contents");
+    }
+
+    // Admission of that page on a later frame consumes the retained physical
+    // dirty bit and replaces the still-sampleable cached contents.
+    pageEntry &= ~CLodVirtualShadowPageContentValidMask;
+    physicalDirty = false;
+    if ((pageEntry & CLodVirtualShadowPageDirtyMask) == 0u ||
+        (pageEntry & CLodVirtualShadowPageContentValidMask) != 0u ||
+        physicalDirty) {
+        throw std::runtime_error(
+            "fallback dependency retry did not enter the normal clear lifecycle");
+    }
+}
+
 void RunExactPageTokenCases()
 {
     constexpr uint32_t physicalPage = 17u;
@@ -212,6 +245,7 @@ int main()
         RunBudgetCases();
         RunAllocationAdmissionCases();
         RunDeferredPageClearLifecycleCase();
+        RunFallbackDependencyOverflowLifecycleCase();
         RunExactPageTokenCases();
         RunAbsolutePageTagCases();
         std::cout << "Virtual shadow budget tests passed.\n";

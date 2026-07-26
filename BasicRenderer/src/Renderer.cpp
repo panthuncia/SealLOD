@@ -3476,7 +3476,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 upgradeBudgetValid,
                 renderedWithinAdmission);
             spdlog::info(
-                "CLOD VSM exact recovery frame={}: fallbackCandidates={} candidateOverflow={} finalizedRaw={} rawOverflow={} finalizedDependencies={} dedupOverflow={} upgradeInputs(accepted={},rejected={},pageTouches={}) upgradePages(eligible={},admitted={},deferred={},rendered={}) cumulative(inputs={},touches={},admitted={},rendered={})",
+                "CLOD VSM exact recovery frame={}: fallbackCandidates={} candidateOverflow={} finalizedRaw={} rawOverflow={} finalizedDependencies={} dedupOverflow={} captureRetries={} upgradeInputs(accepted={},rejected={},pageTouches={}) upgradePages(eligible={},admitted={},deferred={},rendered={}) cumulative(inputs={},touches={},admitted={},rendered={})",
                 requestedFrame,
                 stats.upgradeCandidateInputCount,
                 stats.upgradeCandidateAppendOverflowCount,
@@ -3484,6 +3484,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.upgradeRawPageOverflowCount,
                 stats.readyUpgradePageCount,
                 stats.readyUpgradePageOverflowCount,
+                stats.invalidUpgradeDependencyCount,
                 stats.upgradeInvalidationInputCount,
                 stats.upgradeInvalidationRejectedInputCount,
                 stats.upgradeInvalidationAllocatedPageTouchCount,
