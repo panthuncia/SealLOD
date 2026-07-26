@@ -1472,6 +1472,14 @@ void CLodVirtualShadowSetupCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 const uint2 ownerLogicalPageCoords = CLodVirtualShadowUnwrappedPageCoords(
                     ownerWrappedPageCoords,
                     ownerClipmapInfo);
+                if (CLOD_VIRTUAL_SHADOW_SETUP_FEEDBACK_RECOVERY_REFRESH != 0u)
+                {
+                    uint ignored = 0u;
+                    InterlockedOr(
+                        pageTable[uint3(ownerWrappedPageCoords, meta.w)],
+                        kCLodVirtualShadowDirtyMask,
+                        ignored);
+                }
                 if (CLodVirtualShadowShouldClearWrappedPage(
                         int2(ownerLogicalPageCoords),
                         ownerClipmapInfo.clearOffsetX,
@@ -1612,8 +1620,17 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
     const uint64_t dependencyKey =
         (uint64_t(rawPage.sourceGroupGlobalIndex) << 32u) |
         uint64_t(rawPage.physicalPageIndex);
+    // sourceGroupGlobalIndex and physicalPageIndex are both densely structured.
+    // A few xor-shifts leave their low bits highly correlated, which causes
+    // pathological linear-probe clusters despite a lightly loaded table.
+    uint64_t mixedDependencyKey = dependencyKey;
+    mixedDependencyKey ^= mixedDependencyKey >> 33u;
+    mixedDependencyKey *= 0xff51afd7ed558ccdull;
+    mixedDependencyKey ^= mixedDependencyKey >> 33u;
+    mixedDependencyKey *= 0xc4ceb9fe1a85ec53ull;
+    mixedDependencyKey ^= mixedDependencyKey >> 33u;
     uint hashSlot = uint(
-        (dependencyKey ^ (dependencyKey >> 33u) ^ (dependencyKey >> 17u)) &
+        mixedDependencyKey &
         uint64_t(kCLodVirtualShadowFallbackDependencyHashCapacity - 1u));
     bool inserted = false;
     [loop]
@@ -2692,12 +2709,18 @@ void CLodVirtualShadowBuildPageListsCSMain(uint3 dispatchThreadId : SV_DispatchT
     RWStructuredBuffer<uint> freePhysicalPages = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_FREE_PAGES_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> reusablePhysicalPages = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_REUSABLE_PAGES_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint4> pageListHeader = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_HEADER_DESCRIPTOR_INDEX];
+    StructuredBuffer<uint> allocationCount =
+        ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_ALLOCATION_COUNT_DESCRIPTOR_INDEX];
 
     if (dispatchThreadId.x == 0u)
     {
         pageListHeader[0] = uint4(0u, 0u, 0u, 0u);
     }
     GroupMemoryBarrierWithGroupSync();
+    if (allocationCount[0] == 0u)
+    {
+        return;
+    }
 
     for (uint physicalPageIndex = dispatchThreadId.x;
         physicalPageIndex < CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PHYSICAL_PAGE_COUNT;
@@ -2913,15 +2936,17 @@ void CLodVirtualShadowApplyExactUpgradesCSMain(uint3 dispatchThreadId : SV_Dispa
     const uint4 meta = pageMetadata[input.physicalPageIndex];
     if ((meta.z & kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
         meta.x != input.ownerVirtualAddress ||
-        meta.w != input.ownerClipmapIndex ||
-        CLodVirtualShadowPhysicalPageAllocationGeneration(meta.z) !=
-            input.allocationGeneration ||
-        meta.y != input.contentGeneration)
+        meta.w != input.ownerClipmapIndex)
     {
         InterlockedAdd(statsBuffer[0].upgradeInvalidationRejectedInputCount, 1u);
         return;
     }
-
+    if (CLodVirtualShadowPhysicalPageAllocationGeneration(meta.z) !=
+        input.allocationGeneration)
+    {
+        InterlockedAdd(statsBuffer[0].upgradeInvalidationRejectedInputCount, 1u);
+        return;
+    }
     const uint2 wrappedPageCoords = uint2(
         input.ownerVirtualAddress % kCLodVirtualShadowMaxPageTableResolution,
         input.ownerVirtualAddress / kCLodVirtualShadowMaxPageTableResolution);

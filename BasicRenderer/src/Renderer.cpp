@@ -3378,7 +3378,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     }
     if (m_clodVirtualShadowTelemetryReadbackPending ||
         m_clodVirtualShadowWorkTelemetryReadbackPending ||
-        m_clodVirtualShadowVisibleCounterReadbackPending) {
+        m_clodVirtualShadowVisibleCounterReadbackPending ||
+        m_clodVirtualShadowDebugVisualizationReadbackPending) {
         return;
     }
 
@@ -3386,6 +3387,10 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     if (!readbackService) {
         return;
     }
+    auto debugVisualizationResource =
+        currentRenderGraph->RequestResourcePtr(
+            Builtin::DebugVisualization,
+            /*allowFailure=*/true);
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
     const auto shadowTag = world.component<CLodExtensionShadowTag>();
@@ -3457,6 +3462,13 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 : 0u;
             const bool admittedPagesCleared =
                 stats.physicalPageClearCount == stats.admittedPageCount;
+            const auto sumClipmapCounters = [](const auto& counters) {
+                uint32_t total = 0u;
+                for (uint32_t value : counters) {
+                    total += value;
+                }
+                return total;
+            };
 
             spdlog::info(
                 "CLOD VSM budget frame={}: totalBudget={} upgradeBudget={} eligible(normal={},upgrade={}) admitted(total={},normal={},upgrade={}) deferred(normal={},upgrade={}) rendered(normal={},upgrade={}) admittedNotRendered={} valid(total={},upgrade={},rendered={})",
@@ -3522,6 +3534,16 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.pageJobCommittedRecordCount,
                 stats.pageJobDroppedRecordCount,
                 stats.pageJobDoubleSidedRecordCount);
+            spdlog::info(
+                "CLOD VSM dirty sources frame={}: residentDirtyHits={} dirtyPages={} visitedDirty={} predictiveInvalidated={} currentBoundsInvalidated={} previousBoundsInvalidated={} skinnedInvalidated={}",
+                requestedFrame,
+                sumClipmapCounters(stats.markResidentDirtyHits),
+                sumClipmapCounters(stats.dirtyPageTableEntries),
+                sumClipmapCounters(stats.visitedDirtyPageTableEntries),
+                sumClipmapCounters(stats.predictiveInvalidatedPageTableEntries),
+                sumClipmapCounters(stats.invalidatedCurrentBoundsPageTableEntries),
+                sumClipmapCounters(stats.invalidatedPreviousBoundsPageTableEntries),
+                sumClipmapCounters(stats.invalidatedSkinnedPageTableEntries));
             spdlog::info(
                 "CLOD VSM page-job raster frame={}: jobs={} clusterBoundsOverlap={} triangles(total={},depthRejected={},backfaceRejected={},bboxRejected={}) coveredPixels={} pageWrites={} emptyJobs={}",
                 requestedFrame,
@@ -3625,6 +3647,70 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     requestedFrame,
                     count);
             });
+    }
+    if (debugVisualizationResource) {
+        m_clodVirtualShadowDebugVisualizationReadbackPending = true;
+        readbackService->RequestReadbackCapture(
+            "DebugResolvePass",
+            debugVisualizationResource.get(),
+            RangeSpec{},
+            [this, requestedFrame](ReadbackCaptureResult&& result) {
+                m_clodVirtualShadowDebugVisualizationReadbackPending = false;
+                if (result.layouts.empty() || result.width == 0u ||
+                    result.height == 0u) {
+                    return;
+                }
+                // f32tof16 on the shader path truncates these constants rather
+                // than applying the rounding mode used by the CPU helper.
+                const std::array<uint32_t, 2> purple{
+                    0x31C238F5u,
+                    0x00003B33u};
+                const std::array<uint32_t, 2> yellow{
+                    0x3B993C00u,
+                    0x00002E66u};
+                const std::array<uint32_t, 2> green{
+                    0x3ACC2E66u,
+                    0x00003266u};
+                const auto& layout = result.layouts.front();
+                uint64_t purplePixels = 0u;
+                uint64_t yellowPixels = 0u;
+                uint64_t greenPixels = 0u;
+                uint64_t nonSentinelPixels = 0u;
+                std::array<uint32_t, 2> firstPayload{
+                    UINT32_MAX,
+                    UINT32_MAX};
+                for (uint32_t y = 0u; y < result.height; ++y) {
+                    const auto* row = reinterpret_cast<const uint32_t*>(
+                        result.data.data() + layout.offset +
+                        static_cast<size_t>(y) * layout.rowPitch);
+                    for (uint32_t x = 0u; x < result.width; ++x) {
+                        const std::array<uint32_t, 2> payload{
+                            row[x * 2u],
+                            row[x * 2u + 1u]};
+                        if (payload[0] != UINT32_MAX) {
+                            ++nonSentinelPixels;
+                            if (firstPayload[0] == UINT32_MAX) {
+                                firstPayload = payload;
+                            }
+                        }
+                        purplePixels += payload == purple ? 1u : 0u;
+                        yellowPixels += payload == yellow ? 1u : 0u;
+                        greenPixels += payload == green ? 1u : 0u;
+                    }
+                }
+                spdlog::info(
+                    "CLOD VSM debug pixels frame={}: resolution={}x{} nonSentinel={} first=0x{:08X}/0x{:08X} purpleFiniteLit={} yellowPreferredDirty={} greenFiniteShadowed={}",
+                    requestedFrame,
+                    result.width,
+                    result.height,
+                    nonSentinelPixels,
+                    firstPayload[0],
+                    firstPayload[1],
+                    purplePixels,
+                    yellowPixels,
+                    greenPixels);
+            },
+            QueueKind::Copy);
     }
 }
 

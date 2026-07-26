@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -516,6 +517,10 @@ inline constexpr uint32_t CLodVirtualShadowMovedInstanceBitCapacity = 1u << 20;
 inline constexpr uint32_t CLodVirtualShadowPredictiveCandidateCapacity = 1u << 16;
 inline constexpr uint32_t CLodVirtualShadowPredictiveRawPageCapacity = 1u << 20;
 inline constexpr uint32_t CLodVirtualShadowFallbackDependencyHashCapacity = 1u << 17;
+// Set only after a streaming-feedback frame was dropped and a readback slot
+// subsequently became available. The VSM setup pass consumes this as a
+// one-shot conservative recovery.
+inline std::atomic<bool> g_clodVirtualShadowFeedbackRecoveryRequested{false};
 inline constexpr uint32_t CLodVirtualShadowClipmapValidFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowClipmapInvalidateFlag = 0x2u;
 inline constexpr uint32_t CLodVirtualShadowPageAllocatedMask = 0x80000000u;

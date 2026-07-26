@@ -591,6 +591,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
         std::make_shared<VirtualShadowMapBuildPageListsPass>(
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
+            extension.m_shadowAllocationCountBuffer,
             extension.m_shadowFreePhysicalPagesBuffer,
             extension.m_shadowReusablePhysicalPagesBuffer,
             extension.m_shadowPageListHeaderBuffer));

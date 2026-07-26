@@ -189,6 +189,10 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
     const bool renderResolutionResetPending = g_pendingRenderResolutionResetFrames > 0u;
     const bool forceResetResources = m_forceResetResources || disableVirtualShadowPageCaching || renderResolutionResetPending;
     m_forceResetResources = false;
+    m_feedbackRecoveryRefresh =
+        g_clodVirtualShadowFeedbackRecoveryRequested.exchange(
+            false,
+            std::memory_order_acq_rel);
     if (renderResolutionResetPending) {
         --g_pendingRenderResolutionResetFrames;
     }
@@ -439,7 +443,9 @@ PassReturn VirtualShadowMapSetupPass::Execute(PassExecutionContext& executionCon
         ((m_resetReasonStructureMismatch ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_STRUCTURE_MISMATCH_BIT) |
         ((m_resetReasonLightDirectionChanged ? 1u : 0u) << CLOD_VIRTUAL_SHADOW_SETUP_RESET_REASON_LIGHT_DIRECTION_CHANGED_BIT) |
         ((SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName)() ? 1u : 0u)
-            << CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_ENABLED_BIT);
+            << CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_ENABLED_BIT) |
+        ((m_feedbackRecoveryRefresh ? 1u : 0u)
+            << CLOD_VIRTUAL_SHADOW_SETUP_FEEDBACK_RECOVERY_REFRESH_BIT);
 
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_SETUP_PAGE_METADATA_DESCRIPTOR_INDEX] = m_pageMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;

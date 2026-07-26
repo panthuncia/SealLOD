@@ -547,6 +547,8 @@ private:
     std::vector<ReadbackStagingSlot> m_readbackStagingSlots;
     uint32_t m_readbackStagingCursor = 0;
     uint64_t m_readbackSlotFullEvents = 0;
+    bool m_virtualShadowFeedbackLossPending = false;
+    uint64_t m_virtualShadowFeedbackRecoveryRequests = 0u;
 
     // Background streaming worker thread
     std::thread m_streamingWorkerThread;

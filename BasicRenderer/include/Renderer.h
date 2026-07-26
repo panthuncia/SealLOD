@@ -361,6 +361,7 @@ private:
     bool m_clodVirtualShadowTelemetryReadbackPending = false;
     bool m_clodVirtualShadowWorkTelemetryReadbackPending = false;
     bool m_clodVirtualShadowVisibleCounterReadbackPending = false;
+    bool m_clodVirtualShadowDebugVisualizationReadbackPending = false;
     bool m_loggedCLodVirtualShadowTelemetryEnabled = false;
     uint64_t m_lastObjectReyesAtlasTelemetryRequestFrame = UINT64_MAX;
     bool m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;

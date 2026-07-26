@@ -172,7 +172,7 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeCpuTiming()
     const uint64_t acquireMaxUs =
         m_virtualShadowAcquireTimingMaxUs.exchange(0u);
     spdlog::info(
-        "CLOD VSM upgrade CPU timing: dependency(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) promotion(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) publish(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) renderAcquire(calls={} totalUs={} maxUs={}) state(groups={} buckets={} readySlots={} slotStarvation={})",
+        "CLOD VSM upgrade CPU timing: dependency(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) promotion(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) publish(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) renderAcquire(calls={} totalUs={} maxUs={}) state(groups={} buckets={} readySlots={} uploadSlotStarvation={} readbackSlotFull={} feedbackRecoveries={})",
         dependency.calls,
         dependency.totalUs,
         dependency.maxUs,
@@ -197,7 +197,9 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeCpuTiming()
         m_virtualShadowDependencies.size(),
         m_virtualShadowReadyDependencyBuckets.size(),
         m_virtualShadowReadyUploadSlots.Depth(),
-        m_virtualShadowReadyUploadSlots.FullEvents());
+        m_virtualShadowReadyUploadSlots.FullEvents(),
+        m_readbackSlotFullEvents,
+        m_virtualShadowFeedbackRecoveryRequests);
     m_virtualShadowDependencyTiming.Reset();
     m_virtualShadowPromotionTiming.Reset();
     m_virtualShadowPublishTiming.Reset();
@@ -918,10 +920,15 @@ CLodStreamingSystem::CLodStreamingSystem() {
 
     try {
         auto getFramesInFlight = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numFramesInFlight");
-        m_streamingReadbackRingSize = std::max<uint32_t>(getFramesInFlight(), 1u);
+        // Shadow-page dependencies are transient: unlike load requests, a
+        // dropped frame may never be regenerated after its page becomes
+        // cache-valid. Three slots saturated during normal scene loading and
+        // caused permanently stale VSM pages, while eight kept every tested
+        // feedback frame lossless.
+        m_streamingReadbackRingSize = std::max<uint32_t>(getFramesInFlight(), 8u);
     }
     catch (...) {
-        m_streamingReadbackRingSize = 3u;
+        m_streamingReadbackRingSize = 8u;
     }
 
     try {
@@ -1789,7 +1796,17 @@ void CLodStreamingSystem::GatherStructuralTailPasses(RenderGraph& rg, std::vecto
 
             if (selectedSlot == UINT32_MAX) {
                 TracyPlot("CLodStreaming.ReadbackSlotFullEvents", static_cast<int64_t>(++m_readbackSlotFullEvents));
+                m_virtualShadowFeedbackLossPending = true;
                 return false;
+            }
+            if (m_virtualShadowFeedbackLossPending) {
+                m_virtualShadowFeedbackLossPending = false;
+                ++m_virtualShadowFeedbackRecoveryRequests;
+                g_clodVirtualShadowFeedbackRecoveryRequested.store(
+                    true,
+                    std::memory_order_release);
+                spdlog::warn(
+                    "CLOD VSM streaming feedback recovered after a dropped readback frame; scheduling a conservative cached-page refresh.");
             }
 
             m_readbackStagingCursor =
