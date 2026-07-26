@@ -36,7 +36,7 @@ if ($Action -eq "reload-workgraph") {
 $aliases = @{
     "block-histogram" = "VirtualShadowBlockHistogram"
     "block-emit" = "VirtualShadowBlockEmit"
-    "culling" = "HierarchicalCulling|WorkGraph"
+    "culling" = "HierarchicalCulling|WorkGraph|CLod\.PureCompute\.(Dense)?ClusterCull"
     "hardware-raster" = "CompileClusterLODVirtualShadowRasterPSO|RasterizeClusters|HardwareRaster"
     "software-raster" = "SoftwareRasterizeClusters|SoftwareRaster"
 }

@@ -158,6 +158,7 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer,
@@ -239,6 +240,7 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     m_shadowDirtyHierarchyTexture = std::move(shadowDirtyHierarchyTexture);
     m_shadowPageTableTexture = std::move(shadowPageTableTexture);
     m_shadowPhysicalPagesTexture = std::move(shadowPhysicalPagesTexture);
+    m_shadowActiveBlockMetadataBuffer = std::move(shadowActiveBlockMetadataBuffer);
     m_reyesDiceQueueBuffer = std::move(reyesDiceQueueBuffer);
     m_reyesDiceQueueCounterBuffer = std::move(reyesDiceQueueCounterBuffer);
     m_reyesDiceQueueOverflowBuffer = std::move(reyesDiceQueueOverflowBuffer);
@@ -408,7 +410,8 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
             Builtin::Shadows::CLodCompactShadowCameras,
-            m_shadowDirtyHierarchyTexture)
+            m_shadowDirtyHierarchyTexture,
+            m_shadowActiveBlockMetadataBuffer)
             .WithUnorderedAccess(Builtin::Shadows::CLodPageTable);
         if (m_shadowInvalidatedInstancesBitsetBuffer) {
             builder->WithShaderResource(m_shadowInvalidatedInstancesBitsetBuffer);
@@ -660,7 +663,10 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_VSM_PREDICTIVE_LOD_INVALIDATION;
     }
-    constexpr uint32_t swRasterThreshold = 16; // pixel diameter threshold
+    const uint32_t swRasterThreshold = std::min(
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodSoftwareRasterDiameterThresholdSettingName)(),
+        0xFFFFu);
     workGraphFlags |= (swRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT);
     if (!m_isFirstPass) {
         workGraphFlags |= CLOD_WG_FLAG_PHASE2;
@@ -697,6 +703,10 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     if (m_shadowPhysicalPagesTexture) {
         uintRootConstants[CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX] =
             m_shadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    }
+    if (m_shadowActiveBlockMetadataBuffer) {
+        uintRootConstants[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+            m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index;
     }
     if (m_workGraphReyesVisibility) {
         uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] =

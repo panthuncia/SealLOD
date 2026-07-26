@@ -32,6 +32,7 @@ inline constexpr const char* CLodEnablePageJobVSMSettingName = "clodEnablePageJo
 inline constexpr const char* CLodVSMRasterModeSettingName = "clodVsmRasterMode";
 inline constexpr const char* CLodReyesShadowCoarseTargetPagesPerTriangleSettingName = "clodReyesShadowCoarseTargetPagesPerTriangle";
 inline constexpr const char* CLodPageJobDiameterThresholdSettingName = "clodPageJobDiameterThreshold";
+inline constexpr const char* CLodSoftwareRasterDiameterThresholdSettingName = "clodSoftwareRasterDiameterThreshold";
 inline constexpr const char* CLodPageJobSparseRatioSettingName = "clodPageJobSparseRatio";
 inline constexpr const char* CLodPageJobMaxPagesPerClusterSettingName = "clodPageJobMaxPagesPerCluster";
 inline constexpr const char* CLodPageJobRecordCapacitySettingName = "clodPageJobRecordCapacity";
@@ -488,7 +489,7 @@ inline constexpr uint32_t CLodVirtualShadowMaxPhysicalPageCount =
 // Block expansion is a transient routing buffer, not a Cartesian allocation.
 // Reserving maxVisibleClusters * maxBlocksPerCluster can consume several GiB.
 inline constexpr uint32_t CLodVirtualShadowExpandedRecordCapacityMultiplier = 4u;
-inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 2.0f;
+inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 1.2f;
 inline constexpr float CLodVirtualShadowDefaultDirectionalSourceAngleDegrees = 6.0f;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtRayCountDirectional = 2u;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional = 2u;
@@ -1089,6 +1090,7 @@ struct CLodVirtualShadowStats
     uint32_t physicalPageClearCount = 0u;
     uint32_t markResidentTagMismatchCount = 0u;
     uint32_t renderedWithoutMatchingClearCount = 0u;
+    uint32_t syntheticEmptyValidPageCount = 0u;
     uint32_t blockExpandedRequestedRecordCount = 0u;
     uint32_t blockExpandedCommittedRecordCount = 0u;
     uint32_t blockExpandedDroppedRecordCount = 0u;
@@ -1126,7 +1128,7 @@ struct CLodVirtualShadowStats
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (73u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (74u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

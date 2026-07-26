@@ -1850,6 +1850,7 @@ void Renderer::SetSettings() {
         CLodReyesShadowCoarseTargetPagesPerTriangleSettingName,
         CLodReyesShadowCoarseTargetPagesPerTriangleDefault);
     settingsManager.registerSetting<uint32_t>(CLodPageJobDiameterThresholdSettingName, 64u);
+    settingsManager.registerSetting<uint32_t>(CLodSoftwareRasterDiameterThresholdSettingName, 16u);
     settingsManager.registerSetting<float>(CLodPageJobSparseRatioSettingName, 0.5f);
     settingsManager.registerSetting<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName, 32u);
     settingsManager.registerSetting<uint32_t>(CLodPageJobRecordCapacitySettingName, CLodPageJobDefaultRecordCapacity);
@@ -3497,7 +3498,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.cumulativeUpgradePageAdmittedCount,
                 stats.cumulativeUpgradePageRenderedCount);
             spdlog::info(
-                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} newlyAllocated={} physicalClears={} admitted={} clearAdmissionInvariant={}",
+                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} syntheticEmptyValid={} newlyAllocated={} physicalClears={} admitted={} clearAdmissionInvariant={}",
                 requestedFrame,
                 stats.freePhysicalPageCount,
                 stats.reusablePhysicalPageCount,
@@ -3506,6 +3507,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.contentValidOwnerMismatchCount,
                 stats.markResidentTagMismatchCount,
                 stats.renderedWithoutMatchingClearCount,
+                stats.syntheticEmptyValidPageCount,
                 stats.newlyAllocatedPageCount,
                 stats.physicalPageClearCount,
                 stats.admittedPageCount,

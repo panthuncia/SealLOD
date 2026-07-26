@@ -1746,7 +1746,8 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidateCountBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
-                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr))
+                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr))
             : std::static_pointer_cast<ComputePass>(
                 std::make_shared<HierarchicalCullingPass>(
                     cullPassName,
@@ -1779,6 +1780,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueCounterBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueOverflowBuffer : nullptr,

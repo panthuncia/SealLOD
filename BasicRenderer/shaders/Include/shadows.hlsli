@@ -14,6 +14,9 @@ static const uint kCLodVirtualShadowDebugFlagSampledTexelCleared = 0x10u;
 static const uint kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame = 0x20u;
 static const uint kCLodVirtualShadowDebugFlagCachedPageTagMismatch = 0x40u;
 static const uint kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch = 0x80u;
+static const uint kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion = 0x100u;
+static const uint kCLodVirtualShadowDebugFlagFiniteDepthLit = 0x200u;
+static const uint kCLodVirtualShadowDebugFlagFiniteDepthShadowed = 0x400u;
 static const float kCLodVirtualShadowPi = 3.14159265359f;
 static const float kCLodVirtualShadowTwoPi = 6.28318530718f;
 static const float kCLodVirtualShadowDegreesToRadians = kCLodVirtualShadowPi / 180.0f;
@@ -178,6 +181,16 @@ float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo
         return float3(0.0f, 0.85f, 0.95f);
     }
 
+    // Blue identifies a page whose validity came from the raster pipeline
+    // completing an exact admitted job without any depth writes. This is
+    // expected only for page-job raster and distinguishes intentional empty
+    // pages from normally rendered green pages.
+    if ((debugInfo.flags &
+            kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion) != 0u)
+    {
+        return float3(0.05f, 0.30f, 1.0f);
+    }
+
     if ((debugInfo.flags & kCLodVirtualShadowDebugFlagSampledTexelCleared) != 0u)
     {
         return float3(1.0f, 1.0f, 1.0f);
@@ -198,7 +211,21 @@ float3 CLodVirtualShadowDebugPageStateColor(CLodVirtualShadowDebugInfo debugInfo
         return float3(0.65f, 0.0f, 0.0f);
     }
 
-    return float3(0.10f, 0.85f, 0.20f);
+    // A valid page and a useful shadow sample are not the same state. Keep
+    // green for samples that actually occlude this receiver, and use violet
+    // when a finite depth value was accepted but compares as fully lit. This
+    // makes cached-depth-origin or incomplete-coverage failures visible
+    // instead of reporting both cases as healthy green pages.
+    if ((debugInfo.flags & kCLodVirtualShadowDebugFlagFiniteDepthShadowed) != 0u)
+    {
+        return float3(0.10f, 0.85f, 0.20f);
+    }
+    if ((debugInfo.flags & kCLodVirtualShadowDebugFlagFiniteDepthLit) != 0u)
+    {
+        return float3(0.62f, 0.18f, 0.90f);
+    }
+
+    return float3(0.35f, 0.35f, 0.35f);
 }
 
 float3 CLodVirtualShadowDebugRerenderedThisFrameColor(CLodVirtualShadowDebugInfo debugInfo)
@@ -384,6 +411,12 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
                     kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
             continue;
         }
+        if ((physicalMeta.y &
+                kCLodVirtualShadowClearEpochPendingMask) != 0u)
+        {
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
@@ -427,8 +460,12 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         result.sampledPhysicalPageIndex = physicalPageIndex;
         if (storedDepthBits == 0x7F7FFFFFu)
         {
-            if (attempt == 0u)
-                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledTexelCleared;
+            // This is the texel actually selected by lookup, even when the
+            // preferred clipmap fell back to a coarser one. Restricting this
+            // diagnostic to attempt zero made clear coarse-page texels appear
+            // healthy green.
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSampledTexelCleared;
             result.depthAvailable = 0u;
             result.occlusion = 0.0f;
             result.closestDepth = asfloat(storedDepthBits);
@@ -447,6 +484,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         result.depthAvailable = 1u;
         result.closestDepth = closestDepth;
         result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        debugInfo.flags |= result.occlusion > 0.01f
+            ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
+            : kCLodVirtualShadowDebugFlagFiniteDepthLit;
         return result;
     }
 
@@ -642,6 +682,12 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
                     kCLodVirtualShadowDebugFlagPhysicalOwnerMismatch;
             continue;
         }
+        if ((physicalMeta.y &
+                kCLodVirtualShadowClearEpochPendingMask) != 0u)
+        {
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion;
+        }
         debugInfo.sampledClipmapIndex = candidateIndex;
         debugInfo.sampledPageEntry = pageEntry;
         debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
@@ -680,8 +726,10 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
         if (storedDepthBits == 0x7F7FFFFFu)
         {
-            if (attempt == 0u)
-                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledTexelCleared;
+            // Report the state of the page that was actually sampled. Coarse
+            // fallback samples are just as authoritative as attempt zero.
+            debugInfo.flags |=
+                kCLodVirtualShadowDebugFlagSampledTexelCleared;
             result.clipmapInfo = clipmapInfo;
             result.valid = 1u;
             result.depthAvailable = 0u;
@@ -707,6 +755,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         result.sampledPhysicalPageIndex = physicalPageIndex;
         const float depthDelta = linearLightDepth - closestDepth;
         result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        debugInfo.flags |= result.occlusion > 0.01f
+            ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
+            : kCLodVirtualShadowDebugFlagFiniteDepthLit;
         return result;
     }
 

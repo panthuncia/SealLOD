@@ -3893,6 +3893,15 @@ void CLodVirtualShadowGatherStatsCSMain(uint3 dispatchThreadId : SV_DispatchThre
                     1u);
             }
         }
+        else if (!capturePreAllocateState &&
+            (pageEntry & kCLodVirtualShadowContentValidMask) != 0u &&
+            (pageMetadata[physicalPageIndex].y &
+                kCLodVirtualShadowClearEpochPendingMask) != 0u)
+        {
+            InterlockedAdd(
+                statsBuffer[0].syntheticEmptyValidPageCount,
+                1u);
+        }
     }
 
     if (capturePreAllocateState)

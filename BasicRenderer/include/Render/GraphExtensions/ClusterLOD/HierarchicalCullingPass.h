@@ -81,6 +81,7 @@ public:
         std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
         std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
+        std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer = nullptr,
         std::shared_ptr<Buffer> reyesDiceQueueBuffer = nullptr,
         std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer = nullptr,
         std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer = nullptr,
@@ -155,6 +156,7 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
+    std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueCounterBuffer;
     std::shared_ptr<Buffer> m_reyesDiceQueueOverflowBuffer;

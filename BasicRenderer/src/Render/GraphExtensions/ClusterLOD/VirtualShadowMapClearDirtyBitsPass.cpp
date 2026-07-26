@@ -2,6 +2,7 @@
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "BuiltinResources.h"
@@ -63,7 +64,17 @@ PassReturn VirtualShadowMapClearDirtyBitsPass::Execute(PassExecutionContext& exe
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = m_statsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
-    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_COMPLETE_EMPTY_ADMITTED_PAGES] = 1u;
+    // An exact page-job dispatch proves that an admitted job which produced no
+    // depth writes is genuinely empty. The amplified hardware/software paths
+    // do not provide that guarantee: missing work and empty work are
+    // indistinguishable there, so synthesizing ContentValid can hide missing
+    // coarse-clipmap geometry.
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_COMPLETE_EMPTY_ADMITTED_PAGES] =
+        CLodVSMRasterModeUsesLargeClusterPageJob(
+            SettingsManager::GetInstance().getSettingGetter<CLodVSMRasterMode>(
+                CLodVSMRasterModeSettingName)())
+        ? 1u
+        : 0u;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] =
         m_dirtyFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
 

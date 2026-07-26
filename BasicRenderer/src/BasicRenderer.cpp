@@ -32,6 +32,7 @@
 #include "Menu/Menu.h"
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
+#include "Render/OutputTypes.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/GraphExtensions/ClusterLOD/HierarchicalCullingPass.h"
@@ -858,6 +859,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         clodStreamingCleanupTest;
     const bool vsmOrbitTest =
         commandLine.find("--vsm-orbit-test") != std::string_view::npos;
+    const bool vsmRetreatTest =
+        commandLine.find("--vsm-retreat-test") != std::string_view::npos;
+    const bool vsmPageStateTest =
+        commandLine.find("--vsm-page-state") != std::string_view::npos;
     const bool graphRebuildSmokeTest =
         pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest || clodStreamingStressTest;
 
@@ -901,6 +906,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
+    if (vsmPageStateTest) {
+        SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+            static_cast<unsigned int>(OutputType::VSM_PAGE_STATE));
+    }
     if (clodStreamingStressTest) {
         SettingsManager::GetInstance().getSettingSetter<uint32_t>(
             "clodStreamingCpuUploadBudgetRequests")(256u);
@@ -1150,7 +1159,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             lastUpdateTime = currentTime;
 
             frameIndex += 1;
-            if (vsmOrbitTest) {
+            if (vsmRetreatTest) {
+                // Hold the initial close view long enough to populate its
+                // clipmaps, then move straight backwards while continuing to
+                // look at the same point. This deterministically exercises
+                // the transition to cached coarser VSM pages.
+                constexpr uint32_t kRetreatStartFrame = 180u;
+                constexpr uint32_t kRetreatEndFrame = 540u;
+                const float retreatT = std::clamp(
+                    static_cast<float>(
+                        static_cast<int64_t>(frameIndex) -
+                        static_cast<int64_t>(kRetreatStartFrame)) /
+                        static_cast<float>(
+                            kRetreatEndFrame - kRetreatStartFrame),
+                    0.0f,
+                    1.0f);
+                const XMFLOAT3 retreatPosition{
+                    0.0f,
+                    5.0f,
+                    4.0f + retreatT * 36.0f};
+                const XMFLOAT3 retreatTarget{0.0f, 5.0f, 0.0f};
+                const XMFLOAT3 retreatUp{0.0f, 1.0f, 0.0f};
+                const XMMATRIX retreatView = XMMatrixLookAtRH(
+                    XMLoadFloat3(&retreatPosition),
+                    XMLoadFloat3(&retreatTarget),
+                    XMLoadFloat3(&retreatUp));
+                const XMMATRIX retreatModel =
+                    XMMatrixInverse(nullptr, retreatView);
+                const XMVECTOR retreatRotation =
+                    XMQuaternionNormalize(
+                        XMQuaternionRotationMatrix(retreatModel));
+                auto& retreatCamera =
+                    renderer.GetCurrentScene()->GetPrimaryCamera();
+                retreatCamera
+                    .set<Components::Position>(
+                        {retreatPosition.x,
+                         retreatPosition.y,
+                         retreatPosition.z})
+                    .set<Components::Rotation>(retreatRotation)
+                    .set<Components::Matrix>(retreatModel);
+            }
+            else if (vsmOrbitTest) {
                 constexpr float kOrbitRadius = 8.0f;
                 constexpr float kOrbitCenterY = 5.0f;
                 // About one revolution every twelve seconds at 60 Hz. This
@@ -1545,6 +1594,13 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                                 CLodPageJobMaxPagesPerClusterSettingName)(
                                 request->document.at("block_soft_cap").get<uint32_t>());
                         }
+                        if (request->document.contains("sw_raster_threshold")) {
+                            settings.getSettingSetter<uint32_t>(
+                                CLodSoftwareRasterDiameterThresholdSettingName)(
+                                std::min(
+                                    request->document.at("sw_raster_threshold").get<uint32_t>(),
+                                    0xFFFFu));
+                        }
                         if (request->document.contains("page_job_force_all")) {
                             settings.getSettingSetter<bool>(
                                 CLodPageJobForceAllSettingName)(
@@ -1571,6 +1627,8 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         CLodDisableVirtualShadowPageCachingSettingName)();
                     response["block_soft_cap"] = settings.getSettingGetter<uint32_t>(
                         CLodPageJobMaxPagesPerClusterSettingName)();
+                    response["sw_raster_threshold"] = settings.getSettingGetter<uint32_t>(
+                        CLodSoftwareRasterDiameterThresholdSettingName)();
                     response["page_job_force_all"] = settings.getSettingGetter<bool>(
                         CLodPageJobForceAllSettingName)();
                     const CLodVSMRasterMode rasterMode = settings.getSettingGetter<CLodVSMRasterMode>(

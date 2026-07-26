@@ -163,7 +163,8 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
-    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture)
+    std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
@@ -191,6 +192,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowInvalidatedInstancesBitsetBuffer(std::move(shadowInvalidatedInstancesBitsetBuffer))
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
+    , m_shadowActiveBlockMetadataBuffer(std::move(shadowActiveBlockMetadataBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
 {
     m_isFirstPass = inputs.isFirstPass;
@@ -571,6 +573,9 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         if (m_shadowPhysicalPagesTexture) {
             builder->WithUnorderedAccess(m_shadowPhysicalPagesTexture);
         }
+        if (m_shadowActiveBlockMetadataBuffer) {
+            builder->WithShaderResource(m_shadowActiveBlockMetadataBuffer);
+        }
     }
 
     if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) {
@@ -740,6 +745,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         m_shadowPhysicalPagesTexture
             ? m_shadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index
             : 0u;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+        m_shadowActiveBlockMetadataBuffer
+            ? m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index
+            : 0u;
     sharedRootConstants[CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] =
         (m_phase1VisibleClustersCounterBuffer ? m_phase1VisibleClustersCounterBuffer : m_visibleClustersCounterBuffer)
             ->GetSRVInfo(0)
@@ -775,7 +784,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodFrustumCullingSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;
     }
-    constexpr uint32_t swRasterThreshold = 16u;
+    const uint32_t swRasterThreshold = std::min(
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodSoftwareRasterDiameterThresholdSettingName)(),
+        0xFFFFu);
     workGraphFlags |= (swRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT);
     if (!m_isFirstPass) {
         workGraphFlags |= CLOD_WG_FLAG_PHASE2;

@@ -211,6 +211,7 @@ struct CLodVirtualShadowStats
     uint physicalPageClearCount;
     uint markResidentTagMismatchCount;
     uint renderedWithoutMatchingClearCount;
+    uint syntheticEmptyValidPageCount;
     uint blockExpandedRequestedRecordCount;
     uint blockExpandedCommittedRecordCount;
     uint blockExpandedDroppedRecordCount;

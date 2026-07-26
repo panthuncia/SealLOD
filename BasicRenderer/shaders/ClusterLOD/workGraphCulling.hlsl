@@ -994,52 +994,33 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
 
 bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
     uint shadowClipmapIndex,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    RWTexture2DArray<uint> pageTable,
     uint2 meshletMinPageCoord,
     uint2 meshletMaxPageCoord,
     uint2 blockCoord,
     out uint vsmPayload)
 {
     vsmPayload = 0u;
-
-    const uint2 blockOriginPageCoord = CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
-    uint2 minLocalPageCoord = uint2(kCLodVirtualShadowBlockPagesPerAxis - 1u, kCLodVirtualShadowBlockPagesPerAxis - 1u);
-    uint2 maxLocalPageCoord = uint2(0u, 0u);
-    bool hasActivePage = false;
-
-    [unroll]
-    for (uint localPageY = 0u; localPageY < kCLodVirtualShadowBlockPagesPerAxis; ++localPageY)
+    StructuredBuffer<uint> activeBlockMetadata =
+        ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX];
+    const uint packedActiveRect =
+        activeBlockMetadata[CLodVirtualShadowBlockLinearIndex(blockCoord, shadowClipmapIndex)];
+    if (packedActiveRect == 0xFFFFFFFFu)
     {
-        [unroll]
-        for (uint localPageX = 0u; localPageX < kCLodVirtualShadowBlockPagesPerAxis; ++localPageX)
-        {
-            const uint2 localPageCoord = uint2(localPageX, localPageY);
-            const uint2 pageCoord = blockOriginPageCoord + localPageCoord;
-            if (any(pageCoord < meshletMinPageCoord) || any(pageCoord > meshletMaxPageCoord))
-            {
-                continue;
-            }
-
-            if (pageCoord.x >= clipmapInfo.pageTableResolution || pageCoord.y >= clipmapInfo.pageTableResolution)
-            {
-                continue;
-            }
-
-            const uint2 wrappedPageCoord = CLodVirtualShadowWrappedPageCoords(pageCoord, clipmapInfo);
-            const uint pageEntry = pageTable[uint3(wrappedPageCoord, clipmapInfo.pageTableLayer)];
-            if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
-            {
-                continue;
-            }
-
-            hasActivePage = true;
-            minLocalPageCoord = min(minLocalPageCoord, localPageCoord);
-            maxLocalPageCoord = max(maxLocalPageCoord, localPageCoord);
-        }
+        return false;
     }
-
-    if (!hasActivePage)
+    const uint2 blockOriginPageCoord = CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
+    const uint2 meshletMinLocalPageCoord =
+        max(meshletMinPageCoord, blockOriginPageCoord) - blockOriginPageCoord;
+    const uint2 meshletMaxLocalPageCoord =
+        min(meshletMaxPageCoord, blockOriginPageCoord + kCLodVirtualShadowBlockPagesPerAxis - 1u) -
+        blockOriginPageCoord;
+    const uint2 minLocalPageCoord = max(
+        CLodVirtualShadowUnpackBlockActiveRectMin(packedActiveRect),
+        meshletMinLocalPageCoord);
+    const uint2 maxLocalPageCoord = min(
+        CLodVirtualShadowUnpackBlockActiveRectMax(packedActiveRect),
+        meshletMaxLocalPageCoord);
+    if (any(minLocalPageCoord > maxLocalPageCoord))
     {
         return false;
     }
@@ -1071,8 +1052,6 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
         uint vsmPayload = 0u;
         if (CLodVirtualShadowBuildVisibleClusterBlockPayload(
                 shadowClipmapIndex,
-                clipmapInfo,
-                pageTable,
                 meshletMinPageCoord,
                 meshletMaxPageCoord,
                 blockCoord,
@@ -1114,8 +1093,6 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
         uint vsmPayload = 0u;
         if (!CLodVirtualShadowBuildVisibleClusterBlockPayload(
                 shadowClipmapIndex,
-                clipmapInfo,
-                pageTable,
                 meshletMinPageCoord,
                 meshletMaxPageCoord,
                 blockCoord,
