@@ -509,10 +509,31 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 				*meshInstance->GetMesh(),
 				*effectiveMaterial,
 				*m_managerInterface.GetMaterialManager());
-			const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
-			const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
-			const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*meshInstance->GetMesh(), *effectiveMaterial);
-			const auto materialReyesEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
+			const auto materialEvalVariants =
+				ComposeMaterialEvalVariantSet(*meshInstance->GetMesh(), *effectiveMaterial);
+			auto acquireCompileFlags = [&](MaterialCompileFlags flags) {
+				if (!m_renderableActivationBatchActive) {
+					return m_managerInterface.GetMaterialManager()->AcquireCompileFlagsSlot(flags);
+				}
+				const auto key = static_cast<uint64_t>(flags);
+				auto usageIt = m_batchedCompileFlagsUsages.find(key);
+				if (usageIt == m_batchedCompileFlagsUsages.end()) {
+					const auto slot =
+						m_managerInterface.GetMaterialManager()->AcquireCompileFlagsSlot(flags);
+					m_batchedCompileFlagsUsages.emplace(
+						key,
+						BatchedCompileFlagsUsage{ flags, slot, 0u });
+					return slot;
+				}
+				++usageIt->second.deferredCount;
+				return usageIt->second.slot;
+			};
+			const auto materialEvalCompileFlagsID =
+				acquireCompileFlags(materialEvalVariants.regular);
+			const auto materialReyesEvalCompileFlagsID =
+				materialEvalVariants.hasDistinctReyes
+				? acquireCompileFlags(materialEvalVariants.reyes)
+				: materialEvalCompileFlagsID;
 			const MaterialRasterFlags runtimeRasterFlags = ComposeRuntimeRasterFlags(*meshInstance->GetMesh(), *effectiveMaterial);
 			unsigned int rasterBucketIndex = 0;
 			if (m_renderableActivationBatchActive) {
@@ -663,6 +684,7 @@ void Scene::BeginRenderableActivationBatch() {
 	m_batchedActivationWorkloads.clear();
 	m_batchedMaterialUsages.clear();
 	m_batchedRasterBucketUsages.clear();
+	m_batchedCompileFlagsUsages.clear();
 }
 
 void Scene::EndRenderableActivationBatch() {
@@ -686,10 +708,16 @@ void Scene::EndRenderableActivationBatch() {
 				materialManager->AcquireRasterBucket(usage.flags, usage.deferredCount);
 			}
 		}
+		for (const auto& [_, usage] : m_batchedCompileFlagsUsages) {
+			if (usage.deferredCount > 0u) {
+				materialManager->AcquireCompileFlagsSlot(usage.flags, usage.deferredCount);
+			}
+		}
 	}
 	m_renderableActivationMaterialUs += ElapsedUs(materialFlushBegin);
 	m_batchedMaterialUsages.clear();
 	m_batchedRasterBucketUsages.clear();
+	m_batchedCompileFlagsUsages.clear();
 
 	auto* indirectCommandBufferManager = m_managerInterface.GetIndirectCommandBufferManager();
 	if (!indirectCommandBufferManager || m_batchedActivationWorkloads.empty()) {
@@ -899,6 +927,11 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 		&& m_managerInterface.GetMaterialManager() != nullptr;
 
 	if (active && oldMaterial) {
+		const auto oldVariants = ComposeMaterialEvalVariantSet(*mesh, *oldMaterial);
+		m_managerInterface.GetMaterialManager()->ReleaseCompileFlagsSlot(oldVariants.regular);
+		if (oldVariants.hasDistinctReyes) {
+			m_managerInterface.GetMaterialManager()->ReleaseCompileFlagsSlot(oldVariants.reyes);
+		}
 		m_managerInterface.GetMaterialManager()->ReleaseRasterBucket(ComposeRuntimeRasterFlags(*mesh, *oldMaterial));
 		m_managerInterface.GetMaterialManager()->DecrementMaterialUsageCount(*oldMaterial);
 	}
@@ -932,10 +965,13 @@ bool Scene::SetMeshInstanceMaterialOverride(flecs::entity entity, std::size_t me
 			*mesh,
 			*material,
 			*m_managerInterface.GetMaterialManager());
-		const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*mesh, *material);
-		const auto materialEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialEvalCompileFlags);
-		const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*mesh, *material);
-		const auto materialReyesEvalCompileFlagsID = m_managerInterface.GetMaterialManager()->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
+		const auto materialEvalVariants = ComposeMaterialEvalVariantSet(*mesh, *material);
+		const auto materialEvalCompileFlagsID =
+			m_managerInterface.GetMaterialManager()->AcquireCompileFlagsSlot(materialEvalVariants.regular);
+		const auto materialReyesEvalCompileFlagsID =
+			materialEvalVariants.hasDistinctReyes
+				? m_managerInterface.GetMaterialManager()->AcquireCompileFlagsSlot(materialEvalVariants.reyes)
+				: materialEvalCompileFlagsID;
 		auto meshData = mesh->GetPerMeshCBData();
 		meshData.materialDataIndex = materialDataIndex;
 		meshData.materialEvalCompileFlagsID = materialEvalCompileFlagsID;
@@ -1297,6 +1333,11 @@ void Scene::MakeNonResident() {
 				material = mesh->material;
 			}
 			if (material) {
+				const auto variants = ComposeMaterialEvalVariantSet(*mesh, *material);
+				m_managerInterface.GetMaterialManager()->ReleaseCompileFlagsSlot(variants.regular);
+				if (variants.hasDistinctReyes) {
+					m_managerInterface.GetMaterialManager()->ReleaseCompileFlagsSlot(variants.reyes);
+				}
 				m_managerInterface.GetMaterialManager()->ReleaseRasterBucket(ComposeRuntimeRasterFlags(*mesh, *material));
 				m_managerInterface.GetMaterialManager()->DecrementMaterialUsageCount(*material);
 			}

@@ -208,8 +208,7 @@
         "strategy": "external"
       },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "BASICRENDERER_ENABLE_NVPERF": "ON"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     }
   ],

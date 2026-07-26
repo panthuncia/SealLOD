@@ -907,11 +907,14 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
                 }
                 const auto materialDataIndex = m_pMaterialManager->GetMaterialSlot(material->GetMaterialID());
                 mesh->SetMaterialDataIndex(materialDataIndex);
-                const auto materialEvalCompileFlags = ComposeRuntimeMaterialEvalCompileFlags(*mesh, *material);
-                const auto materialEvalCompileFlagsID = m_pMaterialManager->GetCompileFlagsSlot(materialEvalCompileFlags);
+                const auto materialEvalVariants = ComposeMaterialEvalVariantSet(*mesh, *material);
+                const auto materialEvalCompileFlagsID =
+                    m_pMaterialManager->AcquireCompileFlagsSlot(materialEvalVariants.regular);
                 mesh->SetMaterialEvalCompileFlagsID(materialEvalCompileFlagsID);
-                const auto materialReyesEvalCompileFlags = ComposeRuntimeReyesMaterialEvalCompileFlags(*mesh, *material);
-                const auto materialReyesEvalCompileFlagsID = m_pMaterialManager->GetCompileFlagsSlot(materialReyesEvalCompileFlags);
+                const auto materialReyesEvalCompileFlagsID =
+                    materialEvalVariants.hasDistinctReyes
+                        ? m_pMaterialManager->AcquireCompileFlagsSlot(materialEvalVariants.reyes)
+                        : materialEvalCompileFlagsID;
                 mesh->SetMaterialReyesEvalCompileFlagsID(materialReyesEvalCompileFlagsID);
 
                 auto rasterFlags = material->Technique().rasterFlags;
@@ -922,10 +925,25 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
                 mesh->SetRasterBucketIndex(rasterBucketIndex);
 
                 if (!m_pMeshManager->AddMesh(mesh, useMeshletReorderedVertices)) {
+                    m_pMaterialManager->ReleaseRasterBucket(rasterFlags);
+                    m_pMaterialManager->ReleaseCompileFlagsSlot(materialEvalVariants.regular);
+                    if (materialEvalVariants.hasDistinctReyes) {
+                        m_pMaterialManager->ReleaseCompileFlagsSlot(materialEvalVariants.reyes);
+                    }
+                    if (!externalMeshKnown) {
+                        m_pMaterialManager->DecrementMaterialUsageCount(*material);
+                    }
                     m_externalRegisteredMeshes.erase(mesh->GetGlobalID());
                     continue;
                 }
                 m_externalRegisteredMeshes.insert(mesh->GetGlobalID());
+                m_externalMeshRegistrations[mesh->GetGlobalID()] = ExternalMeshRegistration{
+                    .material = material,
+                    .regularEvalFlags = materialEvalVariants.regular,
+                    .reyesEvalFlags = materialEvalVariants.reyes,
+                    .rasterFlags = rasterFlags,
+                    .hasDistinctReyes = materialEvalVariants.hasDistinctReyes,
+                };
 
                 ForEachMeshDrawWorkload(*mesh, *material, [&](const DrawWorkloadKey& workload) {
                     m_pIndirectCommandBufferManager->RegisterWorkload(workload);
@@ -941,6 +959,24 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
             }
         }
     }
+}
+
+void Renderer::ClearExternalSnapshotMeshRegistrations() {
+    if (m_pMaterialManager) {
+        for (const auto& [_, registration] : m_externalMeshRegistrations) {
+            m_pMaterialManager->ReleaseCompileFlagsSlot(registration.regularEvalFlags);
+            if (registration.hasDistinctReyes) {
+                m_pMaterialManager->ReleaseCompileFlagsSlot(registration.reyesEvalFlags);
+            }
+            m_pMaterialManager->ReleaseRasterBucket(registration.rasterFlags);
+            if (registration.material) {
+                m_pMaterialManager->DecrementMaterialUsageCount(*registration.material);
+            }
+        }
+    }
+    m_externalMeshRegistrations.clear();
+    m_externalRegisteredMeshes.clear();
+    m_externalRegisteredMeshInstances.clear();
 }
 
 void Renderer::ApplyPrimaryCameraInput(float elapsedSeconds) {
@@ -4423,6 +4459,7 @@ void Renderer::Cleanup() {
 	if (currentScene) {
 		currentScene->Deactivate();
 	}
+	ClearExternalSnapshotMeshRegistrations();
 	m_sceneRenderBridge.Clear(m_managerInterface);
 	m_renderSyncObjectQuery = {};
 	m_renderSyncCameraQuery = {};
@@ -4532,6 +4569,7 @@ std::shared_ptr<Scene>& Renderer::GetCurrentScene() {
 void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
 	if (!newScene) {
     InvalidateSceneOverlapState();
+        ClearExternalSnapshotMeshRegistrations();
         m_sceneRenderBridge.Clear(m_managerInterface);
         if (currentScene) {
             currentScene->Deactivate();
@@ -4543,6 +4581,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
     }
 
 	if (currentScene != newScene) {
+		ClearExternalSnapshotMeshRegistrations();
 		m_sceneRenderBridge.Clear(m_managerInterface);
         if (currentScene) {
             currentScene->Deactivate();

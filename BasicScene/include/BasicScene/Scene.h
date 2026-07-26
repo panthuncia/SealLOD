@@ -126,8 +126,14 @@ private:
         unsigned int slot = 0;
         unsigned int deferredCount = 0;
     };
+    struct BatchedCompileFlagsUsage {
+        MaterialCompileFlags flags = MaterialCompileNone;
+        unsigned int slot = 0;
+        unsigned int deferredCount = 0;
+    };
     std::unordered_map<uint32_t, BatchedMaterialUsage> m_batchedMaterialUsages;
     std::unordered_map<uint32_t, BatchedRasterBucketUsage> m_batchedRasterBucketUsages;
+    std::unordered_map<uint64_t, BatchedCompileFlagsUsage> m_batchedCompileFlagsUsages;
     std::uint64_t m_renderableEntityAcquireUs = 0;
     std::uint64_t m_renderableEntitySetupUs = 0;
     std::uint64_t m_renderableEntityActivateUs = 0;

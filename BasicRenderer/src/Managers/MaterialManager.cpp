@@ -303,7 +303,7 @@ MaterialManager::MaterialManager() {
 	// The forced-resize path is intentionally left on while validating upload and
 	// descriptor lifetime safety under worst-case cell-streaming pressure.
 	m_materialBufferCapacity = kForceMaterialBufferResizeEveryMaterial
-		? m_compileFlagsSlotsUsed
+		? m_compileFlagsRegistry.GetSlotsUsed()
 		: kInitialMaterialBufferCapacity;
 	m_perMaterialDataBuffer = DynamicStructuredBuffer<PerMaterialCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialDataBuffer", true);
 	m_perMaterialEvalDataBuffer = DynamicStructuredBuffer<PerMaterialEvalCB>::CreateShared(m_materialBufferCapacity, "Builtin::PerMaterialEvalDataBuffer", true);
@@ -314,22 +314,22 @@ MaterialManager::MaterialManager() {
 	rg::memory::SetResourceUsageHint(*m_perMaterialOpenPBRDataBuffer, "Material buffers");
 
 	// Visibility buffer resources
-    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialPixelCountBuffer", true);
-    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialOffsetBuffer", true);
-	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsSlotsUsed, "VisUtil::MaterialWriteCursorBuffer", true);
+    m_materialPixelCountBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialPixelCountBuffer", true);
+    m_materialOffsetBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialOffsetBuffer", true);
+	m_materialWriteCursorBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "VisUtil::MaterialWriteCursorBuffer", true);
 	rg::memory::SetResourceUsageHint(*m_materialPixelCountBuffer, "Material evaluation buffers");
 	rg::memory::SetResourceUsageHint(*m_materialOffsetBuffer, "Material evaluation buffers");
 	rg::memory::SetResourceUsageHint(*m_materialWriteCursorBuffer, "Material evaluation buffers");
 
 	// Per-block arrays for hierarchical scan
-	const uint32_t numBlocks = (m_compileFlagsSlotsUsed + kScanBlockSize - 1u) / kScanBlockSize;
+	const uint32_t numBlocks = (m_compileFlagsRegistry.GetSlotsUsed() + kScanBlockSize - 1u) / kScanBlockSize;
 	m_blockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::BlockSumsBuffer", true);
 	m_scannedBlockSumsBuffer = DynamicStructuredBuffer<uint32_t>::CreateShared(std::max(1u, numBlocks), "VisUtil::ScannedBlockSumsBuffer", true);
 	rg::memory::SetResourceUsageHint(*m_blockSumsBuffer, "Material evaluation buffers");
 	rg::memory::SetResourceUsageHint(*m_scannedBlockSumsBuffer, "Material evaluation buffers");
 
 	// Indirect command buffer for material evaluation
-	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsSlotsUsed, "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
+	m_materialEvaluationCommandBuffer = DynamicStructuredBuffer<MaterialEvaluationIndirectCommand>::CreateShared(m_compileFlagsRegistry.GetSlotsUsed(), "IndirectCommandBuffers::MaterialEvaluationCommandBuffer", true);
 	rg::memory::SetResourceUsageHint(*m_materialEvaluationCommandBuffer, "Indirect command buffers");
 
 	m_resources["Builtin::VisUtil::MaterialPixelCountBuffer"] = m_materialPixelCountBuffer;
@@ -345,7 +345,7 @@ MaterialManager::MaterialManager() {
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
-	GetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
+	AcquireCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel);
 	CommitGpuVisibleSnapshot();
 }
 
@@ -450,14 +450,6 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 		return GetMaterialSlot(material.GetMaterialID());
 	}
 
-	auto& flags = material.Technique().compileFlags;
-	unsigned int flagsSlot = 0;
-	{
-		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::CompileFlagsSlot");
-		flagsSlot = GetCompileFlagsSlot(flags);
-		m_compileFlagsUsageCounts[flagsSlot] += count;
-	}
-
 	uint32_t materialID = material.GetMaterialID();
 	decltype(m_materialIDSlotMapping)::iterator existingSlotIt;
 	bool alreadyResident = false;
@@ -471,7 +463,6 @@ unsigned int MaterialManager::IncrementMaterialUsageCount(Material& material, Te
 		TracyPlot("MaterialManager.IncrementUsage.AlreadyResident", alreadyResident ? int64_t{ 1 } : int64_t{ 0 });
 	}
 
-	material.SetCompileFlagsID(flagsSlot);
 	unsigned int materialSlot = 0;
 	{
 		ZoneScopedN("MaterialManager::IncrementMaterialUsageCount::ResolveMaterialSlot");
@@ -681,16 +672,6 @@ void MaterialManager::RegisterStreamingTexture(const std::shared_ptr<TextureAsse
 
 void MaterialManager::DecrementMaterialUsageCount(const Material& material) {
 	//std::lock_guard<std::mutex> lock(m_materialSlotMappingMutex);
-	auto& flags = material.Technique().compileFlags;
-	unsigned int flagsSlot = GetCompileFlagsSlot(flags);
-	m_compileFlagsUsageCounts[flagsSlot]--;
-	if (m_compileFlagsUsageCounts[flagsSlot] == 0) {
-		m_freeCompileFlagsSlots.push_back(flagsSlot);
-		m_compileFlagsSlotMapping.erase(flags);
-		m_activeCompileFlagsSlots.erase(std::remove(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), flagsSlot), m_activeCompileFlagsSlots.end());
-		m_activeCompileFlags.erase(std::remove(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags), m_activeCompileFlags.end());
-	}
-
 	const uint32_t materialID = material.GetMaterialID();
 	const unsigned int materialSlot = GetMaterialSlot(materialID);
 	m_materialUsageCounts[materialSlot]--;
@@ -1092,17 +1073,13 @@ void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlot
 }
 
 bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const {
-	auto it = m_compileFlagsSlotMapping.find(flags);
-	if (it == m_compileFlagsSlotMapping.end()) {
-		return false;
-	}
-	slot = it->second;
-	return true;
+	return m_compileFlagsRegistry.TryGet(flags, slot);
 }
 
 void MaterialManager::CommitGpuVisibleSnapshot() {
-	if (m_materialPixelCountBuffer && m_compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
-		EnsureCompileFlagsBufferCapacity(m_compileFlagsSlotsUsed);
+	const unsigned int compileFlagsSlotsUsed = m_compileFlagsRegistry.GetSlotsUsed();
+	if (m_materialPixelCountBuffer && compileFlagsSlotsUsed > m_materialPixelCountBuffer->Capacity()) {
+		EnsureCompileFlagsBufferCapacity(compileFlagsSlotsUsed);
 	}
 
 	const auto slotResidentCapacity = static_cast<unsigned int>((std::min<uint64_t>)(
@@ -1115,15 +1092,16 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 		m_scannedBlockSumsBuffer ? m_scannedBlockSumsBuffer->ResidentCapacity() : 0u));
 	const auto scanCoveredSlots = blockResidentCapacity * kScanBlockSize;
 	const auto publishedSlots = (std::min<unsigned int>)(
-		m_compileFlagsSlotsUsed,
+		compileFlagsSlotsUsed,
 		(std::min<unsigned int>)(slotResidentCapacity, scanCoveredSlots));
 
 	m_publishedCompileFlagsSlotsUsed = publishedSlots;
 	m_publishedActiveCompileFlags.clear();
 	m_publishedActiveCompileFlagsSlots.clear();
-	m_publishedActiveCompileFlags.reserve(m_activeCompileFlags.size());
-	m_publishedActiveCompileFlagsSlots.reserve(m_activeCompileFlagsSlots.size());
-	for (MaterialCompileFlags flags : m_activeCompileFlags) {
+	const auto& activeCompileFlags = m_compileFlagsRegistry.GetActiveFlags();
+	m_publishedActiveCompileFlags.reserve(activeCompileFlags.size());
+	m_publishedActiveCompileFlagsSlots.reserve(m_compileFlagsRegistry.GetActiveSlots().size());
+	for (MaterialCompileFlags flags : activeCompileFlags) {
 		unsigned int slot = 0u;
 		if (!TryGetCompileFlagsSlot(flags, slot) || slot >= publishedSlots) {
 			continue;
@@ -1133,48 +1111,28 @@ void MaterialManager::CommitGpuVisibleSnapshot() {
 	}
 }
 
-unsigned int MaterialManager::GetCompileFlagsSlot(MaterialCompileFlags flags) {
-	ZoneScopedN("MaterialManager::GetCompileFlagsSlot");
-	unsigned int slot;
-	{
-		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::Lookup");
-		auto it = m_compileFlagsSlotMapping.find(flags);
-		if (it != m_compileFlagsSlotMapping.end()) {
-			TracyPlot("MaterialManager.GetCompileFlagsSlot.Existing", int64_t{ 1 });
-			slot = it->second;
-			return slot;
-		}
+unsigned int MaterialManager::AcquireCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
+	ZoneScopedN("MaterialManager::AcquireCompileFlagsSlot");
+	if (count == 0u) {
+		throw std::invalid_argument("AcquireCompileFlagsSlot requires a non-zero count");
 	}
-	TracyPlot("MaterialManager.GetCompileFlagsSlot.Existing", int64_t{ 0 });
-	if (!m_freeCompileFlagsSlots.empty()) {
-		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::ReuseFreeSlot");
-		slot = m_freeCompileFlagsSlots.back();
-		m_freeCompileFlagsSlots.pop_back();
+	const auto result = m_compileFlagsRegistry.Acquire(flags, count);
+	if (result.createdSlot) {
+		EnsureCompileFlagsBufferCapacity(m_compileFlagsRegistry.GetSlotsUsed());
 	}
-	else {
-		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot");
-		slot = m_nextCompileFlagsSlot++;
-		{
-			ZoneScopedN("MaterialManager::GetCompileFlagsSlot::AllocateNewSlot::BumpCounters");
-			m_compileFlagsSlotsUsed++;
-			m_compileFlagsUsageCounts.push_back(0);
-		}
-		EnsureCompileFlagsBufferCapacity(m_compileFlagsSlotsUsed);
+	return result.slot;
+}
+
+bool MaterialManager::ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count) {
+	ZoneScopedN("MaterialManager::ReleaseCompileFlagsSlot");
+	if (!m_compileFlagsRegistry.Release(flags, count)) {
+		spdlog::error(
+			"MaterialManager::ReleaseCompileFlagsSlot rejected flags=0x{:X} count={}",
+			static_cast<uint64_t>(flags),
+			count);
+		return false;
 	}
-	{
-		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::StoreMapping");
-		m_compileFlagsSlotMapping[flags] = slot;
-	}
-	{
-		ZoneScopedN("MaterialManager::GetCompileFlagsSlot::UpdateActiveLists");
-		if (std::find(m_activeCompileFlagsSlots.begin(), m_activeCompileFlagsSlots.end(), slot) == m_activeCompileFlagsSlots.end()) {
-			m_activeCompileFlagsSlots.push_back(slot);
-		}
-		if (std::find(m_activeCompileFlags.begin(), m_activeCompileFlags.end(), flags) == m_activeCompileFlags.end()) {
-			m_activeCompileFlags.push_back(flags);
-		}
-	}
-	return slot;
+	return true;
 }
 
 unsigned int MaterialManager::AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count) {

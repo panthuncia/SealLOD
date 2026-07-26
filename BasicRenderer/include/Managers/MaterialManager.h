@@ -10,6 +10,7 @@
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/ResourceGroup.h"
 #include "Render/IndirectCommand.h"
+#include "Render/MaterialCompileFlagsSlotRegistry.h"
 #include "Render/RasterBucketFlags.h"
 
 namespace rg::runtime {
@@ -25,7 +26,8 @@ public:
 	static std::unique_ptr<MaterialManager> CreateUnique() {
 		return std::unique_ptr<MaterialManager>(new MaterialManager());
 	}
-	unsigned int GetCompileFlagsSlot(MaterialCompileFlags flags);
+	unsigned int AcquireCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count = 1u);
+	bool ReleaseCompileFlagsSlot(MaterialCompileFlags flags, unsigned int count = 1u);
 	bool TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const;
 	unsigned int GetMaterialSlot(unsigned int materialID, std::optional<PerMaterialCB> data = std::nullopt);
 	unsigned int AcquireRasterBucket(MaterialRasterFlags rasterFlags, unsigned int count = 1u);
@@ -96,16 +98,9 @@ private:
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;
 	std::unordered_map<uint32_t, std::vector<uint32_t>> m_materialTextureStreamingTextureIDs;
 	bool m_textureStreamingFeedbackSuppressed = false;
-	std::unordered_map <MaterialCompileFlags, unsigned int> m_compileFlagsSlotMapping;
-	std::atomic<unsigned int> m_nextCompileFlagsSlot{ 1 };
-	std::vector<unsigned int> m_freeCompileFlagsSlots;
-	std::vector<unsigned int> m_compileFlagsUsageCounts = { 0 };
-	std::vector<unsigned int> m_activeCompileFlagsSlots;
-	std::vector<MaterialCompileFlags> m_activeCompileFlags;
+	MaterialCompileFlagsSlotRegistry m_compileFlagsRegistry;
 	std::vector<unsigned int> m_publishedActiveCompileFlagsSlots;
 	std::vector<MaterialCompileFlags> m_publishedActiveCompileFlags;
-	//std::mutex m_compileFlagsSlotMappingMutex;
-	unsigned int m_compileFlagsSlotsUsed = 1;
 	unsigned int m_publishedCompileFlagsSlotsUsed = 1;
 
 	unsigned int m_materialSlotsUsed = 0;

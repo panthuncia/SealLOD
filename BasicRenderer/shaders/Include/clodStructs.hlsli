@@ -123,6 +123,25 @@ uint CLodClusterCullBoneCount(CLodClusterCullHeader header) { return header.kind
 
 // Embedded at byte 0 of each page-tile. Simplified header.
 // 16 x uint32 = 64 bytes.
+// Keep these serialized byte offsets named at partial load sites so it is
+// immediately clear which members a specialized reader fetches.
+#define CLOD_PAGE_HEADER_FORMAT_AND_KIND_BYTE_OFFSET                  0u
+#define CLOD_PAGE_HEADER_MESHLET_COUNT_BYTE_OFFSET                    4u
+#define CLOD_PAGE_HEADER_DESCRIPTOR_OFFSET_BYTE_OFFSET                8u
+#define CLOD_PAGE_HEADER_BONE_INDEX_STREAM_OFFSET_BYTE_OFFSET        12u
+#define CLOD_PAGE_HEADER_COMPRESSED_POSITION_QUANT_EXP_BYTE_OFFSET   16u
+#define CLOD_PAGE_HEADER_ATTRIBUTE_MASK_BYTE_OFFSET                  20u
+#define CLOD_PAGE_HEADER_UV_SET_COUNT_BYTE_OFFSET                    24u
+#define CLOD_PAGE_HEADER_UV_DESCRIPTOR_OFFSET_BYTE_OFFSET            28u
+#define CLOD_PAGE_HEADER_POSITION_BITSTREAM_OFFSET_BYTE_OFFSET       32u
+#define CLOD_PAGE_HEADER_NORMAL_ARRAY_OFFSET_BYTE_OFFSET             36u
+#define CLOD_PAGE_HEADER_COLOR_ARRAY_OFFSET_BYTE_OFFSET              40u
+#define CLOD_PAGE_HEADER_JOINT_ARRAY_OFFSET_BYTE_OFFSET              44u
+#define CLOD_PAGE_HEADER_WEIGHT_ARRAY_OFFSET_BYTE_OFFSET             48u
+#define CLOD_PAGE_HEADER_UV_BITSTREAM_DIRECTORY_OFFSET_BYTE_OFFSET   52u
+#define CLOD_PAGE_HEADER_TRIANGLE_STREAM_OFFSET_BYTE_OFFSET          56u
+#define CLOD_PAGE_HEADER_TANGENT_FRAME_ARRAY_OFFSET_BYTE_OFFSET      60u
+
 struct CLodPageHeader
 {
     uint formatAndKind;                // [0] common page magic/kind

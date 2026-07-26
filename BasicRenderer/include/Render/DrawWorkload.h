@@ -28,22 +28,60 @@ inline bool ShouldAddSupplementalCLodShadowWorkload(const Mesh& mesh, const Rend
     return mesh.IsCLodMesh() && pass == Engine::Primary::ShadowMapsPass;
 }
 
-inline MaterialCompileFlags ComposeRuntimeMaterialEvalCompileFlags(const Mesh& mesh, const Material& material) {
-    auto compileFlags = material.Technique().compileFlags;
-    const auto vertexFlags = mesh.GetPerMeshCBData().vertexFlags;
+struct MaterialEvalVariantSet {
+    MaterialCompileFlags regular = MaterialCompileNone;
+    MaterialCompileFlags reyes = MaterialCompileNone;
+    bool hasDistinctReyes = false;
+};
+
+inline MaterialEvalVariantSet ComposeMaterialEvalVariantSet(
+    MaterialCompileFlags materialFlags,
+    uint32_t vertexFlags,
+    bool isClodMesh,
+    const PerMaterialCB& materialData,
+    bool terrainTelemetryDebug = false)
+{
+    MaterialCompileFlags regular = materialFlags;
     if ((vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u) {
-        compileFlags |= MaterialCompileFlags::MaterialCompileClodSkinning;
+        regular |= MaterialCompileFlags::MaterialCompileClodSkinning;
     }
-    if (IsTerrainRvtTelemetryDebugEnabled()) {
-        compileFlags |= MaterialCompileFlags::MaterialCompileTerrainRvtTelemetry;
+    if (terrainTelemetryDebug) {
+        regular |= MaterialCompileFlags::MaterialCompileTerrainRvtTelemetry;
     }
-    return compileFlags;
+
+    const bool terrain =
+        (materialFlags & MaterialCompileFlags::MaterialCompileTerrain) != 0;
+    const bool geometricDisplacement =
+        (materialFlags & MaterialCompileFlags::MaterialCompileGeometricDisplacement) != 0;
+    const bool heightFromBaseAlpha =
+        (materialFlags & MaterialCompileFlags::MaterialCompileHeightFromBaseAlpha) != 0;
+    const float displacementSpan =
+        materialData.geometricDisplacementMax - materialData.geometricDisplacementMin;
+    const bool canProduceReyesPatches =
+        isClodMesh &&
+        materialData.geometricDisplacementEnabled != 0u &&
+        displacementSpan > 1.0e-5f &&
+        (terrain || (geometricDisplacement && !heightFromBaseAlpha));
+
+    MaterialEvalVariantSet result{
+        .regular = GetMaterialEvaluationShaderKey(regular),
+        .reyes = GetMaterialEvaluationShaderKey(regular),
+        .hasDistinctReyes = canProduceReyesPatches,
+    };
+    if (result.hasDistinctReyes) {
+        result.reyes |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
+    }
+    return result;
 }
 
-inline MaterialCompileFlags ComposeRuntimeReyesMaterialEvalCompileFlags(const Mesh& mesh, const Material& material) {
-    auto compileFlags = ComposeRuntimeMaterialEvalCompileFlags(mesh, material);
-    compileFlags |= MaterialCompileFlags::MaterialCompileClodReyesPatch;
-    return compileFlags;
+inline MaterialEvalVariantSet ComposeMaterialEvalVariantSet(const Mesh& mesh, const Material& material)
+{
+    return ComposeMaterialEvalVariantSet(
+        material.Technique().compileFlags,
+        mesh.GetPerMeshCBData().vertexFlags,
+        mesh.IsCLodMesh(),
+        material.GetData(),
+        IsTerrainRvtTelemetryDebugEnabled());
 }
 
 struct MaterialEvalVariantOptions {

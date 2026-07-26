@@ -290,32 +290,47 @@ float3 DecodeCompressedPosition(
 CLodPageHeader LoadRasterPageHeader(uint slabDescriptorIndex, uint pageByteOffset)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    const uint4 d0 = slab.Load4(pageByteOffset);
+    const uint4 d0 = slab.Load4(
+        pageByteOffset + CLOD_PAGE_HEADER_FORMAT_AND_KIND_BYTE_OFFSET);
 
     CLodPageHeader header = (CLodPageHeader)0;
     header.formatAndKind = d0.x;
     header.meshletCount = d0.y;
     header.descriptorOffset = d0.z;
-    header.compressedPositionQuantExp = slab.Load(pageByteOffset + 16u);
-    header.positionBitstreamOffset = slab.Load(pageByteOffset + 32u);
-    header.triangleStreamOffset = slab.Load(pageByteOffset + 56u);
+    header.compressedPositionQuantExp = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_COMPRESSED_POSITION_QUANT_EXP_BYTE_OFFSET);
+    header.positionBitstreamOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_POSITION_BITSTREAM_OFFSET_BYTE_OFFSET);
+    header.triangleStreamOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_TRIANGLE_STREAM_OFFSET_BYTE_OFFSET);
 
+#if defined(PSO_SKINNED) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+    header.attributeMask = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_ATTRIBUTE_MASK_BYTE_OFFSET);
+#endif
 #if defined(PSO_SKINNED)
     header.boneIndexStreamOffset = d0.w;
-    header.jointArrayOffset = slab.Load(pageByteOffset + 44u);
-    header.weightArrayOffset = slab.Load(pageByteOffset + 48u);
+    header.jointArrayOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_JOINT_ARRAY_OFFSET_BYTE_OFFSET);
+    header.weightArrayOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_WEIGHT_ARRAY_OFFSET_BYTE_OFFSET);
 #endif
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
-    header.uvSetCount = slab.Load(pageByteOffset + 24u);
-    header.uvDescriptorOffset = slab.Load(pageByteOffset + 28u);
-    header.uvBitstreamDirectoryOffset = slab.Load(pageByteOffset + 52u);
+    header.uvSetCount = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_UV_SET_COUNT_BYTE_OFFSET);
+    header.uvDescriptorOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_UV_DESCRIPTOR_OFFSET_BYTE_OFFSET);
+    header.uvBitstreamDirectoryOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_UV_BITSTREAM_DIRECTORY_OFFSET_BYTE_OFFSET);
 #endif
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
-    header.attributeMask = slab.Load(pageByteOffset + 20u);
-    header.normalArrayOffset = slab.Load(pageByteOffset + 36u);
-    header.colorArrayOffset = slab.Load(pageByteOffset + 40u);
+    header.normalArrayOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_NORMAL_ARRAY_OFFSET_BYTE_OFFSET);
+    header.colorArrayOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_COLOR_ARRAY_OFFSET_BYTE_OFFSET);
 #elif defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
-    header.normalArrayOffset = slab.Load(pageByteOffset + 36u);
+    header.normalArrayOffset = slab.Load(
+        pageByteOffset + CLOD_PAGE_HEADER_NORMAL_ARRAY_OFFSET_BYTE_OFFSET);
 #endif
 
     return header;

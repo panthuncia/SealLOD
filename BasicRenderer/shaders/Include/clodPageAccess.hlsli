@@ -11,9 +11,9 @@ static const uint CLOD_MESHLET_UV_DESCRIPTOR_STRIDE = 32u;
 CLodPageHeader LoadPageHeader(uint slabDescriptorIndex, uint pageByteOffset)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    uint4 d0 = slab.Load4(pageByteOffset +  0);
-    uint4 d1 = slab.Load4(pageByteOffset + 16);
-    uint4 d2 = slab.Load4(pageByteOffset + 32);
+    uint4 d0 = slab.Load4(pageByteOffset + CLOD_PAGE_HEADER_FORMAT_AND_KIND_BYTE_OFFSET);
+    uint4 d1 = slab.Load4(pageByteOffset + CLOD_PAGE_HEADER_COMPRESSED_POSITION_QUANT_EXP_BYTE_OFFSET);
+    uint4 d2 = slab.Load4(pageByteOffset + CLOD_PAGE_HEADER_POSITION_BITSTREAM_OFFSET_BYTE_OFFSET);
 
     CLodPageHeader hdr;
     hdr.formatAndKind              = d0.x;
@@ -28,7 +28,7 @@ CLodPageHeader LoadPageHeader(uint slabDescriptorIndex, uint pageByteOffset)
     hdr.normalArrayOffset          = d2.y;
     hdr.colorArrayOffset           = d2.z;
     hdr.jointArrayOffset           = d2.w;
-    uint4 d3 = slab.Load4(pageByteOffset + 48);
+    uint4 d3 = slab.Load4(pageByteOffset + CLOD_PAGE_HEADER_WEIGHT_ARRAY_OFFSET_BYTE_OFFSET);
     hdr.weightArrayOffset          = d3.x;
     hdr.uvBitstreamDirectoryOffset = d3.y;
     hdr.triangleStreamOffset       = d3.z;
@@ -122,7 +122,7 @@ uint LoadPageUvBitstreamOffset(uint slabDescriptorIndex, uint pageByteOffset, ui
 uint LoadPageMeshletCount(uint slabDescriptorIndex, uint pageByteOffset)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptorIndex)];
-    return slab.Load(pageByteOffset + 4u);
+    return slab.Load(pageByteOffset + CLOD_PAGE_HEADER_MESHLET_COUNT_BYTE_OFFSET);
 }
 
 // Resolve a group-local page index to a physical slab location via the GroupPageMap buffer.

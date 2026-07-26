@@ -315,6 +315,7 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
 add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
 add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
+add_executable(MaterialEvalVariantTests "tests/MaterialEvalVariantTests.cpp")
 add_executable(VirtualShadowBudgetTests "tests/VirtualShadowBudgetTests.cpp")
 add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
 target_include_directories(BoundedSpscQueueTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/include")
@@ -862,13 +863,6 @@ add_symlink_or_copy_per_config(
     "USD_SDR"
 )
 
-add_symlink_or_copy_per_config(
-    "${BASICRENDERER_USD_ROOT}/usd_$<IF:$<CONFIG:Debug>,dbg,rel>/bin/tbb.dll"
-    "${BASICRENDERER_OUTPUT_ROOT}/tbb.dll"
-    FALSE  # IS_DIRECTORY
-    "tbb"
-)
-
 set(_tbb_config_sync_stamp "${CMAKE_CURRENT_BINARY_DIR}/runtime_sync/$<CONFIG>/tbb_config.stamp")
 add_custom_command(
     OUTPUT "${_tbb_config_sync_stamp}"
@@ -1369,10 +1363,12 @@ PRIVATE
 
 target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
 target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(MaterialEvalVariantTests PRIVATE ${PROJECT_NAME})
 target_link_libraries(VirtualShadowBudgetTests PRIVATE ${PROJECT_NAME})
 if(MSVC)
     target_compile_options(SkeletonArtifactCacheTests PRIVATE /std:c++latest)
     target_compile_options(PipelineRecipeTests PRIVATE /std:c++latest)
+    target_compile_options(MaterialEvalVariantTests PRIVATE /std:c++latest)
     target_compile_options(VirtualShadowBudgetTests PRIVATE /std:c++latest)
 endif()
 
@@ -1380,6 +1376,7 @@ enable_testing()
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
+add_test(NAME MaterialEvalVariantTests COMMAND MaterialEvalVariantTests)
 add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME CLodCoordinatorTests COMMAND CLodCoordinatorTests)

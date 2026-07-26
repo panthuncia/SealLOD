@@ -247,6 +247,7 @@ private:
     void RunTransformPropagationStage();
     void RunSceneBridgeSyncStage();
     void RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapshot& snapshot);
+    void ClearExternalSnapshotMeshRegistrations();
     void ApplyPrimaryCameraInput(float elapsedSeconds);
     void ApplyPrimaryCameraInputToRenderBridge(float elapsedSeconds);
     void InvalidateSceneOverlapState();
@@ -348,6 +349,14 @@ private:
 
     std::mutex m_pendingSceneExplorerEditsMutex;
     std::unordered_map<uint64_t, PendingSceneExplorerEdit> m_pendingSceneExplorerEdits;
+    struct ExternalMeshRegistration {
+        std::shared_ptr<Material> material;
+        MaterialCompileFlags regularEvalFlags = MaterialCompileNone;
+        MaterialCompileFlags reyesEvalFlags = MaterialCompileNone;
+        MaterialRasterFlags rasterFlags = MaterialRasterFlagsNone;
+        bool hasDistinctReyes = false;
+    };
+    std::unordered_map<uint64_t, ExternalMeshRegistration> m_externalMeshRegistrations;
     std::unordered_set<uint64_t> m_externalRegisteredMeshes;
     std::unordered_set<uint64_t> m_externalRegisteredMeshInstances;
 
