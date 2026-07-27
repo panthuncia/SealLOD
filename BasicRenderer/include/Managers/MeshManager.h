@@ -86,6 +86,7 @@ public:
 
 	struct CLodDiskStreamingCompletion {
 		uint32_t groupGlobalIndex = 0;
+		uint32_t groupsBase = 0;
 		bool success = false;
 		CLodDiskStreamingPayloadKind payloadKind = CLodDiskStreamingPayloadKind::CpuPageBlobs;
 		ClusterLODGroupChunk chunk{};

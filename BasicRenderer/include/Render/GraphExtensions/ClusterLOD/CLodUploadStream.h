@@ -61,6 +61,13 @@ public:
 
     explicit CLodUploadStream(size_t pageSize = DefaultPageSize) : m_pageSize(pageSize) {}
 
+    void BeginBulkUpload();
+    void EndBulkUpload();
+    void UploadPageData(
+        const void* data,
+        size_t size,
+        rg::runtime::UploadTarget target,
+        size_t destinationOffset);
     void UploadData(
         const void* data,
         size_t size,
@@ -77,12 +84,21 @@ public:
     void Cleanup();
 
 private:
+    struct DeferredUpload {
+        const void* data = nullptr;
+        size_t size = 0;
+        rg::runtime::UploadTarget target;
+        size_t destinationOffset = 0;
+    };
+
     std::shared_ptr<CLodUploadPage> AcquirePage(size_t minimumSize);
 
     size_t m_pageSize;
     uint64_t m_nextPageId = 0;
     std::deque<std::shared_ptr<CLodUploadPage>> m_freePages;
     std::shared_ptr<CLodUploadPage> m_activePage;
+    bool m_bulkUploadActive = false;
+    std::vector<DeferredUpload> m_deferredUploads;
     std::vector<std::shared_ptr<CLodUploadPage>> m_openPages;
     std::vector<CLodUploadCopy> m_copies;
 };

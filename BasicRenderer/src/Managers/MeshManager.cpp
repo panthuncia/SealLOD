@@ -2016,6 +2016,7 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 		localIndex >= sharedState->residentGroupAllocations.size()) {
 		return DiskStreamingApplyResult::FailedPermanent;
 	}
+	outCompletion.groupsBase = sharedState->groupsBase;
 
 	// Start with baseline chunk and apply any disk-delivered metadata overrides.
 	ClusterLODGroupChunk chunk = sharedState->baselineGroupChunks[localIndex];

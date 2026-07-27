@@ -106,9 +106,7 @@ private:
         CLodStreamingRequest request{};
         uint32_t priority = 0u;
         uint32_t generation = 0u;
-        uint64_t firstQueuedNs = 0u;
         uint64_t lastObservedTick = 0u;
-        bool liveDemand = true;
     };
 
     struct CachedChildGroupLayout {
@@ -158,7 +156,6 @@ private:
     bool RemovePendingStreamingRequestAt(
         uint32_t heapIndex,
         PendingStreamingRequest& outRequest);
-    void RefreshStreamingUrgentCandidates();
     void SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage);
     void ApplyDiskStreamingCompletions(MeshManager* meshManager);
     void ParkReadyCompletionForSharedPage(
@@ -191,8 +188,6 @@ private:
         uint32_t groupIndex);
     void QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex);
     void PublishVirtualShadowUpgradeUpload();
-    void PublishVirtualShadowUpgradeCpuTiming();
-    void WriteVirtualShadowUpgradeBenchmarkReport();
     void ClearVirtualShadowUpgradeState();
     void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
@@ -315,6 +310,12 @@ private:
     };
 
     PreAllocatedPages PreAllocatePagesForGroup(uint32_t groupIndex, const MeshManager::CLodGroupStreamingInfo& info, MeshManager* meshManager);
+    PreAllocatedPages PreAllocatePagesForGroup(
+        uint32_t groupIndex,
+        uint32_t groupsBase,
+        std::span<const uint32_t> meshPageIndices,
+        MeshManager* meshManager,
+        bool buildMeshPageKeys = true);
     bool AssignPagesToGroup(uint32_t groupIndex, const PreAllocatedPages& pages, MeshManager* meshManager);
     void ReleasePreAllocatedPages(const PreAllocatedPages& pages, MeshManager* meshManager);
     bool ValidateRenderableCompletion(
@@ -403,8 +404,6 @@ private:
         uint64_t ioTaskQueuedNs = 0u;
         uint64_t ioTaskStartedNs = 0u;
         uint64_t ioTaskCompletedNs = 0u;
-        uint64_t urgentEnteredNs = 0u;
-        uint64_t rescueEnteredNs = 0u;
         uint64_t diskCompletedNs = 0u;
         uint64_t uploadQueuedNs = 0u;
         uint64_t commitQueuedNs = 0u;
@@ -500,12 +499,9 @@ private:
     std::vector<uint32_t> m_pendingStreamingRequestGenerationByGroup;
     CLodPriorityMode m_priorityMode = CLodPriorityMode::Max;
     uint64_t m_streamingDiagnosticTick = 0;
-    uint64_t m_streamingSchedulerDispatchOrdinal = 0u;
     uint32_t m_streamingIoAdmissionDepth = 0u;
     uint32_t m_streamingIoWorkerCount = 0u;
     uint32_t m_streamingIoTaskBatchSize = 0u;
-    std::vector<uint32_t> m_streamingUrgentCandidateGroups;
-    size_t m_streamingUrgentCandidateCursor = 0u;
 
     struct VirtualShadowPageKey {
         uint32_t physicalPageIndex = 0u;
@@ -521,11 +517,6 @@ private:
         uint32_t groupIndex = UINT32_MAX;
         uint32_t dependencyCount = 0u;
         std::vector<VirtualShadowDependency> dependencies;
-    };
-    struct VirtualShadowExpandedDependency {
-        uint64_t groupPageKey = UINT64_MAX;
-        uint32_t inputIndex = UINT32_MAX;
-        uint32_t residencyGeneration = 0u;
     };
     struct VirtualShadowMissingGroup {
         uint32_t groupIndex = UINT32_MAX;
@@ -555,51 +546,16 @@ private:
     std::vector<uint8_t> m_virtualShadowReadyFlagsByPhysicalPage;
     std::vector<uint32_t> m_virtualShadowReadyTouchedPhysicalPages;
     std::vector<CLodVirtualShadowPredictedPage> m_virtualShadowReadbackBatchScratch;
-    std::vector<VirtualShadowExpandedDependency> m_virtualShadowExpandedScratch;
     std::vector<VirtualShadowMissingGroup> m_virtualShadowMissingGroupsScratch;
     std::vector<uint32_t> m_virtualShadowBatchSourceGenerationByGroup;
     std::vector<uint32_t> m_virtualShadowBatchSourceChainOffsetByGroup;
     std::vector<uint32_t> m_virtualShadowBatchSourceChainCountByGroup;
     uint32_t m_virtualShadowBatchSourceGeneration = 0u;
-    std::vector<VirtualShadowDependency> m_virtualShadowMergeScratch;
     std::array<VirtualShadowUpgradeUploadSlot, VirtualShadowUpgradeUploadSlotCapacity>
         m_virtualShadowUpgradeUploadSlots;
     uint32_t m_virtualShadowUpgradeUploadSlotCount = 0u;
     BoundedSpscQueue<uint32_t, VirtualShadowUpgradeUploadSlotCapacity>
         m_virtualShadowReadyUploadSlots;
-    struct VirtualShadowUpgradeCpuTimingSeries {
-        std::array<uint32_t, 256> samples{};
-        uint32_t sampleCount = 0u;
-        uint64_t totalUs = 0u;
-        uint32_t maxUs = 0u;
-        void Add(uint64_t elapsedUs);
-        void Reset();
-    };
-    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowDependencyTiming;
-    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowPromotionTiming;
-    VirtualShadowUpgradeCpuTimingSeries m_virtualShadowPublishTiming;
-    std::atomic<uint64_t> m_virtualShadowAcquireTimingTotalUs{0u};
-    std::atomic<uint64_t> m_virtualShadowAcquireTimingMaxUs{0u};
-    std::atomic<uint64_t> m_virtualShadowAcquireTimingCalls{0u};
-    uint64_t m_virtualShadowTimingLastLogTick = 0u;
-    struct VirtualShadowCpuBenchmarkSamples {
-        std::vector<uint32_t> batchUs;
-        std::vector<uint32_t> inputPrepareUs;
-        std::vector<uint32_t> ancestryExpandUs;
-        std::vector<uint32_t> expandedSortUs;
-        std::vector<uint32_t> dependencyMergeUs;
-        std::vector<uint32_t> inputCounts;
-        std::vector<uint32_t> uniqueInputCounts;
-        std::vector<uint32_t> expandedPairCounts;
-        uint64_t inputRecords = 0u;
-        uint64_t uniqueInputRecords = 0u;
-        uint64_t expandedDependencyPairs = 0u;
-        uint64_t peakActiveDependencyPairs = 0u;
-        uint64_t peakActiveDependencySlots = 0u;
-        uint64_t dependencyBucketRehashes = 0u;
-        bool written = false;
-    };
-    VirtualShadowCpuBenchmarkSamples m_virtualShadowBenchmarkSamples;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
     std::shared_ptr<Buffer> m_virtualShadowFallbackDependenciesBuffer;
