@@ -7,7 +7,8 @@
 #include "Resources/PixelBuffer.h"
 #include "Utilities/Utilities.h"
 
-PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass() {
+PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
+    : m_writeProjectedDepth(writeProjectedDepth) {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"shaders/gbuffer.hlsl",
@@ -49,7 +50,7 @@ PassReturn PerViewLinearDepthCopyPass::Execute(PassExecutionContext& executionCo
         rootConstants[UintRootConstant3] = view->gpu.visibilityBuffer->GetHeight();
 
         // Only write projected depth for the primary camera view
-        if (view->flags.primaryCamera && m_pProjectedDepthTexture) {
+        if (m_writeProjectedDepth && view->flags.primaryCamera && m_pProjectedDepthTexture) {
             rootConstants[UintRootConstant4] = m_pProjectedDepthTexture->GetUAVShaderVisibleInfo(0).slot.index;
             // Extract M[2][2] and M[3][2] from the unjittered projection matrix (row-major)
             const auto& proj = view->cameraInfo.unjitteredProjection;

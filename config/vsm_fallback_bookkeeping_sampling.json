@@ -1,0 +1,44 @@
+{
+  "name": "BasicRenderer VSM fallback bookkeeping optimization",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 80,
+    "maximum_samples": 160,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.01
+  },
+  "output": {
+    "database": "out/vsm_fallback_bookkeeping_sampling.sqlite",
+    "last_run_summary": "out/vsm_fallback_bookkeeping_sampling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.01
+    }
+  ],
+  "passes": [
+    {
+      "id": "finalize_fallback_pages",
+      "name": "CLodShadow::VirtualShadowFinalizeFallbackPagesPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    },
+    {
+      "id": "deduplicate_fallback_pages",
+      "name": "CLodShadow::VirtualShadowDeduplicateFallbackPagesPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": ["gpu_time"]
+    }
+  ]
+}

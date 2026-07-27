@@ -43,8 +43,10 @@ public:
 
         // Dispatch
         // In luminance histogram each thread group handles a 16x16 block
-        unsigned int x = (context.renderResolution.x + 16 - 1) / 16;
-        unsigned int y = (context.renderResolution.y + 16 - 1) / 16;
+        const unsigned int sampledWidth = (context.renderResolution.x + 3) / 4;
+        const unsigned int sampledHeight = (context.renderResolution.y + 3) / 4;
+        unsigned int x = (sampledWidth + 16 - 1) / 16;
+        unsigned int y = (sampledHeight + 16 - 1) / 16;
         commandList.Dispatch(x, y, 1);
 
         return {};

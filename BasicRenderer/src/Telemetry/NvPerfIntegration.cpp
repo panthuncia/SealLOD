@@ -119,7 +119,7 @@ struct MetricSpec {
     std::string outputName;
     std::string id;
     std::string unit;
-    bool required = true;
+    bool required = false;
 };
 
 struct SelectedMetric {

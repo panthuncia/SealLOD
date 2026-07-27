@@ -398,6 +398,12 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
                 }
             }
 
+            // Full occlusion makes every direct-light term exactly zero.
+            if (shadow >= 1.0f)
+            {
+                continue;
+            }
+
             LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
             if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
             {
@@ -525,7 +531,7 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
         lightingParameters.fuzzRoughness = fragmentInfo.fuzzRoughness;
         lightingParameters.glintEnabled = fragmentInfo.glintEnabled;
         lightingParameters.glintParameters = fragmentInfo.glintParameters;
-        
+
         // TODO: Parallax shadows will require a forward pass
         //parallaxShadowParameters parallaxShadowParams;
         //if (materialInfo.materialFlags & MATERIAL_PARALLAX)
@@ -652,11 +658,13 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                 }
             }
             
+            // Full occlusion makes every direct-light term exactly zero.
+            if (shadow >= 1.0f)
+            {
+                continue;
+            }
+
             LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
-            // if (shadow > 0.95)
-            // {
-            //     continue; // skip light if shadowed
-            // }
             if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
             {
                 continue;
@@ -675,30 +683,33 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
 #endif
     }
 
-    const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
-        fragmentInfo.albedo,
-        fragmentInfo.diffuseColor,
-        fragmentInfo.baseDiffuseRoughness,
-        fragmentInfo.specularAlpha,
-        fragmentInfo.weightedSpecularIor,
-        fragmentInfo.dielectricSpecularF0,
-        fragmentInfo.dielectricSpecularWeight,
-        fragmentInfo.metalAverageFresnel,
-        fragmentInfo.metalSpecularF0,
-        fragmentInfo.metalSpecularWeight);
-    const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
-        emissiveBaseState,
-        fragmentInfo.coatColor,
-        fragmentInfo.coatWeight,
-        fragmentInfo.coatIor,
-        fragmentInfo.coatRoughness,
-        fragmentInfo.coatDarkening);
-    lighting += EvaluateOpenPBREmissive(
-        fragmentInfo.emissive,
-        emissiveCoatState,
-        fragmentInfo.fuzzWeight,
-        fragmentInfo.fuzzRoughness,
-        fragmentInfo.NdotV);
+    if (any(fragmentInfo.emissive != 0.0f.xxx))
+    {
+        const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
+            fragmentInfo.albedo,
+            fragmentInfo.diffuseColor,
+            fragmentInfo.baseDiffuseRoughness,
+            fragmentInfo.specularAlpha,
+            fragmentInfo.weightedSpecularIor,
+            fragmentInfo.dielectricSpecularF0,
+            fragmentInfo.dielectricSpecularWeight,
+            fragmentInfo.metalAverageFresnel,
+            fragmentInfo.metalSpecularF0,
+            fragmentInfo.metalSpecularWeight);
+        const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
+            emissiveBaseState,
+            fragmentInfo.coatColor,
+            fragmentInfo.coatWeight,
+            fragmentInfo.coatIor,
+            fragmentInfo.coatRoughness,
+            fragmentInfo.coatDarkening);
+        lighting += EvaluateOpenPBREmissive(
+            fragmentInfo.emissive,
+            emissiveCoatState,
+            fragmentInfo.fuzzWeight,
+            fragmentInfo.fuzzRoughness,
+            fragmentInfo.NdotV);
+    }
     
     output.lighting = lighting;
     

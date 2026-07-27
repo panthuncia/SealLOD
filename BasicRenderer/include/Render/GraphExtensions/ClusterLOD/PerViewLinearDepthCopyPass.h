@@ -6,7 +6,7 @@ class PixelBuffer;
 
 class PerViewLinearDepthCopyPass : public ComputePass {
 public:
-    PerViewLinearDepthCopyPass();
+    explicit PerViewLinearDepthCopyPass(bool writeProjectedDepth = true);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -16,4 +16,5 @@ public:
 private:
     PipelineState m_pso;
     PixelBuffer* m_pProjectedDepthTexture = nullptr;
+    bool m_writeProjectedDepth = true;
 };

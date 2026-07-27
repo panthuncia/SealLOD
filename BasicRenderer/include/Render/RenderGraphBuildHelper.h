@@ -1006,17 +1006,12 @@ void BuildPrimaryPass(RenderGraph* graph, Environment* currentEnvironment, bool 
 	bool wireframe = SettingsManager::GetInstance().getSettingGetter<bool>("enableWireframe")();
 
 	// Uses existing GBuffer resources
-    graph->BuildComputePass<DeferredShadingPass>("DeferredShadingPass");
+    const bool renderSkybox = currentEnvironment != nullptr || hasBoundEnvironment;
+    graph->BuildComputePass<DeferredShadingPass>("DeferredShadingPass", renderSkybox);
     TagPassTechnique(graph, "DeferredShadingPass", "Lighting::Primary Shading");
 
-    // Skybox needs the final opaque depth classification. In the CLod two-phase path,
-    // a second linear-depth copy is inserted immediately before DeferredShadingPass.
-    // Building the skybox here keeps it after that final depth write while still
-    // letting forward/transparent passes blend over the background.
-    if (currentEnvironment != nullptr || hasBoundEnvironment) {
-        graph->BuildComputePass<SkyboxRenderPass>("SkyboxPass");
-        TagPassTechnique(graph, "SkyboxPass", "Lighting::Primary Shading");
-    }
+    // DeferredShading's background branch renders the skybox using the same
+    // final opaque-depth classification, avoiding a second full-screen pass.
 
 	// Forward pass for materials incompatible with deferred rendering
     graph->BuildRenderPass<ForwardRenderPass>("Forward render pass", ForwardRenderPassInputs{
@@ -1149,15 +1144,17 @@ void BuildBloomPipeline(RenderGraph* graph) {
     }
 
 	// Upsample numBloomMips - 1 mips of the HDR color target, starting from the last mip
-    for (unsigned int i = numBloomMips-1; i > 0; i--) {
+    // The final mip-2 to mip-1 accumulation is folded into the full-resolution
+    // blend pass, avoiding a separate half-resolution render pass.
+    for (unsigned int i = numBloomMips-1; i > 1; i--) {
         const std::string passName = "BloomUpsamplePass" + std::to_string(i);
         graph->BuildRenderPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, true });
         graph->SetPassTechnique(passName, "Post Process::Bloom");
     }
     
-    // Upsample and blend the first mip with the HDR color target
-    graph->BuildRenderPass<BloomBlendPass>("BloomUpsampleAndBlendPass");
-    TagPassTechnique(graph, "BloomUpsampleAndBlendPass", "Post Process::Bloom");
+    // Tonemapping composites mip 1 plus the accumulated mip 2 directly while
+    // it already reads the full-resolution HDR source. This avoids another
+    // full-resolution HDR read/modify/write pass.
 }
 
 void BuildSSRPasses(RenderGraph* graph) {

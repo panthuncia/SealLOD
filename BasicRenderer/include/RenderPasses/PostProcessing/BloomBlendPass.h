@@ -17,8 +17,8 @@ public:
     }
 
     void DeclareResourceUsages(RenderPassBuilder* builder) override {
-        builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 1 }))
-            .WithUnorderedAccess(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 }));
+        builder->WithShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, Mip{ 1, 2 }))
+            .WithRenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, Mip{ 0, 1 }));
     }
 
     void Setup() override {
@@ -35,6 +35,13 @@ public:
 		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
 
 		rhi::PassBeginInfo passInfo{};
+		rhi::ColorAttachment colorAttachment{};
+		colorAttachment.rtv = m_pHDRTarget->GetRTVInfo(0).slot;
+		colorAttachment.loadOp = rhi::LoadOp::Load;
+		colorAttachment.mipSlice = 0;
+		colorAttachment.storeOp = rhi::StoreOp::Store;
+		colorAttachment.resource = m_pHDRTarget->GetAPIResource().GetHandle();
+		passInfo.colors = { &colorAttachment };
 		passInfo.height = m_pHDRTarget->GetHeight();
 		passInfo.width = m_pHDRTarget->GetWidth();
 		commandList.BeginPass(passInfo);
@@ -47,7 +54,7 @@ public:
         BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
 
         unsigned int misc[NumMiscUintRootConstants] = {};
-		misc[HDR_TARGET_UAV_DESCRIPTOR_INDEX] = m_pHDRTarget->GetUAVShaderVisibleInfo(0).slot.index; // HDR target index
+		misc[BLOOM_LOW_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(2).slot.index;
 		misc[BLOOM_SOURCE_SRV_DESCRIPTOR_INDEX] = m_pBloomTarget->GetSRVInfo(1).slot.index; // Bloom texture index
         misc[DST_WIDTH] = m_pHDRTarget->GetWidth();
         misc[DST_HEIGHT] = m_pHDRTarget->GetHeight();
@@ -100,11 +107,21 @@ private:
         rhi::BlendState bs{};
         bs.alphaToCoverage = false;
         bs.independentBlend = false;
-        bs.numAttachments = 0;
+        bs.numAttachments = 1;
+        auto& blend = bs.attachments[0];
+        blend.enable = true;
+        blend.srcColor = rhi::BlendFactor::SrcAlpha;
+        blend.dstColor = rhi::BlendFactor::InvSrcAlpha;
+        blend.colorOp = rhi::BlendOp::Add;
+        blend.srcAlpha = rhi::BlendFactor::Zero;
+        blend.dstAlpha = rhi::BlendFactor::One;
+        blend.alphaOp = rhi::BlendOp::Add;
+        blend.writeMask = rhi::ColorWriteEnable::All;
         rhi::SubobjBlend soBlend{ bs };
 
         rhi::RenderTargets rts{};
-        rts.count = 0;
+        rts.count = 1;
+        rts.formats[0] = rhi::Format::R16G16B16A16_Float;
         rhi::SubobjRTVs soRTVs{ rts };
 
         rhi::SubobjSample soSample{ rhi::SampleDesc{1, 0} };

@@ -1,0 +1,74 @@
+{
+  "name": "BasicRenderer deferred shading hardware metrics",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 1500,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 2,
+    "maximum_samples": 2,
+    "confidence_level": 0.95,
+    "relative_half_width": 1.0
+  },
+  "output": {
+    "database": "out/deferred_shading_nvperf.sqlite",
+    "last_run_summary": "out/deferred_shading_nvperf.md"
+  },
+  "metrics": [
+    { "id": "gpu_time", "name": "gpu__time_duration", "output_name": "GPU duration", "unit": "ns", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "instructions", "name": "smsp__inst_executed", "output_name": "Instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_alu", "name": "smsp__inst_executed_pipe_alu", "output_name": "ALU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_fma", "name": "smsp__inst_executed_pipe_fma", "output_name": "FMA instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_lsu", "name": "smsp__inst_executed_pipe_lsu", "output_name": "LSU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_tex", "name": "smsp__inst_executed_pipe_tex", "output_name": "TEX instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "op_fadd", "name": "smsp__sass_thread_inst_executed_op_fadd_pred_on", "output_name": "Thread FADD", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "op_ffma", "name": "smsp__sass_thread_inst_executed_op_ffma_pred_on", "output_name": "Thread FFMA", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "op_fmul", "name": "smsp__sass_thread_inst_executed_op_fmul_pred_on", "output_name": "Thread FMUL", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "op_integer", "name": "smsp__sass_thread_inst_executed_op_integer_pred_on", "output_name": "Thread integer", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "op_memory", "name": "smsp__sass_thread_inst_executed_op_memory_pred_on", "output_name": "Thread memory", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "warps_active", "name": "smsp__warps_active", "output_name": "Active warps", "unit": "warps/cycle", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "warps_eligible", "name": "smsp__warps_eligible", "output_name": "Eligible warps", "unit": "warps/cycle", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false },
+    { "id": "sm", "name": "sm__throughput", "output_name": "SM throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "l1", "name": "l1tex__throughput", "output_name": "L1/TEX throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "l2", "name": "lts__throughput", "output_name": "L2 throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "dram", "name": "dram__throughput", "output_name": "DRAM throughput", "unit": "%", "type": "throughput", "rollup": "avg", "submetric": "pct_of_peak_sustained_elapsed" },
+    { "id": "stall_barrier", "name": "smsp__warp_issue_stalled_barrier_per_warp_active", "output_name": "Stall barrier", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_branch", "name": "smsp__warp_issue_stalled_branch_resolving_per_warp_active", "output_name": "Stall branch", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_dispatch", "name": "smsp__warp_issue_stalled_dispatch_stall_per_warp_active", "output_name": "Stall dispatch", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_lg", "name": "smsp__warp_issue_stalled_lg_throttle_per_warp_active", "output_name": "Stall LG throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_long", "name": "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", "output_name": "Stall long scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_math", "name": "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active", "output_name": "Stall math throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_membar", "name": "smsp__warp_issue_stalled_membar_per_warp_active", "output_name": "Stall memory barrier", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_mio", "name": "smsp__warp_issue_stalled_mio_throttle_per_warp_active", "output_name": "Stall MIO throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_no_instruction", "name": "smsp__warp_issue_stalled_no_instruction_per_warp_active", "output_name": "Stall no instruction", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_not_selected", "name": "smsp__warp_issue_stalled_not_selected_per_warp_active", "output_name": "Stall not selected", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_short", "name": "smsp__warp_issue_stalled_short_scoreboard_per_warp_active", "output_name": "Stall short scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_tex", "name": "smsp__warp_issue_stalled_tex_throttle_per_warp_active", "output_name": "Stall TEX throttle", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "stall_wait", "name": "smsp__warp_issue_stalled_wait_per_warp_active", "output_name": "Stall wait", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio" },
+    { "id": "launch_barrier", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_barrier_allocation", "output_name": "Launch barrier allocation", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "launch_cta", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_cta_allocation", "output_name": "Launch CTA allocation", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "launch_register", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_register_allocation", "output_name": "Launch register allocation", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "launch_shmem", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_shmem_allocation", "output_name": "Launch shared-memory allocation", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "launch_warp", "name": "tpc__warp_launch_cycles_stalled_shader_cs_reason_warp_allocation", "output_name": "Launch warp allocation", "unit": "%", "type": "counter", "rollup": "sum", "submetric": "pct_of_peak_sustained_elapsed", "required": false },
+    { "id": "registers", "name": "tpc__average_registers_per_thread_shader_cs", "output_name": "Registers/thread", "unit": "registers", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false }
+  ],
+  "passes": [
+    {
+      "id": "deferred_shading",
+      "name": "DeferredShadingPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time", "instructions", "pipe_alu", "pipe_fma", "pipe_lsu",
+        "pipe_tex", "op_fadd", "op_ffma", "op_fmul", "op_integer",
+        "op_memory", "warps_active", "warps_eligible", "sm", "l1", "l2",
+        "dram", "stall_barrier", "stall_branch", "stall_dispatch",
+        "stall_lg", "stall_long", "stall_math", "stall_membar", "stall_mio",
+        "stall_no_instruction", "stall_not_selected", "stall_short",
+        "stall_tex", "stall_wait", "launch_barrier", "launch_cta",
+        "launch_register", "launch_shmem", "launch_warp", "registers"
+      ]
+    }
+  ]
+}

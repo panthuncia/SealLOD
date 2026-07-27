@@ -390,9 +390,7 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
 
     if (UsesPerViewDepthMapOcclusion(m_rasterOutputKind)) {
         builder->WithUnorderedAccess(m_viewDepthSrvIndicesBuffer)
-            .WithShaderResource(m_isFirstPass
-                ? Builtin::LastFrameLinearDepthMaps
-                : Builtin::PrimaryCamera::LinearDepthMap);
+            .WithShaderResource(Builtin::PrimaryCamera::LinearDepthMap);
     }
 
     if (UsesSWClassification(m_workGraphMode)) {
@@ -1151,9 +1149,10 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
                     return;
                 }
 
-                const auto linearDepthMap = useHistoryDepth
-                    ? (view->gpu.lastFrameLinearDepthValid ? view->gpu.lastFrameLinearDepthMap : nullptr)
-                    : view->gpu.linearDepthMap;
+                const auto linearDepthMap =
+                    !useHistoryDepth || view->gpu.lastFrameLinearDepthValid
+                    ? view->gpu.linearDepthMap
+                    : nullptr;
                 if (!linearDepthMap) {
                     return;
                 }

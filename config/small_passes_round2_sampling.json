@@ -1,0 +1,42 @@
+{
+  "name": "BasicRenderer small-pass round 2",
+  "readiness": {
+    "stable_frames": 120,
+    "settling_frames": 30,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 80,
+    "maximum_samples": 160,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.005
+  },
+  "output": {
+    "database": "out/small_passes_round2_sampling.sqlite",
+    "last_run_summary": "out/small_passes_round2_sampling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.005
+    }
+  ],
+  "passes": [
+    { "id": "tonemapping", "name": "TonemappingPass", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "depth_history", "name": "LinearDepthHistoryCopyPass", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "visibility_clear", "name": "ClearVisibilityBufferPass", "queue": "Direct", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "depth_copy_1", "name": "CLodOpaque::LinearDepthCopyPass1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "depth_copy_2", "name": "CLodOpaque::LinearDepthCopyPass2", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "depth_down_1", "name": "CLodOpaque::LinearDepthDownsamplePass1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "depth_down_2", "name": "CLodOpaque::LinearDepthDownsamplePass2", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "culling_1", "name": "CLodOpaque::HierarchicalCullingPass1", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "culling_2", "name": "CLodOpaque::HierarchicalCullingPass2", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "gtao_filter", "name": "GTAOFilterPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "gtao_denoise", "name": "GTAODenoisePass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] },
+    { "id": "deferred", "name": "DeferredShadingPass", "queue": "Compute", "occurrence": 0, "metrics": ["gpu_time"] }
+  ]
+}

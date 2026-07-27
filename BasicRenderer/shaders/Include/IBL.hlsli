@@ -164,6 +164,10 @@ OpenPBRFuzzLayerState MakeOpenPBRFuzzLayerState(float3 normal, float3 viewDir, f
     state.roughness = saturate(fuzzRoughness);
     state.tint = saturate(fuzzColor);
     state.presence = saturate(fuzzWeight);
+    if (state.presence <= 0.0f)
+    {
+        return state;
+    }
     state.basis.normal = normalize(normal);
     OpenPBRBuildViewAlignedBasis(state.basis.normal, normalize(viewDir), state.basis.tangent, state.basis.bitangent);
     state.viewDirLocal = OpenPBRWorldToLocal(state.basis, normalize(viewDir));
@@ -630,6 +634,11 @@ OpenPBRCoatLayerState MakeOpenPBRCoatLayerState(
     state.presence = saturate(coatWeight);
     state.ior = max(coatIor, 1.0f);
     state.roughness = saturate(coatRoughness);
+    if (state.presence <= 0.0f)
+    {
+        state.extraBaseLayerScale = 1.0f.xxx;
+        return state;
+    }
     state.extraBaseLayerScale = OpenPBRComputeCoatExtraBaseLayerScale(baseState, state.presence, state.ior, coatDarkening);
     return state;
 }
@@ -665,17 +674,32 @@ float OpenPBRComputeDielectricEnergyReflected(float ior, float alpha, float cosT
 
 float OpenPBRCoatReflectedProportion(OpenPBRCoatLayerState state, float NdotX)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 0.0f;
+    }
+
     return saturate(state.presence * OpenPBRComputeDielectricEnergyReflected(state.ior, state.roughness, NdotX));
 }
 
 float3 OpenPBRCoatBaseLayerScaleIncoming(OpenPBRCoatLayerState state, float NdotV)
 {
+    if (state.presence <= 0.0f)
+    {
+        return state.extraBaseLayerScale;
+    }
+
     const float reflectedProportion = OpenPBRCoatReflectedProportion(state, NdotV);
     return OpenPBRCoatPassageColorMultiplier(state, NdotV) * (1.0f - reflectedProportion).xxx * state.extraBaseLayerScale;
 }
 
 float3 OpenPBRCoatBaseLayerScaleOutgoing(OpenPBRCoatLayerState state, float NdotL)
 {
+    if (state.presence <= 0.0f)
+    {
+        return 1.0f.xxx;
+    }
+
     const float reflectedProportion = OpenPBRCoatReflectedProportion(state, NdotL);
     return OpenPBRCoatPassageColorMultiplier(state, NdotL) * (1.0f - reflectedProportion).xxx;
 }
@@ -722,7 +746,12 @@ void evaluateIBL(inout float3 color, inout float3 debugDiffuse, inout float3 deb
     float3 fuzzRadiance = 0.0f.xxx;
 #if defined (PSO_SPECULAR_IBL)
     specularRadiance = prefilteredRadiance(r, perceptualRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
-    fuzzRadiance = prefilteredRadiance(r, fuzzRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
+    // A zero-presence fuzz layer contributes no radiance, so avoid the extra
+    // prefiltered-environment lookup for the common non-fuzz material path.
+    if (fuzzWeight > 0.0f)
+    {
+        fuzzRadiance = prefilteredRadiance(r, fuzzRoughness, environments[environmentIndex].prefilteredCubemapDescriptorIndex);
+    }
 #endif
     float3 diffuseIrradiance = max(irradianceSH(normalize(normal + bentNormal), environmentIndex, environmentBufferDescriptorIndex), 0.0) * Fd_Lambert();
     OpenPBRBaseLayerEvaluation baseEvaluation = EvaluateOpenPBRBaseLayerIBL(baseState, NdotV, diffuseIrradiance, specularRadiance);

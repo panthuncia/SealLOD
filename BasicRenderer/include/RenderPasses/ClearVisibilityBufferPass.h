@@ -1,13 +1,19 @@
 #pragma once
 
+#include <functional>
+
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Render/RenderContext.h"
+#include "Render/OutputTypes.h"
 #include "Resources/PixelBuffer.h"
 
 class ClearVisibilityBufferPass : public RenderPass {
 public:
-	ClearVisibilityBufferPass() {}
+	ClearVisibilityBufferPass() {
+		m_getOutputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType");
+	}
 
 	void DeclareResourceUsages(RenderPassBuilder* builder) override {
 		builder->WithUnorderedAccessClear(Builtin::PrimaryCamera::VisibilityTexture,
@@ -17,12 +23,8 @@ public:
 			Builtin::GBuffer::Fuzz,
 			Builtin::GBuffer::MetallicRoughness,
 			Builtin::GBuffer::Normals,
-			Builtin::GBuffer::MotionVectors,
-			Builtin::Color::HDRColorTarget,
 			Builtin::DebugVisualization);
 		builder->WithDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
-		builder->WithRenderTargetClear(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
-			.WithUnorderedAccessClear(Subresources(Builtin::PrimaryCamera::LinearDepthMap, FromMip{ 1 }));
 	}
 
 	void Setup() override {
@@ -33,10 +35,7 @@ public:
 		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Emissive);
 		m_fuzz = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Fuzz);
 		m_normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
-		m_motionVectors = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MotionVectors);
-		m_HDRColorTarget = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget);
 		m_depthTexture = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::DepthTexture);
-		m_linearDepthTexture = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::LinearDepthMap);
 		m_debugVisualization = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::DebugVisualization);
 	}
 
@@ -88,29 +87,16 @@ public:
 			}
 			};
 
-		clearResource(m_albedo);
-		clearResource(m_coat);
-		clearResource(m_metallicRoughness);
-		clearResource(m_emissive);
-		clearResource(m_fuzz);
-		clearResource(m_normals);
-		clearResource(m_motionVectors);
-		clearResource(m_HDRColorTarget); // TODO: Only needed because of non-zero initialized memory issue- make a clear manager instead?
-		clearDepth(m_depthTexture); // same
-		if (m_linearDepthTexture) {
-			for (unsigned int slice = 0; slice < m_linearDepthTexture->GetNumRTVSlices(); ++slice) {
-				commandList.ClearRenderTargetView(
-					m_linearDepthTexture->GetRTVInfo(0, slice).slot,
-					m_linearDepthTexture->GetClearColor());
-				for (unsigned int mip = 1; mip < m_linearDepthTexture->GetNumUAVMipLevels(); ++mip) {
-					rhi::UavClearInfo clearInfo{};
-					clearInfo.cpuVisible = m_linearDepthTexture->GetUAVNonShaderVisibleInfo(mip, slice).slot;
-					clearInfo.shaderVisible = m_linearDepthTexture->GetUAVShaderVisibleInfo(mip, slice).slot;
-					clearInfo.resource = m_linearDepthTexture->GetAPIResource();
-					commandList.ClearUavFloat(clearInfo, rhi::UavClearFloat{});
-				}
-			}
+		const bool diagnosticOutput = m_getOutputType() != OutputType::COLOR;
+		if (diagnosticOutput) {
+			clearResource(m_albedo);
+			clearResource(m_coat);
+			clearResource(m_metallicRoughness);
+			clearResource(m_emissive);
+			clearResource(m_fuzz);
+			clearResource(m_normals);
 		}
+		clearDepth(m_depthTexture); // same
 
 		// Clear debug visualization texture to sentinel (0xFFFFFFFF)
 		{
@@ -138,9 +124,7 @@ private:
 	GloballyIndexedResource* m_emissive;
 	GloballyIndexedResource* m_fuzz;
 	GloballyIndexedResource* m_normals;
-	GloballyIndexedResource* m_motionVectors;
-	GloballyIndexedResource* m_HDRColorTarget;
 	GloballyIndexedResource* m_depthTexture;
-	PixelBuffer* m_linearDepthTexture;
 	GloballyIndexedResource* m_debugVisualization;
+	std::function<unsigned int()> m_getOutputType;
 };

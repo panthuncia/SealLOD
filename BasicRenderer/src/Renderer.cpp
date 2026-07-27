@@ -4962,7 +4962,9 @@ void Renderer::CreateRenderGraph() {
                 BuildBloomPipeline(newGraph.get());
                 break;
             case Tonemapping:
-                newGraph->BuildRenderPass<TonemappingPass>("TonemappingPass");
+                newGraph->BuildRenderPass<TonemappingPass>(
+                    "TonemappingPass",
+                    m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>());
                 newGraph->SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
                 break;
             case DebugOutput: {

@@ -23,5 +23,5 @@ vk_streamline/
 vk_lod_clusters/
 cache/
 reports/
-docs/
+#docs/
 logs/
