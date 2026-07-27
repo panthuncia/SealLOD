@@ -500,6 +500,8 @@ static void WriteClusterLODReport(
     uint32_t refinedEdgesToSameOrHigherDepth = 0;
     uint32_t nonSelectedParentEdges = 0;
     uint32_t finiteGroupErrorIssues = 0;
+    uint32_t lodSphereContainmentViolations = 0;
+    float maxLodSphereEscape = 0.0f;
     float minGroupError = std::numeric_limits<float>::max();
     float maxGroupError = 0.0f;
     float maxParentToOwnErrorRatio = 0.0f;
@@ -549,6 +551,17 @@ static void WriteClusterLODReport(
             }
 
             const ClusterLODGroup& child = groups[childGroupIndex];
+            const float dx = child.bounds.center[0] - group.bounds.center[0];
+            const float dy = child.bounds.center[1] - group.bounds.center[1];
+            const float dz = child.bounds.center[2] - group.bounds.center[2];
+            const float escape =
+                std::sqrt(dx * dx + dy * dy + dz * dz) +
+                child.bounds.radius -
+                group.bounds.radius;
+            if (escape > std::max(1.0e-5f, group.bounds.radius * 1.0e-5f)) {
+                lodSphereContainmentViolations++;
+                maxLodSphereEscape = std::max(maxLodSphereEscape, escape);
+            }
             if (child.depth < group.depth) {
                 refinedEdgesToLowerDepth++;
             }
@@ -722,6 +735,8 @@ static void WriteClusterLODReport(
         << " refined_edges_to_same_or_higher_depth=" << refinedEdgesToSameOrHigherDepth
         << " non_selected_parent_edges=" << nonSelectedParentEdges
         << " finite_group_error_issues=" << finiteGroupErrorIssues
+        << " lod_sphere_containment_violations=" << lodSphereContainmentViolations
+        << " max_lod_sphere_escape=" << maxLodSphereEscape
         << " invalid_node_kinds=" << invalidNodeKinds
         << " invalid_node_ranges=" << invalidNodeRanges
         << " invalid_leaf_owners=" << invalidLeafOwners
@@ -826,7 +841,7 @@ static void WriteClusterLODReport(
 
         for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(groups.size()); ++groupIndex) {
             const ClusterLODGroup& group = groups[groupIndex];
-            if (!std::isfinite(group.bounds.error) || group.bounds.error < threshold ||
+            if (!std::isfinite(group.bounds.error) || group.bounds.error <= threshold ||
                 group.firstSegment + group.segmentCount > segments.size()) {
                 continue;
             }

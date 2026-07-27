@@ -706,7 +706,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         lodCameraIsOrtho);
     const bool nodeWantsTraversal =
         forceLodDecision ||
-        (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
+        (parentAllowsRefine && (nodeErrorOverDistance > lodCam.errorOverDistanceThreshold));
 
     if (!nodeWantsTraversal) {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
@@ -782,7 +782,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 child.metric.maxQuadricError, lodUniformScale,
                 lodCam.viewZ, lodCam.zNear,
                 lodCameraIsOrtho);
-            if (childEOD < lodCam.errorOverDistanceThreshold) {
+            if (childEOD <= lodCam.errorOverDistanceThreshold) {
                 WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED, 1);
                 continue;
             }

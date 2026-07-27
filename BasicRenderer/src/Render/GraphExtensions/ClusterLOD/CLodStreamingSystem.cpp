@@ -888,6 +888,10 @@ CLodStreamingSystem::CLodStreamingSystem() {
         m_streamingStorageGroupCapacity, kInvalidCLodMeshPageKey);
     m_readyStreamingCompletionWaitGenerationByGroup.assign(
         m_streamingStorageGroupCapacity, 0u);
+    m_readyStreamingCompletionWaitParentByGroup.assign(
+        m_streamingStorageGroupCapacity, UINT32_MAX);
+    m_readyStreamingCompletionWaitParentGenerationByGroup.assign(
+        m_streamingStorageGroupCapacity, 0u);
     m_streamingDiagnosticsByGroup.resize(m_streamingStorageGroupCapacity);
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
@@ -1314,6 +1318,11 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
         m_readyStreamingCompletionWaitKeyByGroup.end(),
         kInvalidCLodMeshPageKey);
     m_readyStreamingCompletionWaitersByPage.clear();
+    m_readyStreamingCompletionWaitersByParent.clear();
+    std::fill(
+        m_readyStreamingCompletionWaitParentByGroup.begin(),
+        m_readyStreamingCompletionWaitParentByGroup.end(),
+        UINT32_MAX);
     m_pendingResidencyCommitGroups.clear();
     m_groupsUsingPinnedStorage.clear();
     m_usedGroupsWordsCpu.clear();
@@ -2994,13 +3003,10 @@ uint32_t CLodStreamingSystem::QueueLoadRequestWithParents(
     const size_t maxHops = m_streamingStorageGroupCapacity;
     for (size_t hop = 0; hop < maxHops; ++hop) {
         uint32_t parentGroup = 0;
-        if (!TryGetCachedParentGroup(currentGroup, parentGroup)) {
+        if (!TryGetCachedParentGroup(currentGroup, parentGroup) ||
+            parentGroup == currentGroup) {
             break;
         }
-        if (parentGroup == currentGroup) {
-            break;
-        }
-
         m_parentChainScratch.push_back(parentGroup);
         currentGroup = parentGroup;
     }
@@ -3922,6 +3928,17 @@ void CLodStreamingSystem::WriteStreamingRequestTraceReport() {
          m_readyStreamingCompletionWaitersByPage) {
         sharedPageWaiterCount += waiters.size();
     }
+    size_t parentResidencyWaiterCount = 0u;
+    for (uint32_t groupIndex = 0u;
+         groupIndex < m_readyStreamingCompletionWaitParentByGroup.size();
+         ++groupIndex) {
+        parentResidencyWaiterCount +=
+            m_readyStreamingCompletionWaitParentByGroup[groupIndex] !=
+                    UINT32_MAX &&
+                m_readyStreamingCompletionsByGroup.contains(groupIndex)
+            ? 1u
+            : 0u;
+    }
 
     nlohmann::json report{
         {"schema_version", 2u},
@@ -3992,6 +4009,12 @@ void CLodStreamingSystem::WriteStreamingRequestTraceReport() {
               CLodPageCreditRetryBudget()},
              {"ready_completions",
               m_readyStreamingCompletionsByGroup.size()},
+             {"parent_residency_waiters",
+              parentResidencyWaiterCount},
+             {"transactional_child_completion_admissions",
+              m_transactionalChildCompletionAdmissions},
+             {"transactional_child_promotions",
+              m_transactionalChildPromotions},
              {"shared_page_waiters", sharedPageWaiterCount},
          }},
         {"worst_resident_requests", std::move(worstRequests)},
@@ -4682,7 +4705,7 @@ void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
     };
 
     // Every group is protected through this function, so an already-protected
-    // node implies that its ancestor chain was handled earlier this update.
+    // node implies that its selected ancestor chain was handled earlier.
     if (!protectOne(groupIndex)) {
         return;
     }
@@ -4747,8 +4770,10 @@ bool CLodStreamingSystem::EvictPhysicalPage(uint32_t page, MeshManager* meshMana
     }
 
     for (uint32_t groupIndex : groupsToEvict) {
-        SetGroupResidentBit(groupIndex, false);
-        ReleaseGroupResidency(groupIndex, meshManager, false);
+        // Residency must remain ancestor-closed. If this group disappears,
+        // none of the finer groups reachable through its refinement edges may
+        // remain visible to traversal.
+        ForceGroupAndDescendantsNonResident(groupIndex, meshManager, false);
     }
 
     if (page < m_pageState.size() && m_pageState[page] != CLodPhysicalPageState::Retiring) {
@@ -5493,6 +5518,18 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
         }
         m_pendingResidencyCommitGroups.clear();
     }
+    std::unordered_map<uint32_t, uint32_t> groupDepths;
+    groupDepths.reserve(groups.size());
+    for (uint32_t group : groups) {
+        groupDepths.emplace(
+            group, SelectedAncestorDepth(group, meshManager));
+    }
+    std::stable_sort(
+        groups.begin(),
+        groups.end(),
+        [&groupDepths](uint32_t lhs, uint32_t rhs) {
+            return groupDepths.at(lhs) < groupDepths.at(rhs);
+        });
 
     TracyPlot(
         "CLodStreaming.ApplyPromotions.InputGroups",
@@ -5511,11 +5548,14 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
         uint32_t missingOwnedPages = 0u;
         uint32_t uploadFenceDeferrals = 0u;
         uint32_t pagePromotionDeferrals = 0u;
+        uint32_t parentResidencyDeferrals = 0u;
         uint32_t promotedGroups = 0u;
         uint64_t promotedPageSlots = 0u;
         uint32_t shadowPromotionGroups = 0u;
         std::optional<std::unordered_set<uint32_t>> groupsAwaitingFenceSeal;
         std::optional<std::unordered_set<uint32_t>> groupsWithRetainedUploadBatch;
+        std::unordered_set<uint32_t> promotedThisBatch;
+        promotedThisBatch.reserve(groups.size());
 
         for (uint32_t groupIndex : groups) {
             {
@@ -5536,6 +5576,17 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
                 m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
                 ClearStreamingRequestInProgress(groupIndex);
                 ClearPendingLoadPriority(groupIndex);
+                continue;
+            }
+
+            if (!IsGroupSelectedParentResident(groupIndex, meshManager)) {
+                ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::DeferForParents");
+                m_pendingResidencyCommitGroups.insert(groupIndex);
+                if (groupIndex < m_streamingDiagnosticsByGroup.size()) {
+                    ++m_streamingDiagnosticsByGroup[groupIndex].promotionDeferrals;
+                }
+                ++m_streamingDiagnosticsPromotionDeferralsThisFrame;
+                ++parentResidencyDeferrals;
                 continue;
             }
 
@@ -5609,14 +5660,24 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
                 continue;
             }
 
+            uint32_t selectedParent = 0u;
+            const bool parentPromotedInThisBatch =
+                meshManager != nullptr &&
+                meshManager->TryGetCLodParentGroup(
+                    groupIndex, selectedParent) &&
+                promotedThisBatch.contains(selectedParent);
             bool residencyChanged = false;
             {
                 ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::SetResident");
                 residencyChanged = SetGroupResidentBit(groupIndex, true);
             }
             if (residencyChanged) {
+                promotedThisBatch.insert(groupIndex);
+                m_transactionalChildPromotions +=
+                    parentPromotedInThisBatch ? 1u : 0u;
                 ZoneScopedN("CLodStreamingSystem::CommitPendingResidencyPromotions::ApplyPromotions::QueueVirtualShadowUpgrade");
                 QueueVirtualShadowUpgradeForPromotion(groupIndex);
+                WakeReadyCompletionsForParent(groupIndex);
                 ++shadowPromotionGroups;
             }
 
@@ -5634,6 +5695,7 @@ void CLodStreamingSystem::CommitPendingResidencyPromotions(MeshManager* meshMana
         TracyPlot("CLodStreaming.ApplyPromotions.MissingOwnedPages", static_cast<int64_t>(missingOwnedPages));
         TracyPlot("CLodStreaming.ApplyPromotions.UploadFenceDeferrals", static_cast<int64_t>(uploadFenceDeferrals));
         TracyPlot("CLodStreaming.ApplyPromotions.PagePromotionDeferrals", static_cast<int64_t>(pagePromotionDeferrals));
+        TracyPlot("CLodStreaming.ApplyPromotions.ParentResidencyDeferrals", static_cast<int64_t>(parentResidencyDeferrals));
         TracyPlot("CLodStreaming.ApplyPromotions.PromotedGroups", static_cast<int64_t>(promotedGroups));
         TracyPlot("CLodStreaming.ApplyPromotions.PageSlotsVisited", static_cast<int64_t>(promotedPageSlots));
         TracyPlot("CLodStreaming.ApplyPromotions.ShadowPromotionGroups", static_cast<int64_t>(shadowPromotionGroups));
@@ -5782,6 +5844,115 @@ void CLodStreamingSystem::ForceGroupNonResident(uint32_t groupIndex, MeshManager
     m_pendingResidencyCommitGroups.erase(groupIndex);
 }
 
+void CLodStreamingSystem::ForceGroupAndDescendantsNonResident(
+    uint32_t groupIndex,
+    MeshManager* meshManager,
+    bool clearPageMapEntries) {
+    if (meshManager == nullptr) {
+        ForceGroupNonResident(groupIndex, meshManager, clearPageMapEntries);
+        return;
+    }
+
+    // Build a child-first order so shared pages remain attributed to a valid
+    // resident owner until every finer dependency has been removed.
+    std::vector<std::pair<uint32_t, bool>> traversal;
+    std::vector<uint32_t> evictionOrder;
+    std::unordered_set<uint32_t> visited;
+    traversal.emplace_back(groupIndex, false);
+    while (!traversal.empty()) {
+        const auto [current, expanded] = traversal.back();
+        traversal.pop_back();
+        if (expanded) {
+            evictionOrder.push_back(current);
+            continue;
+        }
+        if (!visited.insert(current).second) {
+            continue;
+        }
+
+        traversal.emplace_back(current, true);
+        std::vector<uint32_t> children;
+        meshManager->GetCLodChildGroups(current, children);
+        for (uint32_t child : children) {
+            if (child != current) {
+                traversal.emplace_back(child, false);
+            }
+        }
+    }
+
+    for (uint32_t current : evictionOrder) {
+        // Leave already-non-resident descendants' in-flight uploads intact;
+        // the promotion gate below will hold them until their parents return.
+        // The requested root is always released because it owns the physical
+        // page that initiated this eviction.
+        if (current == groupIndex || IsGroupResident(current)) {
+            ForceGroupNonResident(current, meshManager, clearPageMapEntries);
+        }
+    }
+}
+
+bool CLodStreamingSystem::IsGroupSelectedParentResident(uint32_t groupIndex, MeshManager* meshManager) const {
+    if (meshManager == nullptr) {
+        return true;
+    }
+
+    uint32_t parent = 0u;
+    if (!meshManager->TryGetCLodParentGroup(groupIndex, parent) ||
+        IsGroupResident(parent)) {
+        return true;
+    }
+
+    // Structural groups have no payload and are always usable by the shader
+    // regardless of the streamed-residency bit.
+    const MeshManager::CLodGroupStreamingInfo info =
+        meshManager->GetCLodGroupStreamingInfo(parent);
+    return info.valid && info.pageCount == 0u;
+}
+
+bool CLodStreamingSystem::IsGroupSelectedParentResidentOrCommitReady(
+    uint32_t groupIndex,
+    MeshManager* meshManager) const {
+    if (IsGroupSelectedParentResident(groupIndex, meshManager) ||
+        meshManager == nullptr) {
+        return true;
+    }
+
+    uint32_t parent = 0u;
+    if (!meshManager->TryGetCLodParentGroup(groupIndex, parent)) {
+        return true;
+    }
+
+    // Commit-ready means the parent's pages and render metadata have already
+    // been validated and staged. Its upload fence may be sealed later in this
+    // service transaction, but no further page allocation can invalidate it.
+    return m_pendingResidencyCommitGroups.contains(parent) &&
+        m_groupOwnedPages.contains(parent) &&
+        m_groupCommittedPageMaps.contains(parent);
+}
+
+uint32_t CLodStreamingSystem::SelectedAncestorDepth(
+    uint32_t groupIndex,
+    MeshManager* meshManager) const {
+    if (meshManager == nullptr) {
+        return 0u;
+    }
+
+    uint32_t depth = 0u;
+    uint32_t current = groupIndex;
+    const uint32_t maxHops =
+        std::max<uint32_t>(m_streamingStorageGroupCapacity, 1u);
+    for (uint32_t hop = 0u; hop < maxHops; ++hop) {
+        uint32_t parent = 0u;
+        if (!meshManager->TryGetCLodParentGroup(current, parent) ||
+            parent == current) {
+            break;
+        }
+        ++depth;
+        current = parent;
+    }
+    return depth;
+}
+
 void CLodStreamingSystem::TouchGroupPages(uint32_t groupIndex) {
     ZoneScopedN("CLodStreamingSystem::TouchGroupPages");
 
@@ -5797,11 +5968,13 @@ void CLodStreamingSystem::TouchGroupPages(uint32_t groupIndex) {
     uint32_t current = groupIndex;
     for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
         uint32_t parent = 0;
-        if (!TryGetCachedParentGroup(current, parent) || parent == current) break;
+        if (!TryGetCachedParentGroup(current, parent) || parent == current) {
+            break;
+        }
 
-        auto pit = m_groupOwnedPages.find(parent);
-        if (pit != m_groupOwnedPages.end()) {
-            for (uint32_t page : pit->second) {
+        auto pagesIt = m_groupOwnedPages.find(parent);
+        if (pagesIt != m_groupOwnedPages.end()) {
+            for (uint32_t page : pagesIt->second) {
                 if (page != ~0u) {
                     m_pageLru.Touch(page);
                 }
@@ -5846,6 +6019,10 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_readyStreamingCompletionWaitKeyByGroup.resize(
         newCapacity, kInvalidCLodMeshPageKey);
     m_readyStreamingCompletionWaitGenerationByGroup.resize(newCapacity, 0u);
+    m_readyStreamingCompletionWaitParentByGroup.resize(
+        newCapacity, UINT32_MAX);
+    m_readyStreamingCompletionWaitParentGenerationByGroup.resize(
+        newCapacity, 0u);
     EnsureStreamingDiagnosticsCapacity(newCapacity);
     m_streamingStorageGroupCapacity = newCapacity;
 
@@ -6454,6 +6631,9 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
         m_readyStreamingCompletionWaitKeyByGroup[groupIndex] =
             kInvalidCLodMeshPageKey;
     }
+    if (groupIndex < m_readyStreamingCompletionWaitParentByGroup.size()) {
+        m_readyStreamingCompletionWaitParentByGroup[groupIndex] = UINT32_MAX;
+    }
     if (groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()) {
         m_pendingStreamingRequestHeapIndexByGroup[groupIndex] = UINT32_MAX;
     }
@@ -6875,6 +7055,30 @@ void CLodStreamingSystem::ParkReadyCompletionForPageCredit(
     }
 }
 
+void CLodStreamingSystem::ParkReadyCompletionForParent(
+    uint32_t groupIndex,
+    uint32_t parentGroupIndex,
+    MeshManager::CLodDiskStreamingCompletion&& completion) {
+    StoreReadyStreamingCompletion(groupIndex, std::move(completion));
+    if (groupIndex >= m_readyStreamingCompletionWaitParentByGroup.size()) {
+        return;
+    }
+
+    const uint32_t previousParent =
+        m_readyStreamingCompletionWaitParentByGroup[groupIndex];
+    if (previousParent == parentGroupIndex) {
+        return;
+    }
+    m_readyStreamingCompletionWaitParentByGroup[groupIndex] =
+        parentGroupIndex;
+    m_readyStreamingCompletionWaitParentGenerationByGroup[groupIndex] =
+        groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+            ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+            : 0u;
+    m_readyStreamingCompletionWaitersByParent[parentGroupIndex].push_back(
+        groupIndex);
+}
+
 void CLodStreamingSystem::WakeReadyPageCreditWaiters(
     uint32_t availablePageCredits) {
     while (availablePageCredits != 0u &&
@@ -6979,6 +7183,53 @@ void CLodStreamingSystem::WakeReadyCompletionsForPage(
     }
 }
 
+void CLodStreamingSystem::WakeReadyCompletionsForParent(
+    uint32_t parentGroupIndex,
+    std::vector<MeshManager::CLodDiskStreamingCompletion>*
+        immediateCompletions) {
+    auto waitersIt =
+        m_readyStreamingCompletionWaitersByParent.find(parentGroupIndex);
+    if (waitersIt == m_readyStreamingCompletionWaitersByParent.end()) {
+        return;
+    }
+
+    auto waiters = std::move(waitersIt->second);
+    m_readyStreamingCompletionWaitersByParent.erase(waitersIt);
+    for (uint32_t groupIndex : waiters) {
+        if (groupIndex >= m_readyStreamingCompletionWaitParentByGroup.size() ||
+            m_readyStreamingCompletionWaitParentByGroup[groupIndex] !=
+                parentGroupIndex ||
+            groupIndex >= m_pendingStreamingRequestGenerationByGroup.size() ||
+            m_readyStreamingCompletionWaitParentGenerationByGroup[groupIndex] !=
+                m_pendingStreamingRequestGenerationByGroup[groupIndex] ||
+            m_readyStreamingCompletionsByGroup.find(groupIndex) ==
+                m_readyStreamingCompletionsByGroup.end()) {
+            continue;
+        }
+
+        m_readyStreamingCompletionWaitParentByGroup[groupIndex] = UINT32_MAX;
+        if (immediateCompletions != nullptr) {
+            auto readyIt =
+                m_readyStreamingCompletionsByGroup.find(groupIndex);
+            if (readyIt == m_readyStreamingCompletionsByGroup.end()) {
+                continue;
+            }
+            immediateCompletions->push_back(std::move(readyIt->second));
+            m_readyStreamingCompletionBytes -=
+                std::min(
+                    m_readyStreamingCompletionBytes,
+                    CLodReadyCompletionStorageBytes(
+                        immediateCompletions->back()));
+            m_readyStreamingCompletionsByGroup.erase(readyIt);
+            continue;
+        }
+        if (m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
+            m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
+        }
+    }
+}
+
 void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager) {
     ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions");
 
@@ -7014,6 +7265,21 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
         }
         m_readyStreamingCompletionRetryGroups.clear();
     }
+    std::unordered_map<uint32_t, uint32_t> completionDepths;
+    completionDepths.reserve(completions.size());
+    for (const auto& completion : completions) {
+        completionDepths.emplace(
+            completion.groupGlobalIndex,
+            SelectedAncestorDepth(
+                completion.groupGlobalIndex, meshManager));
+    }
+    std::stable_sort(
+        completions.begin(),
+        completions.end(),
+        [&completionDepths](const auto& lhs, const auto& rhs) {
+            return completionDepths.at(lhs.groupGlobalIndex) <
+                completionDepths.at(rhs.groupGlobalIndex);
+        });
 
     {
         ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ApplyCompletions");
@@ -7077,6 +7343,43 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     clearCompletionRequestState();
                     continue;
                 }
+
+                // A child must not consume its page credits while its selected
+                // fallback parent is still waiting for pages. Holding both
+                // allocations can prevent the parent from ever becoming
+                // resident, which in turn permanently blocks child promotion.
+                // Preallocated requests may already have GPU writes targeting
+                // their pages, so only park completions that have not acquired
+                // physical storage yet.
+                const bool selectedParentResident =
+                    IsGroupSelectedParentResident(
+                        groupIndex, meshManager);
+                const bool selectedParentAvailable =
+                    selectedParentResident ||
+                    IsGroupSelectedParentResidentOrCommitReady(
+                        groupIndex, meshManager);
+                if (preAllocIt == m_preAllocatedPagesByGroup.end() &&
+                    !selectedParentAvailable) {
+                    uint32_t parentGroup = 0u;
+                    if (meshManager->TryGetCLodParentGroup(
+                            groupIndex, parentGroup)) {
+                        ParkReadyCompletionForParent(
+                            groupIndex,
+                            parentGroup,
+                            std::move(completion));
+                        m_pendingResidencyCommitGroups.erase(groupIndex);
+                        continue;
+                    }
+                }
+                if (preAllocIt == m_preAllocatedPagesByGroup.end() &&
+                    !selectedParentResident &&
+                    selectedParentAvailable) {
+                    ++m_transactionalChildCompletionAdmissions;
+                }
+
+                // Prevent late allocation for this completion from choosing a
+                // page owned by its resident fallback chain.
+                ProtectGroupAndAncestors(groupIndex);
 
                 PreAllocatedPages preAlloc{};
                 const bool hadPreAllocation = preAllocIt != m_preAllocatedPagesByGroup.end();
@@ -7414,6 +7717,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     m_pendingResidencyCommitGroups.insert(groupIndex);
                     m_residencyGroupsAwaitingUploadFence.push_back(groupIndex);
                     RecordStreamingCommitQueued(groupIndex);
+                    WakeReadyCompletionsForParent(
+                        groupIndex, &completions);
                 } else {
                     ReleaseGroupResidency(groupIndex, meshManager, true);
                     m_pendingResidencyCommitGroups.erase(groupIndex);
@@ -7557,8 +7862,9 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
 
             uint32_t current = groupIndex;
             for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
-                uint32_t parent = 0;
-                if (!TryGetCachedParentGroup(current, parent) || parent == current) {
+                uint32_t parent = 0u;
+                if (!TryGetCachedParentGroup(current, parent) ||
+                    parent == current) {
                     break;
                 }
 

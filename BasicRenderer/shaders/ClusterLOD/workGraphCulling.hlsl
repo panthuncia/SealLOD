@@ -2100,7 +2100,7 @@ bool CLodInstanceRootWantsTraversal(
         lodCam.viewZ,
         lodCam.zNear,
         lodCameraIsOrtho);
-    if (proxyErrorOverDistance >= lodCam.errorOverDistanceThreshold)
+    if (proxyErrorOverDistance > lodCam.errorOverDistanceThreshold)
     {
         return true;
     }
@@ -2350,15 +2350,18 @@ bool CLodPrepareRenderableLeaf(
 
     const float3 groupWorldCenter = mul(float4(leaf.group.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
     const float groupWorldRadius = leaf.group.bounds.centerAndRadius.w * lodUniformScale;
+    // Meshoptimizer's bidirectional cut must evaluate the same live group
+    // boundary here and in the refined-group condition below. Node metrics are
+    // conservative BVH data and can predate assembly/voxel boundary rewrites.
     leaf.errorOverDistance = ProjectedGeometricError(
         groupWorldCenter,
         groupWorldRadius,
-        node.metric.maxQuadricError,
+        leaf.group.bounds.error,
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
         lodCameraIsOrtho);
-    const bool wantsRender = forceLodDecision || (parentAllowsRefine && (leaf.errorOverDistance >= lodCam.errorOverDistanceThreshold));
+    const bool wantsRender = forceLodDecision || (parentAllowsRefine && (leaf.errorOverDistance > lodCam.errorOverDistanceThreshold));
     if (!wantsRender)
     {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
@@ -3189,7 +3192,7 @@ void WG_TraverseNodes(
                     lodCameraIsOrtho);
                 const bool nodeWantsTraversal =
                     forceLodDecision ||
-                    (parentAllowsRefine && (nodeErrorOverDistance >= lodCam.errorOverDistanceThreshold));
+                    (parentAllowsRefine && (nodeErrorOverDistance > lodCam.errorOverDistanceThreshold));
 
                 if (!nodeWantsTraversal) {
                     WGTelemetryAdd(WG_COUNTER_TRAVERSE_REJECTED_BY_ERROR_RECORDS, 1);
@@ -3277,7 +3280,7 @@ void WG_TraverseNodes(
                                         child.metric.maxQuadricError, lodUniformScale,
                                         lodCam.viewZ, lodCam.zNear,
                                         lodCameraIsOrtho);
-                                    if (childEOD < lodCam.errorOverDistanceThreshold) {
+                                    if (childEOD <= lodCam.errorOverDistanceThreshold) {
                                         WGTelemetryAdd(WG_COUNTER_CHILD_PREFILTER_LOD_REJECTED, 1);
                                         continue;
                                     }

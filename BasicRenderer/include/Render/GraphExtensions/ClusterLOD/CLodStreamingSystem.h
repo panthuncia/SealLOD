@@ -166,12 +166,20 @@ private:
     void ParkReadyCompletionForPageCredit(
         uint32_t groupIndex,
         MeshManager::CLodDiskStreamingCompletion&& completion);
+    void ParkReadyCompletionForParent(
+        uint32_t groupIndex,
+        uint32_t parentGroupIndex,
+        MeshManager::CLodDiskStreamingCompletion&& completion);
     void StoreReadyStreamingCompletion(
         uint32_t groupIndex,
         MeshManager::CLodDiskStreamingCompletion&& completion);
     void WakeReadyPageCreditWaiters(uint32_t availablePageCredits);
     void PruneStaleReadyStreamingCompletions(uint32_t maxCompletions);
     void WakeReadyCompletionsForPage(uint32_t page, uint64_t key);
+    void WakeReadyCompletionsForParent(
+        uint32_t parentGroupIndex,
+        std::vector<MeshManager::CLodDiskStreamingCompletion>*
+            immediateCompletions = nullptr);
     void CommitPendingResidencyPromotions(MeshManager* meshManager);
     void RecordVirtualShadowUpgradeDependencies(
         std::span<const CLodVirtualShadowPredictedPage> dependencies);
@@ -218,6 +226,17 @@ private:
     void ReleasePendingMeshPageReference(uint32_t page, uint64_t key);
     bool SetGroupResidentBit(uint32_t groupIndex, bool resident);
     void ForceGroupNonResident(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
+    void ForceGroupAndDescendantsNonResident(
+        uint32_t groupIndex,
+        MeshManager* meshManager,
+        bool clearPageMapEntries);
+    bool IsGroupSelectedParentResident(uint32_t groupIndex, MeshManager* meshManager) const;
+    bool IsGroupSelectedParentResidentOrCommitReady(
+        uint32_t groupIndex,
+        MeshManager* meshManager) const;
+    uint32_t SelectedAncestorDepth(
+        uint32_t groupIndex,
+        MeshManager* meshManager) const;
     void TouchGroupPages(uint32_t groupIndex);
     void PrefetchChildGroupLayouts(uint32_t parentGroupIndex, MeshManager* meshManager);
     void InstallPrefetchedChildGroupLayouts(
@@ -382,11 +401,17 @@ private:
     uint64_t m_readyStreamingCompletionBytes = 0u;
     uint64_t m_peakReadyStreamingCompletionBytes = 0u;
     uint32_t m_peakReadyStreamingCompletionCount = 0u;
+    uint64_t m_transactionalChildCompletionAdmissions = 0u;
+    uint64_t m_transactionalChildPromotions = 0u;
     std::vector<uint32_t> m_staleReadyCompletionGroupsScratch;
     std::vector<uint32_t> m_readyStreamingCompletionWaitPageByGroup;
     std::vector<uint64_t> m_readyStreamingCompletionWaitKeyByGroup;
     std::vector<uint32_t> m_readyStreamingCompletionWaitGenerationByGroup;
     std::vector<std::vector<uint32_t>> m_readyStreamingCompletionWaitersByPage;
+    std::vector<uint32_t> m_readyStreamingCompletionWaitParentByGroup;
+    std::vector<uint32_t> m_readyStreamingCompletionWaitParentGenerationByGroup;
+    std::unordered_map<uint32_t, std::vector<uint32_t>>
+        m_readyStreamingCompletionWaitersByParent;
     std::unordered_set<uint32_t> m_pendingResidencyCommitGroups;
     std::unordered_map<uint32_t, uint64_t> m_pendingResidencyUploadFenceByGroup;
     std::vector<uint32_t> m_residencyGroupsAwaitingUploadFence;
