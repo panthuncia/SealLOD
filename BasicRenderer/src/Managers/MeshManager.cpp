@@ -398,31 +398,100 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 				CLodCache::PagePayloadLayoutMetadata layout;
 				std::shared_ptr<const CLodCache::MappedContainerLease>
 					mappedContainer;
-				loaded = CLodCache::GetMeshPagePayloadLayout(
-					std::span<const ClusterLODGroupDiskLocator>(
-						pageDiskLocators->data(),
-						pageDiskLocators->size()),
-					std::span<const uint32_t>(
-						request.meshPageIndices.data(),
-						request.meshPageIndices.size()),
-					layout) &&
-					CLodCache::AcquireMappedContainer(
-						containerPath,
-						locatorCount,
-						mappedContainer);
+				{
+					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::BuildLayout");
+					loaded = CLodCache::GetMeshPagePayloadLayout(
+						std::span<const ClusterLODGroupDiskLocator>(
+							pageDiskLocators->data(),
+							pageDiskLocators->size()),
+						std::span<const uint32_t>(
+							request.meshPageIndices.data(),
+							request.meshPageIndices.size()),
+						layout);
+				}
 				if (loaded) {
-					for (size_t pageIndex = 0;
-						pageIndex < layout.pageBlobSizes.size();
-						++pageIndex) {
-						if (!mappedContainer->WarmBlob(
-								layout.pageBlobOffsets[pageIndex],
-								layout.pageBlobSizes[pageIndex])) {
-							loaded = false;
-							break;
+					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::AcquireLease");
+					mappedContainer = sharedState->mappedContainerLease;
+					if (mappedContainer == nullptr) {
+						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::AcquireLeaseFallback");
+						loaded = CLodCache::AcquireMappedContainer(
+							containerPath,
+							locatorCount,
+							mappedContainer);
+					}
+				}
+				if (loaded) {
+					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges");
+					ZoneValue(layout.pageBlobSizes.size());
+					thread_local std::vector<uint64_t> warmOffsets;
+					thread_local std::vector<uint32_t> warmSizes;
+					thread_local std::vector<uint32_t> warmPageIndices;
+					warmOffsets.clear();
+					warmSizes.clear();
+					warmPageIndices.clear();
+					{
+						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges::SelectColdPages");
+						warmOffsets.reserve(layout.pageBlobSizes.size());
+						warmSizes.reserve(layout.pageBlobSizes.size());
+						warmPageIndices.reserve(
+							layout.pageBlobSizes.size());
+						for (size_t pageOffset = 0;
+							pageOffset < layout.pageBlobSizes.size();
+							++pageOffset) {
+							const uint32_t meshPageIndex =
+								request.meshPageIndices[pageOffset];
+							bool shouldWarm = true;
+							if (sharedState->mappedPageWarmStates !=
+									nullptr &&
+								meshPageIndex <
+									sharedState->
+										mappedPageWarmStateCount) {
+								uint8_t expected = 0u;
+								shouldWarm =
+									sharedState->
+										mappedPageWarmStates[
+											meshPageIndex]
+											.compare_exchange_strong(
+												expected,
+												1u,
+												std::memory_order_acq_rel,
+												std::memory_order_acquire);
+							}
+							if (!shouldWarm) {
+								continue;
+							}
+							warmOffsets.push_back(
+								layout.pageBlobOffsets[pageOffset]);
+							warmSizes.push_back(
+								layout.pageBlobSizes[pageOffset]);
+							warmPageIndices.push_back(meshPageIndex);
+						}
+					}
+					if (!warmOffsets.empty()) {
+						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges::PrefetchColdPages");
+						loaded = mappedContainer->WarmBlobs(
+							warmOffsets, warmSizes);
+						if (!loaded &&
+							sharedState->mappedPageWarmStates !=
+								nullptr) {
+							for (uint32_t meshPageIndex :
+								warmPageIndices) {
+								if (meshPageIndex <
+									sharedState->
+										mappedPageWarmStateCount) {
+									sharedState->
+										mappedPageWarmStates[
+											meshPageIndex]
+											.store(
+												0u,
+												std::memory_order_release);
+								}
+							}
 						}
 					}
 				}
 				if (loaded) {
+					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::PublishViews");
 					result.mappedContainer = std::move(mappedContainer);
 					result.mappedPageBlobSizes =
 						std::move(layout.pageBlobSizes);
@@ -809,6 +878,29 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			sharedState->resolvedContainerPath = CLodCache::ResolveContainerPath(sharedState->cacheSource);
 		}
 		sharedState->pageDiskLocators = mesh->GetCLodPageDiskLocators();
+		if (!sharedState->resolvedContainerPath.empty() &&
+			!sharedState->pageDiskLocators.empty()) {
+			CLodCache::AcquireMappedContainer(
+				sharedState->resolvedContainerPath,
+				static_cast<uint32_t>(
+					sharedState->pageDiskLocators.size()),
+				sharedState->mappedContainerLease);
+			if (sharedState->mappedContainerLease != nullptr) {
+				sharedState->mappedPageWarmStateCount =
+					static_cast<uint32_t>(
+						sharedState->pageDiskLocators.size());
+				sharedState->mappedPageWarmStates =
+					std::make_unique<std::atomic<uint8_t>[]>(
+						sharedState->mappedPageWarmStateCount);
+				for (uint32_t pageIndex = 0u;
+					pageIndex <
+						sharedState->mappedPageWarmStateCount;
+					++pageIndex) {
+					sharedState->mappedPageWarmStates[pageIndex].store(
+						0u, std::memory_order_relaxed);
+				}
+			}
+		}
 		sharedState->groupChunkHints = mesh->GetCLodGroupChunkHints();
 
 		// Move hierarchy data into the shared state before the mesh releases its CPU copies.

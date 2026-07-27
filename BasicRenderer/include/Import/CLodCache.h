@@ -23,6 +23,9 @@ public:
 		uint32_t size,
 		std::span<const std::byte>& outBlob) const;
 	bool WarmBlob(uint64_t offset, uint32_t size) const;
+	bool WarmBlobs(
+		std::span<const uint64_t> offsets,
+		std::span<const uint32_t> sizes) const;
 
 private:
 	struct Impl;

@@ -195,7 +195,10 @@ controls for normal launches.
 Ordinary CLOD requests use late physical-page allocation by default. Their
 payloads are represented by stable shared mapped-container views, so up to
 1,536 admitted/staged groups retain only compact metadata rather than copied
-page blobs. `SARP_CLOD_LATE_CPU_PAGE_ALLOCATION`,
+page blobs. Each shared mesh acquires its mapped-container lease once during
+registration. I/O workers lock-free deduplicate warming by exact mesh page
+and submit all newly cold ranges in one OS prefetch call per request batch.
+`SARP_CLOD_LATE_CPU_PAGE_ALLOCATION`,
 `SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT`, and
 `SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET` control this path. Pinned groups and GPU
 DirectStorage destinations continue to reserve their required physical pages

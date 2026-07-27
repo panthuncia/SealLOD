@@ -306,6 +306,10 @@ private:
 		ClusterLODCacheSource cacheSource{};
 		std::wstring resolvedContainerPath;
 		std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
+		std::shared_ptr<const CLodCache::MappedContainerLease>
+			mappedContainerLease;
+		std::unique_ptr<std::atomic<uint8_t>[]> mappedPageWarmStates;
+		uint32_t mappedPageWarmStateCount = 0u;
 		std::vector<ClusterLODRuntimeSummary::GroupChunkHint> groupChunkHints;
 		std::unique_ptr<BufferView> ownedMeshMetadataView;
 		uint32_t clodMeshMetadataIndex = 0;

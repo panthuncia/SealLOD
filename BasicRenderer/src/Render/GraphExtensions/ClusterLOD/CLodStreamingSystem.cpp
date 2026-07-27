@@ -7778,22 +7778,41 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
     {
         ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ApplyCompletions");
         for (uint32_t completionIndex = 0; completionIndex < static_cast<uint32_t>(completions.size()); ++completionIndex) {
+            ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ApplyOne");
             auto& completion = completions[completionIndex];
             const uint32_t groupIndex = completion.groupGlobalIndex;
+            ZoneValue(groupIndex);
             if (groupIndex >= m_streamingStorageGroupCapacity) {
                 continue;
             }
-            RecordStreamingCompletion(groupIndex, completion);
+            {
+                ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::RecordCompletion");
+                RecordStreamingCompletion(groupIndex, completion);
+            }
 
             auto clearCompletionRequestState = [this, groupIndex]() {
                 ClearStreamingRequestInProgress(groupIndex);
                 ClearPendingLoadPriority(groupIndex);
             };
 
-            auto preAllocIt = m_preAllocatedPagesByGroup.find(groupIndex);
+            auto preAllocIt = m_preAllocatedPagesByGroup.end();
+            {
+                ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::LookupPreallocation");
+                preAllocIt = m_preAllocatedPagesByGroup.find(groupIndex);
+            }
 
             if (completion.success) {
-                if (!IsGroupActive(groupIndex)) {
+                bool groupActive = false;
+                bool requestStateValid = false;
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ValidateRequestState");
+                    groupActive = IsGroupActive(groupIndex);
+                    requestStateValid =
+                        groupIndex < m_streamingRequestStateByGroup.size() &&
+                        m_streamingRequestStateByGroup[groupIndex] ==
+                            StreamingRequestState::DiskIo;
+                }
+                if (!groupActive) {
                     if (preAllocIt != m_preAllocatedPagesByGroup.end()) {
                         ReleasePreAllocatedPages(preAllocIt->second, meshManager);
                         m_preAllocatedPagesByGroup.erase(preAllocIt);
@@ -7802,8 +7821,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     clearCompletionRequestState();
                     continue;
                 }
-                if (groupIndex >= m_streamingRequestStateByGroup.size() ||
-                    m_streamingRequestStateByGroup[groupIndex] != StreamingRequestState::DiskIo) {
+                if (!requestStateValid) {
                     if (preAllocIt != m_preAllocatedPagesByGroup.end()) {
                         ReleasePreAllocatedPages(preAllocIt->second, meshManager);
                         m_preAllocatedPagesByGroup.erase(preAllocIt);
@@ -7815,9 +7833,12 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
 
                 PreAllocatedPages preAlloc{};
                 const bool hadPreAllocation = preAllocIt != m_preAllocatedPagesByGroup.end();
-                if (hadPreAllocation) {
-                    preAlloc = std::move(preAllocIt->second);
-                    m_preAllocatedPagesByGroup.erase(preAllocIt);
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::TakePreallocation");
+                    if (hadPreAllocation) {
+                        preAlloc = std::move(preAllocIt->second);
+                        m_preAllocatedPagesByGroup.erase(preAllocIt);
+                    }
                 }
                 uint32_t expectedPageCount = preAlloc.segmentCount;
                 if (!hadPreAllocation) {
@@ -7863,7 +7884,9 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 bool waitsForPendingSharedPage = false;
                 uint32_t pendingSharedPage = UINT32_MAX;
                 uint64_t pendingSharedKey = kInvalidCLodMeshPageKey;
-                for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::CheckSharedPageWaits");
+                    for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const bool reusedPage =
                         seg < static_cast<uint32_t>(preAlloc.segmentNeedsFetch.size()) &&
                         !preAlloc.segmentNeedsFetch[seg];
@@ -7884,6 +7907,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         pendingSharedKey = key;
                         break;
                     }
+                }
                 }
                 if (waitsForPendingSharedPage) {
                     m_preAllocatedPagesByGroup[groupIndex] = std::move(preAlloc);
@@ -7916,7 +7940,9 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 // afterwards, so stale data could overwrite the page's new
                 // mesh owner even though the completion was ultimately rejected.
                 bool pageOwnershipValid = true;
-                for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ValidatePageOwnership");
+                    for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const uint32_t page = preAlloc.pagesBySegment[seg];
                     const uint64_t meshPageKey = preAlloc.meshPageKeys[seg];
                     const bool fetchedPage = preAlloc.segmentNeedsFetch[seg];
@@ -7944,6 +7970,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         break;
                     }
                 }
+                }
                 if (!pageOwnershipValid) {
                     ReleasePreAllocatedPages(preAlloc, meshManager);
                     m_pendingResidencyCommitGroups.erase(groupIndex);
@@ -7951,6 +7978,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     continue;
                 }
 
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::PrepareRenderMetadata");
                 if (payloadGpuReady) {
                     if (completion.pageAllocations.size() != expectedPageCount ||
                         completion.pageMapEntries.size() != expectedPageCount ||
@@ -7972,11 +8001,15 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     completion.pageAllocations.resize(expectedPageCount);
                     completion.pageMapEntries.resize(expectedPageCount);
                 }
+                }
 
                 PagePool* pool = meshManager->GetCLodPagePool();
                 bool payloadValid = true;
                 bool queuedPayloadUpload = false;
-                for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ResolveAndQueuePayloads");
+                    ZoneValue(expectedPageCount);
+                    for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const uint32_t page = preAlloc.pagesBySegment[seg];
                     PagePool::PageAllocation allocation{ page, 1u };
                     if (!payloadGpuReady) {
@@ -8036,6 +8069,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         completion.pageMapEntries[seg].slabByteOffset = pool != nullptr ? static_cast<uint32_t>(pool->PageToSlabByteOffset(page)) : 0u;
                     }
                 }
+                }
                 if (!payloadValid) {
                     ReleasePreAllocatedPages(preAlloc, meshManager);
                     m_pendingResidencyCommitGroups.erase(groupIndex);
@@ -8046,7 +8080,16 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     RecordStreamingUploadQueued(groupIndex, completion.totalStreamedBytes);
                 }
 
-                if (!ValidateRenderableCompletion(groupIndex, preAlloc, completion, expectedPageCount)) {
+                bool renderableCompletionValid = false;
+                {
+                    ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ValidateRenderableCompletion");
+                    renderableCompletionValid = ValidateRenderableCompletion(
+                        groupIndex,
+                        preAlloc,
+                        completion,
+                        expectedPageCount);
+                }
+                if (!renderableCompletionValid) {
                     ReleasePreAllocatedPages(preAlloc, meshManager);
                     m_pendingResidencyCommitGroups.erase(groupIndex);
                     clearCompletionRequestState();
@@ -8072,6 +8115,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     SetGroupUsesPinnedStorage(groupIndex, IsGroupPinned(groupIndex));
                 }
 
+                {
+                ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::TouchAndCommitResidency");
                 TouchGroupPages(groupIndex);
 
                 const bool committed = meshManager->CommitCLodGroupResidency(
@@ -8095,8 +8140,10 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     ReleaseGroupResidency(groupIndex, meshManager, true);
                     m_pendingResidencyCommitGroups.erase(groupIndex);
                 }
+                }
             }
             else {
+                ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::HandleFailedCompletion");
                 m_pendingResidencyCommitGroups.erase(groupIndex);
                 m_pendingResidencyUploadFenceByGroup.erase(groupIndex);
                 if (preAllocIt != m_preAllocatedPagesByGroup.end()) {
@@ -8113,8 +8160,11 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 }
             }
 
+            {
+            ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::FinalizeRequestState");
             if (m_pendingResidencyCommitGroups.find(groupIndex) == m_pendingResidencyCommitGroups.end()) {
                 clearCompletionRequestState();
+            }
             }
         }
     }

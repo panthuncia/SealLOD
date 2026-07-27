@@ -93,16 +93,43 @@ namespace CLodCache {
 	bool MappedContainerLease::WarmBlob(
 		uint64_t offset,
 		uint32_t size) const {
-		std::span<const std::byte> blob;
-		if (!GetBlob(offset, size, blob)) {
+		return WarmBlobs(
+			std::span<const uint64_t>(&offset, 1u),
+			std::span<const uint32_t>(&size, 1u));
+	}
+
+	bool MappedContainerLease::WarmBlobs(
+		std::span<const uint64_t> offsets,
+		std::span<const uint32_t> sizes) const {
+		if (m_impl == nullptr ||
+			m_impl->data == nullptr ||
+			offsets.size() != sizes.size()) {
 			return false;
 		}
+		if (offsets.empty()) {
+			return true;
+		}
 #ifdef _WIN32
-		WIN32_MEMORY_RANGE_ENTRY range{};
-		range.VirtualAddress = const_cast<std::byte*>(blob.data());
-		range.NumberOfBytes = blob.size();
+		thread_local std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+		ranges.clear();
+		ranges.reserve(offsets.size());
+		for (size_t i = 0u; i < offsets.size(); ++i) {
+			const uint64_t end =
+				offsets[i] + static_cast<uint64_t>(sizes[i]);
+			if (end < offsets[i] || end > m_impl->fileSize) {
+				return false;
+			}
+			WIN32_MEMORY_RANGE_ENTRY range{};
+			range.VirtualAddress = const_cast<std::byte*>(
+				m_impl->data + offsets[i]);
+			range.NumberOfBytes = sizes[i];
+			ranges.push_back(range);
+		}
 		return PrefetchVirtualMemory(
-			GetCurrentProcess(), 1u, &range, 0u) != FALSE;
+			GetCurrentProcess(),
+			static_cast<ULONG_PTR>(ranges.size()),
+			ranges.data(),
+			0u) != FALSE;
 #else
 		return false;
 #endif
