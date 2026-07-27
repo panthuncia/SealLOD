@@ -47,6 +47,9 @@ public:
 		uint32_t completedResults = 0;
 		uint32_t pendingDirectStorageLaunches = 0;
 		uint32_t pendingDirectStorageUploads = 0;
+		uint32_t ioAdmissionTarget = 0;
+		uint32_t ioWorkerCount = 0;
+		uint32_t ioTaskBatchSize = 0;
 		uint64_t residentAllocationBytes = 0;
 		uint64_t completedResultBytes = 0;
 		uint64_t totalStreamedBytes = 0;
@@ -93,6 +96,9 @@ public:
 		std::vector<GroupPageMapEntry> pageMapEntries;
 		uint64_t generation = 0;
 		uint64_t totalStreamedBytes = 0;
+		uint64_t ioTaskQueuedNs = 0;
+		uint64_t ioTaskStartedNs = 0;
+		uint64_t ioTaskCompletedNs = 0;
 		uint32_t fetchedPageCount = 0;
 		std::string uploadPathLabel;
 		std::vector<CLodPrefetchedChildLayout> prefetchedChildLayouts;
@@ -244,6 +250,7 @@ public:
 	// Access the CLod page pool (may be null if no CLod meshes loaded).
 	PagePool* GetCLodPagePool() const { return m_clodPagePool.get(); }
 	void SetCLodStreamingUploadFunction(PagePool::UploadFn fn);
+	void SetCLodStreamingWakeFunction(std::function<void()> fn);
 	uint64_t GetActiveMeshletCount() const { return m_activeMeshletCount; }
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
@@ -377,6 +384,7 @@ private:
 		std::vector<uint32_t> childLayoutPrefetchGroups;
 		uint64_t generation = 0; // generation at time of request
 		uint32_t priority = 0; // streaming priority for I/O dispatch ordering
+		uint64_t ioTaskQueuedNs = 0;
 	};
 
 	struct CLodDiskStreamingResult {
@@ -394,6 +402,9 @@ private:
 		std::vector<uint32_t> preAllocatedPages; // forwarded from request
 		std::vector<CLodPrefetchedChildLayout> prefetchedChildLayouts;
 		uint64_t generation = 0; // generation at time of request
+		uint64_t ioTaskQueuedNs = 0;
+		uint64_t ioTaskStartedNs = 0;
+		uint64_t ioTaskCompletedNs = 0;
 	};
 
 	struct CLodPendingDirectStorageUpload {
@@ -450,6 +461,9 @@ private:
 	std::vector<CLodPendingDirectStorageLaunch> m_clodPendingDirectStorageLaunches;
 	std::vector<CLodPendingDirectStorageUpload> m_clodPendingDirectStorageUploads;
 	PagePool::UploadFn m_clodStreamingUploadFn;
+	// Guarded by m_clodDiskStreamingResultsMutex. I/O workers copy the
+	// callback while publishing, then invoke it after releasing the lock.
+	std::function<void()> m_clodStreamingWakeFn;
 
 	rhi::TimelinePtr m_clodDirectStorageCompletionFencePtr;
 	rhi::Timeline m_clodDirectStorageCompletionFenceHandle;
@@ -460,10 +474,9 @@ private:
 	// m_clodPagePool, and m_clodSharedGroupChunks UpdateView calls.
 	mutable std::mutex m_clodResidencyMutex;
 
-	// Maximum number of IO requests dispatched per ProcessCLodDiskStreamingIO call.
+	// Keep only a small amount of work beyond the active I/O workers. Priority
+	// remains mutable in m_clodDiskStreamingRequests until a task is admitted.
 	static constexpr uint32_t kMaxIoBatchSize = 128u;
-	static constexpr uint32_t kMinAdaptiveDispatchedIoGroups = 512u;
-	static constexpr uint32_t kMaxAdaptiveDispatchedIoGroups = 2048u;
 
 	void DispatchCLodDiskStreamingBatch();
 	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, const std::shared_ptr<CLodSharedStreamingState>& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);

@@ -153,6 +153,49 @@ experiments without restarting the process. `clod.mode.set` accepts
 contains no skinned geometry; the default general variant remains
 skinned-capable.
 
+For repeatable CLOD virtual-shadow CPU measurements, run:
+
+```powershell
+.\scripts\Benchmark-CLodVsmCpu.ps1 -Runs 3 -DirectHashIngest On
+```
+
+The harness builds the RelWithDebInfo demo, runs a smooth 480-frame camera
+arc using the normal renderer settings, and writes raw dependency-batch
+samples plus per-run and aggregate JSON/CSV reports under
+`out/clod-vsm-cpu-benchmarks`. Use `-DirectHashIngest Both -ParallelSort On`
+to compare direct hash ingestion against the sorted fallback, or
+`-ParallelSort On/Off` to compare sorting policies on that fallback. The benchmark deliberately avoids
+the teleporting camera and graph rebuilds used by
+`--clod-streaming-stress-test`.
+
+Add `-RequestTrace` to capture the lifetime of every CLOD upload request from
+decoded readback through CPU scheduling, disk I/O, upload queueing, residency
+commit, and final promotion. Each run writes `request-trace.json` with stage
+percentiles, full bounded request traces, the 100 worst completed requests,
+and the oldest requests still active at shutdown.
+
+The request trace separates I/O admission, task-queue, active-read, and
+result-service latency, and reports the subset that was still live when
+admitted. Use `-IoAdmissionDepth` to sweep the bounded I/O window. The retained
+large-scene default is derived as 24 jobs per I/O worker (384 with the demo's
+16 workers). `-SchedulerAging On` and `-LiveBackgroundLanes On` enable the
+experimental fairness policies; they remain off by default because the
+reference workload showed lower throughput and worse p99 latency.
+
+Use `-IoWorkerCount` to sweep the process-wide I/O pool and
+`-IoTaskBatchSize` to sweep CLOD request grouping independently. CLOD mapped
+reads default to batches of eight requests per scheduler task; results from a
+task are published under one lock and generate one streaming-owner wake.
+The renderer keeps 16 I/O workers by default because the large-scene sweep
+showed no repeatable benefit from oversubscribing the short mapped reads.
+`SARP_CLOD_IO_WORKER_COUNT` and `SARP_CLOD_IO_TASK_BATCH_SIZE` expose the same
+controls for normal launches.
+
+The same mode can be enabled for a normal demo launch by setting
+`SARP_CLOD_REQUEST_TRACE_OUTPUT` to the desired JSON path. Tracing is disabled
+when the variable is unset. Completed traces are capped at 100,000 records;
+the report includes a dropped-record count if that bound is reached.
+
 ### 1) Build/install `BasicRHI`
 
 ```powershell

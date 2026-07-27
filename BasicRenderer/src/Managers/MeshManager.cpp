@@ -19,7 +19,9 @@
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -38,6 +40,61 @@ size_t ReserveBytesWithImportHeadroom(size_t requestedBytes, size_t minimumHeadr
 		return 0;
 	}
 	return requestedBytes + std::max(requestedBytes * 3u, minimumHeadroomBytes);
+}
+
+uint64_t CLodIoNowNs() {
+	using Clock = std::chrono::steady_clock;
+	return static_cast<uint64_t>(
+		std::chrono::duration_cast<std::chrono::nanoseconds>(
+			Clock::now().time_since_epoch()).count());
+}
+
+uint32_t CLodIoAdmissionTarget() {
+	static const uint32_t target = [] {
+		// Cached/memory-mapped CLOD reads are usually much shorter than one
+		// streaming service interval. Keep a bounded burst available so the I/O
+		// workers do not go idle between service ticks, while remaining far
+		// below the previous 512--2048 fire-and-forget backlog.
+		uint32_t result = std::max<uint32_t>(
+			TaskSchedulerManager::GetInstance().GetNumIoThreads() * 24u,
+			48u);
+		char* value = nullptr;
+		size_t length = 0u;
+		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_ADMISSION_DEPTH") == 0 &&
+			value != nullptr) {
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(value, &end, 10);
+			if (end != value && parsed > 0u) {
+				result = std::clamp<uint32_t>(
+					static_cast<uint32_t>(parsed), 1u, 2048u);
+			}
+		}
+		std::free(value);
+		return result;
+	}();
+	return target;
+}
+
+uint32_t CLodIoTaskBatchSize() {
+	static const uint32_t batchSize = [] {
+		// Most cached/mapped reads complete in microseconds. Grouping a few
+		// requests amortizes generic scheduler and completion-publication costs.
+		uint32_t result = 8u;
+		char* value = nullptr;
+		size_t length = 0u;
+		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_TASK_BATCH_SIZE") == 0 &&
+			value != nullptr) {
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(value, &end, 10);
+			if (end != value && parsed > 0u) {
+				result = std::clamp<uint32_t>(
+					static_cast<uint32_t>(parsed), 1u, 32u);
+			}
+		}
+		std::free(value);
+		return result;
+	}();
+	return batchSize;
 }
 
 }
@@ -194,10 +251,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 		const uint32_t queuedOrInFlightCount = static_cast<uint32_t>(m_clodDiskStreamingQueuedGroups.size());
 		const uint32_t dispatchedOrInFlightCount =
 			queuedOrInFlightCount > queuedRequestCount ? queuedOrInFlightCount - queuedRequestCount : 0u;
-		const uint32_t adaptiveDispatchedTarget = std::clamp<uint32_t>(
-			kMinAdaptiveDispatchedIoGroups + queuedRequestCount / 4u,
-			kMinAdaptiveDispatchedIoGroups,
-			kMaxAdaptiveDispatchedIoGroups);
+		const uint32_t adaptiveDispatchedTarget = CLodIoAdmissionTarget();
 		if (dispatchedOrInFlightCount >= adaptiveDispatchedTarget) {
 			return;
 		}
@@ -223,14 +277,27 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 		m_clodDiskStreamingRequests.resize(m_clodDiskStreamingRequests.size() - toDrain);
 	}
 
-	// Dispatch each request as a fire-and-forget IO task on the dedicated IO
-	// thread pool. Each task captures its request by move, performs the disk
-	// read, and pushes the result directly into the shared results vector.
+	// Dispatch small request batches to amortize scheduler, result-lock, and
+	// wake-up overhead. Requests are still ordered by coordinator priority
+	// before admission, and the bounded batch size limits head-of-line delay.
 	auto& scheduler = TaskSchedulerManager::GetInstance();
-	for (auto& request : batch) {
+	const uint32_t taskBatchSize = CLodIoTaskBatchSize();
+	for (size_t batchBegin = 0; batchBegin < batch.size(); batchBegin += taskBatchSize) {
+		const size_t batchEnd = std::min(
+			batchBegin + static_cast<size_t>(taskBatchSize), batch.size());
+		std::vector<CLodDiskStreamingRequest> taskRequests;
+		taskRequests.reserve(batchEnd - batchBegin);
+		for (size_t requestIndex = batchBegin; requestIndex < batchEnd; ++requestIndex) {
+			taskRequests.push_back(std::move(batch[requestIndex]));
+		}
 		scheduler.QueueIoTask("CLodDiskStreaming",
-			[this, request = std::move(request)]() mutable {
+			[this, requests = std::move(taskRequests)]() mutable {
+			std::vector<CLodDiskStreamingResult> completedResults;
+			completedResults.reserve(requests.size());
+			for (auto& request : requests) {
 			CLodDiskStreamingResult result{};
+			result.ioTaskQueuedNs = request.ioTaskQueuedNs;
+			result.ioTaskStartedNs = CLodIoNowNs();
 			result.groupGlobalIndex = request.groupGlobalIndex;
 			result.cacheSource = request.cacheSource;
 			result.segmentNeedsFetch = request.segmentNeedsFetch;
@@ -246,9 +313,9 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 					pageDiskLocators->empty() ||
 					std::any_of(request.meshPageIndices.begin(), request.meshPageIndices.end(), [locatorCount](uint32_t pageIndex) { return pageIndex >= locatorCount; })) {
 					result.success = false;
-					std::lock_guard<std::mutex> resultsLock(m_clodDiskStreamingResultsMutex);
-					m_clodDiskStreamingResults.push_back(std::move(result));
-					return;
+					result.ioTaskCompletedNs = CLodIoNowNs();
+					completedResults.push_back(std::move(result));
+					continue;
 				}
 			}
 
@@ -390,8 +457,22 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 
 			{
 				ZoneScopedN("CLodDiskStreaming::PublishResult");
+				result.ioTaskCompletedNs = CLodIoNowNs();
+				completedResults.push_back(std::move(result));
+			}
+			}
+
+			std::function<void()> wakeFn;
+			{
 				std::lock_guard<std::mutex> resultsLock(m_clodDiskStreamingResultsMutex);
-				m_clodDiskStreamingResults.push_back(std::move(result));
+				m_clodDiskStreamingResults.insert(
+					m_clodDiskStreamingResults.end(),
+					std::make_move_iterator(completedResults.begin()),
+					std::make_move_iterator(completedResults.end()));
+				wakeFn = m_clodStreamingWakeFn;
+			}
+			if (wakeFn) {
+				wakeFn();
 			}
 		});
 	}
@@ -1783,6 +1864,9 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 	outCompletion = {};
 	outCompletion.groupGlobalIndex = result.groupGlobalIndex;
 	outCompletion.generation = result.generation;
+	outCompletion.ioTaskQueuedNs = result.ioTaskQueuedNs;
+	outCompletion.ioTaskStartedNs = result.ioTaskStartedNs;
+	outCompletion.ioTaskCompletedNs = result.ioTaskCompletedNs;
 	if (!result.success) {
 		return DiskStreamingApplyResult::FailedPermanent;
 	}
@@ -2205,6 +2289,11 @@ void MeshManager::SetCLodStreamingUploadFunction(PagePool::UploadFn fn) {
 	}
 }
 
+void MeshManager::SetCLodStreamingWakeFunction(std::function<void()> fn) {
+	std::lock_guard<std::mutex> lock(m_clodDiskStreamingResultsMutex);
+	m_clodStreamingWakeFn = std::move(fn);
+}
+
 bool MeshManager::LaunchPendingCLodDirectStorageUploads(rhi::Timeline waitTimeline, uint64_t waitValue) {
 	if (!waitTimeline.IsValid() || waitValue == 0 || !m_clodDirectStorageCompletionFenceHandle.IsValid()) {
 		return false;
@@ -2379,6 +2468,7 @@ uint32_t MeshManager::QueueCLodGroupDiskIOBatch(const std::vector<CLodGroupDiskI
 		preparedRequest.request.childLayoutPrefetchGroups = batchRequest.childLayoutPrefetchGroups;
 		preparedRequest.request.generation = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
 		preparedRequest.request.priority = batchRequest.priority;
+		preparedRequest.request.ioTaskQueuedNs = CLodIoNowNs();
 		prepared.push_back(std::move(preparedRequest));
 	}
 
@@ -2901,6 +2991,9 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 		? static_cast<uint64_t>(stats.residentAllocations) * m_clodPagePool->GetPageSize()
 		: 0ull;
 	stats.totalStreamedBytes = m_debugTotalStreamedBytes.load(std::memory_order_relaxed);
+	stats.ioAdmissionTarget = CLodIoAdmissionTarget();
+	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().GetNumIoThreads();
+	stats.ioTaskBatchSize = CLodIoTaskBatchSize();
 	{
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
 		stats.queuedRequests = static_cast<uint32_t>(m_clodDiskStreamingRequests.size());

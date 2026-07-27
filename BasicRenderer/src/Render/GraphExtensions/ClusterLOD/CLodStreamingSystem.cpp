@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -12,7 +14,9 @@
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
+#include <tbb/parallel_sort.h>
 #include <tracy/Tracy.hpp>
+#include <nlohmann/json.hpp>
 
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/SettingsManager.h"
@@ -66,6 +70,100 @@ bool NvPerfCaptureSuppressesCLodReadback()
     return suppressed;
 }
 
+const std::string& CLodVsmBenchmarkOutputPath()
+{
+    static const std::string path = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_VSM_BENCHMARK_OUTPUT") != 0 ||
+            value == nullptr) {
+            return std::string{};
+        }
+        std::string result(value);
+        std::free(value);
+        return result;
+    }();
+    return path;
+}
+
+const std::string& CLodRequestTraceOutputPath()
+{
+    static const std::string path = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_REQUEST_TRACE_OUTPUT") != 0 ||
+            value == nullptr) {
+            return std::string{};
+        }
+        std::string result(value);
+        std::free(value);
+        return result;
+    }();
+    return path;
+}
+
+bool CLodRequestTraceEnabled()
+{
+    return !CLodRequestTraceOutputPath().empty();
+}
+
+bool CLodSchedulerAgingEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_SCHEDULER_AGING") != 0 ||
+            value == nullptr) {
+            return false;
+        }
+        const std::string_view text(value);
+        const bool result =
+            text != "0" && text != "false" && text != "FALSE" &&
+            text != "off" && text != "OFF";
+        std::free(value);
+        return result;
+    }();
+    return enabled;
+}
+
+bool CLodLiveBackgroundLanesEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_LIVE_BACKGROUND_LANES") != 0 ||
+            value == nullptr) {
+            return false;
+        }
+        const std::string_view text(value);
+        const bool result =
+            text == "1" || text == "true" || text == "TRUE" ||
+            text == "on" || text == "ON";
+        std::free(value);
+        return result;
+    }();
+    return enabled;
+}
+
+uint64_t CLodRequestTraceNowNs()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 bool CLodVsmUpgradeCpuTimingEnabled()
 {
     static const bool enabled = [] {
@@ -79,6 +177,50 @@ bool CLodVsmUpgradeCpuTimingEnabled()
         const bool result =
             text == "1" || text == "true" || text == "TRUE" ||
             text == "on" || text == "ON";
+        std::free(value);
+        return result;
+    }();
+    return enabled || !CLodVsmBenchmarkOutputPath().empty();
+}
+
+bool CLodVsmParallelCpuSortEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_VSM_PARALLEL_SORT") != 0 ||
+            value == nullptr) {
+            return true;
+        }
+        const std::string_view text(value);
+        const bool result =
+            text != "0" && text != "false" && text != "FALSE" &&
+            text != "off" && text != "OFF";
+        std::free(value);
+        return result;
+    }();
+    return enabled;
+}
+
+bool CLodVsmDirectHashIngestionEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_VSM_DIRECT_HASH_INGEST") != 0 ||
+            value == nullptr) {
+            return true;
+        }
+        const std::string_view text(value);
+        const bool result =
+            text != "0" && text != "false" && text != "FALSE" &&
+            text != "off" && text != "OFF";
         std::free(value);
         return result;
     }();
@@ -172,7 +314,7 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeCpuTiming()
     const uint64_t acquireMaxUs =
         m_virtualShadowAcquireTimingMaxUs.exchange(0u);
     spdlog::info(
-        "CLOD VSM upgrade CPU timing: dependency(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) promotion(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) publish(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) renderAcquire(calls={} totalUs={} maxUs={}) state(groups={} buckets={} readySlots={} uploadSlotStarvation={} readbackSlotFull={} feedbackRecoveries={})",
+        "CLOD VSM upgrade CPU timing: dependencyBatch(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) promotion(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) publish(calls={} totalUs={} maxUs={} p50={} p95={} p99={}) renderAcquire(calls={} totalUs={} maxUs={}) state(groups={} readyPages={} readySlots={} uploadSlotStarvation={} readbackSlotFull={} feedbackRecoveries={})",
         dependency.calls,
         dependency.totalUs,
         dependency.maxUs,
@@ -194,8 +336,8 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeCpuTiming()
         acquireCalls,
         acquireTotalUs,
         acquireMaxUs,
-        m_virtualShadowDependencies.size(),
-        m_virtualShadowReadyDependencyBuckets.size(),
+        m_virtualShadowDependencyBuckets.size(),
+        m_virtualShadowReadyTouchedPhysicalPages.size(),
         m_virtualShadowReadyUploadSlots.Depth(),
         m_virtualShadowReadyUploadSlots.FullEvents(),
         m_readbackSlotFullEvents,
@@ -203,6 +345,153 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeCpuTiming()
     m_virtualShadowDependencyTiming.Reset();
     m_virtualShadowPromotionTiming.Reset();
     m_virtualShadowPublishTiming.Reset();
+}
+
+void CLodStreamingSystem::WriteVirtualShadowUpgradeBenchmarkReport()
+{
+    const std::string& outputPath = CLodVsmBenchmarkOutputPath();
+    auto& samples = m_virtualShadowBenchmarkSamples;
+    if (outputPath.empty() || samples.written) {
+        return;
+    }
+    samples.written = true;
+
+    const auto summarize = [](const std::vector<uint32_t>& values) {
+        nlohmann::json result{
+            {"count", values.size()},
+            {"total_us", 0u},
+            {"mean_us", 0.0},
+            {"p50_us", 0u},
+            {"p95_us", 0u},
+            {"p99_us", 0u},
+            {"max_us", 0u}};
+        if (values.empty()) {
+            return result;
+        }
+        uint64_t total = 0u;
+        for (uint32_t value : values) {
+            total += value;
+        }
+        auto sorted = values;
+        std::sort(sorted.begin(), sorted.end());
+        const auto percentile = [&sorted](uint32_t numerator) {
+            const size_t index = std::min<size_t>(
+                sorted.size() - 1u,
+                ((sorted.size() - 1u) * numerator + 99u) / 100u);
+            return sorted[index];
+        };
+        result["total_us"] = total;
+        result["mean_us"] =
+            static_cast<double>(total) /
+            static_cast<double>(values.size());
+        result["p50_us"] = percentile(50u);
+        result["p95_us"] = percentile(95u);
+        result["p99_us"] = percentile(99u);
+        result["max_us"] = sorted.back();
+        return result;
+    };
+
+    const nlohmann::json batchSummary = summarize(samples.batchUs);
+    const uint64_t batchTotalUs =
+        batchSummary.at("total_us").get<uint64_t>();
+    const auto nanosecondsPer = [batchTotalUs](uint64_t count) {
+        return count == 0u
+            ? 0.0
+            : static_cast<double>(batchTotalUs) * 1000.0 /
+                static_cast<double>(count);
+    };
+    nlohmann::json report{
+        {"schema_version", 1u},
+        {"parallel_sort_enabled", CLodVsmParallelCpuSortEnabled()},
+        {"direct_hash_ingestion_enabled",
+         CLodVsmDirectHashIngestionEnabled()},
+        {"summary",
+         {
+             {"dependency_batch", batchSummary},
+             {"input_prepare", summarize(samples.inputPrepareUs)},
+             {"ancestry_expand", summarize(samples.ancestryExpandUs)},
+             {"expanded_sort", summarize(samples.expandedSortUs)},
+             {"dependency_merge", summarize(samples.dependencyMergeUs)},
+         }},
+        {"volume",
+         {
+             {"input_records", samples.inputRecords},
+             {"unique_input_records", samples.uniqueInputRecords},
+             {"expanded_dependency_pairs",
+              samples.expandedDependencyPairs},
+             {"peak_active_dependency_pairs",
+              samples.peakActiveDependencyPairs},
+             {"peak_active_dependency_slots",
+              samples.peakActiveDependencySlots},
+             {"peak_active_dependency_bytes",
+              samples.peakActiveDependencySlots *
+                  sizeof(VirtualShadowDependency)},
+             {"dependency_bucket_rehashes",
+              samples.dependencyBucketRehashes},
+             {"nanoseconds_per_input_record",
+              nanosecondsPer(samples.inputRecords)},
+             {"nanoseconds_per_unique_input_record",
+              nanosecondsPer(samples.uniqueInputRecords)},
+             {"nanoseconds_per_expanded_dependency_pair",
+              nanosecondsPer(samples.expandedDependencyPairs)},
+         }},
+        {"queue_stats",
+         {
+             {"dependencies_observed",
+              m_virtualShadowUpgradeStats.dependenciesObserved},
+             {"dependencies_deduplicated",
+              m_virtualShadowUpgradeStats.dependenciesDeduplicated},
+             {"late_resident_dependencies",
+              m_virtualShadowUpgradeStats.lateResidentDependencies},
+             {"promotions_with_dependencies",
+              m_virtualShadowUpgradeStats.promotionsWithDependencies},
+             {"promotions_without_dependencies",
+              m_virtualShadowUpgradeStats.promotionsWithoutDependencies},
+             {"events_queued",
+              m_virtualShadowUpgradeStats.eventsQueued},
+             {"events_uploaded",
+              m_virtualShadowUpgradeStats.eventsUploaded},
+             {"stale_events",
+              m_virtualShadowUpgradeStats.staleEvents},
+             {"cleared_dependencies",
+              m_virtualShadowUpgradeStats.clearedDependencies},
+             {"upload_slot_starvation",
+              m_virtualShadowReadyUploadSlots.FullEvents()},
+             {"readback_slot_full", m_readbackSlotFullEvents},
+             {"feedback_recoveries",
+              m_virtualShadowFeedbackRecoveryRequests},
+         }},
+        {"samples_us",
+         {
+             {"dependency_batch", samples.batchUs},
+             {"input_prepare", samples.inputPrepareUs},
+             {"ancestry_expand", samples.ancestryExpandUs},
+             {"expanded_sort", samples.expandedSortUs},
+             {"dependency_merge", samples.dependencyMergeUs},
+             {"input_counts", samples.inputCounts},
+             {"unique_input_counts", samples.uniqueInputCounts},
+             {"expanded_pair_counts", samples.expandedPairCounts},
+         }}};
+
+    const std::filesystem::path path(outputPath);
+    std::error_code directoryError;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(
+            path.parent_path(),
+            directoryError);
+    }
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        spdlog::error(
+            "CLOD VSM benchmark: failed to open report '{}'",
+            outputPath);
+        return;
+    }
+    output << report.dump(2) << '\n';
+    spdlog::info(
+        "CLOD VSM benchmark: wrote {} dependency batches to '{}'",
+        samples.batchUs.size(),
+        outputPath);
 }
 
 namespace {
@@ -907,6 +1196,14 @@ CLodStreamingSystem::CLodStreamingSystem() {
     m_pendingLoadPriorityByGroup.assign(m_streamingStorageGroupCapacity, 0u);
     m_pendingStreamingRequestHeapIndexByGroup.assign(m_streamingStorageGroupCapacity, UINT32_MAX);
     m_pendingStreamingRequestGenerationByGroup.assign(m_streamingStorageGroupCapacity, 0u);
+    m_readyStreamingCompletionRetryQueuedByGroup.assign(
+        m_streamingStorageGroupCapacity, 0u);
+    m_readyStreamingCompletionWaitPageByGroup.assign(
+        m_streamingStorageGroupCapacity, UINT32_MAX);
+    m_readyStreamingCompletionWaitKeyByGroup.assign(
+        m_streamingStorageGroupCapacity, kInvalidCLodMeshPageKey);
+    m_readyStreamingCompletionWaitGenerationByGroup.assign(
+        m_streamingStorageGroupCapacity, 0u);
     m_streamingDiagnosticsByGroup.resize(m_streamingStorageGroupCapacity);
     MarkStreamingNonResidentBitsDirtyAll();
     MarkStreamingActiveGroupsBitsDirty();
@@ -1116,6 +1413,8 @@ void CLodStreamingSystem::Shutdown() {
         }
     }
     StopStreamingWorker();
+    WriteStreamingRequestTraceReport();
+    WriteVirtualShadowUpgradeBenchmarkReport();
 
     // Destruction transfers streaming ownership back to MeshManager/PagePool.
     // A render-graph registry reset does not: the same streaming system remains
@@ -1309,6 +1608,20 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     ClearPrefetchedChildLayouts();
     m_preAllocatedPagesByGroup.clear();
     m_readyStreamingCompletionsByGroup.clear();
+    m_readyStreamingCompletionRetryGroups.clear();
+    std::fill(
+        m_readyStreamingCompletionRetryQueuedByGroup.begin(),
+        m_readyStreamingCompletionRetryQueuedByGroup.end(),
+        0u);
+    std::fill(
+        m_readyStreamingCompletionWaitPageByGroup.begin(),
+        m_readyStreamingCompletionWaitPageByGroup.end(),
+        UINT32_MAX);
+    std::fill(
+        m_readyStreamingCompletionWaitKeyByGroup.begin(),
+        m_readyStreamingCompletionWaitKeyByGroup.end(),
+        kInvalidCLodMeshPageKey);
+    m_readyStreamingCompletionWaitersByPage.clear();
     m_pendingResidencyCommitGroups.clear();
     m_groupsUsingPinnedStorage.clear();
     m_usedGroupsWordsCpu.clear();
@@ -1442,6 +1755,11 @@ void CLodStreamingSystem::ClearStreamingUploadFunction(MeshManager* meshManager)
         return;
     }
 
+    meshManager->SetCLodStreamingWakeFunction({});
+    {
+        std::lock_guard<std::mutex> lock(m_streamingWakeState->mutex);
+        m_streamingWakeState->owner = nullptr;
+    }
     meshManager->SetCLodStreamingUploadFunction({});
     if (PagePool* pool = meshManager->GetCLodPagePool()) {
         pool->SetUploadFunction({});
@@ -1453,8 +1771,23 @@ void CLodStreamingSystem::InstallStreamingUploadFunction(MeshManager* meshManage
         return;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_streamingWakeState->mutex);
+        m_streamingWakeState->owner = this;
+    }
+    meshManager->SetCLodStreamingWakeFunction(
+        [wakeState = m_streamingWakeState]() {
+            std::lock_guard<std::mutex> lock(wakeState->mutex);
+            if (wakeState->owner != nullptr) {
+                wakeState->owner->RequestStreamingFrameWork();
+            }
+        });
+
     PagePool* pool = meshManager->GetCLodPagePool();
     if (pool == nullptr) {
+        meshManager->SetCLodStreamingWakeFunction({});
+        std::lock_guard<std::mutex> lock(m_streamingWakeState->mutex);
+        m_streamingWakeState->owner = nullptr;
         return;
     }
 
@@ -2270,104 +2603,521 @@ bool CLodStreamingSystem::IsGroupResident(uint32_t groupIndex) const {
     return (m_streamingNonResidentBitsCpu[wordAddress] & BitMask(groupIndex)) == 0u;
 }
 
-void CLodStreamingSystem::RecordVirtualShadowUpgradeDependency(
-    const CLodVirtualShadowPredictedPage& request) {
+void CLodStreamingSystem::QueueVirtualShadowReadyDependency(
+    const VirtualShadowDependency& dependency) {
+    const uint32_t physicalPageIndex = dependency.page.physicalPageIndex;
+    if (physicalPageIndex >= CLodVirtualShadowMaxPhysicalPageCount) {
+        ++m_virtualShadowUpgradeStats.staleEvents;
+        return;
+    }
+    if (m_virtualShadowReadyByPhysicalPage.size() <
+        CLodVirtualShadowMaxPhysicalPageCount) {
+        m_virtualShadowReadyByPhysicalPage.resize(
+            CLodVirtualShadowMaxPhysicalPageCount);
+        m_virtualShadowReadyFlagsByPhysicalPage.resize(
+            CLodVirtualShadowMaxPhysicalPageCount,
+            0u);
+    }
+    if (m_virtualShadowReadyFlagsByPhysicalPage[physicalPageIndex] == 0u) {
+        m_virtualShadowReadyFlagsByPhysicalPage[physicalPageIndex] = 1u;
+        m_virtualShadowReadyTouchedPhysicalPages.push_back(physicalPageIndex);
+    } else {
+        ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+    }
+    m_virtualShadowReadyByPhysicalPage[physicalPageIndex] = dependency;
+}
+
+void CLodStreamingSystem::RehashVirtualShadowDependencyBucket(
+    VirtualShadowDependencyBucket& bucket,
+    size_t capacity) {
+    capacity = std::max<size_t>(8u, std::bit_ceil(capacity));
+    const size_t previousCapacity = bucket.dependencies.size();
+    auto previous = std::move(bucket.dependencies);
+    bucket.dependencies.assign(capacity, VirtualShadowDependency{});
+    m_virtualShadowActiveDependencySlotCount += capacity;
+    m_virtualShadowActiveDependencySlotCount -= previousCapacity;
+    if (!CLodVsmBenchmarkOutputPath().empty()) {
+        ++m_virtualShadowBenchmarkSamples.dependencyBucketRehashes;
+    }
+    bucket.dependencyCount = 0u;
+    const size_t mask = capacity - 1u;
+    for (const auto& dependency : previous) {
+        const uint32_t physicalPageIndex =
+            dependency.page.physicalPageIndex;
+        if (physicalPageIndex == UINT32_MAX) {
+            continue;
+        }
+        size_t slot = static_cast<size_t>(physicalPageIndex) & mask;
+        while (bucket.dependencies[slot].page.physicalPageIndex !=
+               UINT32_MAX) {
+            slot = (slot + 1u) & mask;
+        }
+        bucket.dependencies[slot] = dependency;
+        ++bucket.dependencyCount;
+    }
+}
+
+bool CLodStreamingSystem::InsertVirtualShadowDependency(
+    VirtualShadowDependencyBucket& bucket,
+    const VirtualShadowDependency& dependency) {
+    if (bucket.dependencies.empty()) {
+        RehashVirtualShadowDependencyBucket(bucket, 8u);
+    }
+    for (;;) {
+        const size_t mask = bucket.dependencies.size() - 1u;
+        const uint32_t physicalPageIndex =
+            dependency.page.physicalPageIndex;
+        size_t slot = static_cast<size_t>(physicalPageIndex) & mask;
+        while (bucket.dependencies[slot].page.physicalPageIndex !=
+                   UINT32_MAX &&
+               bucket.dependencies[slot].page.physicalPageIndex !=
+                   physicalPageIndex) {
+            slot = (slot + 1u) & mask;
+        }
+        if (bucket.dependencies[slot].page.physicalPageIndex ==
+            physicalPageIndex) {
+            bucket.dependencies[slot] = dependency;
+            return false;
+        }
+        if ((static_cast<size_t>(bucket.dependencyCount) + 1u) * 2u >
+            bucket.dependencies.size()) {
+            RehashVirtualShadowDependencyBucket(
+                bucket,
+                bucket.dependencies.size() * 2u);
+            continue;
+        }
+        bucket.dependencies[slot] = dependency;
+        ++bucket.dependencyCount;
+        return true;
+    }
+}
+
+CLodStreamingSystem::VirtualShadowDependencyBucket&
+CLodStreamingSystem::GetOrCreateVirtualShadowDependencyBucket(
+    uint32_t groupIndex) {
+    if (groupIndex >=
+        m_virtualShadowDependencyBucketIndexByGroup.size()) {
+        m_virtualShadowDependencyBucketIndexByGroup.resize(
+            static_cast<size_t>(groupIndex) + 1u,
+            -1);
+    }
+    int32_t& bucketIndex =
+        m_virtualShadowDependencyBucketIndexByGroup[groupIndex];
+    if (bucketIndex < 0) {
+        std::vector<VirtualShadowDependency> dependencies;
+        if (!m_virtualShadowDependencyBucketPool.empty()) {
+            dependencies = std::move(
+                m_virtualShadowDependencyBucketPool.back());
+            m_virtualShadowDependencyBucketPool.pop_back();
+            std::fill(
+                dependencies.begin(),
+                dependencies.end(),
+                VirtualShadowDependency{});
+        }
+        bucketIndex = static_cast<int32_t>(
+            m_virtualShadowDependencyBuckets.size());
+        m_virtualShadowDependencyBuckets.push_back(
+            VirtualShadowDependencyBucket{
+                groupIndex,
+                0u,
+                std::move(dependencies)});
+        m_virtualShadowActiveDependencySlotCount +=
+            m_virtualShadowDependencyBuckets.back()
+                .dependencies.size();
+    }
+    return m_virtualShadowDependencyBuckets[
+        static_cast<size_t>(bucketIndex)];
+}
+
+std::vector<CLodStreamingSystem::VirtualShadowDependency>
+CLodStreamingSystem::RemoveVirtualShadowDependencyBucket(uint32_t groupIndex) {
+    if (groupIndex >= m_virtualShadowDependencyBucketIndexByGroup.size()) {
+        return {};
+    }
+    const int32_t bucketIndex =
+        m_virtualShadowDependencyBucketIndexByGroup[groupIndex];
+    if (bucketIndex < 0 ||
+        static_cast<size_t>(bucketIndex) >=
+            m_virtualShadowDependencyBuckets.size()) {
+        return {};
+    }
+
+    auto& removedBucket =
+        m_virtualShadowDependencyBuckets[static_cast<size_t>(bucketIndex)];
+    auto dependencies = std::move(removedBucket.dependencies);
+    m_virtualShadowActiveDependencyPairCount -= std::min<uint64_t>(
+        m_virtualShadowActiveDependencyPairCount,
+        removedBucket.dependencyCount);
+    m_virtualShadowActiveDependencySlotCount -= std::min<uint64_t>(
+        m_virtualShadowActiveDependencySlotCount,
+        dependencies.size());
+    const size_t lastIndex = m_virtualShadowDependencyBuckets.size() - 1u;
+    if (static_cast<size_t>(bucketIndex) != lastIndex) {
+        m_virtualShadowDependencyBuckets[static_cast<size_t>(bucketIndex)] =
+            std::move(m_virtualShadowDependencyBuckets[lastIndex]);
+        m_virtualShadowDependencyBucketIndexByGroup[
+            m_virtualShadowDependencyBuckets[static_cast<size_t>(bucketIndex)]
+                .groupIndex] = bucketIndex;
+    }
+    m_virtualShadowDependencyBuckets.pop_back();
+    m_virtualShadowDependencyBucketIndexByGroup[groupIndex] = -1;
+    return dependencies;
+}
+
+void CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies(
+    std::span<const CLodVirtualShadowPredictedPage> requests) {
+    if (requests.empty()) {
+        return;
+    }
     if (!SettingsManager::GetInstance()
              .getSettingGetter<bool>(
                  CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
         return;
     }
-    ZoneScopedN("CLodStreamingSystem::RecordVirtualShadowUpgradeDependency");
+    ZoneScopedN("CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies");
     const bool timingEnabled = CLodVsmUpgradeCpuTimingEnabled();
     const uint64_t timingBegin = timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
-    uint32_t groupIndex = request.sourceGroupGlobalIndex;
-    for (uint32_t hop = 0u; hop < 64u; ++hop) {
-        if (groupIndex >= m_virtualShadowResidencyGenerationByGroup.size()) {
+    const bool directHashIngestion =
+        CLodVsmDirectHashIngestionEnabled();
+    size_t expandedPairCount = 0u;
+
+    constexpr size_t parallelSortThreshold = 1u << 14u;
+    ++m_virtualShadowBatchSourceGeneration;
+    if (m_virtualShadowBatchSourceGeneration == 0u) {
+        m_virtualShadowBatchSourceGeneration = 1u;
+        std::fill(
+            m_virtualShadowBatchSourceGenerationByGroup.begin(),
+            m_virtualShadowBatchSourceGenerationByGroup.end(),
+            0u);
+    }
+    m_virtualShadowMissingGroupsScratch.clear();
+    m_virtualShadowExpandedScratch.clear();
+    if (!directHashIngestion) {
+        m_virtualShadowExpandedScratch.reserve(
+            std::max(
+                m_virtualShadowExpandedScratch.capacity(),
+                requests.size() * 4u));
+    }
+    const uint64_t inputPrepareEnd =
+        timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
+
+    for (uint32_t inputIndex = 0u;
+         inputIndex < requests.size();
+         ++inputIndex) {
+        const auto& request = requests[inputIndex];
+        const uint32_t sourceGroup = request.sourceGroupGlobalIndex;
+        if (sourceGroup >= m_virtualShadowResidencyGenerationByGroup.size()) {
             m_virtualShadowResidencyGenerationByGroup.resize(
-                static_cast<size_t>(groupIndex) + 1u,
+                static_cast<size_t>(sourceGroup) + 1u,
                 1u);
         }
-        if (IsGroupResident(groupIndex)) {
-            // Readback trails the authoritative streaming promotion by several
-            // frames.  If the originally missing group is already resident when
-            // its finalized fallback-page dependency reaches the CPU, the
-            // promotion callback has necessarily already run.  Queue the exact
-            // token now instead of silently losing the recovery event.
-            if (hop == 0u) {
-                ++m_virtualShadowUpgradeStats.dependenciesObserved;
-                std::vector<VirtualShadowDependency> bucket;
-                bucket.push_back(VirtualShadowDependency{
-                    CLodVirtualShadowPageToken{
-                        request.physicalPageIndex,
-                        request.allocationGeneration,
-                        request.contentGeneration,
-                        request.clipmapIndex,
-                        request.virtualAddress },
-                    m_virtualShadowResidencyGenerationByGroup[groupIndex] });
-                m_virtualShadowReadyDependencyBuckets.push_back(std::move(bucket));
-                ++m_virtualShadowUpgradeStats.lateResidentDependencies;
-                ++m_virtualShadowUpgradeStats.eventsQueued;
-                break;
-            }
-            uint32_t parentGroup = 0u;
-            if (!TryGetCachedParentGroup(groupIndex, parentGroup) ||
-                parentGroup == groupIndex) {
-                break;
-            }
-            groupIndex = parentGroup;
+        if (IsGroupResident(sourceGroup)) {
+            // Readback trails promotion. Queue the exact latest token directly
+            // when the source group is already resident.
+            QueueVirtualShadowReadyDependency(VirtualShadowDependency{
+                CLodVirtualShadowPageToken{
+                    request.physicalPageIndex,
+                    request.allocationGeneration,
+                    request.contentGeneration,
+                    request.clipmapIndex,
+                    request.virtualAddress},
+                m_virtualShadowResidencyGenerationByGroup[sourceGroup]});
+            ++m_virtualShadowUpgradeStats.dependenciesObserved;
+            ++m_virtualShadowUpgradeStats.lateResidentDependencies;
+            ++m_virtualShadowUpgradeStats.eventsQueued;
             continue;
         }
-        auto dependenciesIt = m_virtualShadowDependencies.find(groupIndex);
-        if (dependenciesIt == m_virtualShadowDependencies.end()) {
-            std::vector<VirtualShadowDependency> bucket;
-            if (!m_virtualShadowDependencyBucketPool.empty()) {
-                bucket = std::move(m_virtualShadowDependencyBucketPool.back());
-                m_virtualShadowDependencyBucketPool.pop_back();
-                bucket.clear();
-            }
-            dependenciesIt = m_virtualShadowDependencies.emplace(
-                groupIndex,
-                std::move(bucket)).first;
+
+        if (sourceGroup >=
+            m_virtualShadowBatchSourceGenerationByGroup.size()) {
+            const size_t newSize =
+                static_cast<size_t>(sourceGroup) + 1u;
+            m_virtualShadowBatchSourceGenerationByGroup.resize(
+                newSize,
+                0u);
+            m_virtualShadowBatchSourceChainOffsetByGroup.resize(
+                newSize,
+                0u);
+            m_virtualShadowBatchSourceChainCountByGroup.resize(
+                newSize,
+                0u);
         }
-        auto& dependencies = dependenciesIt->second;
-        ++m_virtualShadowUpgradeStats.dependenciesObserved;
-        const auto dependencyIt = std::lower_bound(
-            dependencies.begin(),
-            dependencies.end(),
-            request.physicalPageIndex,
-            [](const VirtualShadowDependency& dependency, uint32_t physicalPageIndex) {
-                return dependency.page.physicalPageIndex < physicalPageIndex;
-            });
-        const VirtualShadowDependency dependency{
+        if (m_virtualShadowBatchSourceGenerationByGroup[sourceGroup] !=
+            m_virtualShadowBatchSourceGeneration) {
+            const uint32_t chainOffset = static_cast<uint32_t>(
+                m_virtualShadowMissingGroupsScratch.size());
+            uint32_t groupIndex = sourceGroup;
+            for (uint32_t hop = 0u; hop < 64u; ++hop) {
+                if (groupIndex >=
+                    m_virtualShadowResidencyGenerationByGroup.size()) {
+                    m_virtualShadowResidencyGenerationByGroup.resize(
+                        static_cast<size_t>(groupIndex) + 1u,
+                        1u);
+                }
+                if (!IsGroupResident(groupIndex)) {
+                    uint32_t dependencyBucketIndex = UINT32_MAX;
+                    if (directHashIngestion) {
+                        GetOrCreateVirtualShadowDependencyBucket(
+                            groupIndex);
+                        dependencyBucketIndex = static_cast<uint32_t>(
+                            m_virtualShadowDependencyBucketIndexByGroup[
+                                groupIndex]);
+                    }
+                    m_virtualShadowMissingGroupsScratch.push_back(
+                        VirtualShadowMissingGroup{
+                            groupIndex,
+                            m_virtualShadowResidencyGenerationByGroup[
+                                groupIndex],
+                            dependencyBucketIndex});
+                }
+                uint32_t parentGroup = 0u;
+                if (!TryGetCachedParentGroup(groupIndex, parentGroup) ||
+                    parentGroup == groupIndex) {
+                    break;
+                }
+                groupIndex = parentGroup;
+            }
+            m_virtualShadowBatchSourceGenerationByGroup[sourceGroup] =
+                m_virtualShadowBatchSourceGeneration;
+            m_virtualShadowBatchSourceChainOffsetByGroup[sourceGroup] =
+                chainOffset;
+            m_virtualShadowBatchSourceChainCountByGroup[sourceGroup] =
+                static_cast<uint32_t>(
+                    m_virtualShadowMissingGroupsScratch.size()) -
+                chainOffset;
+        }
+
+        const uint32_t chainOffset =
+            m_virtualShadowBatchSourceChainOffsetByGroup[sourceGroup];
+        const uint32_t chainCount =
+            m_virtualShadowBatchSourceChainCountByGroup[sourceGroup];
+        VirtualShadowDependency dependency{
             CLodVirtualShadowPageToken{
                 request.physicalPageIndex,
                 request.allocationGeneration,
                 request.contentGeneration,
                 request.clipmapIndex,
-                request.virtualAddress },
-            m_virtualShadowResidencyGenerationByGroup[groupIndex]
-        };
-        if (dependencyIt != dependencies.end() &&
-            dependencyIt->page.physicalPageIndex == request.physicalPageIndex) {
-            *dependencyIt = dependency;
-            ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
-        } else {
-            dependencies.insert(dependencyIt, dependency);
+                request.virtualAddress},
+            0u};
+        for (uint32_t missingIndex = 0u;
+             missingIndex < chainCount;
+             ++missingIndex) {
+            const auto& missing =
+                m_virtualShadowMissingGroupsScratch[
+                    chainOffset + missingIndex];
+            if (directHashIngestion) {
+                auto& bucket = m_virtualShadowDependencyBuckets[
+                    missing.dependencyBucketIndex];
+                dependency.residencyGeneration =
+                    missing.residencyGeneration;
+                const bool inserted =
+                    InsertVirtualShadowDependency(
+                        bucket,
+                        dependency);
+                if (inserted) {
+                    ++m_virtualShadowActiveDependencyPairCount;
+                } else {
+                    ++m_virtualShadowUpgradeStats
+                          .dependenciesDeduplicated;
+                }
+            } else {
+                m_virtualShadowExpandedScratch.push_back(
+                    VirtualShadowExpandedDependency{
+                        (static_cast<uint64_t>(missing.groupIndex) <<
+                         32u) |
+                            request.physicalPageIndex,
+                        inputIndex,
+                        missing.residencyGeneration});
+            }
+            ++expandedPairCount;
+        }
+        m_virtualShadowUpgradeStats.dependenciesObserved +=
+            chainCount;
+    }
+    const uint64_t expansionEnd =
+        timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
+
+    uint64_t expandedSortEnd = expansionEnd;
+    uint64_t mergeEnd = expansionEnd;
+    if (!directHashIngestion) {
+    if (CLodVsmParallelCpuSortEnabled() &&
+        m_virtualShadowExpandedScratch.size() >=
+            parallelSortThreshold) {
+        tbb::parallel_sort(
+            m_virtualShadowExpandedScratch.begin(),
+            m_virtualShadowExpandedScratch.end(),
+            [](const VirtualShadowExpandedDependency& lhs,
+               const VirtualShadowExpandedDependency& rhs) {
+                return lhs.groupPageKey < rhs.groupPageKey;
+            });
+    } else {
+        std::sort(
+            m_virtualShadowExpandedScratch.begin(),
+            m_virtualShadowExpandedScratch.end(),
+            [](const VirtualShadowExpandedDependency& lhs,
+               const VirtualShadowExpandedDependency& rhs) {
+                return lhs.groupPageKey < rhs.groupPageKey;
+            });
+    }
+    expandedSortEnd =
+        timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
+
+    size_t expandedIndex = 0u;
+    while (expandedIndex < m_virtualShadowExpandedScratch.size()) {
+        const uint32_t groupIndex = static_cast<uint32_t>(
+            m_virtualShadowExpandedScratch[expandedIndex].groupPageKey >>
+            32u);
+        size_t groupEnd = expandedIndex;
+        m_virtualShadowMergeScratch.clear();
+        while (groupEnd < m_virtualShadowExpandedScratch.size() &&
+            static_cast<uint32_t>(
+                m_virtualShadowExpandedScratch[groupEnd].groupPageKey >>
+                32u) == groupIndex) {
+            size_t duplicateEnd = groupEnd + 1u;
+            size_t selectedIndex = groupEnd;
+            while (duplicateEnd < m_virtualShadowExpandedScratch.size() &&
+                m_virtualShadowExpandedScratch[duplicateEnd]
+                    .groupPageKey ==
+                    m_virtualShadowExpandedScratch[groupEnd]
+                        .groupPageKey) {
+                if (m_virtualShadowExpandedScratch[duplicateEnd]
+                        .inputIndex >
+                    m_virtualShadowExpandedScratch[selectedIndex]
+                        .inputIndex) {
+                    selectedIndex = duplicateEnd;
+                }
+                ++duplicateEnd;
+            }
+            const auto& selected =
+                m_virtualShadowExpandedScratch[selectedIndex];
+            const auto& selectedRequest = requests[selected.inputIndex];
+            m_virtualShadowMergeScratch.push_back(
+                VirtualShadowDependency{
+                    CLodVirtualShadowPageToken{
+                        selectedRequest.physicalPageIndex,
+                        selectedRequest.allocationGeneration,
+                        selectedRequest.contentGeneration,
+                        selectedRequest.clipmapIndex,
+                        selectedRequest.virtualAddress},
+                    selected.residencyGeneration});
+            m_virtualShadowUpgradeStats.dependenciesDeduplicated +=
+                duplicateEnd - groupEnd - 1u;
+            groupEnd = duplicateEnd;
         }
 
-        uint32_t parentGroup = 0u;
-        if (!TryGetCachedParentGroup(groupIndex, parentGroup) || parentGroup == groupIndex) {
-            break;
+        auto& bucket =
+            GetOrCreateVirtualShadowDependencyBucket(groupIndex);
+        for (const auto& dependency : m_virtualShadowMergeScratch) {
+            if (InsertVirtualShadowDependency(bucket, dependency)) {
+                ++m_virtualShadowActiveDependencyPairCount;
+            } else {
+                ++m_virtualShadowUpgradeStats.dependenciesDeduplicated;
+            }
         }
-        groupIndex = parentGroup;
+        expandedIndex = groupEnd;
     }
+    mergeEnd =
+        timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
+    }
+
+    m_virtualShadowUpgradeStats.activeDependencyGroups =
+        static_cast<uint32_t>(m_virtualShadowDependencyBuckets.size());
+    m_virtualShadowUpgradeStats.activeDependencyPairs =
+        static_cast<uint32_t>(
+            std::min<uint64_t>(
+                m_virtualShadowActiveDependencyPairCount,
+                UINT32_MAX));
+    m_virtualShadowUpgradeStats.inputRecords += requests.size();
+    m_virtualShadowUpgradeStats.uniqueInputRecords +=
+        requests.size();
+    m_virtualShadowUpgradeStats.expandedDependencyPairs +=
+        expandedPairCount;
+    m_virtualShadowUpgradeStats.peakActiveDependencyPairs = std::max(
+        m_virtualShadowUpgradeStats.peakActiveDependencyPairs,
+        m_virtualShadowUpgradeStats.activeDependencyPairs);
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.BatchInputs",
+        static_cast<int64_t>(requests.size()));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.BatchAcceptedInputs",
+        static_cast<int64_t>(requests.size()));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.BatchExpandedPairs",
+        static_cast<int64_t>(expandedPairCount));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.ActiveDependencyPairs",
+        static_cast<int64_t>(
+            m_virtualShadowActiveDependencyPairCount));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.ActiveDependencySlots",
+        static_cast<int64_t>(
+            m_virtualShadowActiveDependencySlotCount));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.ExpandedScratchBytes",
+        static_cast<int64_t>(
+            m_virtualShadowExpandedScratch.capacity() *
+            sizeof(VirtualShadowExpandedDependency)));
     if (timingEnabled) {
-        const uint64_t elapsedUs =
-            (CLodVsmUpgradeCpuNowNs() - timingBegin) / 1000u;
+        const uint64_t elapsedUs = (mergeEnd - timingBegin) / 1000u;
+        const auto clampUs = [](uint64_t value) {
+            return static_cast<uint32_t>(
+                std::min<uint64_t>(value, UINT32_MAX));
+        };
+        const uint32_t inputPrepareUs =
+            clampUs((inputPrepareEnd - timingBegin) / 1000u);
+        const uint32_t ancestryExpandUs =
+            clampUs((expansionEnd - inputPrepareEnd) / 1000u);
+        const uint32_t expandedSortUs =
+            clampUs((expandedSortEnd - expansionEnd) / 1000u);
+        const uint32_t dependencyMergeUs =
+            clampUs((mergeEnd - expandedSortEnd) / 1000u);
         m_virtualShadowDependencyTiming.Add(elapsedUs);
         TracyPlot(
-            "CLodStreaming.VSMUpgrade.DependencyRecordUs",
+            "CLodStreaming.VSMUpgrade.InputPrepareUs",
+            static_cast<int64_t>(inputPrepareUs));
+        TracyPlot(
+            "CLodStreaming.VSMUpgrade.AncestryExpandUs",
+            static_cast<int64_t>(ancestryExpandUs));
+        TracyPlot(
+            "CLodStreaming.VSMUpgrade.ExpandedSortUs",
+            static_cast<int64_t>(expandedSortUs));
+        TracyPlot(
+            "CLodStreaming.VSMUpgrade.DependencyMergeUs",
+            static_cast<int64_t>(dependencyMergeUs));
+        TracyPlot(
+            "CLodStreaming.VSMUpgrade.DependencyBatchUs",
             static_cast<int64_t>(elapsedUs));
+        if (!CLodVsmBenchmarkOutputPath().empty()) {
+            auto& benchmark = m_virtualShadowBenchmarkSamples;
+            benchmark.batchUs.push_back(clampUs(elapsedUs));
+            benchmark.inputPrepareUs.push_back(inputPrepareUs);
+            benchmark.ancestryExpandUs.push_back(ancestryExpandUs);
+            benchmark.expandedSortUs.push_back(expandedSortUs);
+            benchmark.dependencyMergeUs.push_back(
+                dependencyMergeUs);
+            benchmark.inputCounts.push_back(
+                static_cast<uint32_t>(
+                    std::min<size_t>(requests.size(), UINT32_MAX)));
+            benchmark.uniqueInputCounts.push_back(
+                static_cast<uint32_t>(std::min<size_t>(
+                    requests.size(),
+                    UINT32_MAX)));
+            benchmark.expandedPairCounts.push_back(
+                static_cast<uint32_t>(std::min<size_t>(
+                    expandedPairCount,
+                    UINT32_MAX)));
+            benchmark.inputRecords += requests.size();
+            benchmark.uniqueInputRecords +=
+                requests.size();
+            benchmark.expandedDependencyPairs +=
+                expandedPairCount;
+            benchmark.peakActiveDependencyPairs = std::max(
+                benchmark.peakActiveDependencyPairs,
+                m_virtualShadowActiveDependencyPairCount);
+            benchmark.peakActiveDependencySlots = std::max(
+                benchmark.peakActiveDependencySlots,
+                m_virtualShadowActiveDependencySlotCount);
+        }
     }
 }
 
@@ -2375,8 +3125,8 @@ void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIn
     ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion");
     const bool timingEnabled = CLodVsmUpgradeCpuTimingEnabled();
     const uint64_t timingBegin = timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
-    auto dependencyNode = m_virtualShadowDependencies.extract(groupIndex);
-    if (dependencyNode.empty() || dependencyNode.mapped().empty()) {
+    auto dependencies = RemoveVirtualShadowDependencyBucket(groupIndex);
+    if (dependencies.empty()) {
         ++m_virtualShadowUpgradeStats.promotionsWithoutDependencies;
         if (timingEnabled) {
             const uint64_t elapsedUs =
@@ -2390,9 +3140,23 @@ void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIn
     }
 
     ++m_virtualShadowUpgradeStats.promotionsWithDependencies;
-    m_virtualShadowUpgradeStats.eventsQueued += dependencyNode.mapped().size();
-    m_virtualShadowReadyDependencyBuckets.push_back(
-        std::move(dependencyNode.mapped()));
+    uint64_t queuedCount = 0u;
+    for (const auto& dependency : dependencies) {
+        if (dependency.page.physicalPageIndex == UINT32_MAX) {
+            continue;
+        }
+        QueueVirtualShadowReadyDependency(dependency);
+        ++queuedCount;
+    }
+    m_virtualShadowUpgradeStats.eventsQueued += queuedCount;
+    std::fill(
+        dependencies.begin(),
+        dependencies.end(),
+        VirtualShadowDependency{});
+    if (m_virtualShadowDependencyBucketPool.size() < 256u) {
+        m_virtualShadowDependencyBucketPool.push_back(
+            std::move(dependencies));
+    }
     if (timingEnabled) {
         const uint64_t elapsedUs =
             (CLodVsmUpgradeCpuNowNs() - timingBegin) / 1000u;
@@ -2407,7 +3171,7 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeUpload() {
     ZoneScopedN("CLodStreamingSystem::PublishVirtualShadowUpgradeUpload");
     const bool timingEnabled = CLodVsmUpgradeCpuTimingEnabled();
     const uint64_t timingBegin = timingEnabled ? CLodVsmUpgradeCpuNowNs() : 0u;
-    if (m_virtualShadowReadyDependencyBuckets.empty() ||
+    if (m_virtualShadowReadyTouchedPhysicalPages.empty() ||
         m_virtualShadowUpgradeUploadSlotCount == 0u) {
         return;
     }
@@ -2439,60 +3203,21 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeUpload() {
         return;
     }
 
-    if (m_virtualShadowReadyIndexByPhysicalPage.size() <
-        CLodVirtualShadowMaxPhysicalPageCount) {
-        m_virtualShadowReadyIndexByPhysicalPage.assign(
-            CLodVirtualShadowMaxPhysicalPageCount,
-            -1);
-    }
-
     auto* outputs =
         static_cast<CLodVirtualShadowUpgradeInvalidationInput*>(slot.mapped);
     uint32_t outputCount = 0u;
-    uint64_t duplicates = 0u;
-    while (!m_virtualShadowReadyDependencyBuckets.empty()) {
-        auto& bucket = m_virtualShadowReadyDependencyBuckets.front();
-        for (const auto& dependency : bucket) {
-            const uint32_t physicalPageIndex =
-                dependency.page.physicalPageIndex;
-            if (physicalPageIndex >= m_virtualShadowReadyIndexByPhysicalPage.size()) {
-                ++m_virtualShadowUpgradeStats.staleEvents;
-                continue;
-            }
-            int32_t& outputIndex =
-                m_virtualShadowReadyIndexByPhysicalPage[physicalPageIndex];
-            CLodVirtualShadowUpgradeInvalidationInput input{};
-            input.page = dependency.page;
-            input.sourceGroupGlobalIndex = 0u;
-            input.residencyGeneration = dependency.residencyGeneration;
-            if (outputIndex >= 0) {
-                outputs[static_cast<uint32_t>(outputIndex)] = input;
-                ++duplicates;
-                continue;
-            }
-            if (outputCount >= CLodVirtualShadowMaxInvalidationInputs) {
-                break;
-            }
-            outputIndex = static_cast<int32_t>(outputCount);
-            m_virtualShadowReadyTouchedPhysicalPages.push_back(
-                physicalPageIndex);
-            outputs[outputCount++] = input;
-        }
-        if (outputCount >= CLodVirtualShadowMaxInvalidationInputs) {
-            break;
-        }
-        auto completedBucket =
-            std::move(m_virtualShadowReadyDependencyBuckets.front());
-        m_virtualShadowReadyDependencyBuckets.pop_front();
-        completedBucket.clear();
-        if (m_virtualShadowDependencyBucketPool.size() < 256u) {
-            m_virtualShadowDependencyBucketPool.push_back(
-                std::move(completedBucket));
-        }
-    }
+    const size_t readyPageCount =
+        m_virtualShadowReadyTouchedPhysicalPages.size();
     for (uint32_t physicalPageIndex :
          m_virtualShadowReadyTouchedPhysicalPages) {
-        m_virtualShadowReadyIndexByPhysicalPage[physicalPageIndex] = -1;
+        const auto& dependency =
+            m_virtualShadowReadyByPhysicalPage[physicalPageIndex];
+        CLodVirtualShadowUpgradeInvalidationInput input{};
+        input.page = dependency.page;
+        input.sourceGroupGlobalIndex = 0u;
+        input.residencyGeneration = dependency.residencyGeneration;
+        outputs[outputCount++] = input;
+        m_virtualShadowReadyFlagsByPhysicalPage[physicalPageIndex] = 0u;
     }
     m_virtualShadowReadyTouchedPhysicalPages.clear();
 
@@ -2508,10 +3233,10 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeUpload() {
         return;
     }
     m_virtualShadowUpgradeStats.eventsUploaded += outputCount;
-    m_virtualShadowUpgradeStats.dependenciesDeduplicated += duplicates;
     TracyPlot("CLodStreaming.VSMUpgrade.PublishedInputs", static_cast<int64_t>(outputCount));
-    TracyPlot("CLodStreaming.VSMUpgrade.ReadyBuckets", static_cast<int64_t>(
-        m_virtualShadowReadyDependencyBuckets.size()));
+    TracyPlot(
+        "CLodStreaming.VSMUpgrade.ReadyPages",
+        static_cast<int64_t>(readyPageCount));
     if (timingEnabled) {
         const uint64_t elapsedUs =
             (CLodVsmUpgradeCpuNowNs() - timingBegin) / 1000u;
@@ -2615,19 +3340,38 @@ void CLodStreamingSystem::SetVirtualShadowFallbackFeedbackResources(
 void CLodStreamingSystem::ClearVirtualShadowUpgradeState() {
     ZoneScopedN("CLodStreamingSystem::ClearVirtualShadowUpgradeState");
     uint64_t cleared = 0u;
-    for (const auto& [groupIndex, dependencies] : m_virtualShadowDependencies) {
-        (void)groupIndex;
-        cleared += dependencies.size();
+    for (auto& bucket : m_virtualShadowDependencyBuckets) {
+        cleared += bucket.dependencyCount;
+        std::fill(
+            bucket.dependencies.begin(),
+            bucket.dependencies.end(),
+            VirtualShadowDependency{});
+        if (m_virtualShadowDependencyBucketPool.size() < 256u) {
+            m_virtualShadowDependencyBucketPool.push_back(
+                std::move(bucket.dependencies));
+        }
     }
-    for (const auto& dependencies : m_virtualShadowReadyDependencyBuckets) {
-        cleared += dependencies.size();
-    }
+    cleared += m_virtualShadowReadyTouchedPhysicalPages.size();
     m_virtualShadowUpgradeStats.clearedDependencies += cleared;
-    m_virtualShadowDependencies.clear();
-    m_virtualShadowReadyDependencyBuckets.clear();
+    m_virtualShadowDependencyBuckets.clear();
+    m_virtualShadowActiveDependencyPairCount = 0u;
+    m_virtualShadowActiveDependencySlotCount = 0u;
+    std::fill(
+        m_virtualShadowDependencyBucketIndexByGroup.begin(),
+        m_virtualShadowDependencyBucketIndexByGroup.end(),
+        -1);
     m_virtualShadowDependencyBucketPool.clear();
-    m_virtualShadowReadyIndexByPhysicalPage.clear();
+    m_virtualShadowReadyByPhysicalPage.clear();
+    m_virtualShadowReadyFlagsByPhysicalPage.clear();
     m_virtualShadowReadyTouchedPhysicalPages.clear();
+    m_virtualShadowReadbackBatchScratch.clear();
+    m_virtualShadowExpandedScratch.clear();
+    m_virtualShadowMissingGroupsScratch.clear();
+    m_virtualShadowBatchSourceGenerationByGroup.clear();
+    m_virtualShadowBatchSourceChainOffsetByGroup.clear();
+    m_virtualShadowBatchSourceChainCountByGroup.clear();
+    m_virtualShadowBatchSourceGeneration = 0u;
+    m_virtualShadowMergeScratch.clear();
     m_virtualShadowReadyUploadSlots.Reset();
     for (uint32_t index = 0u; index < m_virtualShadowUpgradeUploadSlotCount; ++index) {
         auto& slot = m_virtualShadowUpgradeUploadSlots[index];
@@ -2673,12 +3417,16 @@ bool CLodStreamingSystem::SetGroupResidentBit(uint32_t groupIndex, bool resident
         if (m_virtualShadowResidencyGenerationByGroup[groupIndex] == 0u) {
             m_virtualShadowResidencyGenerationByGroup[groupIndex] = 1u;
         }
-        if (auto dependencyIt =
-                m_virtualShadowDependencies.find(groupIndex);
-            dependencyIt != m_virtualShadowDependencies.end()) {
+        auto dependencies =
+            RemoveVirtualShadowDependencyBucket(groupIndex);
+        if (!dependencies.empty()) {
             m_virtualShadowUpgradeStats.clearedDependencies +=
-                dependencyIt->second.size();
-            m_virtualShadowDependencies.erase(dependencyIt);
+                dependencies.size();
+            dependencies.clear();
+            if (m_virtualShadowDependencyBucketPool.size() < 256u) {
+                m_virtualShadowDependencyBucketPool.push_back(
+                    std::move(dependencies));
+            }
         }
     }
     MarkStreamingNonResidentBitsDirtyWord(wordAddress);
@@ -2697,12 +3445,18 @@ bool CLodStreamingSystem::UsesPinnedStorage(uint32_t groupIndex) const {
     return m_groupsUsingPinnedStorage.count(groupIndex) != 0u;
 }
 
-bool CLodStreamingSystem::TryQueuePendingLoadRequest(const CLodStreamingRequest& req, uint32_t priority) {
+bool CLodStreamingSystem::TryQueuePendingLoadRequest(
+    const CLodStreamingRequest& req,
+    uint32_t priority,
+    uint64_t readbackDecodedNs) {
     const uint32_t groupIndex = req.groupGlobalIndex;
     if (groupIndex >= m_streamingStorageGroupCapacity) {
         EnsureStreamingStorageCapacity(groupIndex + 1u);
     }
-    RecordStreamingRequestObserved(groupIndex, priority);
+    RecordStreamingRequestObserved(
+        groupIndex,
+        priority,
+        readbackDecodedNs);
 
     if (IsGroupResident(groupIndex)) {
         RecordStreamingTerminal(groupIndex);
@@ -2748,7 +3502,10 @@ bool CLodStreamingSystem::TryQueuePendingLoadRequest(const CLodStreamingRequest&
     return true;
 }
 
-uint32_t CLodStreamingSystem::QueueLoadRequestWithParents(const CLodStreamingRequest& requestedLoad, uint32_t requestedPriority) {
+uint32_t CLodStreamingSystem::QueueLoadRequestWithParents(
+    const CLodStreamingRequest& requestedLoad,
+    uint32_t requestedPriority,
+    uint64_t readbackDecodedNs) {
     ZoneScopedN("CLodStreamingSystem::QueueLoadRequestWithParents");
 
     if (requestedLoad.groupGlobalIndex >= m_streamingStorageGroupCapacity) {
@@ -2785,12 +3542,18 @@ uint32_t CLodStreamingSystem::QueueLoadRequestWithParents(const CLodStreamingReq
             (requestedPriority == std::numeric_limits<uint32_t>::max())
                 ? requestedPriority
                 : requestedPriority + 1u;
-        if (TryQueuePendingLoadRequest(parentLoad, parentPriority)) {
+        if (TryQueuePendingLoadRequest(
+                parentLoad,
+                parentPriority,
+                readbackDecodedNs)) {
             queuedCount++;
         }
     }
 
-    if (TryQueuePendingLoadRequest(requestedLoad, requestedPriority)) {
+    if (TryQueuePendingLoadRequest(
+            requestedLoad,
+            requestedPriority,
+            readbackDecodedNs)) {
         queuedCount++;
     }
 
@@ -2825,6 +3588,8 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
     m_pageOwnerMeshPageKey.assign(totalPages, kInvalidCLodMeshPageKey);
     m_pageResidentGroups.clear();
     m_pageResidentGroups.resize(totalPages);
+    m_readyStreamingCompletionWaitersByPage.clear();
+    m_readyStreamingCompletionWaitersByPage.resize(totalPages);
     m_pageProtectedThisUpdate.assign(totalPages, 0u);
 
     {
@@ -2866,6 +3631,7 @@ void CLodStreamingSystem::EnsurePageTrackingCapacity(MeshManager* meshManager) {
         m_pendingPageOwnerSegment.resize(totalPages, 0u);
         m_pageOwnerMeshPageKey.resize(totalPages, kInvalidCLodMeshPageKey);
         m_pageResidentGroups.resize(totalPages);
+        m_readyStreamingCompletionWaitersByPage.resize(totalPages);
         m_pageProtectedThisUpdate.resize(totalPages, 0u);
     }
 }
@@ -3067,15 +3833,25 @@ void CLodStreamingSystem::EnsureStreamingDiagnosticsCapacity(uint32_t requiredGr
     }
 }
 
-void CLodStreamingSystem::RecordStreamingRequestObserved(uint32_t groupIndex, uint32_t priority) {
+void CLodStreamingSystem::RecordStreamingRequestObserved(
+    uint32_t groupIndex,
+    uint32_t priority,
+    uint64_t readbackDecodedNs) {
     EnsureStreamingDiagnosticsCapacity(groupIndex + 1u);
     auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
     if (!diag.active) {
         diag = {};
         diag.firstRequestTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.requestId = m_nextStreamingRequestTraceId++;
+            diag.readbackDecodedNs = readbackDecodedNs != 0u
+                ? readbackDecodedNs
+                : CLodRequestTraceNowNs();
+        }
         diag.active = true;
     }
     diag.priority = std::max(diag.priority, priority);
+    diag.lastRequestTick = m_streamingDiagnosticTick;
 }
 
 void CLodStreamingSystem::RecordStreamingRequestQueued(uint32_t groupIndex) {
@@ -3087,6 +3863,9 @@ void CLodStreamingSystem::RecordStreamingRequestQueued(uint32_t groupIndex) {
     }
     if (diag.cpuQueuedTick == 0u) {
         diag.cpuQueuedTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.cpuQueuedNs = CLodRequestTraceNowNs();
+        }
     }
 }
 
@@ -3110,6 +3889,9 @@ void CLodStreamingSystem::RecordStreamingDiskQueued(uint32_t groupIndex) {
     }
     if (diag.diskQueuedTick == 0u) {
         diag.diskQueuedTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.diskQueuedNs = CLodRequestTraceNowNs();
+        }
     }
 }
 
@@ -3122,14 +3904,29 @@ void CLodStreamingSystem::RecordStreamingCompletion(
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
     }
-    diag.diskCompletedTick = m_streamingDiagnosticTick;
     diag.uploadedBytes = completion.totalStreamedBytes;
-    if (completion.success) {
-        ++m_streamingDiagnosticsCompletionSuccessThisFrame;
-    } else {
-        ++m_streamingDiagnosticsCompletionFailedThisFrame;
+    if (diag.ioTaskQueuedNs == 0u) {
+        diag.ioTaskQueuedNs = completion.ioTaskQueuedNs;
     }
-    if (diag.diskQueuedTick != 0u) {
+    if (diag.ioTaskStartedNs == 0u) {
+        diag.ioTaskStartedNs = completion.ioTaskStartedNs;
+    }
+    if (diag.ioTaskCompletedNs == 0u) {
+        diag.ioTaskCompletedNs = completion.ioTaskCompletedNs;
+    }
+    const bool firstCompletion = diag.diskCompletedTick == 0u;
+    if (firstCompletion) {
+        diag.diskCompletedTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.diskCompletedNs = CLodRequestTraceNowNs();
+        }
+        if (completion.success) {
+            ++m_streamingDiagnosticsCompletionSuccessThisFrame;
+        } else {
+            ++m_streamingDiagnosticsCompletionFailedThisFrame;
+        }
+    }
+    if (diag.diskQueuedTick != 0u && firstCompletion) {
         const uint32_t ticks = static_cast<uint32_t>(
             std::min<uint64_t>(m_streamingDiagnosticTick - diag.diskQueuedTick, UINT32_MAX));
         ++m_streamingDiagnosticsDiskQueueToCompleteSamplesThisFrame;
@@ -3148,6 +3945,9 @@ void CLodStreamingSystem::RecordStreamingUploadQueued(uint32_t groupIndex, uint6
     }
     if (diag.uploadQueuedTick == 0u) {
         diag.uploadQueuedTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.uploadQueuedNs = CLodRequestTraceNowNs();
+        }
         ++m_streamingDiagnosticsUploadQueuedGroupsThisFrame;
         if (diag.active) {
             const uint32_t ticks = static_cast<uint32_t>(
@@ -3172,6 +3972,21 @@ void CLodStreamingSystem::RecordStreamingCommitQueued(uint32_t groupIndex) {
     }
     if (diag.commitQueuedTick == 0u) {
         diag.commitQueuedTick = m_streamingDiagnosticTick;
+        if (CLodRequestTraceEnabled()) {
+            diag.commitQueuedNs = CLodRequestTraceNowNs();
+        }
+    }
+}
+
+void CLodStreamingSystem::RecordStreamingUploadSubmitted(
+    uint32_t groupIndex) {
+    if (!CLodRequestTraceEnabled() ||
+        groupIndex >= m_streamingDiagnosticsByGroup.size()) {
+        return;
+    }
+    auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
+    if (diag.active && diag.uploadSubmittedNs == 0u) {
+        diag.uploadSubmittedNs = CLodRequestTraceNowNs();
     }
 }
 
@@ -3183,6 +3998,9 @@ void CLodStreamingSystem::RecordStreamingPromoted(uint32_t groupIndex) {
     }
 
     diag.residentTick = m_streamingDiagnosticTick;
+    if (CLodRequestTraceEnabled()) {
+        diag.residentNs = CLodRequestTraceNowNs();
+    }
     const uint32_t requestToResident = static_cast<uint32_t>(
         std::min<uint64_t>(diag.residentTick - diag.firstRequestTick, UINT32_MAX));
     ++m_streamingDiagnosticsRequestToResidentSamplesThisFrame;
@@ -3208,13 +4026,509 @@ void CLodStreamingSystem::RecordStreamingPromoted(uint32_t groupIndex) {
             std::max(m_streamingDiagnosticsCommitToResidentWorstThisFrame, ticks);
     }
 
+    CompleteStreamingRequestTrace(groupIndex, true);
     diag = {};
+}
+
+void CLodStreamingSystem::CompleteStreamingRequestTrace(
+    uint32_t groupIndex,
+    bool resident) {
+    if (!CLodRequestTraceEnabled() ||
+        groupIndex >= m_streamingDiagnosticsByGroup.size()) {
+        return;
+    }
+    const auto& diagnostics =
+        m_streamingDiagnosticsByGroup[groupIndex];
+    if (!diagnostics.active || diagnostics.requestId == 0u) {
+        return;
+    }
+    constexpr size_t maxCompletedTraces = 100000u;
+    if (m_completedStreamingRequestTraces.size() >=
+        maxCompletedTraces) {
+        ++m_droppedStreamingRequestTraceCount;
+        return;
+    }
+    m_completedStreamingRequestTraces.push_back(
+        CompletedStreamingRequestTrace{
+            groupIndex,
+            resident,
+            diagnostics});
 }
 
 void CLodStreamingSystem::RecordStreamingTerminal(uint32_t groupIndex) {
     if (groupIndex < m_streamingDiagnosticsByGroup.size()) {
+        CompleteStreamingRequestTrace(groupIndex, false);
         m_streamingDiagnosticsByGroup[groupIndex] = {};
     }
+}
+
+void CLodStreamingSystem::WriteStreamingRequestTraceReport() {
+    const std::string& outputPath = CLodRequestTraceOutputPath();
+    if (outputPath.empty()) {
+        return;
+    }
+
+    const auto durationUs = [](uint64_t begin, uint64_t end) {
+        return begin != 0u && end >= begin
+            ? (end - begin) / 1000u
+            : 0u;
+    };
+    const auto summarize = [](std::vector<uint64_t> values) {
+        nlohmann::json result{
+            {"count", values.size()},
+            {"mean_us", 0.0},
+            {"p50_us", 0u},
+            {"p95_us", 0u},
+            {"p99_us", 0u},
+            {"max_us", 0u}};
+        if (values.empty()) {
+            return result;
+        }
+        const uint64_t total =
+            std::accumulate(values.begin(), values.end(), uint64_t{0u});
+        std::sort(values.begin(), values.end());
+        const auto percentile = [&values](uint32_t percentileValue) {
+            const size_t index = std::min<size_t>(
+                values.size() - 1u,
+                ((values.size() - 1u) * percentileValue + 99u) /
+                    100u);
+            return values[index];
+        };
+        result["mean_us"] =
+            static_cast<double>(total) /
+            static_cast<double>(values.size());
+        result["p50_us"] = percentile(50u);
+        result["p95_us"] = percentile(95u);
+        result["p99_us"] = percentile(99u);
+        result["max_us"] = values.back();
+        return result;
+    };
+
+    std::vector<uint64_t> readbackToCpuQueue;
+    std::vector<uint64_t> cpuQueueWait;
+    std::vector<uint64_t> diskIo;
+    std::vector<uint64_t> ioTaskQueueWait;
+    std::vector<uint64_t> ioActiveRead;
+    std::vector<uint64_t> ioResultWait;
+    std::vector<uint64_t> completionToUpload;
+    std::vector<uint64_t> completionToCommit;
+    std::vector<uint64_t> uploadToCommit;
+    std::vector<uint64_t> commitToSubmit;
+    std::vector<uint64_t> submitToResident;
+    std::vector<uint64_t> commitToResident;
+    std::vector<uint64_t> requestToResident;
+    std::vector<uint64_t> liveRequestToResident;
+    std::vector<size_t> residentTraceIndices;
+    uint64_t terminalCount = 0u;
+    const auto appendDuration =
+        [&durationUs](
+            std::vector<uint64_t>& output,
+            uint64_t begin,
+            uint64_t end) {
+            if (begin != 0u && end >= begin) {
+                output.push_back(durationUs(begin, end));
+            }
+        };
+    for (size_t index = 0u;
+         index < m_completedStreamingRequestTraces.size();
+         ++index) {
+        const auto& trace = m_completedStreamingRequestTraces[index];
+        const auto& diag = trace.diagnostics;
+        if (!trace.resident) {
+            ++terminalCount;
+            continue;
+        }
+        residentTraceIndices.push_back(index);
+        appendDuration(
+            readbackToCpuQueue,
+            diag.readbackDecodedNs,
+            diag.cpuQueuedNs);
+        appendDuration(
+            cpuQueueWait,
+            diag.cpuQueuedNs,
+            diag.diskQueuedNs);
+        appendDuration(
+            diskIo,
+            diag.diskQueuedNs,
+            diag.diskCompletedNs);
+        appendDuration(
+            ioTaskQueueWait,
+            diag.ioTaskQueuedNs,
+            diag.ioTaskStartedNs);
+        appendDuration(
+            ioActiveRead,
+            diag.ioTaskStartedNs,
+            diag.ioTaskCompletedNs);
+        appendDuration(
+            ioResultWait,
+            diag.ioTaskCompletedNs,
+            diag.diskCompletedNs);
+        appendDuration(
+            completionToUpload,
+            diag.diskCompletedNs,
+            diag.uploadQueuedNs);
+        appendDuration(
+            completionToCommit,
+            diag.diskCompletedNs,
+            diag.commitQueuedNs);
+        appendDuration(
+            uploadToCommit,
+            diag.uploadQueuedNs,
+            diag.commitQueuedNs);
+        appendDuration(
+            commitToSubmit,
+            diag.commitQueuedNs,
+            diag.uploadSubmittedNs);
+        appendDuration(
+            submitToResident,
+            diag.uploadSubmittedNs,
+            diag.residentNs);
+        appendDuration(
+            commitToResident,
+            diag.commitQueuedNs,
+            diag.residentNs);
+        appendDuration(
+            requestToResident,
+            diag.readbackDecodedNs,
+            diag.residentNs);
+        if (diag.liveAtAdmission) {
+            appendDuration(
+                liveRequestToResident,
+                diag.readbackDecodedNs,
+                diag.residentNs);
+        }
+    }
+    std::sort(
+        residentTraceIndices.begin(),
+        residentTraceIndices.end(),
+        [this, &durationUs](size_t lhs, size_t rhs) {
+            const auto& lhsDiag =
+                m_completedStreamingRequestTraces[lhs].diagnostics;
+            const auto& rhsDiag =
+                m_completedStreamingRequestTraces[rhs].diagnostics;
+            return durationUs(
+                       lhsDiag.readbackDecodedNs,
+                       lhsDiag.residentNs) >
+                durationUs(
+                       rhsDiag.readbackDecodedNs,
+                       rhsDiag.residentNs);
+        });
+
+    const auto makeTraceJson =
+        [&durationUs](const CompletedStreamingRequestTrace& trace) {
+            const auto& diag = trace.diagnostics;
+            const uint64_t base = diag.readbackDecodedNs;
+            const auto offsetUs = [base](uint64_t timestamp) {
+                return timestamp != 0u && timestamp >= base
+                    ? (timestamp - base) / 1000u
+                    : 0u;
+            };
+            const std::array<std::pair<const char*, uint64_t>, 12u>
+                stages{{
+                    {"readback_to_cpu_queue",
+                     durationUs(
+                         diag.readbackDecodedNs,
+                         diag.cpuQueuedNs)},
+                    {"cpu_queue_wait",
+                     durationUs(diag.cpuQueuedNs, diag.diskQueuedNs)},
+                    {"disk_io",
+                     durationUs(diag.diskQueuedNs, diag.diskCompletedNs)},
+                    {"io_task_queue",
+                     durationUs(
+                         diag.ioTaskQueuedNs,
+                         diag.ioTaskStartedNs)},
+                    {"io_active_read",
+                     durationUs(
+                         diag.ioTaskStartedNs,
+                         diag.ioTaskCompletedNs)},
+                    {"io_result_wait",
+                     durationUs(
+                         diag.ioTaskCompletedNs,
+                         diag.diskCompletedNs)},
+                    {"completion_to_upload",
+                     durationUs(
+                         diag.diskCompletedNs,
+                         diag.uploadQueuedNs)},
+                    {"completion_to_commit",
+                     durationUs(
+                         diag.diskCompletedNs,
+                         diag.commitQueuedNs)},
+                    {"upload_to_commit",
+                     durationUs(
+                         diag.uploadQueuedNs,
+                         diag.commitQueuedNs)},
+                    {"commit_to_submit",
+                     durationUs(
+                         diag.commitQueuedNs,
+                         diag.uploadSubmittedNs)},
+                    {"submit_to_resident",
+                     durationUs(
+                         diag.uploadSubmittedNs,
+                         diag.residentNs)},
+                    {"commit_to_resident",
+                     durationUs(
+                         diag.commitQueuedNs,
+                         diag.residentNs)},
+                }};
+            const auto worstStage = std::max_element(
+                stages.begin(),
+                stages.end(),
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs.second < rhs.second;
+                });
+            return nlohmann::json{
+                {"request_id", diag.requestId},
+                {"group_index", trace.groupIndex},
+                {"outcome", trace.resident ? "resident" : "terminal"},
+                {"priority", diag.priority},
+                {"uploaded_bytes", diag.uploadedBytes},
+                {"duplicate_requests", diag.duplicateRequests},
+                {"preallocation_deferrals",
+                 diag.preallocationDeferrals},
+                {"promotion_deferrals", diag.promotionDeferrals},
+                {"live_at_admission", diag.liveAtAdmission},
+                {"total_us",
+                 durationUs(
+                     diag.readbackDecodedNs,
+                     trace.resident ? diag.residentNs
+                                    : std::max(
+                                          diag.diskCompletedNs,
+                                          diag.commitQueuedNs))},
+                {"worst_stage", worstStage->first},
+                {"worst_stage_us", worstStage->second},
+                {"stage_offsets_us",
+                 {
+                     {"readback_decoded", 0u},
+                     {"cpu_queued", offsetUs(diag.cpuQueuedNs)},
+                      {"disk_queued", offsetUs(diag.diskQueuedNs)},
+                      {"urgent_entered", offsetUs(diag.urgentEnteredNs)},
+                      {"rescue_entered", offsetUs(diag.rescueEnteredNs)},
+                      {"io_task_started", offsetUs(diag.ioTaskStartedNs)},
+                      {"io_task_queued", offsetUs(diag.ioTaskQueuedNs)},
+                      {"io_task_completed", offsetUs(diag.ioTaskCompletedNs)},
+                     {"disk_completed",
+                      offsetUs(diag.diskCompletedNs)},
+                     {"upload_queued", offsetUs(diag.uploadQueuedNs)},
+                     {"commit_queued", offsetUs(diag.commitQueuedNs)},
+                     {"upload_submitted",
+                      offsetUs(diag.uploadSubmittedNs)},
+                     {"resident", offsetUs(diag.residentNs)},
+                 }},
+                {"stage_durations_us",
+                 {
+                     {"readback_to_cpu_queue",
+                      durationUs(
+                          diag.readbackDecodedNs,
+                          diag.cpuQueuedNs)},
+                     {"cpu_queue_wait",
+                      durationUs(
+                          diag.cpuQueuedNs,
+                          diag.diskQueuedNs)},
+                      {"disk_io",
+                      durationUs(
+                          diag.diskQueuedNs,
+                           diag.diskCompletedNs)},
+                      {"io_task_queue",
+                       durationUs(
+                           diag.ioTaskQueuedNs,
+                           diag.ioTaskStartedNs)},
+                      {"io_active_read",
+                       durationUs(
+                           diag.ioTaskStartedNs,
+                           diag.ioTaskCompletedNs)},
+                      {"io_result_wait",
+                       durationUs(
+                           diag.ioTaskCompletedNs,
+                           diag.diskCompletedNs)},
+                     {"completion_to_commit",
+                      durationUs(
+                          diag.diskCompletedNs,
+                          diag.commitQueuedNs)},
+                     {"commit_to_submit",
+                      durationUs(
+                          diag.commitQueuedNs,
+                          diag.uploadSubmittedNs)},
+                     {"submit_to_resident",
+                      durationUs(
+                          diag.uploadSubmittedNs,
+                          diag.residentNs)},
+                 }},
+            };
+        };
+
+    nlohmann::json worstRequests = nlohmann::json::array();
+    const size_t worstCount =
+        std::min<size_t>(residentTraceIndices.size(), 100u);
+    for (size_t rank = 0u; rank < worstCount; ++rank) {
+        worstRequests.push_back(makeTraceJson(
+            m_completedStreamingRequestTraces[
+                residentTraceIndices[rank]]));
+    }
+    nlohmann::json traces = nlohmann::json::array();
+    for (const auto& trace : m_completedStreamingRequestTraces) {
+        traces.push_back(makeTraceJson(trace));
+    }
+
+    uint64_t activeCount = 0u;
+    const uint64_t reportNowNs = CLodRequestTraceNowNs();
+    nlohmann::json oldestActive = nlohmann::json::array();
+    std::vector<std::pair<uint64_t, uint32_t>> activeByAge;
+    for (uint32_t groupIndex = 0u;
+         groupIndex < m_streamingDiagnosticsByGroup.size();
+         ++groupIndex) {
+        const auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
+        if (!diag.active || diag.requestId == 0u) {
+            continue;
+        }
+        ++activeCount;
+        activeByAge.emplace_back(
+            durationUs(diag.readbackDecodedNs, reportNowNs),
+            groupIndex);
+    }
+    std::sort(activeByAge.begin(), activeByAge.end(), std::greater{});
+    for (size_t index = 0u;
+         index < std::min<size_t>(activeByAge.size(), 100u);
+         ++index) {
+        const auto [ageUs, groupIndex] = activeByAge[index];
+        const auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
+        const char* currentStage = "readback";
+        uint64_t currentStageStartNs = diag.readbackDecodedNs;
+        if (diag.uploadSubmittedNs != 0u) {
+            currentStage = "upload_submitted";
+            currentStageStartNs = diag.uploadSubmittedNs;
+        } else if (diag.commitQueuedNs != 0u) {
+            currentStage = "commit_waiting_submission";
+            currentStageStartNs = diag.commitQueuedNs;
+        } else if (diag.diskCompletedNs != 0u) {
+            currentStage = "completion_processing";
+            currentStageStartNs = diag.diskCompletedNs;
+        } else if (diag.diskQueuedNs != 0u) {
+            currentStage = "disk_io";
+            currentStageStartNs = diag.diskQueuedNs;
+        } else if (diag.cpuQueuedNs != 0u) {
+            currentStage = "cpu_queue";
+            currentStageStartNs = diag.cpuQueuedNs;
+        }
+        oldestActive.push_back({
+            {"request_id", diag.requestId},
+            {"group_index", groupIndex},
+            {"age_us", ageUs},
+            {"current_stage", currentStage},
+            {"current_stage_age_us",
+             durationUs(currentStageStartNs, reportNowNs)},
+            {"priority", diag.priority},
+            {"duplicate_requests", diag.duplicateRequests},
+            {"preallocation_deferrals", diag.preallocationDeferrals},
+            {"promotion_deferrals", diag.promotionDeferrals},
+        });
+    }
+
+    uint64_t traceStartNs = reportNowNs;
+    uint64_t residentBytes = 0u;
+    for (size_t index : residentTraceIndices) {
+        const auto& diag =
+            m_completedStreamingRequestTraces[index].diagnostics;
+        if (diag.readbackDecodedNs != 0u) {
+            traceStartNs = std::min(traceStartNs, diag.readbackDecodedNs);
+        }
+        residentBytes += diag.uploadedBytes;
+    }
+    for (const auto& diag : m_streamingDiagnosticsByGroup) {
+        if (diag.active && diag.readbackDecodedNs != 0u) {
+            traceStartNs =
+                std::min(traceStartNs, diag.readbackDecodedNs);
+        }
+    }
+    const double measuredSeconds =
+        reportNowNs > traceStartNs
+        ? static_cast<double>(reportNowNs - traceStartNs) / 1.0e9
+        : 0.0;
+    size_t sharedPageWaiterCount = 0u;
+    for (const auto& waiters :
+         m_readyStreamingCompletionWaitersByPage) {
+        sharedPageWaiterCount += waiters.size();
+    }
+
+    nlohmann::json report{
+        {"schema_version", 2u},
+        {"clock", "steady_clock_nanoseconds"},
+        {"counts",
+         {
+             {"resident", residentTraceIndices.size()},
+             {"terminal", terminalCount},
+             {"active_at_shutdown", activeCount},
+             {"dropped", m_droppedStreamingRequestTraceCount},
+         }},
+        {"summary_us",
+         {
+             {"readback_to_cpu_queue", summarize(readbackToCpuQueue)},
+             {"cpu_queue_wait", summarize(cpuQueueWait)},
+             {"disk_io", summarize(diskIo)},
+              {"io_task_queue", summarize(ioTaskQueueWait)},
+              {"io_active_read", summarize(ioActiveRead)},
+              {"io_result_wait", summarize(ioResultWait)},
+             {"completion_to_upload",
+              summarize(completionToUpload)},
+             {"completion_to_commit",
+              summarize(completionToCommit)},
+             {"upload_to_commit", summarize(uploadToCommit)},
+             {"commit_to_submit", summarize(commitToSubmit)},
+             {"submit_to_resident", summarize(submitToResident)},
+             {"commit_to_resident", summarize(commitToResident)},
+              {"request_to_resident", summarize(requestToResident)},
+              {"live_request_to_resident",
+               summarize(liveRequestToResident)},
+         }},
+        {"throughput",
+         {
+             {"measured_seconds", measuredSeconds},
+             {"resident_requests_per_second",
+              measuredSeconds > 0.0
+                  ? static_cast<double>(
+                        residentTraceIndices.size()) /
+                        measuredSeconds
+                  : 0.0},
+             {"resident_mib_per_second",
+              measuredSeconds > 0.0
+                  ? static_cast<double>(residentBytes) /
+                        (1024.0 * 1024.0 * measuredSeconds)
+                  : 0.0},
+         }},
+        {"scheduler",
+         {
+             {"io_admission_depth", m_streamingIoAdmissionDepth},
+             {"io_worker_count", m_streamingIoWorkerCount},
+             {"io_task_batch_size", m_streamingIoTaskBatchSize},
+             {"aging_enabled", CLodSchedulerAgingEnabled()},
+             {"live_background_lanes_enabled",
+              CLodLiveBackgroundLanesEnabled()},
+             {"ready_completions",
+              m_readyStreamingCompletionsByGroup.size()},
+             {"shared_page_waiters", sharedPageWaiterCount},
+         }},
+        {"worst_resident_requests", std::move(worstRequests)},
+        {"oldest_active_requests", std::move(oldestActive)},
+        {"requests", std::move(traces)}};
+
+    const std::filesystem::path path(outputPath);
+    std::error_code directoryError;
+    if (path.has_parent_path()) {
+        std::filesystem::create_directories(
+            path.parent_path(),
+            directoryError);
+    }
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        spdlog::error(
+            "CLOD request trace: failed to open report '{}'",
+            outputPath);
+        return;
+    }
+    output << report.dump(2) << '\n';
+    spdlog::info(
+        "CLOD request trace: wrote {} completed requests to '{}'",
+        m_completedStreamingRequestTraces.size(),
+        outputPath);
 }
 
 void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationStats& stats) {
@@ -3531,6 +4845,10 @@ bool CLodStreamingSystem::IsPhysicalPagePinnedStorage(uint32_t page) const {
 void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshManager, bool pinned) {
     if (page == ~0u || page >= m_pageState.size()) {
         return;
+    }
+    if (page < m_pageOwnerMeshPageKey.size()) {
+        WakeReadyCompletionsForPage(
+            page, m_pageOwnerMeshPageKey[page]);
     }
 
     if (m_pageState[page] == CLodPhysicalPageState::Retiring) {
@@ -4942,6 +6260,7 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
         if (!IsPhysicalPagePinnedStorage(page)) {
             m_pageLru.Insert(page);
         }
+        WakeReadyCompletionsForPage(page, key);
     }
 
     return !waitingForSharedPendingPage;
@@ -4999,12 +6318,22 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_streamingResidencyInitializedBitsCpu.resize(newWordCount, 0u);
     m_usedGroupsBitsCpu.resize(newWordCount, 0u);
     m_parentGroupByGroup.resize(newCapacity, UINT32_MAX);
+    m_virtualShadowDependencyBucketIndexByGroup.resize(newCapacity, -1);
+    m_virtualShadowResidencyGenerationByGroup.resize(newCapacity, 1u);
+    m_virtualShadowBatchSourceGenerationByGroup.resize(newCapacity, 0u);
+    m_virtualShadowBatchSourceChainOffsetByGroup.resize(newCapacity, 0u);
+    m_virtualShadowBatchSourceChainCountByGroup.resize(newCapacity, 0u);
     m_groupLastUsedTick.resize(newCapacity, 0u);
     m_streamingRequestStateByGroup.resize(newCapacity, StreamingRequestState::None);
     m_pendingLoadPriorityByGroup.resize(newCapacity, 0u);
     m_pendingStreamingRequestHeapIndexByGroup.resize(newCapacity, UINT32_MAX);
     m_pendingStreamingRequestGenerationByGroup.resize(newCapacity, 0u);
     m_waitingForPagesRequestIndexByGroup.resize(newCapacity, UINT32_MAX);
+    m_readyStreamingCompletionRetryQueuedByGroup.resize(newCapacity, 0u);
+    m_readyStreamingCompletionWaitPageByGroup.resize(newCapacity, UINT32_MAX);
+    m_readyStreamingCompletionWaitKeyByGroup.resize(
+        newCapacity, kInvalidCLodMeshPageKey);
+    m_readyStreamingCompletionWaitGenerationByGroup.resize(newCapacity, 0u);
     EnsureStreamingDiagnosticsCapacity(newCapacity);
     m_streamingStorageGroupCapacity = newCapacity;
 
@@ -5203,6 +6532,7 @@ void CLodStreamingSystem::ObserveUploadBatchTickets() {
                 for (uint32_t groupIndex : batch->affectedGroups) {
                     if (m_pendingResidencyCommitGroups.contains(groupIndex)) {
                         m_pendingResidencyUploadFenceByGroup.insert_or_assign(groupIndex, fenceValue);
+                        RecordStreamingUploadSubmitted(groupIndex);
                     }
                 }
                 for (uint32_t page : batch->retiringPages) {
@@ -5591,6 +6921,14 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
         ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress::EraseReadyCompletion");
         m_readyStreamingCompletionsByGroup.erase(groupIndex);
     }
+    if (groupIndex < m_readyStreamingCompletionRetryQueuedByGroup.size()) {
+        m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 0u;
+    }
+    if (groupIndex < m_readyStreamingCompletionWaitPageByGroup.size()) {
+        m_readyStreamingCompletionWaitPageByGroup[groupIndex] = UINT32_MAX;
+        m_readyStreamingCompletionWaitKeyByGroup[groupIndex] =
+            kInvalidCLodMeshPageKey;
+    }
     if (groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()) {
         m_pendingStreamingRequestHeapIndexByGroup[groupIndex] = UINT32_MAX;
     }
@@ -5647,6 +6985,9 @@ void CLodStreamingSystem::PushOrUpdatePendingStreamingRequest(const CLodStreamin
     auto higherPriority = [this](uint32_t lhsIndex, uint32_t rhsIndex) {
         const auto& lhs = m_pendingStreamingRequests[lhsIndex];
         const auto& rhs = m_pendingStreamingRequests[rhsIndex];
+        if (lhs.liveDemand != rhs.liveDemand) {
+            return lhs.liveDemand;
+        }
         if (lhs.priority != rhs.priority) {
             return lhs.priority > rhs.priority;
         }
@@ -5696,6 +7037,9 @@ void CLodStreamingSystem::PushOrUpdatePendingStreamingRequest(const CLodStreamin
         pending.request = req;
         pending.priority = priority;
         pending.generation = generation;
+        pending.firstQueuedNs = CLodRequestTraceNowNs();
+        pending.lastObservedTick = m_streamingDiagnosticTick;
+        pending.liveDemand = true;
         m_pendingStreamingRequests.push_back(pending);
         heapIndex = static_cast<uint32_t>(m_pendingStreamingRequests.size() - 1u);
         m_pendingStreamingRequestHeapIndexByGroup[groupIndex] = heapIndex;
@@ -5707,6 +7051,13 @@ void CLodStreamingSystem::PushOrUpdatePendingStreamingRequest(const CLodStreamin
     m_pendingStreamingRequests[heapIndex].request = req;
     m_pendingStreamingRequests[heapIndex].priority = priority;
     m_pendingStreamingRequests[heapIndex].generation = generation;
+    if (m_pendingStreamingRequests[heapIndex].firstQueuedNs == 0u) {
+        m_pendingStreamingRequests[heapIndex].firstQueuedNs =
+            CLodRequestTraceNowNs();
+    }
+    m_pendingStreamingRequests[heapIndex].lastObservedTick =
+        m_streamingDiagnosticTick;
+    m_pendingStreamingRequests[heapIndex].liveDemand = true;
     if (priority > oldPriority) {
         siftUp(heapIndex);
     } else if (priority < oldPriority) {
@@ -5809,6 +7160,9 @@ void CLodStreamingSystem::RequeuePendingStreamingRequest(const PendingStreamingR
     auto higherPriority = [this](uint32_t lhsIndex, uint32_t rhsIndex) {
         const auto& lhs = m_pendingStreamingRequests[lhsIndex];
         const auto& rhs = m_pendingStreamingRequests[rhsIndex];
+        if (lhs.liveDemand != rhs.liveDemand) {
+            return lhs.liveDemand;
+        }
         if (lhs.priority != rhs.priority) {
             return lhs.priority > rhs.priority;
         }
@@ -5834,14 +7188,18 @@ void CLodStreamingSystem::RequeuePendingStreamingRequest(const PendingStreamingR
     }
 }
 
-bool CLodStreamingSystem::PopHighestPriorityPendingStreamingRequest(PendingStreamingRequest& outRequest) {
-    if (m_pendingStreamingRequests.empty()) {
+bool CLodStreamingSystem::RemovePendingStreamingRequestAt(
+    uint32_t removeIndex,
+    PendingStreamingRequest& outRequest) {
+    if (removeIndex >= m_pendingStreamingRequests.size()) {
         return false;
     }
-
     auto higherPriority = [this](uint32_t lhsIndex, uint32_t rhsIndex) {
         const auto& lhs = m_pendingStreamingRequests[lhsIndex];
         const auto& rhs = m_pendingStreamingRequests[rhsIndex];
+        if (lhs.liveDemand != rhs.liveDemand) {
+            return lhs.liveDemand;
+        }
         if (lhs.priority != rhs.priority) {
             return lhs.priority > rhs.priority;
         }
@@ -5854,10 +7212,10 @@ bool CLodStreamingSystem::PopHighestPriorityPendingStreamingRequest(PendingStrea
         m_pendingStreamingRequestHeapIndexByGroup[m_pendingStreamingRequests[b].request.groupGlobalIndex] = b;
     };
 
-    outRequest = m_pendingStreamingRequests.front();
+    outRequest = m_pendingStreamingRequests[removeIndex];
     const uint32_t groupIndex = outRequest.request.groupGlobalIndex;
     if (groupIndex < m_pendingStreamingRequestHeapIndexByGroup.size()
-        && m_pendingStreamingRequestHeapIndexByGroup[groupIndex] == 0u) {
+        && m_pendingStreamingRequestHeapIndexByGroup[groupIndex] == removeIndex) {
         m_pendingStreamingRequestHeapIndexByGroup[groupIndex] = UINT32_MAX;
     }
 
@@ -5866,11 +7224,31 @@ bool CLodStreamingSystem::PopHighestPriorityPendingStreamingRequest(PendingStrea
         return true;
     }
 
-    m_pendingStreamingRequests.front() = m_pendingStreamingRequests.back();
-    m_pendingStreamingRequests.pop_back();
-    m_pendingStreamingRequestHeapIndexByGroup[m_pendingStreamingRequests.front().request.groupGlobalIndex] = 0u;
+    if (removeIndex == m_pendingStreamingRequests.size() - 1u) {
+        m_pendingStreamingRequests.pop_back();
+        return true;
+    }
 
-    uint32_t index = 0u;
+    m_pendingStreamingRequests[removeIndex] =
+        m_pendingStreamingRequests.back();
+    m_pendingStreamingRequests.pop_back();
+    m_pendingStreamingRequestHeapIndexByGroup[
+        m_pendingStreamingRequests[removeIndex].request.groupGlobalIndex] =
+        removeIndex;
+
+    uint32_t index = removeIndex;
+    while (index > 0u) {
+        const uint32_t parent = (index - 1u) >> 1u;
+        if (!higherPriority(index, parent)) {
+            break;
+        }
+        swapEntries(index, parent);
+        index = parent;
+    }
+    if (index != removeIndex) {
+        return true;
+    }
+
     for (;;) {
         const uint32_t left = index * 2u + 1u;
         const uint32_t right = left + 1u;
@@ -5891,6 +7269,157 @@ bool CLodStreamingSystem::PopHighestPriorityPendingStreamingRequest(PendingStrea
     return true;
 }
 
+void CLodStreamingSystem::RefreshStreamingUrgentCandidates() {
+    constexpr uint64_t kUrgentAgeNs = 500'000'000ull;
+    m_streamingUrgentCandidateGroups.clear();
+    m_streamingUrgentCandidateCursor = 0u;
+    const bool agingEnabled = CLodSchedulerAgingEnabled();
+    const bool liveLanesEnabled = CLodLiveBackgroundLanesEnabled();
+    if (!agingEnabled && !liveLanesEnabled) {
+        return;
+    }
+    const uint64_t nowNs = CLodRequestTraceNowNs();
+    for (auto& pending : m_pendingStreamingRequests) {
+        if (pending.firstQueuedNs == 0u || pending.firstQueuedNs > nowNs) {
+            continue;
+        }
+        const uint64_t ageNs = nowNs - pending.firstQueuedNs;
+        const uint32_t groupIndex = pending.request.groupGlobalIndex;
+        const bool liveDemand =
+            groupIndex < m_streamingDiagnosticsByGroup.size() &&
+            m_streamingDiagnosticsByGroup[groupIndex].lastRequestTick != 0u &&
+            m_streamingDiagnosticTick <=
+                m_streamingDiagnosticsByGroup[groupIndex].lastRequestTick +
+                    static_cast<uint64_t>(m_streamingReadbackRingSize + 2u);
+        pending.liveDemand = !liveLanesEnabled || liveDemand;
+        if (agingEnabled && liveDemand && ageNs >= kUrgentAgeNs) {
+            m_streamingUrgentCandidateGroups.push_back(groupIndex);
+        }
+    }
+    if (liveLanesEnabled) {
+        std::make_heap(
+            m_pendingStreamingRequests.begin(),
+            m_pendingStreamingRequests.end(),
+            [](const PendingStreamingRequest& lhs,
+               const PendingStreamingRequest& rhs) {
+                if (lhs.liveDemand != rhs.liveDemand) {
+                    return !lhs.liveDemand && rhs.liveDemand;
+                }
+                if (lhs.priority != rhs.priority) {
+                    return lhs.priority < rhs.priority;
+                }
+                return lhs.request.groupGlobalIndex >
+                    rhs.request.groupGlobalIndex;
+            });
+        for (uint32_t index = 0u;
+             index < static_cast<uint32_t>(
+                 m_pendingStreamingRequests.size());
+             ++index) {
+            const uint32_t groupIndex =
+                m_pendingStreamingRequests[index]
+                    .request.groupGlobalIndex;
+            if (groupIndex <
+                m_pendingStreamingRequestHeapIndexByGroup.size()) {
+                m_pendingStreamingRequestHeapIndexByGroup[groupIndex] =
+                    index;
+            }
+        }
+    }
+    std::sort(
+        m_streamingUrgentCandidateGroups.begin(),
+        m_streamingUrgentCandidateGroups.end(),
+        [this](uint32_t lhs, uint32_t rhs) {
+            const uint32_t lhsIndex =
+                lhs < m_pendingStreamingRequestHeapIndexByGroup.size()
+                ? m_pendingStreamingRequestHeapIndexByGroup[lhs]
+                : UINT32_MAX;
+            const uint32_t rhsIndex =
+                rhs < m_pendingStreamingRequestHeapIndexByGroup.size()
+                ? m_pendingStreamingRequestHeapIndexByGroup[rhs]
+                : UINT32_MAX;
+            const uint64_t lhsNs =
+                lhsIndex < m_pendingStreamingRequests.size()
+                ? m_pendingStreamingRequests[lhsIndex].firstQueuedNs
+                : UINT64_MAX;
+            const uint64_t rhsNs =
+                rhsIndex < m_pendingStreamingRequests.size()
+                ? m_pendingStreamingRequests[rhsIndex].firstQueuedNs
+                : UINT64_MAX;
+            return lhsNs != rhsNs ? lhsNs < rhsNs : lhs < rhs;
+        });
+}
+
+bool CLodStreamingSystem::PopHighestPriorityPendingStreamingRequest(
+    PendingStreamingRequest& outRequest) {
+    if (m_pendingStreamingRequests.empty()) {
+        return false;
+    }
+
+    constexpr uint64_t kRescueAgeNs = 2'000'000'000ull;
+    const uint64_t nowNs = CLodRequestTraceNowNs();
+    const bool urgentTurn =
+        (m_streamingSchedulerDispatchOrdinal++ & 3ull) == 0ull;
+    uint32_t selectedIndex = 0u;
+    bool selectedRescue = false;
+    bool selectedUrgent = false;
+    const uint32_t normalPriority =
+        m_pendingStreamingRequests.front().priority;
+    if (urgentTurn) {
+        while (m_streamingUrgentCandidateCursor <
+               m_streamingUrgentCandidateGroups.size()) {
+            const uint32_t candidateGroup =
+                m_streamingUrgentCandidateGroups[
+                    m_streamingUrgentCandidateCursor++];
+            if (candidateGroup >=
+                m_pendingStreamingRequestHeapIndexByGroup.size()) {
+                continue;
+            }
+            const uint32_t candidateIndex =
+                m_pendingStreamingRequestHeapIndexByGroup[candidateGroup];
+            if (candidateIndex >= m_pendingStreamingRequests.size() ||
+                m_pendingStreamingRequests[candidateIndex]
+                        .request.groupGlobalIndex != candidateGroup) {
+                continue;
+            }
+            const auto& candidate =
+                m_pendingStreamingRequests[candidateIndex];
+            const uint64_t ageNs =
+                candidate.firstQueuedNs != 0u &&
+                    candidate.firstQueuedNs <= nowNs
+                ? nowNs - candidate.firstQueuedNs
+                : 0u;
+            const bool rescue = ageNs >= kRescueAgeNs;
+            const uint32_t boost = rescue ? 32u : 8u;
+            if (static_cast<uint64_t>(candidate.priority) + boost <
+                normalPriority) {
+                continue;
+            }
+            selectedIndex = candidateIndex;
+            selectedRescue = rescue;
+            selectedUrgent = !rescue;
+            break;
+        }
+    }
+
+    const uint32_t groupIndex =
+        m_pendingStreamingRequests[selectedIndex].request.groupGlobalIndex;
+    if (groupIndex < m_streamingDiagnosticsByGroup.size()) {
+        auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
+        diag.liveAtAdmission =
+            diag.lastRequestTick != 0u &&
+            m_streamingDiagnosticTick <=
+                diag.lastRequestTick +
+                    static_cast<uint64_t>(m_streamingReadbackRingSize + 2u);
+        if (selectedRescue && diag.rescueEnteredNs == 0u) {
+            diag.rescueEnteredNs = nowNs;
+        }
+        else if (selectedUrgent && diag.urgentEnteredNs == 0u) {
+            diag.urgentEnteredNs = nowNs;
+        }
+    }
+    return RemovePendingStreamingRequestAt(selectedIndex, outRequest);
+}
+
 void CLodStreamingSystem::SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage) {
     if (usesPinnedStorage) {
         m_groupsUsingPinnedStorage.insert(groupIndex);
@@ -5898,6 +7427,61 @@ void CLodStreamingSystem::SetGroupUsesPinnedStorage(uint32_t groupIndex, bool us
     }
 
     m_groupsUsingPinnedStorage.erase(groupIndex);
+}
+
+void CLodStreamingSystem::ParkReadyCompletionForSharedPage(
+    uint32_t groupIndex,
+    uint32_t page,
+    uint64_t key,
+    MeshManager::CLodDiskStreamingCompletion&& completion) {
+    m_readyStreamingCompletionsByGroup[groupIndex] = std::move(completion);
+    if (groupIndex >= m_readyStreamingCompletionWaitPageByGroup.size() ||
+        page >= m_readyStreamingCompletionWaitersByPage.size()) {
+        if (groupIndex < m_readyStreamingCompletionRetryQueuedByGroup.size() &&
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
+            m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
+        }
+        return;
+    }
+
+    m_readyStreamingCompletionWaitPageByGroup[groupIndex] = page;
+    m_readyStreamingCompletionWaitKeyByGroup[groupIndex] = key;
+    m_readyStreamingCompletionWaitGenerationByGroup[groupIndex] =
+        groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
+        ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
+        : 0u;
+    m_readyStreamingCompletionWaitersByPage[page].push_back(groupIndex);
+}
+
+void CLodStreamingSystem::WakeReadyCompletionsForPage(
+    uint32_t page,
+    uint64_t key) {
+    if (page >= m_readyStreamingCompletionWaitersByPage.size()) {
+        return;
+    }
+    auto waiters = std::move(
+        m_readyStreamingCompletionWaitersByPage[page]);
+    m_readyStreamingCompletionWaitersByPage[page].clear();
+    for (uint32_t groupIndex : waiters) {
+        if (groupIndex >= m_readyStreamingCompletionWaitPageByGroup.size() ||
+            m_readyStreamingCompletionWaitPageByGroup[groupIndex] != page ||
+            m_readyStreamingCompletionWaitKeyByGroup[groupIndex] != key ||
+            groupIndex >= m_pendingStreamingRequestGenerationByGroup.size() ||
+            m_readyStreamingCompletionWaitGenerationByGroup[groupIndex] !=
+                m_pendingStreamingRequestGenerationByGroup[groupIndex] ||
+            m_readyStreamingCompletionsByGroup.find(groupIndex) ==
+                m_readyStreamingCompletionsByGroup.end()) {
+            continue;
+        }
+        m_readyStreamingCompletionWaitPageByGroup[groupIndex] = UINT32_MAX;
+        m_readyStreamingCompletionWaitKeyByGroup[groupIndex] =
+            kInvalidCLodMeshPageKey;
+        if (m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
+            m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
+        }
+    }
 }
 
 void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager) {
@@ -5912,12 +7496,24 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
         ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::DrainCompletions");
         meshManager->DrainCompletedCLodDiskStreamingGroups(completions);
     }
-    if (!m_readyStreamingCompletionsByGroup.empty()) {
-        completions.reserve(completions.size() + m_readyStreamingCompletionsByGroup.size());
-        for (auto& [_, completion] : m_readyStreamingCompletionsByGroup) {
-            completions.push_back(std::move(completion));
+    if (!m_readyStreamingCompletionRetryGroups.empty()) {
+        completions.reserve(
+            completions.size() +
+            m_readyStreamingCompletionRetryGroups.size());
+        for (uint32_t groupIndex : m_readyStreamingCompletionRetryGroups) {
+            if (groupIndex <
+                m_readyStreamingCompletionRetryQueuedByGroup.size()) {
+                m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 0u;
+            }
+            auto readyIt =
+                m_readyStreamingCompletionsByGroup.find(groupIndex);
+            if (readyIt == m_readyStreamingCompletionsByGroup.end()) {
+                continue;
+            }
+            completions.push_back(std::move(readyIt->second));
+            m_readyStreamingCompletionsByGroup.erase(readyIt);
         }
-        m_readyStreamingCompletionsByGroup.clear();
+        m_readyStreamingCompletionRetryGroups.clear();
     }
 
     {
@@ -5986,6 +7582,12 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                                 m_streamingResidencyInitializedBitsCpu[wordAddress] &= ~bitMask;
                             }
                             m_readyStreamingCompletionsByGroup[groupIndex] = std::move(completion);
+                            if (groupIndex <
+                                    m_readyStreamingCompletionRetryQueuedByGroup.size() &&
+                                m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
+                                m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
+                                m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
+                            }
                             m_pendingResidencyCommitGroups.erase(groupIndex);
                             continue;
                         }
@@ -6005,6 +7607,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 }
 
                 bool waitsForPendingSharedPage = false;
+                uint32_t pendingSharedPage = UINT32_MAX;
+                uint64_t pendingSharedKey = kInvalidCLodMeshPageKey;
                 for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const bool reusedPage =
                         seg < static_cast<uint32_t>(preAlloc.segmentNeedsFetch.size()) &&
@@ -6022,12 +7626,18 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     if (!IsPhysicalPageResidentForKey(page, key) &&
                         IsPhysicalPagePendingForKey(page, key)) {
                         waitsForPendingSharedPage = true;
+                        pendingSharedPage = page;
+                        pendingSharedKey = key;
                         break;
                     }
                 }
                 if (waitsForPendingSharedPage) {
                     m_preAllocatedPagesByGroup[groupIndex] = std::move(preAlloc);
-                    m_readyStreamingCompletionsByGroup[groupIndex] = std::move(completion);
+                    ParkReadyCompletionForSharedPage(
+                        groupIndex,
+                        pendingSharedPage,
+                        pendingSharedKey,
+                        std::move(completion));
                     m_pendingResidencyCommitGroups.erase(groupIndex);
                     continue;
                 }
@@ -6335,10 +7945,13 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
         ZoneScopedN("CLodStreamingSystem::PollCompletedReadbackSlots::QueueLoadRequests");
         {
             ZoneScopedN("CLodStreamingWorker::QueueLoadRequests");
-            for (const auto& [groupIndex, priority] : m_readbackBatchScratch) {
+            for (const auto& decoded : m_readbackBatchScratch) {
                 CLodStreamingRequest req{};
-                req.groupGlobalIndex = groupIndex;
-                queuedCount += QueueLoadRequestWithParents(req, priority);
+                req.groupGlobalIndex = decoded.groupIndex;
+                queuedCount += QueueLoadRequestWithParents(
+                    req,
+                    decoded.priority,
+                    decoded.decodedNs);
             }
         }
     }
@@ -6422,11 +8035,12 @@ void CLodStreamingSystem::StreamingWorkerMain() {
             {
                 ZoneScopedN("CLodStreamingWorker::DecodeReadbackSlots");
 
-                std::vector<std::pair<uint32_t, uint32_t>> decodedRequests;
+                std::vector<DecodedStreamingRequest> decodedRequests;
                 std::vector<uint32_t> sumSeenGroups;
                 std::vector<uint32_t> decodedUsedGroups;
                 bool decodedAnyCompletedSlot = false;
                 const bool sortedFeedback = m_parallelSortAvailable;
+                m_virtualShadowReadbackBatchScratch.clear();
 
                 auto beginDecodeGeneration = [](uint32_t& generation, std::vector<uint32_t>& seen) {
                     ++generation;
@@ -6451,6 +8065,10 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         continue;
                     }
                     decodedAnyCompletedSlot = true;
+                    const uint64_t slotDecodeNs =
+                        CLodRequestTraceEnabled()
+                        ? CLodRequestTraceNowNs()
+                        : 0u;
 
                     uint32_t virtualShadowDependencyCount = 0u;
                     if (slot.virtualShadowDependencyCountStaging) {
@@ -6478,12 +8096,11 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                         if (mapped) {
                             const auto* dependencies =
                                 static_cast<const CLodVirtualShadowPredictedPage*>(mapped);
-                            for (uint32_t dependencyIndex = 0u;
-                                dependencyIndex < virtualShadowDependencyCount;
-                                ++dependencyIndex) {
-                                RecordVirtualShadowUpgradeDependency(
-                                    dependencies[dependencyIndex]);
-                            }
+                            m_virtualShadowReadbackBatchScratch.insert(
+                                m_virtualShadowReadbackBatchScratch.end(),
+                                dependencies,
+                                dependencies +
+                                    virtualShadowDependencyCount);
                             apiResource.Unmap(0, 0);
                         }
                     }
@@ -6514,12 +8131,17 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                                     const size_t newSize = static_cast<size_t>(groupIndex) + 1u;
                                     m_decodeSeenGenerationByGroup.resize(newSize, 0u);
                                     m_decodePriorityAccumByGroup.resize(newSize, 0u);
+                                    m_decodeFirstSeenNsByGroup.resize(
+                                        newSize,
+                                        0u);
                                 }
 
                                 if (m_priorityMode == CLodPriorityMode::Sum || !sortedFeedback) {
                                     if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
                                         m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
                                         m_decodePriorityAccumByGroup[groupIndex] = priority;
+                                        m_decodeFirstSeenNsByGroup[groupIndex] =
+                                            slotDecodeNs;
                                         sumSeenGroups.push_back(groupIndex);
                                     }
                                     else if (m_priorityMode == CLodPriorityMode::Sum) {
@@ -6532,7 +8154,11 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                                 else if (m_decodeSeenGenerationByGroup[groupIndex] != m_decodeSeenGeneration) {
                                     // Sorted feedback is highest-priority first, so the first occurrence wins.
                                     m_decodeSeenGenerationByGroup[groupIndex] = m_decodeSeenGeneration;
-                                    decodedRequests.emplace_back(groupIndex, priority);
+                                    decodedRequests.push_back(
+                                        DecodedStreamingRequest{
+                                            groupIndex,
+                                            priority,
+                                            slotDecodeNs});
                                 }
                             }
                             apiResource.Unmap(0, 0);
@@ -6630,16 +8256,23 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     slot.state.store(ReadbackStagingSlot::State::Free, std::memory_order_release);
                 }
 
+                RecordVirtualShadowUpgradeDependencies(
+                    m_virtualShadowReadbackBatchScratch);
+
                 if (!sumSeenGroups.empty()) {
                     decodedRequests.reserve(decodedRequests.size() + sumSeenGroups.size());
                     for (uint32_t groupIndex : sumSeenGroups) {
-                        decodedRequests.emplace_back(groupIndex, m_decodePriorityAccumByGroup[groupIndex]);
+                        decodedRequests.push_back(
+                            DecodedStreamingRequest{
+                                groupIndex,
+                                m_decodePriorityAccumByGroup[groupIndex],
+                                m_decodeFirstSeenNsByGroup[groupIndex]});
                     }
                     std::sort(
                         decodedRequests.begin(),
                         decodedRequests.end(),
                         [](const auto& a, const auto& b) {
-                            return a.second > b.second;
+                            return a.priority > b.priority;
                         });
                 }
 
@@ -6652,20 +8285,25 @@ void CLodStreamingSystem::StreamingWorkerMain() {
                     m_decodedUsedGroupsBatch.reserve(m_decodedUsedGroupsBatch.size() + decodedUsedGroups.size());
 
                     // Push cross-slot deduplicated results for the streaming service.
-                    for (const auto& [groupIndex, priority] : decodedRequests) {
-                        m_decodedReadbackBatch.emplace_back(groupIndex, priority);
+                    for (const auto& decoded : decodedRequests) {
+                        m_decodedReadbackBatch.push_back(decoded);
                     }
                     for (const uint32_t g : decodedUsedGroups) {
                         m_decodedUsedGroupsBatch.push_back(g);
                     }
                 }
 
-                if (!decodedRequests.empty() || !decodedUsedGroups.empty()) {
+                if (!decodedRequests.empty() || !decodedUsedGroups.empty() ||
+                    !m_virtualShadowReadbackBatchScratch.empty()) {
                     RequestStreamingFrameWork();
                 }
 
                 TracyPlot("CLodStreaming.Worker.DecodedRequests", static_cast<int64_t>(decodedRequests.size()));
                 TracyPlot("CLodStreaming.Worker.DecodedUsedGroups", static_cast<int64_t>(decodedUsedGroups.size()));
+                TracyPlot(
+                    "CLodStreaming.Worker.DecodedVsmDependencies",
+                    static_cast<int64_t>(
+                        m_virtualShadowReadbackBatchScratch.size()));
             }
 
             lastProcessed = decodeTarget;
@@ -6724,12 +8362,11 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
             static_cast<int64_t>(completedFenceValue < armedFenceValue ? 1 : 0));
         if (completedFenceValue < armedFenceValue) {
             // Do not block this worker for the render queue. The per-frame
-            // publisher will request another service tick after the signal,
-            // while returning here keeps the armed launch set frozen.
-            return;
+            // publisher will request another service tick after the signal.
+            // Keep the armed launch set frozen, but continue servicing CPU
+            // completions, page retirement, and unrelated uploads.
         }
-
-        {
+        else {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::LaunchArmedDirectStorageBatch");
             meshManager->LaunchPendingCLodDirectStorageUploads(
                 m_directStorageLaunchFenceHandle,
@@ -6824,20 +8461,39 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
 
     auto* pool = meshManager ? meshManager->GetCLodPagePool() : nullptr;
     const uint64_t pageSize = pool ? pool->GetPageSize() : 0u;
+    uint32_t admissionBudget = budget;
+    if (meshManager != nullptr) {
+        const auto admissionStats = meshManager->GetCLodStreamingDebugStats();
+        m_streamingIoAdmissionDepth = std::max<uint32_t>(
+            admissionStats.ioAdmissionTarget, 1u);
+        m_streamingIoWorkerCount = admissionStats.ioWorkerCount;
+        m_streamingIoTaskBatchSize = admissionStats.ioTaskBatchSize;
+        admissionBudget =
+            admissionStats.queuedOrInFlightGroups < m_streamingIoAdmissionDepth
+            ? std::min<uint32_t>(
+                budget,
+                m_streamingIoAdmissionDepth -
+                    admissionStats.queuedOrInFlightGroups)
+            : 0u;
+        TracyPlot(
+            "CLodStreaming.Service.IoAdmissionBudget",
+            static_cast<int64_t>(admissionBudget));
+    }
 
     struct QueuedStreamingCandidate {
         uint32_t groupIndex = 0u;
         MeshManager::CLodGroupDiskIOBatchRequest request;
     };
     std::vector<QueuedStreamingCandidate> diskIoBatch;
-    diskIoBatch.reserve(budget);
+    diskIoBatch.reserve(admissionBudget);
 
     uint32_t processed = 0;
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::SelectAndPrepareRequests");
         {
             ZoneScopedN("CLodStreamingWorker::SelectAndPrepareRequests");
-            while (processed < budget && !m_pendingStreamingRequests.empty()) {
+            RefreshStreamingUrgentCandidates();
+            while (processed < admissionBudget && !m_pendingStreamingRequests.empty()) {
             PendingStreamingRequest pending{};
             {
                 ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::PopPendingRequest");

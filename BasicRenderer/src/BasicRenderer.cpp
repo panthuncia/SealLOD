@@ -968,6 +968,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         commandLine.find("--clod-graph-rebuild-smoke-test") != std::string_view::npos;
     const bool clodStreamingCleanupTest =
         commandLine.find("--clod-streaming-cleanup-test") != std::string_view::npos;
+    const bool clodVsmCpuBenchmark =
+        commandLine.find("--clod-vsm-cpu-benchmark") !=
+        std::string_view::npos;
     const bool clodStreamingStressTest =
         commandLine.find("--clod-streaming-stress-test") != std::string_view::npos ||
         clodStreamingCleanupTest;
@@ -1035,6 +1038,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     if (clodStreamingStressTest) {
         SettingsManager::GetInstance().getSettingSetter<uint32_t>(
             "clodStreamingCpuUploadBudgetRequests")(256u);
+    }
+    if (clodVsmCpuBenchmark) {
+        spdlog::info(
+            "CLOD VSM CPU benchmark armed: deterministic residency camera "
+            "sweeps through frame 480 with graph rebuilds disabled.");
     }
     if (graphRebuildSmokeTest) {
         SettingsManager::GetInstance().getSettingSetter<bool>("renderGraphCompileDumpEnabled")(true);
@@ -1426,6 +1434,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     }
                 }
             }
+            else if (clodVsmCpuBenchmark) {
+                // Follow a smooth, projection-preserving arc around the
+                // normal demo view. Unlike the streaming stress test, this
+                // never teleports the camera, forces an aspect ratio, or
+                // places the camera near the scene origin.
+                constexpr XMFLOAT3 benchmarkTarget{
+                    100.0f,
+                    5.0f,
+                    0.0f};
+                constexpr float benchmarkRadius = 65.0f;
+                const float cycle =
+                    static_cast<float>(frameIndex % 480u) / 480.0f;
+                const float sweepAngle =
+                    XM_PI + std::sin(cycle * XM_2PI) * 0.25f;
+                const XMFLOAT3 benchmarkPosition{
+                    benchmarkTarget.x +
+                        std::cos(sweepAngle) * benchmarkRadius,
+                    10.0f +
+                        std::sin(cycle * XM_2PI * 2.0f) * 2.0f,
+                    benchmarkTarget.z +
+                        std::sin(sweepAngle) * benchmarkRadius};
+                const XMFLOAT3 benchmarkUp{0.0f, 1.0f, 0.0f};
+                const XMMATRIX benchmarkView = XMMatrixLookAtRH(
+                    XMLoadFloat3(&benchmarkPosition),
+                    XMLoadFloat3(&benchmarkTarget),
+                    XMLoadFloat3(&benchmarkUp));
+                const XMMATRIX benchmarkModel =
+                    XMMatrixInverse(nullptr, benchmarkView);
+                const XMVECTOR benchmarkRotation =
+                    XMQuaternionNormalize(
+                        XMQuaternionRotationMatrix(benchmarkModel));
+                auto& benchmarkCamera =
+                    renderer.GetCurrentScene()->GetPrimaryCamera();
+                benchmarkCamera
+                    .set<Components::Position>(
+                        {benchmarkPosition.x,
+                         benchmarkPosition.y,
+                         benchmarkPosition.z})
+                    .set<Components::Rotation>(benchmarkRotation)
+                    .set<Components::Matrix>(benchmarkModel);
+            }
             if (graphRebuildSmokeTest && frameIndex == 120) {
                 if (pipelineReplacementSmokeTest) {
                     spdlog::info("Pipeline replacement smoke test: disabling bloom at frame {}.", frameIndex);
@@ -1474,6 +1523,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
             if (clodStreamingStressTest && frameIndex == 1200) {
                 spdlog::info("CLod streaming stress test completed after {} frames; closing.", frameIndex);
+                PostMessage(hwnd, WM_CLOSE, 0, 0);
+            }
+            if (clodVsmCpuBenchmark && frameIndex == 480) {
+                spdlog::info(
+                    "CLOD VSM CPU benchmark completed after {} frames; "
+                    "closing.",
+                    frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
             if (clodStreamingCleanupTest && frameIndex == 180) {

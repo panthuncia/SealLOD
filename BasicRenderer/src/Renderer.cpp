@@ -157,6 +157,34 @@ bool ReadTruthyEnvironmentFlag(const char* name)
     return result;
 }
 
+uint32_t ReadBoundedEnvironmentUint(
+    const char* name,
+    uint32_t fallback,
+    uint32_t minimum,
+    uint32_t maximum)
+{
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) {
+        return fallback;
+    }
+
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    const bool valid = end != value && *end == '\0';
+    std::free(value);
+    if (!valid) {
+        return fallback;
+    }
+    if (parsed < minimum) {
+        return minimum;
+    }
+    if (parsed > maximum) {
+        return maximum;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
 struct TerrainRvtTelemetryStatsReadback {
     uint32_t heightRequests;
     uint32_t materialRequests;
@@ -689,7 +717,9 @@ void Renderer::Initialize(
         rg::runtime::SetActiveDescriptorService(descriptorService);
     }
     ResourceManager::GetInstance().Initialize();
-    TaskSchedulerManager::GetInstance().Initialize(16);
+    const uint32_t ioWorkerCount = ReadBoundedEnvironmentUint(
+        "SARP_CLOD_IO_WORKER_COUNT", 16u, 1u, 64u);
+    TaskSchedulerManager::GetInstance().Initialize(ioWorkerCount);
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
         TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
     });
