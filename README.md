@@ -177,8 +177,8 @@ and the oldest requests still active at shutdown.
 The request trace separates I/O admission, task-queue, active-read, and
 result-service latency, and reports the subset that was still live when
 admitted. Use `-IoAdmissionDepth` to sweep the bounded I/O window. The retained
-large-scene default is derived as 24 jobs per I/O worker (384 with the demo's
-16 workers). `-SchedulerAging On` and `-LiveBackgroundLanes On` enable the
+large-scene default is derived as 48 jobs per I/O worker (1,536 with the
+demo's 32 workers). `-SchedulerAging On` and `-LiveBackgroundLanes On` enable the
 experimental fairness policies; they remain off by default because the
 reference workload showed lower throughput and worse p99 latency.
 
@@ -186,10 +186,20 @@ Use `-IoWorkerCount` to sweep the process-wide I/O pool and
 `-IoTaskBatchSize` to sweep CLOD request grouping independently. CLOD mapped
 reads default to batches of eight requests per scheduler task; results from a
 task are published under one lock and generate one streaming-owner wake.
-The renderer keeps 16 I/O workers by default because the large-scene sweep
-showed no repeatable benefit from oversubscribing the short mapped reads.
+The renderer uses 32 I/O workers by default. Late-allocation mapped-view
+requests warm cache ranges on those workers, so the retained large-scene
+configuration benefits from the additional concurrency.
 `SARP_CLOD_IO_WORKER_COUNT` and `SARP_CLOD_IO_TASK_BATCH_SIZE` expose the same
 controls for normal launches.
+
+Ordinary CLOD requests use late physical-page allocation by default. Their
+payloads are represented by stable shared mapped-container views, so up to
+1,536 admitted/staged groups retain only compact metadata rather than copied
+page blobs. `SARP_CLOD_LATE_CPU_PAGE_ALLOCATION`,
+`SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT`, and
+`SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET` control this path. Pinned groups and GPU
+DirectStorage destinations continue to reserve their required physical pages
+before submission.
 
 The same mode can be enabled for a normal demo launch by setting
 `SARP_CLOD_REQUEST_TRACE_OUTPUT` to the desired JSON path. Tracing is disabled

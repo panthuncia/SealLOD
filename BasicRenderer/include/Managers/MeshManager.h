@@ -79,6 +79,7 @@ public:
 
 	enum class CLodDiskStreamingPayloadKind : uint8_t {
 		CpuPageBlobs,
+		CpuMappedPageViews,
 		GpuPagesReady,
 		ReusedExistingPages,
 	};
@@ -91,6 +92,9 @@ public:
 		std::vector<uint32_t> meshPageIndices;
 		std::vector<bool> segmentNeedsFetch;
 		std::vector<std::vector<std::byte>> pageBlobs;
+		std::shared_ptr<const CLodCache::MappedContainerLease> mappedContainer;
+		std::vector<uint32_t> mappedPageBlobSizes;
+		std::vector<uint64_t> mappedPageBlobOffsets;
 		std::vector<uint32_t> preAllocatedPages;
 		std::vector<PagePool::PageAllocation> pageAllocations;
 		std::vector<GroupPageMapEntry> pageMapEntries;
@@ -197,6 +201,7 @@ public:
 		std::vector<bool> segmentNeedsFetch;
 		std::vector<uint32_t> preAllocatedPages;
 		std::vector<uint32_t> childLayoutPrefetchGroups;
+		bool deferCpuPayloadCopy = false;
 		uint32_t priority = 0u;
 		std::optional<CLodCache::GroupPayloadLayoutMetadata> prefetchedLayout;
 	};
@@ -382,6 +387,7 @@ private:
 		std::vector<bool> segmentNeedsFetch; // true = fetch from disk; false = reuse existing slab data
 		std::vector<uint32_t> preAllocatedPages; // page IDs pre-allocated by the LRU
 		std::vector<uint32_t> childLayoutPrefetchGroups;
+		bool deferCpuPayloadCopy = false;
 		uint64_t generation = 0; // generation at time of request
 		uint32_t priority = 0; // streaming priority for I/O dispatch ordering
 		uint64_t ioTaskQueuedNs = 0;
@@ -399,6 +405,9 @@ private:
 		std::vector<uint64_t> directStoragePageBlobOffsets;
 		bool directStorageGpuUploadPending = false;
 		std::vector<std::vector<std::byte>> pageBlobs;
+		std::shared_ptr<const CLodCache::MappedContainerLease> mappedContainer;
+		std::vector<uint32_t> mappedPageBlobSizes;
+		std::vector<uint64_t> mappedPageBlobOffsets;
 		std::vector<uint32_t> preAllocatedPages; // forwarded from request
 		std::vector<CLodPrefetchedChildLayout> prefetchedChildLayouts;
 		uint64_t generation = 0; // generation at time of request

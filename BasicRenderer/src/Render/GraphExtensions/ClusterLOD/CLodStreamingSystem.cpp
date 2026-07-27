@@ -157,6 +157,94 @@ bool CLodLiveBackgroundLanesEnabled()
     return enabled;
 }
 
+bool CLodLateCpuPageAllocationEnabled()
+{
+    static const bool enabled = [] {
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_LATE_CPU_PAGE_ALLOCATION") != 0 ||
+            value == nullptr) {
+            return true;
+        }
+        const std::string_view text(value);
+        const bool result =
+            text == "1" || text == "true" || text == "TRUE" ||
+            text == "on" || text == "ON";
+        std::free(value);
+        return result;
+    }();
+    return enabled;
+}
+
+uint32_t CLodStagedPayloadGroupLimit()
+{
+    static const uint32_t limit = [] {
+        uint32_t result = 1536u;
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT") == 0 &&
+            value != nullptr) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(value, &end, 10);
+            if (end != value && parsed > 0u) {
+                result = std::clamp<uint32_t>(
+                    static_cast<uint32_t>(parsed), 1u, 16384u);
+            }
+        }
+        std::free(value);
+        return result;
+    }();
+    return limit;
+}
+
+uint32_t CLodPageCreditRetryBudget()
+{
+    static const uint32_t budget = [] {
+        uint32_t result = 2048u;
+        char* value = nullptr;
+        size_t length = 0u;
+        if (_dupenv_s(
+                &value,
+                &length,
+                "SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET") == 0 &&
+            value != nullptr) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(value, &end, 10);
+            if (end != value && parsed > 0u) {
+                result = std::clamp<uint32_t>(
+                    static_cast<uint32_t>(parsed), 1u, 4096u);
+            }
+        }
+        std::free(value);
+        return result;
+    }();
+    return budget;
+}
+
+uint64_t CLodReadyCompletionStorageBytes(
+    const MeshManager::CLodDiskStreamingCompletion& completion)
+{
+    uint64_t bytes = 0u;
+    for (const auto& blob : completion.pageBlobs) {
+        bytes += blob.capacity();
+    }
+    bytes += completion.mappedPageBlobSizes.capacity() *
+        sizeof(uint32_t);
+    bytes += completion.mappedPageBlobOffsets.capacity() *
+        sizeof(uint64_t);
+    bytes += completion.meshPageIndices.capacity() *
+        sizeof(uint32_t);
+    bytes += completion.preAllocatedPages.capacity() *
+        sizeof(uint32_t);
+    return bytes;
+}
+
 uint64_t CLodRequestTraceNowNs()
 {
     return static_cast<uint64_t>(
@@ -1198,6 +1286,8 @@ CLodStreamingSystem::CLodStreamingSystem() {
     m_pendingStreamingRequestGenerationByGroup.assign(m_streamingStorageGroupCapacity, 0u);
     m_readyStreamingCompletionRetryQueuedByGroup.assign(
         m_streamingStorageGroupCapacity, 0u);
+    m_readyStreamingCompletionPageCreditWaitQueuedByGroup.assign(
+        m_streamingStorageGroupCapacity, 0u);
     m_readyStreamingCompletionWaitPageByGroup.assign(
         m_streamingStorageGroupCapacity, UINT32_MAX);
     m_readyStreamingCompletionWaitKeyByGroup.assign(
@@ -1609,9 +1699,18 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     m_preAllocatedPagesByGroup.clear();
     m_readyStreamingCompletionsByGroup.clear();
     m_readyStreamingCompletionRetryGroups.clear();
+    m_readyStreamingCompletionPageCreditWaitGroups.clear();
+    m_readyStreamingCompletionPageCreditWaitCursor = 0u;
+    m_readyStreamingCompletionBytes = 0u;
+    m_peakReadyStreamingCompletionBytes = 0u;
+    m_peakReadyStreamingCompletionCount = 0u;
     std::fill(
         m_readyStreamingCompletionRetryQueuedByGroup.begin(),
         m_readyStreamingCompletionRetryQueuedByGroup.end(),
+        0u);
+    std::fill(
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup.begin(),
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup.end(),
         0u);
     std::fill(
         m_readyStreamingCompletionWaitPageByGroup.begin(),
@@ -4499,6 +4598,25 @@ void CLodStreamingSystem::WriteStreamingRequestTraceReport() {
              {"io_admission_depth", m_streamingIoAdmissionDepth},
              {"io_worker_count", m_streamingIoWorkerCount},
              {"io_task_batch_size", m_streamingIoTaskBatchSize},
+             {"late_cpu_page_allocation_enabled",
+              CLodLateCpuPageAllocationEnabled()},
+             {"staged_payload_group_limit",
+              CLodStagedPayloadGroupLimit()},
+             {"staged_payload_groups",
+              m_readyStreamingCompletionsByGroup.size()},
+             {"staged_payload_bytes",
+              m_readyStreamingCompletionBytes},
+             {"peak_staged_payload_groups",
+              m_peakReadyStreamingCompletionCount},
+             {"peak_staged_payload_bytes",
+              m_peakReadyStreamingCompletionBytes},
+             {"page_credit_waiters",
+              m_readyStreamingCompletionPageCreditWaitGroups.size() -
+                  std::min(
+                      m_readyStreamingCompletionPageCreditWaitCursor,
+                      m_readyStreamingCompletionPageCreditWaitGroups.size())},
+             {"page_credit_retry_budget",
+              CLodPageCreditRetryBudget()},
              {"aging_enabled", CLodSchedulerAgingEnabled()},
              {"live_background_lanes_enabled",
               CLodLiveBackgroundLanesEnabled()},
@@ -4956,6 +5074,7 @@ void CLodStreamingSystem::DrainRetiredPhysicalPages(MeshManager* meshManager) {
 
     TracyPlot("CLodStreaming.RetiringPhysicalPages", static_cast<int64_t>(m_retiringPhysicalPages.size()));
     std::vector<uint32_t> pinnedPagesToFree;
+    uint32_t availablePageCredits = 0u;
     size_t pendingWriteIndex = 0u;
     for (uint32_t page : m_retiringPhysicalPages) {
         if (!IsPhysicalPageRetired(page)) {
@@ -4991,9 +5110,11 @@ void CLodStreamingSystem::DrainRetiredPhysicalPages(MeshManager* meshManager) {
             }
         } else {
             m_pageLru.Insert(page);
+            ++availablePageCredits;
         }
     }
     m_retiringPhysicalPages.resize(pendingWriteIndex);
+    WakeReadyPageCreditWaiters(availablePageCredits);
 
     if (!pinnedPagesToFree.empty() && meshManager != nullptr) {
         if (PagePool* pool = meshManager->GetCLodPagePool()) {
@@ -6330,6 +6451,8 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_pendingStreamingRequestGenerationByGroup.resize(newCapacity, 0u);
     m_waitingForPagesRequestIndexByGroup.resize(newCapacity, UINT32_MAX);
     m_readyStreamingCompletionRetryQueuedByGroup.resize(newCapacity, 0u);
+    m_readyStreamingCompletionPageCreditWaitQueuedByGroup.resize(
+        newCapacity, 0u);
     m_readyStreamingCompletionWaitPageByGroup.resize(newCapacity, UINT32_MAX);
     m_readyStreamingCompletionWaitKeyByGroup.resize(
         newCapacity, kInvalidCLodMeshPageKey);
@@ -6919,10 +7042,23 @@ void CLodStreamingSystem::ClearStreamingRequestInProgress(uint32_t groupIndex) {
     state = StreamingRequestState::None;
     {
         ZoneScopedN("CLodStreamingSystem::ClearStreamingRequestInProgress::EraseReadyCompletion");
-        m_readyStreamingCompletionsByGroup.erase(groupIndex);
+        auto readyIt =
+            m_readyStreamingCompletionsByGroup.find(groupIndex);
+        if (readyIt != m_readyStreamingCompletionsByGroup.end()) {
+            m_readyStreamingCompletionBytes -=
+                std::min(
+                    m_readyStreamingCompletionBytes,
+                    CLodReadyCompletionStorageBytes(readyIt->second));
+            m_readyStreamingCompletionsByGroup.erase(readyIt);
+        }
     }
     if (groupIndex < m_readyStreamingCompletionRetryQueuedByGroup.size()) {
         m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 0u;
+    }
+    if (groupIndex <
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup.size()) {
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup[groupIndex] =
+            0u;
     }
     if (groupIndex < m_readyStreamingCompletionWaitPageByGroup.size()) {
         m_readyStreamingCompletionWaitPageByGroup[groupIndex] = UINT32_MAX;
@@ -7434,7 +7570,7 @@ void CLodStreamingSystem::ParkReadyCompletionForSharedPage(
     uint32_t page,
     uint64_t key,
     MeshManager::CLodDiskStreamingCompletion&& completion) {
-    m_readyStreamingCompletionsByGroup[groupIndex] = std::move(completion);
+    StoreReadyStreamingCompletion(groupIndex, std::move(completion));
     if (groupIndex >= m_readyStreamingCompletionWaitPageByGroup.size() ||
         page >= m_readyStreamingCompletionWaitersByPage.size()) {
         if (groupIndex < m_readyStreamingCompletionRetryQueuedByGroup.size() &&
@@ -7452,6 +7588,125 @@ void CLodStreamingSystem::ParkReadyCompletionForSharedPage(
         ? m_pendingStreamingRequestGenerationByGroup[groupIndex]
         : 0u;
     m_readyStreamingCompletionWaitersByPage[page].push_back(groupIndex);
+}
+
+void CLodStreamingSystem::StoreReadyStreamingCompletion(
+    uint32_t groupIndex,
+    MeshManager::CLodDiskStreamingCompletion&& completion) {
+    auto existing = m_readyStreamingCompletionsByGroup.find(groupIndex);
+    if (existing != m_readyStreamingCompletionsByGroup.end()) {
+        m_readyStreamingCompletionBytes -=
+            std::min(
+                m_readyStreamingCompletionBytes,
+                CLodReadyCompletionStorageBytes(existing->second));
+        existing->second = std::move(completion);
+    }
+    else {
+        m_readyStreamingCompletionsByGroup.emplace(
+            groupIndex, std::move(completion));
+    }
+    const auto stored = m_readyStreamingCompletionsByGroup.find(groupIndex);
+    if (stored != m_readyStreamingCompletionsByGroup.end()) {
+        m_readyStreamingCompletionBytes +=
+            CLodReadyCompletionStorageBytes(stored->second);
+    }
+    m_peakReadyStreamingCompletionBytes = std::max(
+        m_peakReadyStreamingCompletionBytes,
+        m_readyStreamingCompletionBytes);
+    m_peakReadyStreamingCompletionCount = std::max<uint32_t>(
+        m_peakReadyStreamingCompletionCount,
+        static_cast<uint32_t>(
+            m_readyStreamingCompletionsByGroup.size()));
+}
+
+void CLodStreamingSystem::ParkReadyCompletionForPageCredit(
+    uint32_t groupIndex,
+    MeshManager::CLodDiskStreamingCompletion&& completion) {
+    StoreReadyStreamingCompletion(groupIndex, std::move(completion));
+    if (groupIndex >=
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup.size()) {
+        return;
+    }
+    if (m_readyStreamingCompletionPageCreditWaitQueuedByGroup[groupIndex] ==
+        0u) {
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup[groupIndex] =
+            1u;
+        m_readyStreamingCompletionPageCreditWaitGroups.push_back(groupIndex);
+    }
+}
+
+void CLodStreamingSystem::WakeReadyPageCreditWaiters(
+    uint32_t availablePageCredits) {
+    while (availablePageCredits != 0u &&
+        m_readyStreamingCompletionPageCreditWaitCursor <
+            m_readyStreamingCompletionPageCreditWaitGroups.size()) {
+        const uint32_t groupIndex =
+            m_readyStreamingCompletionPageCreditWaitGroups[
+                m_readyStreamingCompletionPageCreditWaitCursor++];
+        if (groupIndex >=
+            m_readyStreamingCompletionPageCreditWaitQueuedByGroup.size()) {
+            continue;
+        }
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup[groupIndex] =
+            0u;
+        if (m_readyStreamingCompletionsByGroup.find(groupIndex) ==
+            m_readyStreamingCompletionsByGroup.end()) {
+            continue;
+        }
+        if (groupIndex <
+                m_readyStreamingCompletionRetryQueuedByGroup.size() &&
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
+            m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
+            m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
+            --availablePageCredits;
+        }
+    }
+    if (m_readyStreamingCompletionPageCreditWaitCursor ==
+        m_readyStreamingCompletionPageCreditWaitGroups.size()) {
+        m_readyStreamingCompletionPageCreditWaitGroups.clear();
+        m_readyStreamingCompletionPageCreditWaitCursor = 0u;
+    }
+}
+
+void CLodStreamingSystem::PruneStaleReadyStreamingCompletions(
+    uint32_t maxCompletions) {
+    if (maxCompletions == 0u ||
+        m_readyStreamingCompletionsByGroup.empty()) {
+        return;
+    }
+    const uint64_t liveWindow = static_cast<uint64_t>(
+        m_streamingReadbackRingSize + 2u);
+    m_staleReadyCompletionGroupsScratch.clear();
+    m_staleReadyCompletionGroupsScratch.reserve(
+        std::min<size_t>(
+            maxCompletions,
+            m_readyStreamingCompletionsByGroup.size()));
+    for (const auto& [groupIndex, _] :
+        m_readyStreamingCompletionsByGroup) {
+        if (m_staleReadyCompletionGroupsScratch.size() >= maxCompletions) {
+            break;
+        }
+        if (IsGroupPinned(groupIndex) ||
+            groupIndex >= m_streamingDiagnosticsByGroup.size()) {
+            continue;
+        }
+        const uint64_t lastRequestTick =
+            m_streamingDiagnosticsByGroup[groupIndex].lastRequestTick;
+        if (lastRequestTick != 0u &&
+            m_streamingDiagnosticTick <= lastRequestTick + liveWindow) {
+            continue;
+        }
+        m_staleReadyCompletionGroupsScratch.push_back(groupIndex);
+    }
+
+    for (uint32_t groupIndex : m_staleReadyCompletionGroupsScratch) {
+        if (m_readyStreamingCompletionsByGroup.find(groupIndex) ==
+            m_readyStreamingCompletionsByGroup.end()) {
+            continue;
+        }
+        ClearStreamingRequestInProgress(groupIndex);
+        ClearPendingLoadPriority(groupIndex);
+    }
 }
 
 void CLodStreamingSystem::WakeReadyCompletionsForPage(
@@ -7511,6 +7766,10 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 continue;
             }
             completions.push_back(std::move(readyIt->second));
+            m_readyStreamingCompletionBytes -=
+                std::min(
+                    m_readyStreamingCompletionBytes,
+                    CLodReadyCompletionStorageBytes(completions.back()));
             m_readyStreamingCompletionsByGroup.erase(readyIt);
         }
         m_readyStreamingCompletionRetryGroups.clear();
@@ -7581,13 +7840,8 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                                 (m_streamingPinnedGroupsBitsCpu[wordAddress] & bitMask) != 0u) {
                                 m_streamingResidencyInitializedBitsCpu[wordAddress] &= ~bitMask;
                             }
-                            m_readyStreamingCompletionsByGroup[groupIndex] = std::move(completion);
-                            if (groupIndex <
-                                    m_readyStreamingCompletionRetryQueuedByGroup.size() &&
-                                m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] == 0u) {
-                                m_readyStreamingCompletionRetryQueuedByGroup[groupIndex] = 1u;
-                                m_readyStreamingCompletionRetryGroups.push_back(groupIndex);
-                            }
+                            ParkReadyCompletionForPageCredit(
+                                groupIndex, std::move(completion));
                             m_pendingResidencyCommitGroups.erase(groupIndex);
                             continue;
                         }
@@ -7650,6 +7904,10 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::ReusedExistingPages;
                 const bool payloadNeedsCpuUpload =
                     completion.payloadKind == MeshManager::CLodDiskStreamingPayloadKind::CpuPageBlobs;
+                const bool payloadUsesMappedViews =
+                    completion.payloadKind ==
+                    MeshManager::CLodDiskStreamingPayloadKind::
+                        CpuMappedPageViews;
 
                 // Validate the preallocation immediately before using it. A
                 // delayed I/O completion can arrive after one of its physical
@@ -7725,11 +7983,28 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         completion.pageAllocations[seg] = allocation;
                     }
                     const bool needsFetch = seg < preAlloc.segmentNeedsFetch.size() && preAlloc.segmentNeedsFetch[seg];
-                    if (needsFetch && payloadNeedsCpuUpload) {
+                    if (needsFetch &&
+                        (payloadNeedsCpuUpload ||
+                            payloadUsesMappedViews)) {
+                        std::span<const std::byte> payload;
+                        if (payloadNeedsCpuUpload &&
+                            seg < completion.pageBlobs.size()) {
+                            payload = std::span<const std::byte>(
+                                completion.pageBlobs[seg].data(),
+                                completion.pageBlobs[seg].size());
+                        }
+                        else if (payloadUsesMappedViews &&
+                            completion.mappedContainer != nullptr &&
+                            seg < completion.mappedPageBlobSizes.size() &&
+                            seg < completion.mappedPageBlobOffsets.size()) {
+                            completion.mappedContainer->GetBlob(
+                                completion.mappedPageBlobOffsets[seg],
+                                completion.mappedPageBlobSizes[seg],
+                                payload);
+                        }
                         if (pool == nullptr ||
-                            seg >= completion.pageBlobs.size() ||
-                            completion.pageBlobs[seg].empty() ||
-                            completion.pageBlobs[seg].size() > pool->GetPageSize()) {
+                            payload.empty() ||
+                            payload.size() > pool->GetPageSize()) {
                             spdlog::warn(
                                 "CLod streaming: dropping completion for group {} because segment {} has invalid page payload",
                                 groupIndex,
@@ -7741,8 +8016,11 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                             ? preAlloc.meshPageKeys[seg]
                             : kInvalidCLodMeshPageKey;
                         LogPageOverwriteInvariant(page, groupIndex, seg, meshPageKey, "cpu-page-upload");
-                        pool->UploadToPage(page, 0, completion.pageBlobs[seg].data(), completion.pageBlobs[seg].size());
-                        RecordStreamingUploadQueued(groupIndex, static_cast<uint64_t>(completion.pageBlobs[seg].size()));
+                        pool->UploadToPage(
+                            page, 0, payload.data(), payload.size());
+                        RecordStreamingUploadQueued(
+                            groupIndex,
+                            static_cast<uint64_t>(payload.size()));
                         queuedPayloadUpload = true;
                     }
                     else if (needsFetch && !payloadGpuReady && !payloadUsesExistingPages) {
@@ -8400,10 +8678,13 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 meshManager->ProcessCLodDiskStreamingIO();
             }
         }
+        WakeReadyPageCreditWaiters(CLodPageCreditRetryBudget());
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ApplyDiskStreamingCompletions");
             ApplyDiskStreamingCompletions(meshManager);
         }
+        PruneStaleReadyStreamingCompletions(
+            std::max<uint32_t>(budget, 256u));
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::StreamingMaintenance::ReconcileStaleDiskIoRequests");
             ReconcileStaleDiskIoRequests(meshManager);
@@ -8475,6 +8756,23 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 m_streamingIoAdmissionDepth -
                     admissionStats.queuedOrInFlightGroups)
             : 0u;
+        if (CLodLateCpuPageAllocationEnabled()) {
+            const uint32_t stagedPayloadGroups =
+                static_cast<uint32_t>(
+                    m_readyStreamingCompletionsByGroup.size());
+            const uint32_t outstandingPayloadCredits =
+                admissionStats.queuedOrInFlightGroups +
+                stagedPayloadGroups;
+            const uint32_t stagedPayloadLimit =
+                CLodStagedPayloadGroupLimit();
+            admissionBudget =
+                outstandingPayloadCredits < stagedPayloadLimit
+                ? std::min<uint32_t>(
+                      admissionBudget,
+                      stagedPayloadLimit -
+                          outstandingPayloadCredits)
+                : 0u;
+        }
         TracyPlot(
             "CLodStreaming.Service.IoAdmissionBudget",
             static_cast<int64_t>(admissionBudget));
@@ -8565,7 +8863,11 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::BuildDiskIoCandidate");
                 const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr;
                 auto paIt = m_preAllocatedPagesByGroup.find(groupIndex);
-                if (paIt == m_preAllocatedPagesByGroup.end()) {
+                const bool allocatePagesAfterCpuRead =
+                    CLodLateCpuPageAllocationEnabled() &&
+                    !IsGroupPinned(groupIndex);
+                if (!allocatePagesAfterCpuRead &&
+                    paIt == m_preAllocatedPagesByGroup.end()) {
                     const auto info = meshManager->GetCLodGroupStreamingInfo(groupIndex);
                     const uint32_t expectedPageCount = info.valid ? info.pageCount : 1u;
                     PreAllocatedPages preAlloc{};
@@ -8606,13 +8908,20 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 QueuedStreamingCandidate candidate{};
                 candidate.groupIndex = groupIndex;
                 candidate.request.groupGlobalIndex = groupIndex;
-                candidate.request.segmentNeedsFetch = paIt->second.segmentNeedsFetch;
-                candidate.request.preAllocatedPages = paIt->second.pagesBySegment;
+                candidate.request.deferCpuPayloadCopy =
+                    allocatePagesAfterCpuRead;
+                if (!allocatePagesAfterCpuRead) {
+                    candidate.request.segmentNeedsFetch =
+                        paIt->second.segmentNeedsFetch;
+                    candidate.request.preAllocatedPages =
+                        paIt->second.pagesBySegment;
+                }
                 candidate.request.priority = priority;
                 if (prefetchedLayout != nullptr && prefetchedLayout->IsValid()) {
                     candidate.request.prefetchedLayout = *prefetchedLayout;
                 }
-                if (meshManager->IsCLodStreamingDirectStorageEnabled()) {
+                if (!allocatePagesAfterCpuRead &&
+                    meshManager->IsCLodStreamingDirectStorageEnabled()) {
                     meshManager->GetCLodChildGroups(groupIndex, candidate.request.childLayoutPrefetchGroups);
                 }
                 diskIoBatch.push_back(std::move(candidate));

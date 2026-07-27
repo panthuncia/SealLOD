@@ -718,7 +718,7 @@ void Renderer::Initialize(
     }
     ResourceManager::GetInstance().Initialize();
     const uint32_t ioWorkerCount = ReadBoundedEnvironmentUint(
-        "SARP_CLOD_IO_WORKER_COUNT", 16u, 1u, 64u);
+        "SARP_CLOD_IO_WORKER_COUNT", 32u, 1u, 64u);
     TaskSchedulerManager::GetInstance().Initialize(ioWorkerCount);
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
         TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));

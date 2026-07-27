@@ -40,6 +40,147 @@
 
 namespace CLodCache {
 
+	struct MappedContainerLease::Impl {
+#ifdef _WIN32
+		~Impl() {
+			if (data != nullptr) {
+				UnmapViewOfFile(data);
+			}
+			if (mappingHandle != nullptr) {
+				CloseHandle(mappingHandle);
+			}
+			if (fileHandle != INVALID_HANDLE_VALUE) {
+				CloseHandle(fileHandle);
+			}
+		}
+
+		HANDLE fileHandle = INVALID_HANDLE_VALUE;
+		HANDLE mappingHandle = nullptr;
+#endif
+		const std::byte* data = nullptr;
+		uint64_t fileSize = 0u;
+		uint32_t pageCount = 0u;
+	};
+
+	MappedContainerLease::MappedContainerLease(
+		std::shared_ptr<const Impl> impl)
+		: m_impl(std::move(impl)) {
+	}
+
+	MappedContainerLease::~MappedContainerLease() = default;
+
+	uint32_t MappedContainerLease::GetPageCount() const {
+		return m_impl != nullptr ? m_impl->pageCount : 0u;
+	}
+
+	bool MappedContainerLease::GetBlob(
+		uint64_t offset,
+		uint32_t size,
+		std::span<const std::byte>& outBlob) const {
+		outBlob = {};
+		if (m_impl == nullptr || m_impl->data == nullptr) {
+			return false;
+		}
+		const uint64_t end = offset + static_cast<uint64_t>(size);
+		if (end < offset || end > m_impl->fileSize) {
+			return false;
+		}
+		outBlob = std::span<const std::byte>(
+			m_impl->data + offset, size);
+		return true;
+	}
+
+	bool MappedContainerLease::WarmBlob(
+		uint64_t offset,
+		uint32_t size) const {
+		std::span<const std::byte> blob;
+		if (!GetBlob(offset, size, blob)) {
+			return false;
+		}
+#ifdef _WIN32
+		WIN32_MEMORY_RANGE_ENTRY range{};
+		range.VirtualAddress = const_cast<std::byte*>(blob.data());
+		range.NumberOfBytes = blob.size();
+		return PrefetchVirtualMemory(
+			GetCurrentProcess(), 1u, &range, 0u) != FALSE;
+#else
+		return false;
+#endif
+	}
+
+	bool AcquireMappedContainer(
+		const std::wstring& containerPath,
+		uint32_t expectedPageCount,
+		std::shared_ptr<const MappedContainerLease>& outLease) {
+		outLease.reset();
+#ifndef _WIN32
+		(void)containerPath;
+		(void)expectedPageCount;
+		return false;
+#else
+		static std::mutex cacheMutex;
+		static std::unordered_map<
+			std::wstring,
+			std::weak_ptr<const MappedContainerLease>> cache;
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		if (auto existing = cache[containerPath].lock()) {
+			if (existing->GetPageCount() == expectedPageCount) {
+				outLease = std::move(existing);
+				return true;
+			}
+			cache.erase(containerPath);
+		}
+
+		auto impl = std::make_shared<MappedContainerLease::Impl>();
+		impl->fileHandle = CreateFileW(
+			containerPath.c_str(),
+			GENERIC_READ,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+			nullptr,
+			OPEN_EXISTING,
+			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+			nullptr);
+		if (impl->fileHandle == INVALID_HANDLE_VALUE) {
+			return false;
+		}
+		LARGE_INTEGER fileSize{};
+		if (!GetFileSizeEx(impl->fileHandle, &fileSize) ||
+			fileSize.QuadPart < 16) {
+			return false;
+		}
+		impl->fileSize = static_cast<uint64_t>(fileSize.QuadPart);
+		impl->mappingHandle = CreateFileMappingW(
+			impl->fileHandle, nullptr, PAGE_READONLY, 0, 0, nullptr);
+		if (impl->mappingHandle == nullptr) {
+			return false;
+		}
+		impl->data = static_cast<const std::byte*>(
+			MapViewOfFile(impl->mappingHandle, FILE_MAP_READ, 0, 0, 0));
+		if (impl->data == nullptr) {
+			return false;
+		}
+		struct Header {
+			uint32_t magic;
+			uint32_t version;
+			uint32_t reserved;
+			uint32_t pageCount;
+		};
+		Header header{};
+		std::memcpy(&header, impl->data, sizeof(header));
+		if (header.magic != 0x444F4C43u ||
+			header.version != 4u ||
+			header.pageCount != expectedPageCount) {
+			return false;
+		}
+		impl->pageCount = header.pageCount;
+		auto lease = std::shared_ptr<const MappedContainerLease>(
+			new MappedContainerLease(std::move(impl)));
+		cache[containerPath] = lease;
+		outLease = std::move(lease);
+		return true;
+#endif
+	}
+
 	namespace {
 		std::wstring SanitizeFolderName(const std::wstring& input)
 		{

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -12,6 +13,31 @@
 #include "Mesh/ClusterLODTypes.h"
 
 namespace CLodCache {
+
+class MappedContainerLease {
+public:
+	~MappedContainerLease();
+	uint32_t GetPageCount() const;
+	bool GetBlob(
+		uint64_t offset,
+		uint32_t size,
+		std::span<const std::byte>& outBlob) const;
+	bool WarmBlob(uint64_t offset, uint32_t size) const;
+
+private:
+	struct Impl;
+	explicit MappedContainerLease(std::shared_ptr<const Impl> impl);
+	std::shared_ptr<const Impl> m_impl;
+	friend bool AcquireMappedContainer(
+		const std::wstring&,
+		uint32_t,
+		std::shared_ptr<const MappedContainerLease>&);
+};
+
+bool AcquireMappedContainer(
+	const std::wstring& containerPath,
+	uint32_t expectedPageCount,
+	std::shared_ptr<const MappedContainerLease>& outLease);
 
 inline constexpr uint32_t kSchemaVersion = 78;
 

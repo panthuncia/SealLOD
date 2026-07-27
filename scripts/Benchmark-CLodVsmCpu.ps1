@@ -16,6 +16,12 @@ param(
     [ValidateRange(0, 32)]
     [int]$IoTaskBatchSize = 0,
     [ValidateSet("On", "Off")]
+    [string]$LateCpuPageAllocation = "On",
+    [ValidateRange(0, 16384)]
+    [int]$StagedPayloadGroupLimit = 0,
+    [ValidateRange(0, 4096)]
+    [int]$PageCreditRetryBudget = 0,
+    [ValidateSet("On", "Off")]
     [string]$SchedulerAging = "Off",
     [ValidateSet("On", "Off")]
     [string]$LiveBackgroundLanes = "Off",
@@ -99,6 +105,12 @@ $previousRequestTraceOutput = $env:SARP_CLOD_REQUEST_TRACE_OUTPUT
 $previousIoAdmissionDepth = $env:SARP_CLOD_IO_ADMISSION_DEPTH
 $previousIoWorkerCount = $env:SARP_CLOD_IO_WORKER_COUNT
 $previousIoTaskBatchSize = $env:SARP_CLOD_IO_TASK_BATCH_SIZE
+$previousLateCpuPageAllocation =
+    $env:SARP_CLOD_LATE_CPU_PAGE_ALLOCATION
+$previousStagedPayloadGroupLimit =
+    $env:SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT
+$previousPageCreditRetryBudget =
+    $env:SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET
 $previousSchedulerAging = $env:SARP_CLOD_SCHEDULER_AGING
 $previousLiveBackgroundLanes =
     $env:SARP_CLOD_LIVE_BACKGROUND_LANES
@@ -135,6 +147,18 @@ try {
             $env:SARP_CLOD_IO_TASK_BATCH_SIZE =
                 if ($IoTaskBatchSize -gt 0) {
                     [string]$IoTaskBatchSize
+                } else { $null }
+            $env:SARP_CLOD_LATE_CPU_PAGE_ALLOCATION =
+                if ($LateCpuPageAllocation -eq "On") {
+                    "1"
+                } else { "0" }
+            $env:SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT =
+                if ($StagedPayloadGroupLimit -gt 0) {
+                    [string]$StagedPayloadGroupLimit
+                } else { $null }
+            $env:SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET =
+                if ($PageCreditRetryBudget -gt 0) {
+                    [string]$PageCreditRetryBudget
                 } else { $null }
             $env:SARP_CLOD_SCHEDULER_AGING =
                 if ($SchedulerAging -eq "On") { "1" } else { "0" }
@@ -299,6 +323,12 @@ finally {
         $previousIoWorkerCount
     $env:SARP_CLOD_IO_TASK_BATCH_SIZE =
         $previousIoTaskBatchSize
+    $env:SARP_CLOD_LATE_CPU_PAGE_ALLOCATION =
+        $previousLateCpuPageAllocation
+    $env:SARP_CLOD_STAGED_PAYLOAD_GROUP_LIMIT =
+        $previousStagedPayloadGroupLimit
+    $env:SARP_CLOD_PAGE_CREDIT_RETRY_BUDGET =
+        $previousPageCreditRetryBudget
     $env:SARP_CLOD_SCHEDULER_AGING =
         $previousSchedulerAging
     $env:SARP_CLOD_LIVE_BACKGROUND_LANES =
@@ -396,6 +426,9 @@ $summaryDocument = [pscustomobject]@{
     io_admission_depth = $IoAdmissionDepth
     io_worker_count = $IoWorkerCount
     io_task_batch_size = $IoTaskBatchSize
+    late_cpu_page_allocation = $LateCpuPageAllocation
+    staged_payload_group_limit = $StagedPayloadGroupLimit
+    page_credit_retry_budget = $PageCreditRetryBudget
     scheduler_aging = $SchedulerAging
     live_background_lanes = $LiveBackgroundLanes
     runs = $runRows

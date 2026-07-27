@@ -56,8 +56,8 @@ uint32_t CLodIoAdmissionTarget() {
 		// workers do not go idle between service ticks, while remaining far
 		// below the previous 512--2048 fire-and-forget backlog.
 		uint32_t result = std::max<uint32_t>(
-			TaskSchedulerManager::GetInstance().GetNumIoThreads() * 24u,
-			48u);
+			TaskSchedulerManager::GetInstance().GetNumIoThreads() * 48u,
+			96u);
 		char* value = nullptr;
 		size_t length = 0u;
 		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_ADMISSION_DEPTH") == 0 &&
@@ -391,6 +391,48 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 				}
 			}
 
+			if (!loaded &&
+				request.deferCpuPayloadCopy &&
+				!containerPath.empty()) {
+				ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews");
+				CLodCache::PagePayloadLayoutMetadata layout;
+				std::shared_ptr<const CLodCache::MappedContainerLease>
+					mappedContainer;
+				loaded = CLodCache::GetMeshPagePayloadLayout(
+					std::span<const ClusterLODGroupDiskLocator>(
+						pageDiskLocators->data(),
+						pageDiskLocators->size()),
+					std::span<const uint32_t>(
+						request.meshPageIndices.data(),
+						request.meshPageIndices.size()),
+					layout) &&
+					CLodCache::AcquireMappedContainer(
+						containerPath,
+						locatorCount,
+						mappedContainer);
+				if (loaded) {
+					for (size_t pageIndex = 0;
+						pageIndex < layout.pageBlobSizes.size();
+						++pageIndex) {
+						if (!mappedContainer->WarmBlob(
+								layout.pageBlobOffsets[pageIndex],
+								layout.pageBlobSizes[pageIndex])) {
+							loaded = false;
+							break;
+						}
+					}
+				}
+				if (loaded) {
+					result.mappedContainer = std::move(mappedContainer);
+					result.mappedPageBlobSizes =
+						std::move(layout.pageBlobSizes);
+					result.mappedPageBlobOffsets =
+						std::move(layout.pageBlobOffsets);
+					result.uploadPathLabel =
+						"MemoryMappedViewThenCpuUpload";
+				}
+			}
+
 			if (!loaded && !containerPath.empty()) {
 				ZoneScopedN("CLodDiskStreaming::LoadMappedCpu");
 				loaded = CLodCache::LoadMeshPagesSelectiveMapped(
@@ -440,7 +482,8 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 			}
 
 			if (loaded) {
-				if (!result.directStorageGpuUploadPending) {
+				if (!result.directStorageGpuUploadPending &&
+					result.mappedContainer == nullptr) {
 					result.groupChunkMetadata = payload.groupChunkMetadata;
 					result.pageBlobs = std::move(payload.pageBlobs);
 				}
@@ -2017,6 +2060,45 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 		return DiskStreamingApplyResult::DeferredPendingUpload;
 	}
 
+	if (result.mappedContainer != nullptr &&
+		result.mappedPageBlobSizes.size() == sCount &&
+		result.mappedPageBlobOffsets.size() == sCount) {
+		size_t totalBlobBytes = 0u;
+		uint32_t fetchedPageCount = 0u;
+		for (uint32_t ci = 0; ci < sCount; ++ci) {
+			const bool needsFetch =
+				result.segmentNeedsFetch.empty() ||
+				ci >= result.segmentNeedsFetch.size() ||
+				result.segmentNeedsFetch[ci];
+			if (needsFetch) {
+				totalBlobBytes += result.mappedPageBlobSizes[ci];
+				++fetchedPageCount;
+			}
+		}
+		outCompletion.success = true;
+		outCompletion.payloadKind =
+			CLodDiskStreamingPayloadKind::CpuMappedPageViews;
+		outCompletion.chunk = chunk;
+		outCompletion.meshPageIndices =
+			std::move(result.meshPageIndices);
+		outCompletion.segmentNeedsFetch =
+			std::move(result.segmentNeedsFetch);
+		outCompletion.mappedContainer =
+			std::move(result.mappedContainer);
+		outCompletion.mappedPageBlobSizes =
+			std::move(result.mappedPageBlobSizes);
+		outCompletion.mappedPageBlobOffsets =
+			std::move(result.mappedPageBlobOffsets);
+		outCompletion.totalStreamedBytes =
+			static_cast<uint64_t>(totalBlobBytes);
+		outCompletion.fetchedPageCount = fetchedPageCount;
+		outCompletion.uploadPathLabel =
+			std::move(result.uploadPathLabel);
+		outCompletion.prefetchedChildLayouts =
+			std::move(result.prefetchedChildLayouts);
+		return DiskStreamingApplyResult::Prepared;
+	}
+
 	if (result.pageBlobs.size() != sCount) {
 		spdlog::error("CLod streaming: group {} (local {}) expected {} page blobs but got {}",
 			result.groupGlobalIndex, localIndex, sCount, result.pageBlobs.size());
@@ -2466,6 +2548,8 @@ uint32_t MeshManager::QueueCLodGroupDiskIOBatch(const std::vector<CLodGroupDiskI
 		preparedRequest.request.segmentNeedsFetch = batchRequest.segmentNeedsFetch;
 		preparedRequest.request.preAllocatedPages = batchRequest.preAllocatedPages;
 		preparedRequest.request.childLayoutPrefetchGroups = batchRequest.childLayoutPrefetchGroups;
+		preparedRequest.request.deferCpuPayloadCopy =
+			batchRequest.deferCpuPayloadCopy;
 		preparedRequest.request.generation = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
 		preparedRequest.request.priority = batchRequest.priority;
 		preparedRequest.request.ioTaskQueuedNs = CLodIoNowNs();

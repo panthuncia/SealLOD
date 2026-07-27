@@ -166,6 +166,14 @@ private:
         uint32_t page,
         uint64_t key,
         MeshManager::CLodDiskStreamingCompletion&& completion);
+    void ParkReadyCompletionForPageCredit(
+        uint32_t groupIndex,
+        MeshManager::CLodDiskStreamingCompletion&& completion);
+    void StoreReadyStreamingCompletion(
+        uint32_t groupIndex,
+        MeshManager::CLodDiskStreamingCompletion&& completion);
+    void WakeReadyPageCreditWaiters(uint32_t availablePageCredits);
+    void PruneStaleReadyStreamingCompletions(uint32_t maxCompletions);
     void WakeReadyCompletionsForPage(uint32_t page, uint64_t key);
     void CommitPendingResidencyPromotions(MeshManager* meshManager);
     void RecordVirtualShadowUpgradeDependencies(
@@ -366,6 +374,14 @@ private:
     std::unordered_map<uint32_t, MeshManager::CLodDiskStreamingCompletion> m_readyStreamingCompletionsByGroup;
     std::vector<uint32_t> m_readyStreamingCompletionRetryGroups;
     std::vector<uint8_t> m_readyStreamingCompletionRetryQueuedByGroup;
+    std::vector<uint32_t> m_readyStreamingCompletionPageCreditWaitGroups;
+    std::vector<uint8_t>
+        m_readyStreamingCompletionPageCreditWaitQueuedByGroup;
+    size_t m_readyStreamingCompletionPageCreditWaitCursor = 0u;
+    uint64_t m_readyStreamingCompletionBytes = 0u;
+    uint64_t m_peakReadyStreamingCompletionBytes = 0u;
+    uint32_t m_peakReadyStreamingCompletionCount = 0u;
+    std::vector<uint32_t> m_staleReadyCompletionGroupsScratch;
     std::vector<uint32_t> m_readyStreamingCompletionWaitPageByGroup;
     std::vector<uint64_t> m_readyStreamingCompletionWaitKeyByGroup;
     std::vector<uint32_t> m_readyStreamingCompletionWaitGenerationByGroup;
