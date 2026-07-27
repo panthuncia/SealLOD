@@ -164,7 +164,9 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
-    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer)
+    std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
@@ -193,6 +195,10 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
     , m_shadowActiveBlockMetadataBuffer(std::move(shadowActiveBlockMetadataBuffer))
+    , m_shadowDynamicPhysicalPagesTexture(
+        std::move(shadowDynamicPhysicalPagesTexture))
+    , m_shadowDynamicActiveBlockMetadataBuffer(
+        std::move(shadowDynamicActiveBlockMetadataBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
 {
     m_isFirstPass = inputs.isFirstPass;
@@ -297,6 +303,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         { L"CLOD_WG_ENABLE_SW_CLASSIFICATION", enableSharedSWClassificationPath ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"1" : L"0" },
+        { L"CLOD_VSM_TWO_LAYER_COMPUTE_CULL_VERSION", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"2" : L"0" },
         { L"CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER", enableComputePageJobDescriptorBuffer ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_VOXEL_OUTPUT", m_voxelRasterWorkCapacity != 0u ? L"1" : L"0" },
         { L"CLOD_COMPUTE_INCLUDE_ONLY", L"1" },
@@ -573,8 +580,15 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         if (m_shadowPhysicalPagesTexture) {
             builder->WithUnorderedAccess(m_shadowPhysicalPagesTexture);
         }
+        if (m_shadowDynamicPhysicalPagesTexture) {
+            builder->WithUnorderedAccess(m_shadowDynamicPhysicalPagesTexture);
+        }
         if (m_shadowActiveBlockMetadataBuffer) {
             builder->WithShaderResource(m_shadowActiveBlockMetadataBuffer);
+        }
+        if (m_shadowDynamicActiveBlockMetadataBuffer) {
+            builder->WithShaderResource(
+                m_shadowDynamicActiveBlockMetadataBuffer);
         }
     }
 
@@ -748,6 +762,18 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
         m_shadowActiveBlockMetadataBuffer
             ? m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
+        m_shadowDynamicPhysicalPagesTexture
+            ? m_shadowDynamicPhysicalPagesTexture
+                ->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+        m_shadowDynamicActiveBlockMetadataBuffer
+            ? m_shadowDynamicActiveBlockMetadataBuffer
+                ->GetSRVInfo(0).slot.index
             : 0u;
     sharedRootConstants[CLOD_WG_HW_WRITE_BASE_COUNTER_DESCRIPTOR_INDEX] =
         (m_phase1VisibleClustersCounterBuffer ? m_phase1VisibleClustersCounterBuffer : m_visibleClustersCounterBuffer)

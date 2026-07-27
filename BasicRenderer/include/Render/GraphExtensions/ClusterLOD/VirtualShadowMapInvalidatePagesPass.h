@@ -41,5 +41,4 @@ private:
     std::shared_ptr<Buffer> m_statsBuffer;
     uint32_t m_pendingInputCount = 0u;
     flecs::query<const Components::ObjectDrawInfo> m_transformChangedQuery;
-    flecs::query<const Components::ObjectDrawInfo> m_skinnedObjectsQuery;
 };

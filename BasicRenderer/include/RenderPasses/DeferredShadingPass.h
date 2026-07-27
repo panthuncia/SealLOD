@@ -54,7 +54,8 @@ public:
 					Builtin::Shadows::CLodDirectionalPageViewInfo,
 					Builtin::Shadows::CLodPageMetadata,
 					Builtin::Shadows::CLodPageTable,
-					Builtin::Shadows::CLodPhysicalPages);
+					Builtin::Shadows::CLodPhysicalPages)
+					.WithUnorderedAccess(Builtin::Shadows::CLodStats);
 			}
 
 		if (m_clusteredLightingEnabled) {

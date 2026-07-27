@@ -222,6 +222,7 @@ private:
     std::shared_ptr<PixelBuffer> m_AVBOITEarlyDepthTexture;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_shadowStaticPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowPageMetadataBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationInputsBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
@@ -244,6 +245,7 @@ private:
     std::shared_ptr<Buffer> m_shadowMarkedBlocksListBuffer;
     std::shared_ptr<Buffer> m_shadowMarkedBlocksCountBuffer;
     std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_shadowBlockClusterCoverageBuffer;
     std::shared_ptr<Buffer> m_shadowFreePhysicalPagesBuffer;
     std::shared_ptr<Buffer> m_shadowReusablePhysicalPagesBuffer;

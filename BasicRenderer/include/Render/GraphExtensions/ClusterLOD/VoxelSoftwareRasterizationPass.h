@@ -30,6 +30,7 @@ public:
         CLodRasterOutputKind outputKind,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<ResourceGroup> slabResourceGroup,
         uint32_t voxelWorkCapacity);
@@ -58,6 +59,7 @@ private:
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;

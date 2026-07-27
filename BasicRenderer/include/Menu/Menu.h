@@ -813,6 +813,10 @@ private:
     std::function<bool()> getJitterEnabled;
     std::function<void(bool)> setJitterEnabled;
 
+    bool m_rememberCameraPose = false;
+    std::function<bool()> getRememberCameraPose;
+    std::function<void(bool)> setRememberCameraPose;
+
     bool m_collectPassStatistics = true;
     std::function<bool()> getCollectPassStatistics;
     std::function<void(bool)> setCollectPassStatistics;
@@ -1532,6 +1536,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getJitterEnabled = settingsManager.getSettingGetter<bool>("enableJitter");
     m_jitterEnabled = getJitterEnabled();
 	observerSetting(m_jitterEnabled, "enableJitter");
+
+    setRememberCameraPose = settingsManager.getSettingSetter<bool>("rememberCameraPose");
+    getRememberCameraPose = settingsManager.getSettingGetter<bool>("rememberCameraPose");
+    m_rememberCameraPose = getRememberCameraPose();
+    observerSetting(m_rememberCameraPose, "rememberCameraPose");
 
     getCollectPassStatistics = settingsManager.getSettingGetter<bool>("collectPassStatistics");
     setCollectPassStatistics = settingsManager.getSettingSetter<bool>("collectPassStatistics");
@@ -2341,6 +2350,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::Checkbox("Enable Jitter", &m_jitterEnabled)) {
             setJitterEnabled(m_jitterEnabled);
         }
+        if (ImGui::Checkbox("Remember Camera Pose", &m_rememberCameraPose)) {
+            setRememberCameraPose(m_rememberCameraPose);
+        }
         }
 
         if (ImGui::CollapsingHeader("Display and Assets")) {
@@ -2771,6 +2783,19 @@ inline void Menu::DrawOutputTypeDropdown() {
 		}
 		ImGui::EndCombo();
 
+    }
+    if (selectedItemIndex == static_cast<unsigned int>(OutputType::VSM_PAGE_STATE)) {
+        ImGui::TextDisabled(
+            "VSM sample result: violet = finite depth/lit, green = finite "
+            "depth/shadowed, yellow = preferred page dirty.");
+        ImGui::TextDisabled(
+            "This view does not indicate which static pages were rendered.");
+    }
+    else if (selectedItemIndex ==
+        static_cast<unsigned int>(OutputType::VSM_RERENDERED_THIS_FRAME)) {
+        ImGui::TextDisabled(
+            "VSM static lifecycle: orange = static page rendered this frame, "
+            "dark gray = cached, magenta = missing depth.");
     }
 }
 
@@ -4836,7 +4861,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
         uint32_t totalPredictiveInvalidatedPageTableEntries = 0u;
         uint32_t totalInvalidatedCurrentBoundsPageTableEntries = 0u;
         uint32_t totalInvalidatedPreviousBoundsPageTableEntries = 0u;
-        uint32_t totalInvalidatedSkinnedPageTableEntries = 0u;
         for (uint32_t clipmapIndex = 0u; clipmapIndex < displayedClipmapCount; ++clipmapIndex) {
             totalVisitedPageTableEntries += stats.visitedPageTableEntries[clipmapIndex];
             totalVisitedDirtyPageTableEntries += stats.visitedDirtyPageTableEntries[clipmapIndex];
@@ -4847,7 +4871,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             totalPredictiveInvalidatedPageTableEntries += stats.predictiveInvalidatedPageTableEntries[clipmapIndex];
             totalInvalidatedCurrentBoundsPageTableEntries += stats.invalidatedCurrentBoundsPageTableEntries[clipmapIndex];
             totalInvalidatedPreviousBoundsPageTableEntries += stats.invalidatedPreviousBoundsPageTableEntries[clipmapIndex];
-            totalInvalidatedSkinnedPageTableEntries += stats.invalidatedSkinnedPageTableEntries[clipmapIndex];
         }
         ImGui::Text("Cache lifecycle: cleanHits=%u dirtyHits=%u requests=%u visitedPT=%u visitedDirtyPT=%u dirtyPT=%u",
             totalResidentCleanHits,
@@ -4856,11 +4879,10 @@ inline void Menu::DrawCLodTelemetryWindow() {
             totalVisitedPageTableEntries,
             totalVisitedDirtyPageTableEntries,
             totalDirtyPageTableEntries);
-        ImGui::Text("Request creators: predictiveInv=%u invalidateCurr=%u invalidatePrev=%u invalidateSkinned=%u wrapClr=%u staleClr=%u",
+        ImGui::Text("Request creators: predictiveInv=%u invalidateCurr=%u invalidatePrev=%u wrapClr=%u staleClr=%u",
             totalPredictiveInvalidatedPageTableEntries,
             totalInvalidatedCurrentBoundsPageTableEntries,
             totalInvalidatedPreviousBoundsPageTableEntries,
-            totalInvalidatedSkinnedPageTableEntries,
             std::accumulate(
                 std::begin(stats.setupWrappedClearedPageTableEntries),
                 std::end(stats.setupWrappedClearedPageTableEntries),
@@ -4870,7 +4892,7 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 std::end(stats.setupStaleDirtyClearedPageTableEntries),
                 0u));
         ImGui::TextDisabled("Dirty PT is sampled at GatherStatsPass before ClearPages re-marks cleared pages dirty for the hierarchy build.");
-        if (ImGui::BeginTable("##VirtualShadowStatsTable", 20, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        if (ImGui::BeginTable("##VirtualShadowStatsTable", 19, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
             ImGui::TableSetupColumn("Clip");
             ImGui::TableSetupColumn("Selected");
             ImGui::TableSetupColumn("Proj Reject");
@@ -4890,7 +4912,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
             ImGui::TableSetupColumn("Pred Inv");
             ImGui::TableSetupColumn("Inv Curr");
             ImGui::TableSetupColumn("Inv Prev");
-            ImGui::TableSetupColumn("Inv Skin");
             ImGui::TableHeadersRow();
 
             for (uint32_t clipmapIndex = 0u; clipmapIndex < displayedClipmapCount; ++clipmapIndex) {
@@ -4933,8 +4954,6 @@ inline void Menu::DrawCLodTelemetryWindow() {
                 ImGui::Text("%u", stats.invalidatedCurrentBoundsPageTableEntries[clipmapIndex]);
                 ImGui::TableSetColumnIndex(18);
                 ImGui::Text("%u", stats.invalidatedPreviousBoundsPageTableEntries[clipmapIndex]);
-                ImGui::TableSetColumnIndex(19);
-                ImGui::Text("%u", stats.invalidatedSkinnedPageTableEntries[clipmapIndex]);
             }
 
             ImGui::EndTable();

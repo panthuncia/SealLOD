@@ -127,6 +127,116 @@ void RunDeferredPageClearLifecycleCase()
     }
 }
 
+void RunTwoLayerLifecycleCases()
+{
+    constexpr uint32_t clearDepth = 0x7F7FFFFFu;
+    constexpr uint32_t physicalPage = 11u;
+    const auto isStaticRasterable = [](uint32_t pageEntry) {
+        constexpr uint32_t required =
+            CLodVirtualShadowPageAllocatedMask |
+            CLodVirtualShadowPageDirtyMask |
+            CLodVirtualShadowPageAdmittedThisFrameMask;
+        return (pageEntry & required) == required;
+    };
+    const auto isDynamicActive = [](uint32_t pageEntry) {
+        constexpr uint32_t required =
+            CLodVirtualShadowPageAllocatedMask |
+            CLodVirtualShadowPageVisitedMask;
+        return (pageEntry & required) == required;
+    };
+    const auto isCompositeSampleable = [&isDynamicActive](uint32_t pageEntry) {
+        return isDynamicActive(pageEntry) &&
+            (pageEntry & CLodVirtualShadowPageContentValidMask) != 0u;
+    };
+
+    uint32_t cleanPageEntry =
+        physicalPage |
+        CLodVirtualShadowPageAllocatedMask |
+        CLodVirtualShadowPageVisitedMask |
+        CLodVirtualShadowPageContentValidMask;
+    uint32_t staticDepth = 400u;
+    uint32_t dynamicDepth = 123u;
+
+    // A clean cached page is not touched by the static clear/raster lifecycle.
+    if (isStaticRasterable(cleanPageEntry)) {
+        staticDepth = clearDepth;
+    }
+    if (staticDepth != 400u) {
+        throw std::runtime_error(
+            "two-layer VSM changed clean cached static depth");
+    }
+
+    // Every clean, valid active page initializes the transient layer from the
+    // persistent static cache before skinned raster.
+    if (isDynamicActive(cleanPageEntry)) {
+        dynamicDepth =
+            (cleanPageEntry & CLodVirtualShadowPageContentValidMask) != 0u
+                ? staticDepth
+                : clearDepth;
+    }
+    if (dynamicDepth != staticDepth) {
+        throw std::runtime_error(
+            "two-layer VSM did not initialize an active dynamic page");
+    }
+
+    // Skinned raster writes only dynamic depth. Composition retains the nearer
+    // depth while preserving the persistent cached value.
+    dynamicDepth = 250u;
+    dynamicDepth = (std::min)(dynamicDepth, staticDepth);
+    if (dynamicDepth != 250u || staticDepth != 400u) {
+        throw std::runtime_error(
+            "two-layer VSM failed nearer-depth composition");
+    }
+    dynamicDepth = clearDepth;
+    dynamicDepth = (std::min)(dynamicDepth, staticDepth);
+    if (dynamicDepth != staticDepth) {
+        throw std::runtime_error(
+            "two-layer VSM failed static-only composition");
+    }
+
+    // Dynamic activity neither admits static work nor validates static cache
+    // contents.
+    uint32_t dynamicOnlyEntry =
+        physicalPage |
+        CLodVirtualShadowPageAllocatedMask |
+        CLodVirtualShadowPageVisitedMask |
+        CLodVirtualShadowPageDirtyMask;
+    const uint32_t staticAdmissionsBefore = 7u;
+    dynamicDepth = 300u;
+    if (!isDynamicActive(dynamicOnlyEntry) ||
+        isStaticRasterable(dynamicOnlyEntry) ||
+        (dynamicOnlyEntry & CLodVirtualShadowPageContentValidMask) != 0u ||
+        staticAdmissionsBefore != 7u) {
+        throw std::runtime_error(
+            "skinned VSM work affected static validity or admission");
+    }
+
+    // Reused/new pages remain unsampleable until their admitted static clear
+    // and finalization establish valid contents; stale static texels cannot be
+    // composed into the current frame.
+    staticDepth = 17u;
+    if ((dynamicOnlyEntry & CLodVirtualShadowPageContentValidMask) != 0u) {
+        dynamicDepth = (std::min)(dynamicDepth, staticDepth);
+    }
+    if (dynamicDepth != 300u) {
+        throw std::runtime_error(
+            "two-layer VSM exposed stale reused static contents");
+    }
+
+    // Static validity alone is insufficient for the transient composite.
+    // Deferred lookup must not read a cached page that was not initialized
+    // and rastered as part of this frame's dynamic-active set.
+    const uint32_t inactiveCachedEntry =
+        physicalPage |
+        CLodVirtualShadowPageAllocatedMask |
+        CLodVirtualShadowPageContentValidMask;
+    if (isCompositeSampleable(inactiveCachedEntry) ||
+        !isCompositeSampleable(cleanPageEntry)) {
+        throw std::runtime_error(
+            "two-layer VSM allowed deferred lookup to sample an inactive composite");
+    }
+}
+
 void RunFallbackDependencyOverflowLifecycleCase()
 {
     uint32_t pageEntry =
@@ -245,6 +355,7 @@ int main()
         RunBudgetCases();
         RunAllocationAdmissionCases();
         RunDeferredPageClearLifecycleCase();
+        RunTwoLayerLifecycleCases();
         RunFallbackDependencyOverflowLifecycleCase();
         RunExactPageTokenCases();
         RunAbsolutePageTagCases();

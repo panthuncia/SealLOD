@@ -38,6 +38,8 @@ static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB = 122
 static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_MESHLET_OOB = 123u;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_INVALID_OUTPUT_COUNTS = 124u;
 static const uint WG_COUNTER_RASTER_MESH_SHADER_SOURCE_GROUP_MISMATCH = 132u;
+static const uint WG_COUNTER_RASTER_MESH_SHADER_SKINNED_GROUPS = 264u;
+static const uint WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES = 266u;
 static const uint CLOD_SOURCE_GROUP_MISMATCH_DETAIL_CAPACITY = 1024u;
 
 static const uint CLOD_RASTER_INIT_FAILURE_NONE = 0u;
@@ -51,7 +53,8 @@ static const uint CLOD_RASTER_INIT_FAILURE_INVALID_OUTPUT_COUNTS = 3u;
 
 void CLodRasterTelemetryAdd(uint counterIndex, uint value)
 {
-#if CLOD_RASTER_MESH_TELEMETRY
+#if CLOD_RASTER_MESH_TELEMETRY || \
+    (defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW)
     if (CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX == CLOD_TELEMETRY_DISABLED_DESCRIPTOR || value == 0u)
     {
         return;
@@ -1026,6 +1029,11 @@ bool ClodTriangleTouchesRenderableVirtualShadowPages(
         minPageCoords,
         maxPageCoords,
         clipmapInfo,
+#if defined(PSO_SKINNED)
+        true,
+#else
+        false,
+#endif
         pageTable);
 }
 
@@ -1115,6 +1123,11 @@ bool ClodProjectedTriangleTouchesRenderableVirtualShadowPages(
         minPageCoords,
         maxPageCoords,
         clipmapInfo,
+#if defined(PSO_SKINNED)
+        true,
+#else
+        false,
+#endif
         pageTable);
 }
 
@@ -1461,6 +1474,11 @@ void ClusterLODBucketMSMain(
     if (uGroupThreadID == 0u)
     {
         CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_GROUPS, 1u);
+#if defined(PSO_SKINNED)
+        CLodRasterTelemetryAdd(
+            WG_COUNTER_RASTER_MESH_SHADER_SKINNED_GROUPS,
+            1u);
+#endif
         if (linearizedID < count)
         {
             CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_IN_RANGE, 1u);
@@ -1574,6 +1592,11 @@ void ClusterLODBucketMSMain(
     if (uGroupThreadID == 0u && draw)
     {
         CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_OUTPUT_TRIANGLES, outputTriCount);
+#if defined(PSO_SKINNED)
+        CLodRasterTelemetryAdd(
+            WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES,
+            outputTriCount);
+#endif
         if (outputTriCount == 0u)
         {
             CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_ZERO_TRIANGLE_OUTPUTS, 1u);
@@ -1608,6 +1631,11 @@ void ClusterLODBucketMSMain(
     if (uGroupThreadID == 0u && draw)
     {
         CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_OUTPUT_TRIANGLES, outputTriCount);
+#if defined(PSO_SKINNED)
+        CLodRasterTelemetryAdd(
+            WG_COUNTER_RASTER_MESH_SHADER_SKINNED_OUTPUT_TRIANGLES,
+            outputTriCount);
+#endif
         if (outputTriCount == 0u)
         {
             CLodRasterTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_ZERO_TRIANGLE_OUTPUTS, 1u);

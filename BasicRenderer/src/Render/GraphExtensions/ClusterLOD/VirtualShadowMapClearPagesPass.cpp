@@ -11,14 +11,16 @@
 #include "../shaders/PerPassRootConstants/clodVirtualShadowClearRootConstants.h"
 
 VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
-    std::shared_ptr<PixelBuffer> physicalPagesTexture,
+    std::shared_ptr<PixelBuffer> staticPagesTexture,
+    std::shared_ptr<PixelBuffer> dynamicPagesTexture,
     std::shared_ptr<Buffer> dirtyPageFlagsBuffer,
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> pageMetadataBuffer,
     std::shared_ptr<Buffer> clipmapInfoBuffer,
     std::shared_ptr<Buffer> pageViewInfoBuffer,
     std::shared_ptr<Buffer> statsBuffer)
-    : m_physicalPagesTexture(std::move(physicalPagesTexture))
+    : m_staticPagesTexture(std::move(staticPagesTexture))
+    , m_dynamicPagesTexture(std::move(dynamicPagesTexture))
     , m_dirtyPageFlagsBuffer(std::move(dirtyPageFlagsBuffer))
     , m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
@@ -30,14 +32,15 @@ VirtualShadowMapClearPagesPass::VirtualShadowMapClearPagesPass(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"CLodVirtualShadowClearPhysicalPagesCSMain",
-        {},
+        { { L"CLOD_VSM_TWO_LAYER_CLEAR_VERSION", L"2" } },
         "CLod.VirtualShadow.ClearPhysicalPages.PSO");
 }
 
 void VirtualShadowMapClearPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     builder->WithUnorderedAccess(
-        m_physicalPagesTexture,
+        m_staticPagesTexture,
+        m_dynamicPagesTexture,
         m_dirtyPageFlagsBuffer,
         m_pageTableTexture,
         m_pageMetadataBuffer,
@@ -67,7 +70,10 @@ PassReturn VirtualShadowMapClearPagesPass::Execute(PassExecutionContext& executi
     const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
 
     uint32_t rootConstants[NumMiscUintRootConstants] = {};
-    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = m_physicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_STATIC_PAGES_DESCRIPTOR_INDEX] =
+        m_staticPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+        m_dynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_FLAGS_DESCRIPTOR_INDEX] = m_dirtyPageFlagsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_DESCRIPTOR_INDEX] = m_pageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_METADATA_DESCRIPTOR_INDEX] =

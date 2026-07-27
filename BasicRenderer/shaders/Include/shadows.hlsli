@@ -70,6 +70,118 @@ CLodVirtualShadowLookupResult CLodVirtualShadowInitLookupResult()
     return result;
 }
 
+static const uint kCLodVirtualShadowInactiveSamplePreferred = 0u;
+static const uint kCLodVirtualShadowInactiveSampleFallback = 1u;
+static const uint kCLodVirtualShadowInactiveSampleSmrt = 2u;
+
+void CLodVirtualShadowRecordInactiveDeferredSample(uint sampleKind)
+{
+#if defined(CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY) && CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY
+    const uint inactiveLaneCount = WaveActiveCountBits(true);
+    if (WaveIsFirstLane())
+    {
+        RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodStats)];
+        if (sampleKind == kCLodVirtualShadowInactiveSamplePreferred)
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredPreferredInactivePageSampleCount,
+                inactiveLaneCount);
+        }
+        else if (sampleKind == kCLodVirtualShadowInactiveSampleFallback)
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredFallbackInactivePageSampleCount,
+                inactiveLaneCount);
+        }
+        else
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredSmrtInactivePageSampleCount,
+                inactiveLaneCount);
+        }
+    }
+#else
+    (void)sampleKind;
+#endif
+}
+
+void CLodVirtualShadowRecordRejectedInactiveDeferredSample(uint sampleKind)
+{
+#if defined(CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY) && CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY
+    const uint inactiveLaneCount = WaveActiveCountBits(true);
+    if (WaveIsFirstLane())
+    {
+        RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodStats)];
+        if (sampleKind == kCLodVirtualShadowInactiveSamplePreferred)
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredPreferredInactivePageRejectCount,
+                inactiveLaneCount);
+        }
+        else if (sampleKind == kCLodVirtualShadowInactiveSampleFallback)
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredFallbackInactivePageRejectCount,
+                inactiveLaneCount);
+        }
+        else
+        {
+            InterlockedAdd(
+                statsBuffer[0].deferredSmrtInactivePageRejectCount,
+                inactiveLaneCount);
+        }
+    }
+#else
+    (void)sampleKind;
+#endif
+}
+
+void CLodVirtualShadowRecordTrackedDeferredPage(
+    uint physicalPageIndex,
+    Texture2D<uint> physicalPages)
+{
+#if defined(CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY) && CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY
+    RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(
+            Builtin::Shadows::CLodStats)];
+    if (statsBuffer[0].trackedSkinnedPhysicalPagePlusOne ==
+        physicalPageIndex + 1u)
+    {
+        const uint packedPixel =
+            statsBuffer[0].trackedSkinnedAtlasPixel;
+        const uint2 trackedPixel =
+            uint2(packedPixel & 0xFFFFu, packedPixel >> 16u);
+        const uint observedDepth =
+            physicalPages.Load(int3(trackedPixel, 0));
+        statsBuffer[0].trackedDeferredObservedDepthBits = observedDepth;
+        const uint trackedLaneCount = WaveActiveCountBits(true);
+        if (WaveIsFirstLane())
+        {
+            InterlockedAdd(
+                statsBuffer[0].trackedDeferredSampleCount,
+                trackedLaneCount);
+            const uint expectedDepth = min(
+                statsBuffer[0].trackedSkinnedDepthBits,
+                statsBuffer[0].trackedComposeStaticDepthBits);
+            if (statsBuffer[0].trackedComposeFramePlusOne == 0u ||
+                observedDepth > expectedDepth)
+            {
+                InterlockedAdd(
+                    statsBuffer[0].trackedDeferredMismatchCount,
+                    trackedLaneCount);
+            }
+        }
+    }
+#else
+    (void)physicalPageIndex;
+    (void)physicalPages;
+#endif
+}
+
 uint CLodVirtualShadowSmrtRayCountDirectional(uint packedCounts)
 {
     return packedCounts & 0xFFFFu;
@@ -392,6 +504,11 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
             continue;
         }
+        if (!CLodVirtualShadowPageEntryIsDynamicActive(pageEntry))
+        {
+            CLodVirtualShadowRecordInactiveDeferredSample(
+                kCLodVirtualShadowInactiveSampleSmrt);
+        }
 
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
         StructuredBuffer<uint4> pageMetadata =
@@ -451,6 +568,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
 
         const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
         const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+        CLodVirtualShadowRecordTrackedDeferredPage(
+            physicalPageIndex,
+            physicalPages);
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
 
         result.clipmapInfo = clipmapInfo;
@@ -663,6 +783,13 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
             continue;
         }
+        if (!CLodVirtualShadowPageEntryIsDynamicActive(pageEntry))
+        {
+            CLodVirtualShadowRecordInactiveDeferredSample(
+                attempt == 0u
+                    ? kCLodVirtualShadowInactiveSamplePreferred
+                    : kCLodVirtualShadowInactiveSampleFallback);
+        }
 
         const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
         StructuredBuffer<uint4> pageMetadata =
@@ -723,6 +850,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
         const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
+        CLodVirtualShadowRecordTrackedDeferredPage(
+            physicalPageIndex,
+            physicalPages);
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
         if (storedDepthBits == 0x7F7FFFFFu)
         {

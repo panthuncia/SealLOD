@@ -12,6 +12,9 @@ static const uint WG_COUNTER_RASTER_PIXEL_SCISSOR_REJECTED = 126u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED = 129u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED = 130u;
 static const uint WG_COUNTER_RASTER_PIXEL_VSM_WRITES = 131u;
+// Appended after the traversal-divergence histogram counters. Keep this in
+// lockstep with CLodWorkGraphCounterIndex::RasterPixelVirtualShadowDynamicWrites.
+static const uint WG_COUNTER_RASTER_PIXEL_VSM_DYNAMIC_WRITES = 259u;
 
 void CLodRasterPixelTelemetryAdd(uint counterIndex, uint value)
 {
@@ -96,6 +99,9 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     (void)isFrontFace;
     (void)primID;
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS, 1u);
+#if defined(PSO_SKINNED)
+    CLodRasterPixelTelemetryAdd(267u, 1u);
+#endif
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     const ClodViewRasterInfo viewRasterInfo = WaveLoadClodViewRasterInfo(viewRasterInfoBuffer, input.viewID);
@@ -157,8 +163,17 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
+#if defined(PSO_SKINNED)
+    const bool dynamicLayer = true;
+#else
+    const bool dynamicLayer = false;
+#endif
+    if (!CLodVirtualShadowPageEntryCanRasterLayer(
+            pageEntry, dynamicLayer))
     {
+#if defined(PSO_SKINNED)
+        CLodRasterPixelTelemetryAdd(265u, 1u);
+#endif
         CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED, 1u);
         return;
     }
@@ -167,7 +182,10 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+        dynamicLayer
+            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
     if (!isfinite(input.linearDepth) || input.linearDepth <= 0.0f)
     {
         return;
@@ -178,6 +196,37 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
         physicalPages[atlasPixel],
         newDepthBits,
         previousDepthBits);
+    if (dynamicLayer)
+    {
+        RWStructuredBuffer<CLodVirtualShadowStats> shadowStats =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::Shadows::CLodStats)];
+        uint previousTrackedPage = 0u;
+        InterlockedCompareExchange(
+            shadowStats[0].trackedSkinnedPhysicalPagePlusOne,
+            0u,
+            physicalPageIndex + 1u,
+            previousTrackedPage);
+        if (previousTrackedPage == 0u)
+        {
+            shadowStats[0].trackedSkinnedAtlasPixel =
+                (atlasPixel.x & 0xFFFFu) |
+                ((atlasPixel.y & 0xFFFFu) << 16u);
+            shadowStats[0].trackedSkinnedDepthBits = newDepthBits;
+        }
+        else if (previousTrackedPage == physicalPageIndex + 1u)
+        {
+            const uint trackedPixel =
+                shadowStats[0].trackedSkinnedAtlasPixel;
+            if ((trackedPixel & 0xFFFFu) == atlasPixel.x &&
+                (trackedPixel >> 16u) == atlasPixel.y)
+            {
+                InterlockedMin(
+                    shadowStats[0].trackedSkinnedDepthBits,
+                    newDepthBits);
+            }
+        }
+    }
     // Stamp page completion once per unique page in the wave. The old
     // per-fragment InterlockedOr serialized thousands of lanes on a single
     // page-table word after every depth atomic.
@@ -203,7 +252,7 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     {
         pageLeaderLane = 96u + firstbitlow(pageMatchMask.w);
     }
-    if (WaveGetLaneIndex() == pageLeaderLane)
+    if (!dynamicLayer && WaveGetLaneIndex() == pageLeaderLane)
     {
         uint ignored = 0u;
         InterlockedOr(
@@ -212,4 +261,7 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
             ignored);
     }
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);
+    CLodRasterPixelTelemetryAdd(
+        WG_COUNTER_RASTER_PIXEL_VSM_DYNAMIC_WRITES,
+        dynamicLayer ? 1u : 0u);
 }

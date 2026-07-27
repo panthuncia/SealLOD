@@ -347,7 +347,8 @@ bool VoxelRasterWriteVirtualShadow(
 
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
+    if (!CLodVirtualShadowPageEntryCanRasterLayer(
+            pageEntry, PSO_SKINNED != 0))
     {
         return false;
     }
@@ -358,7 +359,10 @@ bool VoxelRasterWriteVirtualShadow(
 
     InterlockedMin(physicalPages[atlasPixel], asuint(linearDepth));
     uint ignored = 0u;
-    InterlockedOr(pageTable[pageCoords], kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask, ignored);
+    if (PSO_SKINNED == 0)
+    {
+        InterlockedOr(pageTable[pageCoords], kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask, ignored);
+    }
     return true;
 }
 #endif
@@ -2262,7 +2266,10 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         return;
     }
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+        PSO_SKINNED != 0
+            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
 #else
     if (rasterInfo.visibilityUAVDescriptorIndex == 0xFFFFFFFFu)
     {

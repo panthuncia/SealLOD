@@ -1330,6 +1330,7 @@ PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+    defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
 
     Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
@@ -1375,6 +1376,7 @@ PipelineState PSOManager::CreateClusterLODVirtualShadowReyesRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+    defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
 
     Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
@@ -1660,6 +1662,7 @@ PipelineState PSOManager::CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags 
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     if (outputKind == CLodRasterOutputKind::VirtualShadow) {
         defines.push_back({ L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
+        defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
     }
     return MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),
@@ -2038,6 +2041,7 @@ PipelineState PSOManager::CreateMeshPPLLPSO(
 PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
 {
     auto defines = GetShaderDefines(psoFlags, MaterialCompileFlags::MaterialCompileNone);
+    defines.push_back({ L"CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY", L"1" });
 
     PipelineState pso = MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),

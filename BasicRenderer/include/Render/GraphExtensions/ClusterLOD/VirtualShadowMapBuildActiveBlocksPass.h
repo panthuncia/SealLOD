@@ -13,7 +13,8 @@ public:
     VirtualShadowMapBuildActiveBlocksPass(
         std::shared_ptr<PixelBuffer> pageTableTexture,
         std::shared_ptr<Buffer> clipmapInfoBuffer,
-        std::shared_ptr<Buffer> activeBlockMetadataBuffer);
+        std::shared_ptr<Buffer> activeBlockMetadataBuffer,
+        bool dynamicPages = false);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override {}
@@ -25,4 +26,5 @@ private:
     std::shared_ptr<PixelBuffer> m_pageTableTexture;
     std::shared_ptr<Buffer> m_clipmapInfoBuffer;
     std::shared_ptr<Buffer> m_activeBlockMetadataBuffer;
+    bool m_dynamicPages = false;
 };

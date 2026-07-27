@@ -1746,8 +1746,10 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidateCountBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowStaticPhysicalPagesTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
-                    traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr))
+                    traits.type == CLodExtensionType::Shadow ? m_shadowDynamicActiveBlockMetadataBuffer : nullptr))
             : std::static_pointer_cast<ComputePass>(
                 std::make_shared<HierarchicalCullingPass>(
                     cullPassName,
@@ -1779,8 +1781,10 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidateCountBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
-                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowStaticPhysicalPagesTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowDynamicActiveBlockMetadataBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueCounterBuffer : nullptr,
                     useWorkGraphReyesVisibility ? m_reyesDiceQueueOverflowBuffer : nullptr,
@@ -1885,7 +1889,10 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
         rasterizePassInputs.outputKind = traits.rasterOutputKind;
 
         const auto shadowPageTable = traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? m_shadowPageTableTexture : nullptr;
-        const auto shadowPhysicalPages = traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? m_shadowPhysicalPagesTexture : nullptr;
+        const auto shadowStaticPhysicalPages =
+            traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? m_shadowStaticPhysicalPagesTexture : nullptr;
+        const auto shadowDynamicPhysicalPages =
+            traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? m_shadowPhysicalPagesTexture : nullptr;
         const auto shadowClipmapInfo = traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow ? m_shadowClipmapInfoBuffer : nullptr;
         const std::shared_ptr<Buffer> rasterHistogramBuffer =
             isPhase1 ? m_rasterBucketsHistogramBuffer : m_rasterBucketsHistogramBufferPhase2;
@@ -1917,13 +1924,14 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                 nullptr,
                 slabGroup,
                 shadowPageTable,
-                shadowPhysicalPages,
+                shadowStaticPhysicalPages,
                 shadowClipmapInfo,
                 nullptr,
                 nullptr,
                 m_workGraphTelemetryBuffer,
                 m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchCounterBuffer() : nullptr,
-                m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchDetailsBuffer() : nullptr));
+                m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchDetailsBuffer() : nullptr,
+                shadowDynamicPhysicalPages));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
             rasterizePassDesc.At(RenderGraph::ExternalInsertPoint::Before("MaterialHistogramPass"));
         }
@@ -2062,6 +2070,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         nullptr,
                         m_shadowClipmapInfoBuffer,
                         m_shadowActiveBlockMetadataBuffer,
+                        m_shadowDynamicActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
                         m_shadowStatsBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
@@ -2103,6 +2112,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                         m_vsmExpandedVisibleClusterTransformIndicesBufferSw,
                         m_shadowClipmapInfoBuffer,
                         m_shadowActiveBlockMetadataBuffer,
+                        m_shadowDynamicActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
                         m_shadowStatsBuffer,
                         m_shadowConfiguredExpandedRecordCapacity,
@@ -2137,8 +2147,10 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     m_viewRasterInfoBuffer,
                     traits.rasterOutputKind,
                     m_shadowPageTableTexture,
+                    m_shadowStaticPhysicalPagesTexture,
                     m_shadowPhysicalPagesTexture,
                     m_shadowClipmapInfoBuffer,
+                    m_workGraphTelemetryBuffer,
                     slabGroup,
                     true));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
@@ -2231,6 +2243,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     m_viewRasterInfoBuffer,
                     traits.rasterOutputKind,
                     m_shadowPageTableTexture,
+                    m_shadowStaticPhysicalPagesTexture,
                     m_shadowPhysicalPagesTexture,
                     m_shadowClipmapInfoBuffer,
                     slabGroup,

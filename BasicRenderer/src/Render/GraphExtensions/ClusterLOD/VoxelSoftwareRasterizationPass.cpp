@@ -29,6 +29,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     CLodRasterOutputKind outputKind,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
     std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
     uint32_t voxelWorkCapacity)
@@ -41,6 +42,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
+    , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_outputKind(outputKind)
@@ -55,6 +57,7 @@ VoxelSoftwareRasterizationPass::VoxelSoftwareRasterizationPass(
     };
     std::vector<DxcDefine> defines = {
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
+        { L"CLOD_VSM_TWO_LAYER_VOXEL_VERSION", outputKind == CLodRasterOutputKind::VirtualShadow ? L"2" : L"0" },
         { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
         { L"CLOD_VOXEL_RASTER_CUBE_BATCH_SIZE", L"16" },
     };
@@ -164,7 +167,10 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         builder->WithShaderResource(m_virtualShadowClipmapInfoBuffer)
-            .WithUnorderedAccess(m_virtualShadowPageTableTexture, m_virtualShadowPhysicalPagesTexture);
+            .WithUnorderedAccess(
+                m_virtualShadowPageTableTexture,
+                m_virtualShadowPhysicalPagesTexture,
+                m_virtualShadowDynamicPagesTexture);
     }
 
     if (m_slabResourceGroup) {
@@ -259,6 +265,8 @@ PassReturn VoxelSoftwareRasterizationPass::Execute(PassExecutionContext& executi
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+            m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;

@@ -29,6 +29,7 @@ public:
         std::shared_ptr<Buffer> viewRasterInfoBuffer,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<Buffer> rigidPageJobCountBuffer,
         std::shared_ptr<Buffer> rigidPageJobRecordsBuffer,
@@ -44,6 +45,7 @@ public:
         , m_viewRasterInfoBuffer(std::move(viewRasterInfoBuffer))
         , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
         , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
+        , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
         , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
         , m_pageJobCountBuffers{ std::move(rigidPageJobCountBuffer), std::move(skinnedPageJobCountBuffer) }
         , m_pageJobRecordsBuffers{ std::move(rigidPageJobRecordsBuffer), std::move(skinnedPageJobRecordsBuffer) }
@@ -107,6 +109,7 @@ public:
             .WithUnorderedAccess(
                 m_virtualShadowPageTableTexture,
                 m_virtualShadowPhysicalPagesTexture,
+                m_virtualShadowDynamicPagesTexture,
                 m_virtualShadowStatsBuffer)
             .WithIndirectArguments(m_pageJobIndirectArgsBuffers[0], m_pageJobIndirectArgsBuffers[1])
             .WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -146,6 +149,8 @@ public:
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX] = m_virtualShadowPageTableTexture->GetUAVShaderVisibleInfo(UAVViewType::Texture2DArrayFull, 0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] = m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+        misc[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+            m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_STATS_DESCRIPTOR_INDEX] =
             m_virtualShadowStatsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_RASTER_VIRTUAL_SHADOW_TELEMETRY_ENABLED] =
@@ -179,6 +184,7 @@ private:
     std::shared_ptr<Buffer> m_viewRasterInfoBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::array<std::shared_ptr<Buffer>, 2> m_pageJobCountBuffers;
     std::array<std::shared_ptr<Buffer>, 2> m_pageJobRecordsBuffers;

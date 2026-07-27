@@ -44,7 +44,9 @@ public:
         std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
         std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
-        std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer = nullptr);
+        std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer = nullptr,
+        std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture = nullptr,
+        std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer = nullptr);
     ~HierarchicalDispatchCullingPass() override;
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -121,6 +123,8 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
+    std::shared_ptr<PixelBuffer> m_shadowDynamicPhysicalPagesTexture;
+    std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_pureComputeCurrentNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeNextNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeCurrentLeafFrontierBuffer;

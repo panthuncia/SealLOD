@@ -42,6 +42,7 @@ public:
         std::shared_ptr<Buffer> expandedVisibleClusterTransformIndicesBuffer,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<Buffer> virtualShadowActiveBlockMetadataBuffer,
+        std::shared_ptr<Buffer> virtualShadowDynamicActiveBlockMetadataBuffer,
         std::shared_ptr<Buffer> virtualShadowBlockClusterCoverageBuffer,
         std::shared_ptr<Buffer> virtualShadowStatsBuffer,
         uint32_t expandedRecordCapacity,
@@ -59,6 +60,7 @@ public:
         , m_expandedVisibleClusterTransformIndicesBuffer(std::move(expandedVisibleClusterTransformIndicesBuffer))
         , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
         , m_virtualShadowActiveBlockMetadataBuffer(std::move(virtualShadowActiveBlockMetadataBuffer))
+        , m_virtualShadowDynamicActiveBlockMetadataBuffer(std::move(virtualShadowDynamicActiveBlockMetadataBuffer))
         , m_virtualShadowBlockClusterCoverageBuffer(std::move(virtualShadowBlockClusterCoverageBuffer))
         , m_virtualShadowStatsBuffer(std::move(virtualShadowStatsBuffer))
         , m_expandedRecordCapacity(expandedRecordCapacity)
@@ -127,7 +129,8 @@ public:
                 m_sourceVisibleClusterTransformIndicesBuffer,
                 m_sourceHistogramBuffer,
                 m_virtualShadowClipmapInfoBuffer,
-                m_virtualShadowActiveBlockMetadataBuffer)
+                m_virtualShadowActiveBlockMetadataBuffer,
+                m_virtualShadowDynamicActiveBlockMetadataBuffer)
             .WithUnorderedAccess(m_expandedHistogramBuffer)
             .WithUnorderedAccess(m_virtualShadowStatsBuffer)
             .WithIndirectArguments(m_sourceIndirectArgsBuffer)
@@ -224,7 +227,6 @@ public:
         misc[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_sourceVisibleClusterTransformIndicesBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_EXPANDED_HISTOGRAM_DESCRIPTOR_INDEX] = m_expandedHistogramBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
-        misc[CLOD_VSM_BLOCK_EXPAND_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] = m_virtualShadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index;
         misc[CLOD_VSM_BLOCK_EXPAND_CLUSTER_COVERAGE_DESCRIPTOR_INDEX] =
             m_mode == VirtualShadowBlockExpandMode::Histogram
                 ? m_virtualShadowBlockClusterCoverageBuffer->GetUAVShaderVisibleInfo(0).slot.index
@@ -244,7 +246,14 @@ public:
         const uint64_t stride = sizeof(RasterizeClustersCommand);
         for (uint32_t bucketIndex = 0u; bucketIndex < numBuckets; ++bucketIndex) {
             const MaterialRasterFlags flags = context.materialManager->GetRasterFlagsForBucket(bucketIndex);
-            const PipelineState& pso = (flags & MaterialRasterFlagsSkinned) ? m_skinnedPso : m_rigidPso;
+            const bool skinned =
+                (flags & MaterialRasterFlagsSkinned) != 0;
+            const PipelineState& pso = skinned ? m_skinnedPso : m_rigidPso;
+            misc[CLOD_VSM_BLOCK_EXPAND_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+                (skinned
+                    ? m_virtualShadowDynamicActiveBlockMetadataBuffer
+                    : m_virtualShadowActiveBlockMetadataBuffer)
+                    ->GetSRVInfo(0).slot.index;
 
             commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, misc);
             BindResourceDescriptorIndices(commandList, pso.GetResourceDescriptorSlots());
@@ -282,6 +291,7 @@ private:
     std::shared_ptr<Buffer> m_expandedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<Buffer> m_virtualShadowActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_virtualShadowDynamicActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_virtualShadowBlockClusterCoverageBuffer;
     std::shared_ptr<Buffer> m_virtualShadowStatsBuffer;
     uint32_t m_expandedRecordCapacity = 0u;

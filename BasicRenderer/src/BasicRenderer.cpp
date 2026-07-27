@@ -17,9 +17,11 @@
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <ranges>
 #include <set>
+#include <nlohmann/json.hpp>
 //#include <tracy/Tracy.hpp>
 
 #include "Mesh/Mesh.h"
@@ -817,6 +819,117 @@ private:
     std::uint64_t m_lastRenderGraphSampleSerial{ 0 };
 };
 
+constexpr std::string_view DemoCameraStatePath = "logs/demo_camera_state.json";
+
+struct DemoCameraState {
+    bool rememberCameraPose = false;
+    std::optional<DirectX::XMFLOAT3> position;
+    std::optional<DirectX::XMFLOAT4> rotation;
+};
+
+bool IsFinite(const DirectX::XMFLOAT3& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+bool IsFinite(const DirectX::XMFLOAT4& value) {
+    return std::isfinite(value.x) && std::isfinite(value.y)
+        && std::isfinite(value.z) && std::isfinite(value.w);
+}
+
+DemoCameraState LoadDemoCameraState() {
+    DemoCameraState state;
+    std::ifstream input(DemoCameraStatePath.data());
+    if (!input) {
+        return state;
+    }
+
+    try {
+        const auto document = nlohmann::json::parse(input);
+        state.rememberCameraPose = document.value("rememberCameraPose", false);
+        if (!state.rememberCameraPose) {
+            return state;
+        }
+
+        const auto& position = document.at("position");
+        const auto& rotation = document.at("rotation");
+        if (!position.is_array() || position.size() != 3
+            || !rotation.is_array() || rotation.size() != 4) {
+            throw std::runtime_error("position or rotation has an invalid shape");
+        }
+
+        DirectX::XMFLOAT3 loadedPosition{
+            position.at(0).get<float>(),
+            position.at(1).get<float>(),
+            position.at(2).get<float>() };
+        DirectX::XMFLOAT4 loadedRotation{
+            rotation.at(0).get<float>(),
+            rotation.at(1).get<float>(),
+            rotation.at(2).get<float>(),
+            rotation.at(3).get<float>() };
+        if (!IsFinite(loadedPosition) || !IsFinite(loadedRotation)) {
+            throw std::runtime_error("position or rotation contains a non-finite value");
+        }
+
+        const float rotationLengthSquared =
+            loadedRotation.x * loadedRotation.x
+            + loadedRotation.y * loadedRotation.y
+            + loadedRotation.z * loadedRotation.z
+            + loadedRotation.w * loadedRotation.w;
+        if (rotationLengthSquared < 1.0e-8f) {
+            throw std::runtime_error("rotation is not a usable quaternion");
+        }
+
+        DirectX::XMStoreFloat4(
+            &loadedRotation,
+            DirectX::XMQuaternionNormalize(DirectX::XMLoadFloat4(&loadedRotation)));
+        state.position = loadedPosition;
+        state.rotation = loadedRotation;
+    }
+    catch (const std::exception& error) {
+        spdlog::warn(
+            "Could not load remembered demo camera pose from '{}': {}",
+            DemoCameraStatePath,
+            error.what());
+        state.position.reset();
+        state.rotation.reset();
+    }
+    return state;
+}
+
+void SaveDemoCameraState(Scene& scene, bool rememberCameraPose) {
+    nlohmann::json document{
+        { "rememberCameraPose", rememberCameraPose }
+    };
+
+    if (rememberCameraPose && scene.HasUsablePrimaryCamera()) {
+        DirectX::XMFLOAT3 position;
+        DirectX::XMFLOAT4 rotation;
+        DirectX::XMStoreFloat3(
+            &position,
+            scene.GetPrimaryCamera().get<Components::Position>().pos);
+        DirectX::XMStoreFloat4(
+            &rotation,
+            DirectX::XMQuaternionNormalize(
+                scene.GetPrimaryCamera().get<Components::Rotation>().rot));
+        document["position"] = { position.x, position.y, position.z };
+        document["rotation"] = { rotation.x, rotation.y, rotation.z, rotation.w };
+    }
+
+    std::ofstream output(DemoCameraStatePath.data(), std::ios::trunc);
+    if (!output) {
+        spdlog::warn(
+            "Could not open '{}' to save the demo camera pose",
+            DemoCameraStatePath);
+        return;
+    }
+    output << document.dump(2) << '\n';
+    if (!output) {
+        spdlog::warn(
+            "Could not write the demo camera pose to '{}'",
+            DemoCameraStatePath);
+    }
+}
+
 } // namespace
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
@@ -830,6 +943,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     file_logger->flush_on(spdlog::level::info);
 
     const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
+    const DemoCameraState cameraState = LoadDemoCameraState();
     DemoStatisticalSamplingRun statisticalSampling;
     if (const auto samplingConfig = FindCommandLinePath(commandLine, "--sampling-config")) {
         std::string samplingError;
@@ -863,6 +977,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         commandLine.find("--vsm-retreat-test") != std::string_view::npos;
     const bool vsmPageStateTest =
         commandLine.find("--vsm-page-state") != std::string_view::npos;
+    const bool vsmRerenderedTest =
+        commandLine.find("--vsm-rerendered") != std::string_view::npos;
     const bool graphRebuildSmokeTest =
         pipelineReplacementSmokeTest || clodGraphRebuildSmokeTest || clodStreamingStressTest;
 
@@ -906,9 +1022,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
+    SettingsManager::GetInstance().getSettingSetter<bool>("rememberCameraPose")(
+        cameraState.rememberCameraPose);
     if (vsmPageStateTest) {
         SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
             static_cast<unsigned int>(OutputType::VSM_PAGE_STATE));
+    }
+    if (vsmRerenderedTest) {
+        SettingsManager::GetInstance().getSettingSetter<unsigned int>("outputType")(
+            static_cast<unsigned int>(OutputType::VSM_RERENDERED_THIS_FRAME));
     }
     if (clodStreamingStressTest) {
         SettingsManager::GetInstance().getSettingSetter<uint32_t>(
@@ -949,6 +1071,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     auto tigerScene = LoadModel("models/tiger.glb");
     tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
+	tigerScene->GetRoot().set<Components::Position>({30, 5, 0});
 
 	//auto shiba = LoadModel("models/shiba.glb");
 
@@ -961,8 +1084,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto robot = LoadModel("models/robot.usdz");
 
-	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
-	//auto zorah = LoadModel("models/bunny.usdc");
+	auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
 
 	//auto zorah = LoadModel("models/zorah_materials/zorah.usdc");
 
@@ -1087,7 +1209,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(island->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(zorah->Clone());
+	renderer.GetCurrentScene()->AppendScene(zorah->Clone());
 
     //mountainScene = LoadModel("models/terrain.glb");
  //   mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
@@ -1114,8 +1236,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(0.f, 5.f, 0.f);
-        XMFLOAT3 lookAt = XMFLOAT3(1.0f, 5.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(35.f, 10.f, 0.f);
+        XMFLOAT3 lookAt = XMFLOAT3(100.0f, 5.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;
@@ -1128,6 +1250,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         aspectRatio = static_cast<float>(clientWidth) / static_cast<float>(clientHeight);
         auto& scene = renderer.GetCurrentScene();
+        if (cameraState.rememberCameraPose
+            && cameraState.position
+            && cameraState.rotation) {
+            pos = *cameraState.position;
+            const DirectX::XMVECTOR savedRotation =
+                DirectX::XMLoadFloat4(&*cameraState.rotation);
+            DirectX::XMStoreFloat3(
+                &up,
+                DirectX::XMVector3Rotate(
+                    DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f),
+                    savedRotation));
+            DirectX::XMFLOAT3 forward;
+            DirectX::XMStoreFloat3(
+                &forward,
+                DirectX::XMVector3Rotate(
+                    DirectX::XMVectorSet(0.0f, 0.0f, -1.0f, 0.0f),
+                    savedRotation));
+            lookAt = {
+                pos.x + forward.x,
+                pos.y + forward.y,
+                pos.z + forward.z };
+            spdlog::info(
+                "Restoring demo camera pose from '{}'",
+                DemoCameraStatePath);
+        }
         scene->SetCamera(pos, lookAt, up, fov, aspectRatio, zNear, zFar);
     
 	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(0, -6, -1));
@@ -1344,6 +1491,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     const bool smokeValidationFailed = graphRebuildSmokeTest && D3D12SmokeValidationFailed();
+    if (const auto& scene = renderer.GetCurrentScene(); scene) {
+        SaveDemoCameraState(
+            *scene,
+            SettingsManager::GetInstance()
+                .getSettingGetter<bool>("rememberCameraPose")());
+    }
     renderer.Cleanup();
 
     if (statisticalSampling.ExitCode() != 0) return statisticalSampling.ExitCode();

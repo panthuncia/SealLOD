@@ -36,6 +36,20 @@
 #define CLOD_WG_RIGID_SW_RASTER CLOD_WG_RIGID_ONLY
 #endif
 
+#if defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+#define CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)
+#define CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX
+#define CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX
+#define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX
+#define CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX
+#else
+#define CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX
+#define CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX
+#define CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX
+#define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+#define CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX
+#endif
+
 // Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
 
 #ifndef CLOD_READ_PACKED_BITS32_DEFINED
@@ -220,7 +234,7 @@ SkinningInfluences SWResolveAssemblySkinningInfluences(SkinningInfluences skinni
 bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
 {
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
-        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+        ResourceDescriptorHeap[CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX];
 
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
     if (!CLodVirtualShadowTryGetClipmapInfoForView(viewID, clipmapInfos, clipmapInfo))
@@ -232,11 +246,32 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
     const uint2 virtualPageCoords = CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
 
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
+    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX];
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
+    const bool dynamicLayer =
+#if CLOD_WG_RIGID_SW_RASTER
+        false;
+#else
+        (gs_vertexFlags & VERTEX_SKINNED) != 0u;
+#endif
+    if (dynamicLayer &&
+        CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
+        RWStructuredBuffer<uint> telemetryCounters =
+            ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
+        InterlockedAdd(telemetryCounters[277u], 1u);
+    }
+    if (!CLodVirtualShadowPageEntryCanRasterLayer(
+            pageEntry, dynamicLayer))
+    {
+        if (dynamicLayer &&
+            CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+        {
+            RWStructuredBuffer<uint> telemetryCounters =
+                ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
+            InterlockedAdd(telemetryCounters[278u], 1u);
+        }
         return false;
     }
 
@@ -244,13 +279,26 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+        dynamicLayer
+            ? CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX];
     InterlockedMin(physicalPages[atlasPixel], asuint(linearDepth));
+    if (dynamicLayer &&
+        CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> telemetryCounters =
+            ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
+        InterlockedAdd(telemetryCounters[279u], 1u);
+    }
     uint ignored = 0u;
-    InterlockedOr(
-        pageTable[pageCoords],
-        kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-        ignored);
+    if (!dynamicLayer)
+    {
+        InterlockedOr(
+            pageTable[pageCoords],
+            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            ignored);
+    }
     return true;
 }
 #endif
@@ -653,10 +701,10 @@ void SWRasterCluster(
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
-        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+        ResourceDescriptorHeap[CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
     const bool hasClipmapInfo = CLodVirtualShadowTryGetClipmapInfoForView(viewID, clipmapInfos, clipmapInfo);
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
+    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX];
 #endif
 
     for (uint triangleBlockBase = 0u;
@@ -733,6 +781,7 @@ void SWRasterCluster(
                 uint2(minPx),
                 uint2(maxPx),
                 clipmapInfo,
+                (gs_vertexFlags & VERTEX_SKINNED) != 0u,
                 pageTable))
         {
             continue;

@@ -31,6 +31,7 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     std::shared_ptr<Buffer> telemetryBuffer,
     std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
     std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+    std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
     std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
     std::shared_ptr<ResourceGroup> slabResourceGroup,
     std::string_view resourceName,
@@ -48,6 +49,7 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     , m_telemetryBuffer(std::move(telemetryBuffer))
     , m_virtualShadowPageTableTexture(std::move(virtualShadowPageTableTexture))
     , m_virtualShadowPhysicalPagesTexture(std::move(virtualShadowPhysicalPagesTexture))
+    , m_virtualShadowDynamicPagesTexture(std::move(virtualShadowDynamicPagesTexture))
     , m_virtualShadowClipmapInfoBuffer(std::move(virtualShadowClipmapInfoBuffer))
     , m_slabResourceGroup(std::move(slabResourceGroup))
     , m_phaseIndex(phaseIndex)
@@ -56,11 +58,15 @@ ReyesVirtualShadowRasterizationPass::ReyesVirtualShadowRasterizationPass(
     m_viewRasterInfoBuffer->SetName(std::string(resourceName));
     rg::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow");
 
+    auto defines = IsTerrainRvtTelemetryDebugEnabled()
+        ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } }
+        : std::vector<DxcDefine>{};
+    defines.push_back({ L"CLOD_VSM_TWO_LAYER_REYES_VERSION", L"2" });
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/reyesPatchVirtualShadowRaster.hlsl",
         L"ReyesPatchVirtualShadowRasterCS",
-        IsTerrainRvtTelemetryDebugEnabled() ? std::vector<DxcDefine>{ DxcDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } } : std::vector<DxcDefine>{},
+        defines,
         "CLod.ReyesPatchVirtualShadowRaster.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {
@@ -134,7 +140,8 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
         .WithUnorderedAccess(
             m_telemetryBuffer,
             m_virtualShadowPageTableTexture,
-            m_virtualShadowPhysicalPagesTexture)
+            m_virtualShadowPhysicalPagesTexture,
+            m_virtualShadowDynamicPagesTexture)
         .WithConstantBuffer(Builtin::PerFrameBuffer);
 
     if (m_slabResourceGroup) {
@@ -227,6 +234,8 @@ PassReturn ReyesVirtualShadowRasterizationPass::Execute(PassExecutionContext& ex
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX] = m_virtualShadowClipmapInfoBuffer->GetSRVInfo(0).slot.index;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX] =
         m_virtualShadowPhysicalPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
+    uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX] =
+        m_virtualShadowDynamicPagesTexture->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_RESOLUTION] = virtualShadowConfig.pageTableResolution;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
     uintRootConstants[CLOD_RASTER_VIRTUAL_SHADOW_VIRTUAL_RESOLUTION] = virtualShadowConfig.virtualResolution;

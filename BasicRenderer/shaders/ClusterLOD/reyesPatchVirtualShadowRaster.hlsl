@@ -8,6 +8,7 @@
 void ReyesTryWriteVirtualShadowTexel(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
     uint shadowVsmPayload,
@@ -45,7 +46,8 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    if (!CLodVirtualShadowPageEntryCanRaster(pageEntry))
+    if (!CLodVirtualShadowPageEntryCanRasterLayer(
+            pageEntry, dynamicLayer))
     {
         return;
     }
@@ -55,16 +57,20 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
     InterlockedMin(physicalPages[atlasPixel], asuint(depth));
 
-    uint ignored = 0u;
-    InterlockedOr(
-        pageTable[pageCoords],
-        kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-        ignored);
+    if (!dynamicLayer)
+    {
+        uint ignored = 0u;
+        InterlockedOr(
+            pageTable[pageCoords],
+            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            ignored);
+    }
 }
 
 void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
@@ -165,6 +171,7 @@ void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
                 ReyesTryWriteVirtualShadowTexel(
                     pageTable,
                     physicalPages,
+                    dynamicLayer,
                     viewRasterInfo,
                     clipmapInfo,
                     shadowVsmPayload,
@@ -184,6 +191,7 @@ void ReyesRasterizeProjectedVirtualShadowMicroTriangle(
 void ReyesRasterizeVirtualShadowMicroTriangle(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages,
+    bool dynamicLayer,
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
     ClodViewRasterInfo viewRasterInfo,
     CLodVirtualShadowClipmapInfo clipmapInfo,
@@ -242,6 +250,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
     ReyesRasterizeProjectedVirtualShadowMicroTriangle(
         pageTable,
         physicalPages,
+        dynamicLayer,
         telemetryBuffer,
         viewRasterInfo,
         clipmapInfo,
@@ -259,6 +268,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
         ReyesRasterizeProjectedVirtualShadowMicroTriangle(
             pageTable,
             physicalPages,
+            dynamicLayer,
             telemetryBuffer,
             viewRasterInfo,
             clipmapInfo,
@@ -280,6 +290,7 @@ void ReyesRasterizeVirtualShadowMicroTriangle(
     ReyesRasterizeProjectedVirtualShadowMicroTriangle(
         pageTable,
         physicalPages,
+        dynamicLayer,
         telemetryBuffer,
         viewRasterInfo,
         clipmapInfo,
@@ -424,7 +435,12 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
         max(camera.zNear, 1.0e-3f));
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    const bool dynamicLayer =
+        (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+        dynamicLayer
+            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
 
     const uint rasterMicroTriangleEnd = min(rasterWorkEntry.microTriangleOffset + rasterWorkEntry.microTriangleCount, microTriangleCount);
     [loop]
@@ -481,6 +497,7 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         ReyesRasterizeVirtualShadowMicroTriangle(
             pageTable,
             physicalPages,
+            dynamicLayer,
             telemetryBuffer,
             viewRasterInfo,
             clipmapInfo,

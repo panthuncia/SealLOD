@@ -17,6 +17,7 @@
 #include <array>
 #include <stacktrace>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <typeindex>
 #include <utility>
@@ -1766,6 +1767,7 @@ void Renderer::SetSettings() {
         settingsManager.registerSetting<std::vector<float>>("directionalLightCascadeSplits", calculateCascadeSplits(numDirectionalCascades, 0.1f, maxShadowDistance, maxShadowDistance));
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);
+    settingsManager.registerSetting<bool>("rememberCameraPose", false);
 	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 0.0f);
 	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
 		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
@@ -3468,7 +3470,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
     m_lastCLodVirtualShadowTelemetryRequestFrame = requestedFrame;
     m_clodVirtualShadowTelemetryReadbackPending = true;
     readbackService->RequestReadbackCapture(
-        "CLodShadow::VirtualShadowClearDirtyBitsPass",
+        "DeferredShadingPass",
         statsResource.get(),
         RangeSpec{},
         [this, requestedFrame](ReadbackCaptureResult&& result) {
@@ -3546,7 +3548,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.cumulativeUpgradePageAdmittedCount,
                 stats.cumulativeUpgradePageRenderedCount);
             spdlog::info(
-                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} syntheticEmptyValid={} newlyAllocated={} physicalClears={} admitted={} clearAdmissionInvariant={}",
+                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} syntheticEmptyValid={} newlyAllocated={} staticClears={} dynamicClears={} composed={} admitted={} clearAdmissionInvariant={}",
                 requestedFrame,
                 stats.freePhysicalPageCount,
                 stats.reusablePhysicalPageCount,
@@ -3558,8 +3560,41 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.syntheticEmptyValidPageCount,
                 stats.newlyAllocatedPageCount,
                 stats.physicalPageClearCount,
+                stats.dynamicPageClearCount,
+                stats.composedPageCount,
                 stats.admittedPageCount,
                 admittedPagesCleared);
+            spdlog::info(
+                "CLOD VSM deferred inactive samples frame={}: unsafe(preferred={},fallback={},smrt={},total={}) rejected(preferred={},fallback={},smrt={},total={})",
+                requestedFrame,
+                stats.deferredPreferredInactivePageSampleCount,
+                stats.deferredFallbackInactivePageSampleCount,
+                stats.deferredSmrtInactivePageSampleCount,
+                stats.deferredPreferredInactivePageSampleCount +
+                    stats.deferredFallbackInactivePageSampleCount +
+                    stats.deferredSmrtInactivePageSampleCount,
+                stats.deferredPreferredInactivePageRejectCount,
+                stats.deferredFallbackInactivePageRejectCount,
+                stats.deferredSmrtInactivePageRejectCount,
+                stats.deferredPreferredInactivePageRejectCount +
+                    stats.deferredFallbackInactivePageRejectCount +
+                    stats.deferredSmrtInactivePageRejectCount);
+            spdlog::info(
+                "CLOD VSM tracked dynamic page frame={}: page={} atlasPixel=0x{:08X} skinnedDepth=0x{:08X} compose(seen={},static=0x{:08X},before=0x{:08X},after=0x{:08X},mismatches={}) deferred(samples={},observed=0x{:08X},mismatches={})",
+                requestedFrame,
+                stats.trackedSkinnedPhysicalPagePlusOne != 0u
+                    ? stats.trackedSkinnedPhysicalPagePlusOne - 1u
+                    : 0xFFFFFFFFu,
+                stats.trackedSkinnedAtlasPixel,
+                stats.trackedSkinnedDepthBits,
+                stats.trackedComposeFramePlusOne != 0u,
+                stats.trackedComposeStaticDepthBits,
+                stats.trackedComposeDynamicBeforeBits,
+                stats.trackedComposeDynamicAfterBits,
+                stats.trackedCompositionMismatchCount,
+                stats.trackedDeferredSampleCount,
+                stats.trackedDeferredObservedDepthBits,
+                stats.trackedDeferredMismatchCount);
             spdlog::info(
                 "CLOD VSM raster expansion frame={}: swBlocks(requested={},committed={},dropped={}) pageJobs(requested={},committed={},dropped={},doubleSided={})",
                 requestedFrame,
@@ -3571,15 +3606,14 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.pageJobDroppedRecordCount,
                 stats.pageJobDoubleSidedRecordCount);
             spdlog::info(
-                "CLOD VSM dirty sources frame={}: residentDirtyHits={} dirtyPages={} visitedDirty={} predictiveInvalidated={} currentBoundsInvalidated={} previousBoundsInvalidated={} skinnedInvalidated={}",
+                "CLOD VSM dirty sources frame={}: residentDirtyHits={} dirtyPages={} visitedDirty={} predictiveInvalidated={} currentBoundsInvalidated={} previousBoundsInvalidated={}",
                 requestedFrame,
                 sumClipmapCounters(stats.markResidentDirtyHits),
                 sumClipmapCounters(stats.dirtyPageTableEntries),
                 sumClipmapCounters(stats.visitedDirtyPageTableEntries),
                 sumClipmapCounters(stats.predictiveInvalidatedPageTableEntries),
                 sumClipmapCounters(stats.invalidatedCurrentBoundsPageTableEntries),
-                sumClipmapCounters(stats.invalidatedPreviousBoundsPageTableEntries),
-                sumClipmapCounters(stats.invalidatedSkinnedPageTableEntries));
+                sumClipmapCounters(stats.invalidatedPreviousBoundsPageTableEntries));
             spdlog::info(
                 "CLOD VSM page-job raster frame={}: jobs={} clusterBoundsOverlap={} triangles(total={},depthRejected={},backfaceRejected={},bboxRejected={}) coveredPixels={} pageWrites={} emptyJobs={}",
                 requestedFrame,
@@ -3633,36 +3667,81 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     return decoded.counters[static_cast<size_t>(index)];
                 };
                 spdlog::info(
-                    "CLOD VSM work frame={}: object(visible={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},dirtyQueries={},dirtyHits={},cleanRejected={}) sort(inputs={},emitted={}) raster(groups={},triangles={},pixels={},pageRejected={},writes={})",
+                "CLOD VSM work frame={}: object(total={},inRange={},visible={},staleRejected={},frustumRejected={},occlusionRejected={},emitted={}) traverse(internal={},leaf={},culled={},emitted={},skinnedLanes={}) cluster(visibleWrites={},skinnedBounds={},skinnedContributing={},skinnedBlocks={},dirtyQueries={},dirtyHits={},cleanRejected={}) sort(inputs={},emitted={},skinnedInputs={},skinnedEmitted={}) raster(groups={},skinnedGroups={},triangles={},skinnedTriangles={},pixels={},dynamicPixels={},pageRejected={},dynamicPageRejected={},writes={},dynamicWrites={})",
                     requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullVisibleThreads),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullRejectedStaleGeneration),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullRejectedFrustum),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullRejectedOcclusion),
                     counter(CLodWorkGraphCounterIndex::ObjectCullTraverseRecordsEmitted),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesInternalNodeRecords),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesCulledNodeRecords),
                     counter(CLodWorkGraphCounterIndex::TraverseNodesTraverseRecordsEmitted),
+                    counter(CLodWorkGraphCounterIndex::TraverseSkinnedLanes),
                     counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
+                    counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedLiveEvaluations),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedContributing),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedBlockRecords),
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyQueries),
                     counter(CLodWorkGraphCounterIndex::ClusterCullShadowDirtyRegionHits),
                     counter(CLodWorkGraphCounterIndex::ClusterCullRejectedCleanPages),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
+                    counter(CLodWorkGraphCounterIndex::RasterSortSkinnedHistogramInputs),
+                    counter(CLodWorkGraphCounterIndex::RasterSortSkinnedCompactionEmitted),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles),
                     counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowDynamicInvocations),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowDynamicPageRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowDynamicWrites));
                 spdlog::info(
-                    "CLOD VSM routing frame={}: contributing={} hardware={} software={} pageJob={} pageJobReject(alpha={},reyes={},threshold={},disabled={})",
+                    "CLOD VSM routing frame={}: contributing={} hardware={} software={} pageJob={} skinned(hardware={},software={},pageJob={}) pageJobReject(alpha={},reyes={},threshold={},disabled={})",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::ClassifyContributing),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedHW),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedPageJob),
+                    counter(CLodWorkGraphCounterIndex::ClassifySkinnedRoutedHW),
+                    counter(CLodWorkGraphCounterIndex::ClassifySkinnedRoutedSW),
+                    counter(CLodWorkGraphCounterIndex::ClassifySkinnedRoutedPageJob),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectAlphaTested),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectReyesDisplacement),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectBelowThreshold),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectDisabled));
+                spdlog::info(
+                    "CLOD VSM skinned block trace frame={}: candidates={} emitted={} metadataMissing={} rectDisjoint={} directActivePageHits={} metadataFalseNegatives={} rectFalseNegatives={}",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedBlockCandidates),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedBlockRecords),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedBlockMetadataMissing),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedBlockRectDisjoint),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedDirectActivePageHits),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedMetadataFalseNegatives),
+                    counter(CLodWorkGraphCounterIndex::ClusterCullSkinnedRectFalseNegatives));
+                spdlog::info(
+                    "CLOD VSM skinned software trace frame={}: recordsWritten={} histogramInputs={} attempts={} pageRejected={} writes={}",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ClassifySkinnedSoftwareRecordsWritten),
+                    counter(CLodWorkGraphCounterIndex::RasterSortSkinnedSoftwareHistogramInputs),
+                    counter(CLodWorkGraphCounterIndex::SoftwareRasterDynamicAttempts),
+                    counter(CLodWorkGraphCounterIndex::SoftwareRasterDynamicPageRejected),
+                    counter(CLodWorkGraphCounterIndex::SoftwareRasterDynamicWrites));
+                spdlog::info(
+                    "CLOD VSM skinned object trace frame={}: classified={} nodeSkinningOnly={} frustumRejected={} cleanRejected={} emitted={}",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::ObjectCullSkinnedClassified),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullNodeSkinningOnly),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullSkinnedFrustumRejected),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullSkinnedCleanRejected),
+                    counter(CLodWorkGraphCounterIndex::ObjectCullSkinnedEmitted));
             });
     }
     if (visibleCounterResource) {
@@ -3712,6 +3791,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 uint64_t yellowPixels = 0u;
                 uint64_t greenPixels = 0u;
                 uint64_t nonSentinelPixels = 0u;
+                std::unordered_map<uint64_t, uint64_t> payloadHistogram;
                 std::array<uint32_t, 2> firstPayload{
                     UINT32_MAX,
                     UINT32_MAX};
@@ -3725,6 +3805,10 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                             row[x * 2u + 1u]};
                         if (payload[0] != UINT32_MAX) {
                             ++nonSentinelPixels;
+                            const uint64_t payloadKey =
+                                static_cast<uint64_t>(payload[0]) |
+                                (static_cast<uint64_t>(payload[1]) << 32u);
+                            ++payloadHistogram[payloadKey];
                             if (firstPayload[0] == UINT32_MAX) {
                                 firstPayload = payload;
                             }
@@ -3745,8 +3829,30 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     purplePixels,
                     yellowPixels,
                     greenPixels);
+                std::vector<std::pair<uint64_t, uint64_t>> sortedPayloads(
+                    payloadHistogram.begin(),
+                    payloadHistogram.end());
+                std::ranges::sort(
+                    sortedPayloads,
+                    [](const auto& lhs, const auto& rhs) {
+                        return lhs.second > rhs.second;
+                    });
+                const size_t reportedPayloadCount =
+                    (std::min)(sortedPayloads.size(), size_t{ 8u });
+                for (size_t payloadIndex = 0u;
+                     payloadIndex < reportedPayloadCount;
+                     ++payloadIndex) {
+                    const auto [payloadKey, pixelCount] =
+                        sortedPayloads[payloadIndex];
+                    spdlog::info(
+                        "CLOD VSM debug payload rank={}: value=0x{:08X}/0x{:08X} pixels={}",
+                        payloadIndex,
+                        static_cast<uint32_t>(payloadKey),
+                        static_cast<uint32_t>(payloadKey >> 32u),
+                        pixelCount);
+                }
             },
-            QueueKind::Copy);
+            QueueKind::Graphics);
     }
 }
 

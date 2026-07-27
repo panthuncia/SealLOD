@@ -181,20 +181,6 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
-#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    bool viewHasDirtyPages = true;
-    if (WaveIsFirstLane())
-    {
-        viewHasDirtyPages =
-            CLodVirtualShadowViewHasDirtyPages(CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX);
-    }
-    viewHasDirtyPages = WaveReadLaneFirst(viewHasDirtyPages);
-    if (!viewHasDirtyPages)
-    {
-        return;
-    }
-#endif
-
     StructuredBuffer<uint2> activeDrawSetIndicesBuffer =
         ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX];
     StructuredBuffer<uint> drawRecordVisibilityGenerations =
@@ -215,6 +201,20 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     const MeshInstanceClodOffsets off = LoadCLodOffsetsForDrawRecord(drawRecord);
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    const PerMeshBuffer perMesh =
+        perMeshBuffer[instanceData.perMeshBufferIndex];
+    const bool objectIsSkinned =
+        (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+    if (objectIsSkinned)
+    {
+        WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_SKINNED_CLASSIFIED, 1u);
+    }
+    else if (clodMeshMetadata.nodeSkinningInfoCount != 0u)
+    {
+        WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_NODE_SKINNING_ONLY, 1u);
+    }
     // Voxel-root classification only feeds debug telemetry. Avoid fetching the
     // first group for every object when telemetry is disabled.
     const bool voxelRootCandidate =
@@ -253,6 +253,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
             if (distanceToPlane < -worldRadius)
             {
                 WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM, 1);
+                if (objectIsSkinned)
+                {
+                    WGTelemetryAdd(
+                        WG_COUNTER_OBJECT_CULL_SKINNED_FRUSTUM_REJECTED,
+                        1u);
+                }
                 if (voxelRootCandidate)
                 {
                     WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_FRUSTUM_REJECTED, 1);
@@ -272,7 +278,8 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     // conservative, so a miss here guarantees that no descendant can touch
     // an admitted dirty page.
     const float3 worldCenter = mul(float4(objectSpaceCenter, 1.0f), objectModelMatrix).xyz;
-    if (CLodWorkGraphShadowDirtyPageCullingEnabled() &&
+    if (!objectIsSkinned &&
+        CLodWorkGraphShadowDirtyPageCullingEnabled() &&
         !CLodVirtualShadowBoundsTouchDirtyPages(
             worldCenter,
             worldRadius,
@@ -333,6 +340,10 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
+    if (objectIsSkinned)
+    {
+        WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_SKINNED_EMITTED, 1u);
+    }
     if (voxelRootCandidate)
     {
         WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_VISIBLE, 1);

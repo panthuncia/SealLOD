@@ -257,7 +257,14 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
             const uint pageY = scanMinPageCoord.y + (GI / pageRangeWidth);
             const uint2 wrappedCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
             const uint pageEntry = pageTable[uint3(wrappedCoords, clipmapInfo.pageTableLayer)];
-            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+#if defined(PSO_SKINNED)
+            const bool pageRasterable =
+                CLodVirtualShadowPageEntryIsDynamicActive(pageEntry);
+#else
+            const bool pageRasterable =
+                CLodVirtualShadowPageEntryCanRaster(pageEntry);
+#endif
+            if (pageRasterable)
             {
                 uint slot = 0u;
                 InterlockedAdd(gs_expandDirtyCount, 1u, slot);
@@ -495,7 +502,13 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
 
     GroupMemoryBarrierWithGroupSync();
 
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
+    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
+#if defined(PSO_SKINNED)
+        CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+#else
+        CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX
+#endif
+    ];
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     ByteAddressBuffer slab = ResourceDescriptorHeap[pageSlabDescriptorIndex];
     const uint pagePixelMaxX = pagePixelMinX + kCLodVirtualShadowPhysicalPageSize - 1u;
@@ -667,11 +680,13 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
         }
         if (gs_pageRasterAnyWrite != 0u)
         {
+#if !defined(PSO_SKINNED)
             uint ignored = 0u;
             InterlockedOr(
                 pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
                 kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
                 ignored);
+#endif
             if (telemetryEnabled)
                 InterlockedAdd(statsBuffer[0].pageJobRasterPageWriteCount, 1u);
         }

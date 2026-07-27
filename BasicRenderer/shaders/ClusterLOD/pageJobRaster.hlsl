@@ -266,6 +266,20 @@ void WG_PageJobExpand(
 
     RWTexture2DArray<uint> pageTableUAV =
         ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX];
+    globallycoherent RWByteAddressBuffer visibleClusters =
+        ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
+    const uint4 packedCluster =
+        CLodLoadVisibleClusterPackedGloballyCoherent(
+            visibleClusters, clusterIndex);
+    const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
+    const PerMeshInstanceBuffer meshInst =
+        LoadMeshTemplateForDraw(instanceID);
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
+        ResourceDescriptorHeap[
+            ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    const bool dynamicLayer =
+        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
+            VERTEX_SKINNED) != 0u;
 
     const uint pageRangeWidth = maxPageCoord.x - minPageCoord.x + 1u;
 
@@ -282,7 +296,8 @@ void WG_PageJobExpand(
         myWrappedCoords = CLodVirtualShadowWrappedPageCoords(uint2(myPageX, myPageY), clipmapInfo);
         const uint pageEntry = pageTableUAV[uint3(myWrappedCoords, clipmapInfo.pageTableLayer)];
 
-        if (CLodVirtualShadowPageEntryCanRaster(pageEntry)) {
+        if (CLodVirtualShadowPageEntryCanRasterLayer(
+                pageEntry, dynamicLayer)) {
             myPhysicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
             InterlockedAdd(gs_pjExpandDirtyCount, 1u, mySlot);
         }
@@ -374,8 +389,6 @@ void WG_PageJobRasterPage(
         materialDataBuffer[perMeshBuffer[meshInst.perMeshBufferIndex].materialDataIndex];
     const bool doubleSided =
         (materialInfo.materialFlags & MATERIAL_DOUBLE_SIDED) != 0u;
-    StructuredBuffer<PerMeshBuffer> perMeshBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
@@ -431,8 +444,14 @@ void WG_PageJobRasterPage(
     GroupMemoryBarrierWithGroupSync();
 
     // Rasterize all triangles clipped to this single page.
+    const bool dynamicLayer =
+        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
+            VERTEX_SKINNED) != 0u;
     RWTexture2D<uint> physicalPages =
-        ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX];
+        ResourceDescriptorHeap[
+            dynamicLayer
+                ? CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX
+                : CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX];
     RWTexture2DArray<uint> pageTableUAV =
         ResourceDescriptorHeap[CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX];
 
@@ -516,10 +535,9 @@ void WG_PageJobRasterPage(
         }
     }
 
-    // Unconditionally mark this page as content-valid. The Expand node already
-    // confirmed the page was dirty+allocated, so this is always correct.
-    // No barrier needed: each thread writes the same idempotent OR.
-    if (anyPixelWritten) {
+    // Only static writes establish persistent cache validity. No barrier is
+    // needed because every contributing thread writes the same idempotent OR.
+    if (anyPixelWritten && !dynamicLayer) {
         uint ignored = 0u;
         InterlockedOr(
             pageTableUAV[uint3(wrappedPageCoords, clipmapLayer)],

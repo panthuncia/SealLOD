@@ -11,16 +11,18 @@
 VirtualShadowMapBuildActiveBlocksPass::VirtualShadowMapBuildActiveBlocksPass(
     std::shared_ptr<PixelBuffer> pageTableTexture,
     std::shared_ptr<Buffer> clipmapInfoBuffer,
-    std::shared_ptr<Buffer> activeBlockMetadataBuffer)
+    std::shared_ptr<Buffer> activeBlockMetadataBuffer,
+    bool dynamicPages)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_clipmapInfoBuffer(std::move(clipmapInfoBuffer))
     , m_activeBlockMetadataBuffer(std::move(activeBlockMetadataBuffer))
+    , m_dynamicPages(dynamicPages)
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"CLodVirtualShadowBuildActiveBlocksCSMain",
-        {},
+        { { L"CLOD_VSM_TWO_LAYER_ACTIVE_BLOCKS_VERSION", L"2" } },
         "CLod.VirtualShadow.BuildActiveBlocks.PSO");
 }
 
@@ -50,6 +52,7 @@ PassReturn VirtualShadowMapBuildActiveBlocksPass::Execute(PassExecutionContext& 
     constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_OUTPUT_DESCRIPTOR_INDEX] =
         m_activeBlockMetadataBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_COUNT] = CLodVirtualShadowMaxMarkedBlockCount;
+    constants[CLOD_VSM_BUILD_ACTIVE_BLOCKS_DYNAMIC] = m_dynamicPages ? 1u : 0u;
     commandList.PushConstants(
         rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0,
         NumMiscUintRootConstants, constants);

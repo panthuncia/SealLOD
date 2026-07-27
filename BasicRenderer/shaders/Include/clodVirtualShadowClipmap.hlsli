@@ -209,6 +209,8 @@ struct CLodVirtualShadowStats
     uint contentValidOwnerMismatchCount;
     uint newlyAllocatedPageCount;
     uint physicalPageClearCount;
+    uint dynamicPageClearCount;
+    uint composedPageCount;
     uint markResidentTagMismatchCount;
     uint renderedWithoutMatchingClearCount;
     uint syntheticEmptyValidPageCount;
@@ -245,7 +247,23 @@ struct CLodVirtualShadowStats
     uint predictiveInvalidatedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedCurrentBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedPreviousBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
-    uint invalidatedSkinnedPageTableEntries[kCLodVirtualShadowClipmapCount];
+    uint deferredPreferredInactivePageSampleCount;
+    uint deferredFallbackInactivePageSampleCount;
+    uint deferredSmrtInactivePageSampleCount;
+    uint deferredPreferredInactivePageRejectCount;
+    uint deferredFallbackInactivePageRejectCount;
+    uint deferredSmrtInactivePageRejectCount;
+    uint trackedSkinnedPhysicalPagePlusOne;
+    uint trackedSkinnedAtlasPixel;
+    uint trackedSkinnedDepthBits;
+    uint trackedComposeFramePlusOne;
+    uint trackedComposeStaticDepthBits;
+    uint trackedComposeDynamicBeforeBits;
+    uint trackedComposeDynamicAfterBits;
+    uint trackedDeferredSampleCount;
+    uint trackedDeferredObservedDepthBits;
+    uint trackedCompositionMismatchCount;
+    uint trackedDeferredMismatchCount;
 };
 
 struct CLodVirtualShadowBlockMeta
@@ -296,6 +314,23 @@ bool CLodVirtualShadowPageEntryCanRaster(uint pageEntry)
         kCLodVirtualShadowDirtyMask |
         kCLodVirtualShadowAdmittedThisFrameMask;
     return (pageEntry & requiredMask) == requiredMask;
+}
+
+bool CLodVirtualShadowPageEntryIsDynamicActive(uint pageEntry)
+{
+    const uint requiredMask =
+        kCLodVirtualShadowAllocatedMask |
+        kCLodVirtualShadowVisitedMask;
+    return (pageEntry & requiredMask) == requiredMask;
+}
+
+bool CLodVirtualShadowPageEntryCanRasterLayer(
+    uint pageEntry,
+    bool dynamicLayer)
+{
+    return dynamicLayer
+        ? CLodVirtualShadowPageEntryIsDynamicActive(pageEntry)
+        : CLodVirtualShadowPageEntryCanRaster(pageEntry);
 }
 
 uint CLodVirtualShadowPackAbsolutePageTag(
@@ -460,6 +495,7 @@ bool CLodVirtualShadowAnyRenderablePageInPixelRect(
     uint2 minPixel,
     uint2 maxPixel,
     CLodVirtualShadowClipmapInfo clipmapInfo,
+    bool dynamicLayer,
     RWTexture2DArray<uint> pageTable)
 {
     if (!CLodVirtualShadowClipmapIsValid(clipmapInfo))
@@ -483,7 +519,7 @@ bool CLodVirtualShadowAnyRenderablePageInPixelRect(
         {
             const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
             const uint pageEntry = pageTable[uint3(wrappedPageCoords, clipmapInfo.pageTableLayer)];
-            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+            if (CLodVirtualShadowPageEntryCanRasterLayer(pageEntry, dynamicLayer))
             {
                 return true;
             }
@@ -497,6 +533,7 @@ bool CLodVirtualShadowAnyRenderablePageInPageRect(
     uint2 minPageCoords,
     uint2 maxPageCoords,
     CLodVirtualShadowClipmapInfo clipmapInfo,
+    bool dynamicLayer,
     RWTexture2DArray<uint> pageTable)
 {
     if (!CLodVirtualShadowClipmapIsValid(clipmapInfo))
@@ -517,7 +554,7 @@ bool CLodVirtualShadowAnyRenderablePageInPageRect(
         {
             const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
             const uint pageEntry = pageTable[uint3(wrappedPageCoords, clipmapInfo.pageTableLayer)];
-            if (CLodVirtualShadowPageEntryCanRaster(pageEntry))
+            if (CLodVirtualShadowPageEntryCanRasterLayer(pageEntry, dynamicLayer))
             {
                 return true;
             }

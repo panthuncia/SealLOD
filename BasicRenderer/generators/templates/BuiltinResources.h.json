@@ -144,6 +144,7 @@
       "CLodPhysicalPages": {},
       "CLodPageTable": {},
       "CLodPageMetadata": {},
+      "CLodStats": {},
       "CLodDirectionalPageViewInfo": {},
       "CLodCompactMainCamera": {},
       "CLodCompactShadowCameras": {}

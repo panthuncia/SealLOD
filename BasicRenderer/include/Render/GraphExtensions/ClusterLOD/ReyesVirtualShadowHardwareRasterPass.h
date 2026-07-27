@@ -29,6 +29,7 @@ public:
         std::shared_ptr<Buffer> tessTableTrianglesBuffer,
         std::shared_ptr<PixelBuffer> virtualShadowPageTableTexture,
         std::shared_ptr<PixelBuffer> virtualShadowPhysicalPagesTexture,
+        std::shared_ptr<PixelBuffer> virtualShadowDynamicPagesTexture,
         std::shared_ptr<Buffer> virtualShadowClipmapInfoBuffer,
         std::shared_ptr<Buffer> telemetryBuffer,
         std::shared_ptr<ResourceGroup> slabResourceGroup);
@@ -54,6 +55,7 @@ private:
     std::shared_ptr<Buffer> m_tessTableTrianglesBuffer;
     std::shared_ptr<PixelBuffer> m_virtualShadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_virtualShadowPhysicalPagesTexture;
+    std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;

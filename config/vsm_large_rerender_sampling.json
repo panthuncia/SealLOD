@@ -59,6 +59,7 @@
     { "id": "page_job_raster2", "name": "CLodShadow::SoftwareRasterPageJobRasterPass2", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "finalize", "name": "CLodShadow::VirtualShadowFinalizeRenderedPagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "clear_dirty", "name": "CLodShadow::VirtualShadowClearDirtyBitsPass", "queue": "", "metrics": ["gpu_time"], "required": false },
+    { "id": "compose", "name": "CLodShadow::VirtualShadowComposePagesPass", "queue": "", "metrics": ["gpu_time"], "required": false },
     { "id": "clock_reference", "name": "EvaluateMaterialGroupsPass", "queue": "", "metrics": ["gpu_time"], "required": false }
   ]
 }

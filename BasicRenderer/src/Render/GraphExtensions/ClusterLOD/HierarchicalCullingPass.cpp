@@ -159,6 +159,8 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
     std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
+    std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueCounterBuffer,
     std::shared_ptr<Buffer> reyesDiceQueueOverflowBuffer,
@@ -241,6 +243,10 @@ HierarchicalCullingPass::HierarchicalCullingPass(
     m_shadowPageTableTexture = std::move(shadowPageTableTexture);
     m_shadowPhysicalPagesTexture = std::move(shadowPhysicalPagesTexture);
     m_shadowActiveBlockMetadataBuffer = std::move(shadowActiveBlockMetadataBuffer);
+    m_shadowDynamicPhysicalPagesTexture =
+        std::move(shadowDynamicPhysicalPagesTexture);
+    m_shadowDynamicActiveBlockMetadataBuffer =
+        std::move(shadowDynamicActiveBlockMetadataBuffer);
     m_reyesDiceQueueBuffer = std::move(reyesDiceQueueBuffer);
     m_reyesDiceQueueCounterBuffer = std::move(reyesDiceQueueCounterBuffer);
     m_reyesDiceQueueOverflowBuffer = std::move(reyesDiceQueueOverflowBuffer);
@@ -418,7 +424,9 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
         }
     }
     if (UsesWorkGraphSWRaster(m_workGraphMode) && UsesVirtualShadowOutput(m_rasterOutputKind)) {
-        builder->WithUnorderedAccess(Builtin::Shadows::CLodPhysicalPages);
+        builder->WithUnorderedAccess(
+            m_shadowPhysicalPagesTexture,
+            m_shadowDynamicPhysicalPagesTexture);
     }
     if (m_workGraphReyesVisibility) {
         builder->WithUnorderedAccess(
@@ -707,6 +715,18 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     if (m_shadowActiveBlockMetadataBuffer) {
         uintRootConstants[CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
             m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index;
+    }
+    if (m_shadowDynamicPhysicalPagesTexture) {
+        uintRootConstants[
+            CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
+            m_shadowDynamicPhysicalPagesTexture
+                ->GetUAVShaderVisibleInfo(0).slot.index;
+    }
+    if (m_shadowDynamicActiveBlockMetadataBuffer) {
+        uintRootConstants[
+            CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX] =
+            m_shadowDynamicActiveBlockMetadataBuffer
+                ->GetSRVInfo(0).slot.index;
     }
     if (m_workGraphReyesVisibility) {
         uintRootConstants[CLOD_WG_REYES_DICE_QUEUE_DESCRIPTOR_INDEX] =
@@ -1344,6 +1364,7 @@ void HierarchicalCullingPass::CreatePipelines(
         { L"CLOD_WG_RIGID_ONLY", rigidOnly ? L"1" : L"0" },
         { L"CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED", pageJobAlwaysDedicated ? L"1" : L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"1" : L"0" },
+        { L"CLOD_VSM_TWO_LAYER_WORKGRAPH_VERSION", UsesVirtualShadowOutput(m_rasterOutputKind) ? L"2" : L"0" },
         { L"CLOD_WG_ENABLE_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER", enableComputePageJobDescriptorBuffer ? L"1" : L"0" },
         { L"CLOD_WG_COMPUTE_PAGE_JOB_DESCRIPTOR_BUFFER_ID", pageJobDescriptorResourceIdDefine.c_str() },
         { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelQueueDescriptorResourceIdDefine.c_str() },

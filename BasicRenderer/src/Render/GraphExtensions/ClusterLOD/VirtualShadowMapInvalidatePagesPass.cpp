@@ -48,10 +48,6 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
         .without<Components::SkipShadowPass>()
         .without<Components::Skinned>()
         .build();
-    m_skinnedObjectsQuery = ecsWorld.query_builder<const Components::ObjectDrawInfo>()
-        .with<Components::Active>()
-        .with<Components::Skinned>()
-        .build();
 }
 
 void VirtualShadowMapInvalidatePagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
@@ -106,19 +102,6 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
             CLodVirtualShadowInvalidationInput input{};
             input.perMeshInstanceBufferIndex = drawRecordIndex;
             input.flags = flags;
-            inputs.push_back(input);
-            markInvalidatedInstance(drawRecordIndex);
-        }
-    });
-
-    m_skinnedObjectsQuery.each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
-        for (uint32_t drawRecordIndex : drawInfo.instanceDrawRecordIndices) {
-            if (inputs.size() >= CLodVirtualShadowMaxInvalidationInputs) {
-                break;
-            }
-            CLodVirtualShadowInvalidationInput input{};
-            input.perMeshInstanceBufferIndex = drawRecordIndex;
-            input.flags = CLodVirtualShadowInvalidationFlagUseCurrentBounds | CLodVirtualShadowInvalidationFlagSkinned;
             inputs.push_back(input);
             markInvalidatedInstance(drawRecordIndex);
         }

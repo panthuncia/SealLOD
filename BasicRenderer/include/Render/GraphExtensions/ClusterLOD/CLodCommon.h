@@ -528,12 +528,12 @@ inline constexpr uint32_t CLodVirtualShadowPageDirtyMask = 0x40000000u;
 inline constexpr uint32_t CLodVirtualShadowPageContentValidMask = 0x20000000u;
 inline constexpr uint32_t CLodVirtualShadowPageVisitedMask = 0x10000000u;
 inline constexpr uint32_t CLodVirtualShadowPageRerenderedThisFrameMask = 0x08000000u;
+inline constexpr uint32_t CLodVirtualShadowPageAdmittedThisFrameMask = 0x04000000u;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
 inline constexpr uint32_t CLodVirtualShadowInvalidationFlagUsePreviousBounds = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowInvalidationFlagUseCurrentBounds = 0x2u;
-inline constexpr uint32_t CLodVirtualShadowInvalidationFlagSkinned = 0x4u;
 
 constexpr uint32_t CLodVirtualShadowDirtyWordCount(uint32_t physicalPageCount)
 {
@@ -1093,6 +1093,8 @@ struct CLodVirtualShadowStats
     uint32_t contentValidOwnerMismatchCount = 0u;
     uint32_t newlyAllocatedPageCount = 0u;
     uint32_t physicalPageClearCount = 0u;
+    uint32_t dynamicPageClearCount = 0u;
+    uint32_t composedPageCount = 0u;
     uint32_t markResidentTagMismatchCount = 0u;
     uint32_t renderedWithoutMatchingClearCount = 0u;
     uint32_t syntheticEmptyValidPageCount = 0u;
@@ -1129,11 +1131,27 @@ struct CLodVirtualShadowStats
     uint32_t predictiveInvalidatedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedCurrentBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedPreviousBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
-    uint32_t invalidatedSkinnedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
+    uint32_t deferredPreferredInactivePageSampleCount = 0u;
+    uint32_t deferredFallbackInactivePageSampleCount = 0u;
+    uint32_t deferredSmrtInactivePageSampleCount = 0u;
+    uint32_t deferredPreferredInactivePageRejectCount = 0u;
+    uint32_t deferredFallbackInactivePageRejectCount = 0u;
+    uint32_t deferredSmrtInactivePageRejectCount = 0u;
+    uint32_t trackedSkinnedPhysicalPagePlusOne = 0u;
+    uint32_t trackedSkinnedAtlasPixel = 0u;
+    uint32_t trackedSkinnedDepthBits = 0u;
+    uint32_t trackedComposeFramePlusOne = 0u;
+    uint32_t trackedComposeStaticDepthBits = 0u;
+    uint32_t trackedComposeDynamicBeforeBits = 0u;
+    uint32_t trackedComposeDynamicAfterBits = 0u;
+    uint32_t trackedDeferredSampleCount = 0u;
+    uint32_t trackedDeferredObservedDepthBits = 0u;
+    uint32_t trackedCompositionMismatchCount = 0u;
+    uint32_t trackedDeferredMismatchCount = 0u;
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (74u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (93u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

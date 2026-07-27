@@ -490,6 +490,7 @@ bool ReyesPatchShouldCull(
     uint routeKind,
     uint clipmapIndex,
     uint viewID,
+    bool skinned,
     RWStructuredBuffer<CLodReyesTelemetry> telemetryBuffer,
     bool isChildPatch)
 {
@@ -514,7 +515,8 @@ bool ReyesPatchShouldCull(
         return true;
     }
 
-    if ((routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM || routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM) &&
+    if (!skinned &&
+        (routeKind == CLOD_REYES_ROUTE_FINE_MICROPOLY_VSM || routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM) &&
         !ReyesPatchTouchesShadowDirtyPages(centerWorld, radiusWorld, clipmapIndex, viewID))
     {
         InterlockedAdd(telemetryBuffer[0].splitShadowDirtyCullCount, 1u);
@@ -659,6 +661,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 currentPosition2WS = mul(float4(currentPosition2OS, 1.0f), objectData.model).xyz;
 
     const uint routeKind = CLodReyesDecodeRouteKind(splitEntry.flags);
+    const bool skinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
     bool emitCoarseDirtyOnlyLeaf = false;
 
     if (routeKind == CLOD_REYES_ROUTE_COARSE_HARDWARE_VSM)
@@ -673,7 +676,11 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             coarseCenterWorld,
             coarseRadiusWorld);
 
-        if (ReyesPatchTouchesOnlyShadowDirtyPages(
+        if (skinned)
+        {
+            emitCoarseDirtyOnlyLeaf = true;
+        }
+        else if (ReyesPatchTouchesOnlyShadowDirtyPages(
                 coarseCenterWorld,
                 coarseRadiusWorld,
                 clipmapIndex,
@@ -698,6 +705,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             routeKind,
             clipmapIndex,
             splitEntry.viewID,
+            skinned,
             telemetryBuffer,
             false))
     {
@@ -895,6 +903,7 @@ void ReyesSplitCS(uint3 dispatchThreadId : SV_DispatchThreadID)
             routeKind,
             clipmapIndex,
             splitEntry.viewID,
+            skinned,
             telemetryBuffer,
             true))
         {
