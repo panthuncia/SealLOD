@@ -2041,8 +2041,6 @@ PipelineState PSOManager::CreateMeshPPLLPSO(
 PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
 {
     auto defines = GetShaderDefines(psoFlags, MaterialCompileFlags::MaterialCompileNone);
-    defines.push_back({ L"CLOD_VSM_DEFERRED_LOOKUP_TELEMETRY", L"1" });
-
     PipelineState pso = MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),
         L"shaders/deferred.hlsl",

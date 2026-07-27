@@ -393,24 +393,6 @@ static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_2 = 255u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_3_TO_4 = 256u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_5_TO_8 = 257u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_9_PLUS = 258u;
-static const uint WG_COUNTER_RASTER_PIXEL_VSM_DYNAMIC_WRITES = 259u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_CONTRIBUTING = 260u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_RECORDS = 261u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_CANDIDATES = 268u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_METADATA_MISSING = 269u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_RECT_DISJOINT = 270u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_DIRECT_ACTIVE_PAGE_HITS = 271u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_METADATA_FALSE_NEGATIVES = 272u;
-static const uint WG_COUNTER_CLUSTER_CULL_SKINNED_RECT_FALSE_NEGATIVES = 273u;
-static const uint WG_COUNTER_CLASSIFY_SKINNED_ROUTED_HW = 274u;
-static const uint WG_COUNTER_CLASSIFY_SKINNED_ROUTED_SW = 275u;
-static const uint WG_COUNTER_CLASSIFY_SKINNED_ROUTED_PAGEJOB = 276u;
-static const uint WG_COUNTER_OBJECT_CULL_SKINNED_CLASSIFIED = 280u;
-static const uint WG_COUNTER_OBJECT_CULL_NODE_SKINNING_ONLY = 281u;
-static const uint WG_COUNTER_OBJECT_CULL_SKINNED_FRUSTUM_REJECTED = 282u;
-static const uint WG_COUNTER_OBJECT_CULL_SKINNED_CLEAN_REJECTED = 283u;
-static const uint WG_COUNTER_OBJECT_CULL_SKINNED_EMITTED = 284u;
-static const uint WG_COUNTER_CLASSIFY_SKINNED_SW_RECORDS_WRITTEN = 285u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -1012,8 +994,6 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
 
 bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
     uint shadowClipmapIndex,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    RWTexture2DArray<uint> pageTable,
     uint2 meshletMinPageCoord,
     uint2 meshletMaxPageCoord,
     uint2 blockCoord,
@@ -1021,12 +1001,6 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
     out uint vsmPayload)
 {
     vsmPayload = 0u;
-    if (dynamicLayer)
-    {
-        WGTelemetryAdd(
-            WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_CANDIDATES,
-            1u);
-    }
     StructuredBuffer<uint> activeBlockMetadata =
         ResourceDescriptorHeap[
             dynamicLayer
@@ -1034,51 +1008,8 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
                 : CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX];
     const uint packedActiveRect =
         activeBlockMetadata[CLodVirtualShadowBlockLinearIndex(blockCoord, shadowClipmapIndex)];
-    uint directActivePageHits = 0u;
-    if (dynamicLayer)
-    {
-        const uint2 blockOrigin = CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
-        const uint2 directMin = max(meshletMinPageCoord, blockOrigin);
-        const uint2 directMax = min(
-            meshletMaxPageCoord,
-            blockOrigin + kCLodVirtualShadowBlockPagesPerAxis - 1u);
-        if (all(directMin <= directMax))
-        {
-            [loop]
-            for (uint pageY = directMin.y; pageY <= directMax.y; ++pageY)
-            {
-                [loop]
-                for (uint pageX = directMin.x; pageX <= directMax.x; ++pageX)
-                {
-                    const uint2 wrappedPageCoord =
-                        CLodVirtualShadowWrappedPageCoords(
-                            uint2(pageX, pageY), clipmapInfo);
-                    const uint directEntry =
-                        pageTable[uint3(
-                            wrappedPageCoord,
-                            clipmapInfo.pageTableLayer)];
-                    directActivePageHits +=
-                        CLodVirtualShadowPageEntryIsDynamicActive(directEntry)
-                            ? 1u
-                            : 0u;
-                }
-            }
-        }
-        WGTelemetryAdd(
-            WG_COUNTER_CLUSTER_CULL_SKINNED_DIRECT_ACTIVE_PAGE_HITS,
-            directActivePageHits);
-    }
     if (packedActiveRect == 0xFFFFFFFFu)
     {
-        if (dynamicLayer)
-        {
-            WGTelemetryAdd(
-                WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_METADATA_MISSING,
-                1u);
-            WGTelemetryAdd(
-                WG_COUNTER_CLUSTER_CULL_SKINNED_METADATA_FALSE_NEGATIVES,
-                directActivePageHits != 0u ? 1u : 0u);
-        }
         return false;
     }
     const uint2 blockOriginPageCoord = CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
@@ -1095,15 +1026,6 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
         meshletMaxLocalPageCoord);
     if (any(minLocalPageCoord > maxLocalPageCoord))
     {
-        if (dynamicLayer)
-        {
-            WGTelemetryAdd(
-                WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_RECT_DISJOINT,
-                1u);
-            WGTelemetryAdd(
-                WG_COUNTER_CLUSTER_CULL_SKINNED_RECT_FALSE_NEGATIVES,
-                directActivePageHits != 0u ? 1u : 0u);
-        }
         return false;
     }
 
@@ -1118,8 +1040,6 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
 
 uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
     uint shadowClipmapIndex,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    RWTexture2DArray<uint> pageTable,
     uint2 meshletMinPageCoord,
     uint2 meshletMaxPageCoord,
     uint2 minBlockCoord,
@@ -1135,8 +1055,6 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
         uint vsmPayload = 0u;
         if (CLodVirtualShadowBuildVisibleClusterBlockPayload(
                 shadowClipmapIndex,
-                clipmapInfo,
-                pageTable,
                 meshletMinPageCoord,
                 meshletMaxPageCoord,
                 blockCoord,
@@ -1145,13 +1063,6 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
         {
             activeBlockCount++;
         }
-    }
-
-    if (dynamicLayer)
-    {
-        WGTelemetryAdd(
-            WG_COUNTER_CLUSTER_CULL_SKINNED_BLOCK_RECORDS,
-            activeBlockCount);
     }
     return activeBlockCount;
 }
@@ -1169,8 +1080,6 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
     uint pageSlabDescriptorIndex,
     uint pageSlabByteOffset,
     uint shadowClipmapIndex,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    RWTexture2DArray<uint> pageTable,
     uint2 meshletMinPageCoord,
     uint2 meshletMaxPageCoord,
     uint2 minBlockCoord,
@@ -1186,8 +1095,6 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
         uint vsmPayload = 0u;
         if (!CLodVirtualShadowBuildVisibleClusterBlockPayload(
                 shadowClipmapIndex,
-                clipmapInfo,
-                pageTable,
                 meshletMinPageCoord,
                 meshletMaxPageCoord,
                 blockCoord,
@@ -2797,15 +2704,6 @@ void WG_ObjectCull(
         const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
         const bool objectIsSkinned =
             (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
-        if (objectIsSkinned)
-        {
-            WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_SKINNED_CLASSIFIED, 1u);
-        }
-        else if (clodMeshMetadata.nodeSkinningInfoCount != 0u)
-        {
-            WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_NODE_SKINNING_ONLY, 1u);
-        }
-
         const row_major matrix objectModelMatrix = instanceTransform.model;
 
         StructuredBuffer<Camera> cameras =
@@ -2836,12 +2734,6 @@ void WG_ObjectCull(
                 if (distanceToPlane < -worldRadius)
                 {
                     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_REJECTED_FRUSTUM, 1);
-                    if (objectIsSkinned)
-                    {
-                        WGTelemetryAdd(
-                            WG_COUNTER_OBJECT_CULL_SKINNED_FRUSTUM_REJECTED,
-                            1u);
-                    }
                     if (voxelRootCandidate)
                     {
                         WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_FRUSTUM_REJECTED, 1);
@@ -2867,12 +2759,6 @@ void WG_ObjectCull(
                     hdr.viewDataIndex))
             {
                 WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
-                if (objectIsSkinned)
-                {
-                    WGTelemetryAdd(
-                        WG_COUNTER_OBJECT_CULL_SKINNED_CLEAN_REJECTED,
-                        1u);
-                }
                 culled = true;
             }
         }
@@ -2919,12 +2805,6 @@ void WG_ObjectCull(
 
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
             WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
-            if (objectIsSkinned)
-            {
-                WGTelemetryAdd(
-                    WG_COUNTER_OBJECT_CULL_SKINNED_EMITTED,
-                    1u);
-            }
             if (voxelRootCandidate)
             {
                 WGTelemetryAdd(WG_COUNTER_VOXEL_OBJECT_VISIBLE, 1);
@@ -4309,12 +4189,6 @@ void ClusterCullBody(
         }
 
         const bool contributes = active && survives;
-        if (contributes && skinnedMesh)
-        {
-            WGTelemetryAdd(
-                WG_COUNTER_CLUSTER_CULL_SKINNED_CONTRIBUTING,
-                1u);
-        }
         const uint visibleGroupId = UnpackGroupId(b.groupIdPacked);
         uint shadowClipmapIndex = CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX;
         CLodVirtualShadowClipmapInfo shadowClipmapInfo = (CLodVirtualShadowClipmapInfo)0;
@@ -4351,8 +4225,6 @@ void ClusterCullBody(
         {
             hwLaneWriteCount = CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
                 shadowClipmapIndex,
-                shadowClipmapInfo,
-                shadowPageTable,
                 hwMinPageCoord,
                 hwMaxPageCoord,
                 hwMinBlockCoord,
@@ -4416,8 +4288,6 @@ void ClusterCullBody(
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
                         shadowClipmapIndex,
-                        shadowClipmapInfo,
-                        shadowPageTable,
                         hwMinPageCoord,
                         hwMaxPageCoord,
                         hwMinBlockCoord,
@@ -4468,8 +4338,6 @@ void ClusterCullBody(
             {
                 hwLaneWriteCount = CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
                     shadowClipmapIndex,
-                    shadowClipmapInfo,
-                    shadowPageTable,
                     hwMinPageCoord,
                     hwMaxPageCoord,
                     hwMinBlockCoord,
@@ -4533,8 +4401,6 @@ void ClusterCullBody(
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
                             shadowClipmapIndex,
-                            shadowClipmapInfo,
-                            shadowPageTable,
                             hwMinPageCoord,
                             hwMaxPageCoord,
                             hwMinBlockCoord,
@@ -4618,12 +4484,6 @@ void ClusterCullBody(
         if (isHW)       WGTelemetryAdd(WG_COUNTER_CLASSIFY_ROUTED_HW, 1);
         if (outputSW)   WGTelemetryAdd(WG_COUNTER_CLASSIFY_ROUTED_SW, 1);
         if (outputPageJob) WGTelemetryAdd(WG_COUNTER_CLASSIFY_ROUTED_PAGEJOB, 1);
-        if (skinnedMesh && isHW)
-            WGTelemetryAdd(WG_COUNTER_CLASSIFY_SKINNED_ROUTED_HW, 1u);
-        if (skinnedMesh && outputSW)
-            WGTelemetryAdd(WG_COUNTER_CLASSIFY_SKINNED_ROUTED_SW, 1u);
-        if (skinnedMesh && outputPageJob)
-            WGTelemetryAdd(WG_COUNTER_CLASSIFY_SKINNED_ROUTED_PAGEJOB, 1u);
 
         // HW path: wave-cooperative bottom-up write
         {
@@ -4649,8 +4509,6 @@ void ClusterCullBody(
             {
                 hwLaneWriteCount = CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
                     shadowClipmapIndex,
-                    shadowClipmapInfo,
-                    shadowPageTable,
                     hwMinPageCoord,
                     hwMaxPageCoord,
                     hwMinBlockCoord,
@@ -4714,8 +4572,6 @@ void ClusterCullBody(
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
                             shadowClipmapIndex,
-                            shadowClipmapInfo,
-                            shadowPageTable,
                             hwMinPageCoord,
                             hwMaxPageCoord,
                             hwMinBlockCoord,
@@ -4829,12 +4685,6 @@ void ClusterCullBody(
                 }
 
                 if (outputSW && (swRank < swAvail)) {
-                    if (skinnedMesh)
-                    {
-                        WGTelemetryAdd(
-                            WG_COUNTER_CLASSIFY_SKINNED_SW_RECORDS_WRITTEN,
-                            1u);
-                    }
                     // Write visible cluster top-down from the end of the buffer.
                     const uint swIndex = visibleClusterCapacity - 1 - (swWriteBase + swBase + swRank);
                     CLodStoreVisibleClusterGloballyCoherent(

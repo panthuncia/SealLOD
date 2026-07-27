@@ -4,6 +4,7 @@
 #define ReyesPatchRasterCS ReyesPatchRasterOpaqueUnusedCS
 #include "ClusterLOD/reyesPatchRaster.hlsl"
 #undef ReyesPatchRasterCS
+#include "include/clodVirtualShadowDepth.hlsli"
 
 void ReyesTryWriteVirtualShadowTexel(
     RWTexture2DArray<uint> pageTable,
@@ -55,7 +56,13 @@ void ReyesTryWriteVirtualShadowTexel(
     const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
-    InterlockedMin(physicalPages[atlasPixel], asuint(depth));
+    const float pageSpaceDepth = dynamicLayer
+        ? CLodVirtualShadowDepthToCachedPageSpace(
+            depth,
+            physicalPageIndex,
+            clipmapInfo.shadowCameraBufferIndex)
+        : depth;
+    InterlockedMin(physicalPages[atlasPixel], asuint(pageSpaceDepth));
 
     if (!dynamicLayer)
     {

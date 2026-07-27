@@ -1061,32 +1061,23 @@ struct CLodVirtualShadowStats
     uint32_t upgradeEligiblePageCount = 0u;
     uint32_t upgradeAdmittedPageCount = 0u;
     uint32_t upgradeDeferredPageCount = 0u;
-    uint32_t pendingUpgradeDependencyCount = 0u;
     uint32_t invalidUpgradeDependencyCount = 0u;
     uint32_t admittedPageCount = 0u;
-    uint32_t admissionTicketCount = 0u;
     uint32_t normalRenderedPageCount = 0u;
     uint32_t upgradeRenderedPageCount = 0u;
     uint32_t upgradeCandidateInputCount = 0u;
-    uint32_t upgradeCandidateRetainedCount = 0u;
-    uint32_t upgradeCandidateResidentCount = 0u;
-    uint32_t upgradeCandidateInvalidCount = 0u;
     uint32_t upgradeRawPageCount = 0u;
     uint32_t upgradeRawPageOverflowCount = 0u;
     uint32_t readyUpgradePageCount = 0u;
     uint32_t readyUpgradePageOverflowCount = 0u;
     uint32_t upgradeCandidateAppendOverflowCount = 0u;
-    uint32_t cumulativeUpgradeCandidateResidentCount = 0u;
     uint32_t cumulativeUpgradePageAdmittedCount = 0u;
     uint32_t cumulativeUpgradePageRenderedCount = 0u;
     uint32_t cumulativeUpgradeCandidateAppendOverflowCount = 0u;
     uint32_t cumulativeUpgradeQueueOverflowCount = 0u;
-    uint32_t upgradeReadyConsumedAllocatedCount = 0u;
-    uint32_t upgradeReadyDroppedUnallocatedCount = 0u;
     uint32_t upgradeInvalidationInputCount = 0u;
     uint32_t upgradeInvalidationRejectedInputCount = 0u;
     uint32_t upgradeInvalidationAllocatedPageTouchCount = 0u;
-    uint32_t upgradeInvalidationUnallocatedPageTouchCount = 0u;
     uint32_t cumulativeUpgradeInvalidationInputCount = 0u;
     uint32_t cumulativeUpgradeInvalidationAllocatedPageTouchCount = 0u;
     uint32_t pageTableOwnerMismatchCount = 0u;
@@ -1131,27 +1122,10 @@ struct CLodVirtualShadowStats
     uint32_t predictiveInvalidatedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedCurrentBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedPreviousBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
-    uint32_t deferredPreferredInactivePageSampleCount = 0u;
-    uint32_t deferredFallbackInactivePageSampleCount = 0u;
-    uint32_t deferredSmrtInactivePageSampleCount = 0u;
-    uint32_t deferredPreferredInactivePageRejectCount = 0u;
-    uint32_t deferredFallbackInactivePageRejectCount = 0u;
-    uint32_t deferredSmrtInactivePageRejectCount = 0u;
-    uint32_t trackedSkinnedPhysicalPagePlusOne = 0u;
-    uint32_t trackedSkinnedAtlasPixel = 0u;
-    uint32_t trackedSkinnedDepthBits = 0u;
-    uint32_t trackedComposeFramePlusOne = 0u;
-    uint32_t trackedComposeStaticDepthBits = 0u;
-    uint32_t trackedComposeDynamicBeforeBits = 0u;
-    uint32_t trackedComposeDynamicAfterBits = 0u;
-    uint32_t trackedDeferredSampleCount = 0u;
-    uint32_t trackedDeferredObservedDepthBits = 0u;
-    uint32_t trackedCompositionMismatchCount = 0u;
-    uint32_t trackedDeferredMismatchCount = 0u;
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (93u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (67u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

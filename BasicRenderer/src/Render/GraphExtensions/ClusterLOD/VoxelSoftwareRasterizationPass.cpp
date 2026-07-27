@@ -130,6 +130,7 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
+            Builtin::CameraBuffer,
             Builtin::PerMeshBuffer,
 			Builtin::CLod::Offsets,
             Builtin::CLod::MeshMetadata,
@@ -166,7 +167,9 @@ void VoxelSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder* b
         }
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        builder->WithShaderResource(m_virtualShadowClipmapInfoBuffer)
+        builder->WithShaderResource(
+                m_virtualShadowClipmapInfoBuffer,
+                Builtin::Shadows::CLodDirectionalPageViewInfo)
             .WithUnorderedAccess(
                 m_virtualShadowPageTableTexture,
                 m_virtualShadowPhysicalPagesTexture,

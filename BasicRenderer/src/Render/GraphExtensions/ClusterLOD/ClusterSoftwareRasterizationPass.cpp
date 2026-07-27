@@ -75,6 +75,7 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::CullingCameraBuffer,
+            Builtin::CameraBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,
             Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo,
@@ -93,7 +94,9 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
         }
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-        builder->WithShaderResource(m_virtualShadowClipmapInfoBuffer)
+        builder->WithShaderResource(
+                m_virtualShadowClipmapInfoBuffer,
+                Builtin::Shadows::CLodDirectionalPageViewInfo)
             .WithUnorderedAccess(
                 m_virtualShadowPageTableTexture,
                 m_virtualShadowPhysicalPagesTexture,

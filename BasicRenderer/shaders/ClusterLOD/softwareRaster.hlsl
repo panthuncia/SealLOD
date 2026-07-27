@@ -10,6 +10,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
@@ -41,13 +42,11 @@
 #define CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_PAGE_TABLE_UAV_DESCRIPTOR_INDEX
 #define CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_PHYSICAL_PAGES_UAV_DESCRIPTOR_INDEX
 #define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX
-#define CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX CLOD_WG_TELEMETRY_DESCRIPTOR_INDEX
 #else
 #define CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX
 #define CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX
 #define CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX
 #define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
-#define CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX
 #endif
 
 // Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
@@ -255,23 +254,9 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
 #else
         (gs_vertexFlags & VERTEX_SKINNED) != 0u;
 #endif
-    if (dynamicLayer &&
-        CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
-    {
-        RWStructuredBuffer<uint> telemetryCounters =
-            ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
-        InterlockedAdd(telemetryCounters[277u], 1u);
-    }
     if (!CLodVirtualShadowPageEntryCanRasterLayer(
             pageEntry, dynamicLayer))
     {
-        if (dynamicLayer &&
-            CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
-        {
-            RWStructuredBuffer<uint> telemetryCounters =
-                ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
-            InterlockedAdd(telemetryCounters[278u], 1u);
-        }
         return false;
     }
 
@@ -283,14 +268,13 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
         dynamicLayer
             ? CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX
             : CLOD_SW_VSM_STATIC_PAGES_DESCRIPTOR_INDEX];
-    InterlockedMin(physicalPages[atlasPixel], asuint(linearDepth));
-    if (dynamicLayer &&
-        CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
-    {
-        RWStructuredBuffer<uint> telemetryCounters =
-            ResourceDescriptorHeap[CLOD_SW_TELEMETRY_DESCRIPTOR_INDEX];
-        InterlockedAdd(telemetryCounters[279u], 1u);
-    }
+    const float pageSpaceLinearDepth = dynamicLayer
+        ? CLodVirtualShadowDepthToCachedPageSpace(
+            linearDepth,
+            physicalPageIndex,
+            clipmapInfo.shadowCameraBufferIndex)
+        : linearDepth;
+    InterlockedMin(physicalPages[atlasPixel], asuint(pageSpaceLinearDepth));
     uint ignored = 0u;
     if (!dynamicLayer)
     {

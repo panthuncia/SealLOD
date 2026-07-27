@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/visibilityPacking.hlsli"
@@ -357,7 +358,15 @@ bool VoxelRasterWriteVirtualShadow(
     const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
 
-    InterlockedMin(physicalPages[atlasPixel], asuint(linearDepth));
+    const float pageSpaceLinearDepth = PSO_SKINNED != 0
+        ? CLodVirtualShadowDepthToCachedPageSpace(
+            linearDepth,
+            physicalPageIndex,
+            clipmapInfo.shadowCameraBufferIndex)
+        : linearDepth;
+    InterlockedMin(
+        physicalPages[atlasPixel],
+        asuint(pageSpaceLinearDepth));
     uint ignored = 0u;
     if (PSO_SKINNED == 0)
     {

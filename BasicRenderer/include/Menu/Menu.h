@@ -4817,17 +4817,13 @@ inline void Menu::DrawCLodTelemetryWindow() {
             stats.upgradeAdmittedPageCount,
             stats.upgradeDeferredPageCount);
         ImGui::Text(
-            "Streaming upgrades: pendingDependencies=%u invalidDependencies=%u",
-            stats.pendingUpgradeDependencyCount,
+            "Streaming upgrades: invalidDependencies=%u",
             stats.invalidUpgradeDependencyCount);
         ImGui::Text(
-            "Rendered pages: normal=%u upgrade=%u | candidates input=%u retainedNonResident=%u becameResident=%u invalid=%u",
+            "Rendered pages: normal=%u upgrade=%u | candidates input=%u",
             stats.normalRenderedPageCount,
             stats.upgradeRenderedPageCount,
-            stats.upgradeCandidateInputCount,
-            stats.upgradeCandidateRetainedCount,
-            stats.upgradeCandidateResidentCount,
-            stats.upgradeCandidateInvalidCount);
+            stats.upgradeCandidateInputCount);
         ImGui::Text(
             "Upgrade queues: raw=%u rawOverflow=%u ready=%u readyOverflow=%u",
             stats.upgradeRawPageCount,

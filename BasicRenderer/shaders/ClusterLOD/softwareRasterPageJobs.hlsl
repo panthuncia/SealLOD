@@ -1,6 +1,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
@@ -388,6 +389,11 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const uint wrappedPageX = rec.wrappedPageX;
     const uint wrappedPageY = rec.wrappedPageY;
     const uint clipmapLayer = rec.clipmapLayer;
+#if defined(PSO_SKINNED)
+    const bool dynamicLayer = true;
+#else
+    const bool dynamicLayer = false;
+#endif
     const bool doubleSided =
         (rec.flags & kCLodSoftwareRasterPageJobDoubleSidedFlag) != 0u;
     const bool telemetryEnabled =
@@ -622,11 +628,17 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
                 if (b0 >= 0.0f && b1 >= 0.0f && b2 >= 0.0f)
                 {
                     const float depth = b0 * depth0 + b1 * depth1 + b2 * depth2;
+                    const float pageSpaceDepth = dynamicLayer
+                        ? CLodVirtualShadowDepthToCachedPageSpace(
+                            depth,
+                            rec.physicalPageIndex,
+                            clipmapInfo.shadowCameraBufferIndex)
+                        : depth;
                     InterlockedMin(
                         physicalPages[uint2(
                             atlasBaseX + uint(px - int(pagePixelMinX)),
                             atlasBaseY + uint(py - int(pagePixelMinY)))],
-                        asuint(depth));
+                        asuint(pageSpaceDepth));
                     localAnyPixelWritten = true;
                     if (telemetryEnabled) localCoveredPixelCount++;
                 }

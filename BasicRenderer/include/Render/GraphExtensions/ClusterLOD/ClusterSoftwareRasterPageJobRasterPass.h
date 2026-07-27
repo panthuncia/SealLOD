@@ -92,6 +92,8 @@ public:
                 Builtin::CLod::MeshMetadata,
                 Builtin::CLod::Groups,
                 Builtin::CullingCameraBuffer,
+                Builtin::CameraBuffer,
+                Builtin::Shadows::CLodDirectionalPageViewInfo,
                 Builtin::SkeletonResources::InverseBindMatrices,
                 Builtin::SkeletonResources::BoneTransforms,
                 Builtin::SkeletonResources::SkinningInstanceInfo,

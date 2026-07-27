@@ -53,9 +53,6 @@ static const uint WG_COUNTER_RASTER_SORT_COMPACTION_INPUTS = 113u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_VOXEL_SKIPPED = 114u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_REYES_SKIPPED = 115u;
 static const uint WG_COUNTER_RASTER_SORT_COMPACTION_TRIANGLE_EMITTED = 116u;
-static const uint WG_COUNTER_RASTER_SORT_SKINNED_HISTOGRAM_INPUTS = 262u;
-static const uint WG_COUNTER_RASTER_SORT_SKINNED_COMPACTION_EMITTED = 263u;
-static const uint WG_COUNTER_RASTER_SORT_SKINNED_SW_HISTOGRAM_INPUTS = 286u;
 
 void CLodSortTelemetryAdd(uint descriptorIndex, uint counterIndex, uint value)
 {
@@ -139,7 +136,6 @@ groupshared uint gCLodVirtualShadowShouldClearPage;
 groupshared uint gCLodVirtualShadowShouldClearDynamicPage;
 groupshared uint gCLodVirtualShadowInitializeDynamicFromStatic;
 groupshared uint gCLodVirtualShadowShouldComposePage;
-groupshared uint gCLodVirtualShadowTrackedComposePage;
 groupshared uint gCLodVirtualShadowMarkTileHasGeometry;
 groupshared uint gCLodVirtualShadowMarkTileMinDepthBits;
 groupshared uint gCLodVirtualShadowMarkTileMaxDepthBits;
@@ -1305,7 +1301,6 @@ void CLodVirtualShadowComposePhysicalPagesCSMain(
     if (groupThreadId.x == 0u && groupThreadId.y == 0u)
     {
         gCLodVirtualShadowShouldComposePage = 0u;
-        gCLodVirtualShadowTrackedComposePage = 0u;
         const uint physicalPageIndex = groupId.x;
         const uint4 meta = pageMetadata[physicalPageIndex];
         if ((meta.z & kCLodVirtualShadowPhysicalPageResidentFlag) != 0u &&
@@ -1327,24 +1322,6 @@ void CLodVirtualShadowComposePhysicalPagesCSMain(
                 (ownerEntry & kCLodVirtualShadowRerenderedThisFrameMask) != 0u
                     ? 1u
                     : 0u;
-            gCLodVirtualShadowTrackedComposePage =
-                compositeActive &&
-                statsBuffer[0].trackedSkinnedPhysicalPagePlusOne ==
-                    physicalPageIndex + 1u
-                    ? 1u
-                    : 0u;
-            if (gCLodVirtualShadowTrackedComposePage != 0u)
-            {
-                const uint packedPixel =
-                    statsBuffer[0].trackedSkinnedAtlasPixel;
-                const uint2 trackedPixel =
-                    uint2(packedPixel & 0xFFFFu, packedPixel >> 16u);
-                statsBuffer[0].trackedComposeFramePlusOne = 1u;
-                statsBuffer[0].trackedComposeStaticDepthBits =
-                    staticPages.Load(int3(trackedPixel, 0));
-                statsBuffer[0].trackedComposeDynamicBeforeBits =
-                    dynamicPages[trackedPixel];
-            }
             if (gCLodVirtualShadowShouldComposePage != 0u)
             {
                 InterlockedAdd(statsBuffer[0].composedPageCount, 1u);
@@ -1354,25 +1331,6 @@ void CLodVirtualShadowComposePhysicalPagesCSMain(
     GroupMemoryBarrierWithGroupSync();
     if (gCLodVirtualShadowShouldComposePage == 0u)
     {
-        if (gCLodVirtualShadowTrackedComposePage != 0u &&
-            groupThreadId.x == 0u && groupThreadId.y == 0u)
-        {
-            const uint packedPixel =
-                statsBuffer[0].trackedSkinnedAtlasPixel;
-            const uint2 trackedPixel =
-                uint2(packedPixel & 0xFFFFu, packedPixel >> 16u);
-            const uint dynamicAfter = dynamicPages[trackedPixel];
-            statsBuffer[0].trackedComposeDynamicAfterBits = dynamicAfter;
-            const uint expectedDepth = min(
-                statsBuffer[0].trackedSkinnedDepthBits,
-                statsBuffer[0].trackedComposeStaticDepthBits);
-            if (dynamicAfter > expectedDepth)
-            {
-                InterlockedAdd(
-                    statsBuffer[0].trackedCompositionMismatchCount,
-                    1u);
-            }
-        }
         return;
     }
 
@@ -1393,26 +1351,6 @@ void CLodVirtualShadowComposePhysicalPagesCSMain(
                 atlasBasePixel + uint2(localX, localY);
             dynamicPages[atlasPixel] =
                 min(dynamicPages[atlasPixel], staticPages.Load(int3(atlasPixel, 0)));
-        }
-    }
-    GroupMemoryBarrierWithGroupSync();
-    if (gCLodVirtualShadowTrackedComposePage != 0u &&
-        groupThreadId.x == 0u && groupThreadId.y == 0u)
-    {
-        const uint packedPixel =
-            statsBuffer[0].trackedSkinnedAtlasPixel;
-        const uint2 trackedPixel =
-            uint2(packedPixel & 0xFFFFu, packedPixel >> 16u);
-        const uint dynamicAfter = dynamicPages[trackedPixel];
-        statsBuffer[0].trackedComposeDynamicAfterBits = dynamicAfter;
-        const uint expectedDepth = min(
-            statsBuffer[0].trackedSkinnedDepthBits,
-            statsBuffer[0].trackedComposeStaticDepthBits);
-        if (dynamicAfter > expectedDepth)
-        {
-            InterlockedAdd(
-                statsBuffer[0].trackedCompositionMismatchCount,
-                1u);
         }
     }
 }
@@ -3675,21 +3613,6 @@ void ClusterRasterBucketsHistogramCSMain(uint3 DTid : SV_DispatchThreadID)
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const PerMeshBuffer meshData = perMeshBuffer[perMeshIndex];
     uint rasterBucketIndex = meshData.rasterBucketIndex;
-    if ((meshData.vertexFlags & VERTEX_SKINNED) != 0u)
-    {
-        CLodSortTelemetryAdd(
-            CLOD_HISTOGRAM_TELEMETRY_DESCRIPTOR_INDEX,
-            WG_COUNTER_RASTER_SORT_SKINNED_HISTOGRAM_INPUTS,
-            1u);
-        if ((CLOD_HISTOGRAM_READ_MODE_FLAGS &
-                CLOD_HISTOGRAM_READ_FLAG_REVERSED) != 0u)
-        {
-            CLodSortTelemetryAdd(
-                CLOD_HISTOGRAM_TELEMETRY_DESCRIPTOR_INDEX,
-                WG_COUNTER_RASTER_SORT_SKINNED_SW_HISTOGRAM_INPUTS,
-                1u);
-        }
-    }
     if (rasterBucketIndex >= CLOD_HISTOGRAM_NUM_RASTER_BUCKETS)
     {
         return;
@@ -3970,13 +3893,6 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
                         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
                     const uint perMeshIndex =
                         LoadMeshTemplateForDraw(instanceID).perMeshBufferIndex;
-                    if ((perMeshBuffer[perMeshIndex].vertexFlags & VERTEX_SKINNED) != 0u)
-                    {
-                        CLodSortTelemetryAdd(
-                            CLOD_COMPACTION_TELEMETRY_DESCRIPTOR_INDEX,
-                            WG_COUNTER_RASTER_SORT_SKINNED_COMPACTION_EMITTED,
-                            1u);
-                    }
                     if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
                     {
                         RWStructuredBuffer<CLodSoftwareRasterMapping> softwareRasterMapping =

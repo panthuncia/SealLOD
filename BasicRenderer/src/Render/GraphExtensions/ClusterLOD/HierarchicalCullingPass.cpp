@@ -415,6 +415,7 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
         }
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
+            Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodCompactShadowCameras,
             m_shadowDirtyHierarchyTexture,
             m_shadowActiveBlockMetadataBuffer)

@@ -7,6 +7,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
 #include "include/structs.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
 #include "include/vertex.hlsli"
@@ -524,7 +525,15 @@ void WG_PageJobRasterPage(
                     float depth = b0 * depth0 + b1 * depth1 + b2 * depth2;
                     uint2 localPixel = uint2(px - pagePixelMinX, py - pagePixelMinY);
                     uint2 atlasPixel = uint2(atlasBaseX + localPixel.x, atlasBaseY + localPixel.y);
-                    InterlockedMin(physicalPages[atlasPixel], asuint(depth));
+                    const float pageSpaceDepth = dynamicLayer
+                        ? CLodVirtualShadowDepthToCachedPageSpace(
+                            depth,
+                            physicalPageIndex,
+                            clipmapInfo.shadowCameraBufferIndex)
+                        : depth;
+                    InterlockedMin(
+                        physicalPages[atlasPixel],
+                        asuint(pageSpaceDepth));
                     anyPixelWritten = true;
                 }
                 b0 += dx_b0;

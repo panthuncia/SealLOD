@@ -233,7 +233,8 @@ void ClusterRasterizationPass::DeclareResourceUsages(RenderPassBuilder* builder)
     }
     else if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         builder->WithShaderResource(
-                m_virtualShadowClipmapInfoBuffer)
+                m_virtualShadowClipmapInfoBuffer,
+                Builtin::Shadows::CLodDirectionalPageViewInfo)
             .WithUnorderedAccess(
                 m_virtualShadowPageTableTexture,
                 m_virtualShadowPhysicalPagesTexture,

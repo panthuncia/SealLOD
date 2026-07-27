@@ -561,6 +561,7 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
     if (UsesVirtualShadowOutput(m_rasterOutputKind)) {
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
+            Builtin::Shadows::CLodDirectionalPageViewInfo,
             Builtin::Shadows::CLodCompactShadowCameras);
         if (m_shadowDirtyHierarchyTexture) {
             builder->WithShaderResource(m_shadowDirtyHierarchyTexture);
