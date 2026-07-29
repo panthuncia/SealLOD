@@ -291,6 +291,15 @@ private:
 	std::shared_ptr<DynamicBuffer> m_clodGroupPageMap;
 	uint64_t m_activeMeshletCount = 0;
 
+	struct PreparedCLodContainer {
+		std::weak_ptr<Mesh> mesh;
+		std::wstring resolvedPath;
+		std::shared_ptr<const CLodCache::MappedContainerLease> lease;
+		uint32_t pageCount = 0;
+	};
+	std::mutex m_preparedCLodContainersMutex;
+	std::unordered_map<Mesh*, PreparedCLodContainer> m_preparedCLodContainers;
+
 	struct CLodSharedStreamingState {
 		struct ResidentGroupAllocations {
 			// Per-child page allocations (one page per child)

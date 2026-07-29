@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
@@ -826,7 +827,14 @@ void DynamicBuffer::StageWritePages(
 }
 
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
-    std::lock_guard lock(m_allocationMutex);
+    ZoneScopedN("DynamicBuffer::AddData");
+    ZoneValue(static_cast<int64_t>(size));
+    ZoneText(m_name.data(), m_name.size());
+    std::unique_lock<std::recursive_mutex> lock(m_allocationMutex, std::defer_lock);
+    {
+        ZoneScopedN("DynamicBuffer::AddData::WaitAllocationMutex");
+        lock.lock();
+    }
 	size_t actualSize = size;
     if (fullAllocationSize != 0) {
 		actualSize = fullAllocationSize;
@@ -835,16 +843,44 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
 			actualSize = size;
 		}
     }
-    std::unique_ptr<BufferView> view = Allocate(actualSize, elementSize);
+    std::unique_ptr<BufferView> view;
+    {
+        ZoneScopedN("DynamicBuffer::AddData::AllocateView");
+        view = Allocate(actualSize, elementSize);
+    }
     if (!view) {
         return nullptr;
     }
     
 	if (data != nullptr) {
+        ZoneScopedN("DynamicBuffer::AddData::StageWrite");
         StageOrUpload(data, size, view->GetOffset());
 	}
 
     return view;
+}
+
+void DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
+    ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes");
+    ZoneValue(static_cast<int64_t>(additionalBytes));
+    ZoneText(m_name.data(), m_name.size());
+    if (additionalBytes == 0) {
+        return;
+    }
+
+    std::unique_lock<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex, std::defer_lock);
+    {
+        ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes::WaitUploadPolicyMutex");
+        uploadLock.lock();
+    }
+    if (additionalBytes > (std::numeric_limits<size_t>::max)() - m_cpuShadowData.size()) {
+        return;
+    }
+    const size_t desiredCapacity = m_cpuShadowData.size() + additionalBytes;
+    if (m_cpuShadowData.capacity() < desiredCapacity) {
+        ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes::Reserve");
+        m_cpuShadowData.reserve(desiredCapacity);
+    }
 }
 
 void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
@@ -852,14 +888,27 @@ void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
 }
 
 void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
-    std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
-    RetainCpuShadowWrite(data, size, offset);
+    ZoneScopedN("DynamicBuffer::StageOrUpload");
+    ZoneValue(static_cast<int64_t>(size));
+    ZoneText(m_name.data(), m_name.size());
+    std::unique_lock<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex, std::defer_lock);
+    {
+        ZoneScopedN("DynamicBuffer::StageOrUpload::WaitUploadPolicyMutex");
+        uploadLock.lock();
+    }
+    {
+        ZoneScopedN("DynamicBuffer::StageOrUpload::RetainCpuShadow");
+        RetainCpuShadowWrite(data, size, offset);
+    }
     if (offset + size > GetBufferSize()) {
         // The logical view has been allocated ahead of the GPU backing resize.
         // Keep the CPU shadow authoritative and replay it when the resize publishes.
         return;
     }
-    StageOrUploadLocked(data, size, offset);
+    {
+        ZoneScopedN("DynamicBuffer::StageOrUpload::StagePolicyWrite");
+        StageOrUploadLocked(data, size, offset);
+    }
 }
 
 void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t offset) {
@@ -896,6 +945,8 @@ void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t of
 
 void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
     if (m_cpuShadowData.size() < size) {
+        ZoneScopedN("DynamicBuffer::EnsureCpuShadowSize::Grow");
+        ZoneValue(static_cast<int64_t>(size - m_cpuShadowData.size()));
         m_cpuShadowData.resize(size, std::byte{ 0 });
     }
 }
@@ -906,7 +957,10 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
     }
 
     EnsureCpuShadowSize(offset + size);
-    std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
+    {
+        ZoneScopedN("DynamicBuffer::RetainCpuShadowWrite::Memcpy");
+        std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
+    }
 }
 
 void DynamicBuffer::Deallocate(const BufferView* view) {

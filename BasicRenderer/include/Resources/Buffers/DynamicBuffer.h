@@ -62,6 +62,9 @@ public:
     void DeallocateRange(size_t offset, size_t size);
     void DeallocatePages(const std::vector<PagedAllocation>& pages);
 	std::unique_ptr<BufferView> AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize = 0);
+    // Avoid repeated CPU-shadow reallocations when a caller is about to append
+    // many independently-owned ranges.
+    void ReserveCpuShadowAdditionalBytes(size_t additionalBytes);
     std::pair<size_t, size_t> AddDataRange(const void* data, size_t count, size_t elementSize);
     std::vector<PagedAllocation> AllocateRangesBatch(const std::vector<size_t>& counts, size_t elementSize);
     bool TryAllocateRangesBatch(

@@ -637,9 +637,11 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 }
 
 bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedVertices) {
+	ZoneScopedN("MeshManager::AddMesh");
 	if (!mesh) {
 		return false;
 	}
+	ZoneValue(static_cast<int64_t>(mesh->GetGlobalID()));
 	if (mesh->GetPerMeshBufferView() != nullptr) {
 		return true;
 	}
@@ -870,6 +872,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 	// Create shared streaming state (once per mesh, before hierarchy CPU data is released)
 	{
+		ZoneScopedN("MeshManager::AddMesh::BuildSharedStreamingState");
 		const uint32_t groupsBase = static_cast<uint32_t>(clusterLODGroupsView->GetOffset() / sizeof(ClusterLODGroup));
 		const auto& groupChunkHints = mesh->GetCLodGroupChunkHints();
 		std::vector<ClusterLODGroupChunk> baselineGroupChunks(groupChunkHints.size());
@@ -920,43 +923,66 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		sharedState->maxTraversalDepth = mesh->GetCLodMaxTraversalDepth();
 		sharedState->vertexByteSize = static_cast<uint32_t>(mesh->GetPerMeshCBData().vertexByteSize);
 		sharedState->cacheSource = mesh->GetCLodCacheSource();
-		if (!sharedState->cacheSource.containerFileName.empty()) {
+		sharedState->pageDiskLocators = mesh->GetCLodPageDiskLocators();
+		{
+			ZoneScopedN("MeshManager::AddMesh::AcquirePreparedContainer");
+			std::lock_guard preparedLock(m_preparedCLodContainersMutex);
+			auto preparedIt = m_preparedCLodContainers.find(mesh.get());
+			if (preparedIt != m_preparedCLodContainers.end()) {
+				const auto preparedMesh = preparedIt->second.mesh.lock();
+				if (preparedMesh.get() == mesh.get() &&
+					preparedIt->second.pageCount == sharedState->pageDiskLocators.size()) {
+					sharedState->resolvedContainerPath = std::move(preparedIt->second.resolvedPath);
+					sharedState->mappedContainerLease = std::move(preparedIt->second.lease);
+				}
+				m_preparedCLodContainers.erase(preparedIt);
+			}
+		}
+		if (sharedState->resolvedContainerPath.empty() &&
+			!sharedState->cacheSource.containerFileName.empty()) {
+			ZoneScopedN("MeshManager::AddMesh::ResolveContainerPathFallback");
 			sharedState->resolvedContainerPath = CLodCache::ResolveContainerPath(sharedState->cacheSource);
 		}
-		sharedState->pageDiskLocators = mesh->GetCLodPageDiskLocators();
 		if (!sharedState->resolvedContainerPath.empty() &&
-			!sharedState->pageDiskLocators.empty()) {
+			!sharedState->pageDiskLocators.empty() &&
+			sharedState->mappedContainerLease == nullptr) {
+			ZoneScopedN("MeshManager::AddMesh::AcquireMappedContainerFallback");
 			CLodCache::AcquireMappedContainer(
 				sharedState->resolvedContainerPath,
 				static_cast<uint32_t>(
 					sharedState->pageDiskLocators.size()),
 				sharedState->mappedContainerLease);
-			if (sharedState->mappedContainerLease != nullptr) {
-				sharedState->mappedPageWarmStateCount =
-					static_cast<uint32_t>(
-						sharedState->pageDiskLocators.size());
-				sharedState->mappedPageWarmStates =
-					std::make_unique<std::atomic<uint8_t>[]>(
-						sharedState->mappedPageWarmStateCount);
-				for (uint32_t pageIndex = 0u;
-					pageIndex <
-						sharedState->mappedPageWarmStateCount;
-					++pageIndex) {
-					sharedState->mappedPageWarmStates[pageIndex].store(
-						0u, std::memory_order_relaxed);
-				}
+		}
+		if (sharedState->mappedContainerLease != nullptr) {
+			ZoneScopedN("MeshManager::AddMesh::InitializeMappedPageWarmStates");
+			sharedState->mappedPageWarmStateCount =
+				static_cast<uint32_t>(
+					sharedState->pageDiskLocators.size());
+			sharedState->mappedPageWarmStates =
+				std::make_unique<std::atomic<uint8_t>[]>(
+					sharedState->mappedPageWarmStateCount);
+			for (uint32_t pageIndex = 0u;
+				pageIndex <
+					sharedState->mappedPageWarmStateCount;
+				++pageIndex) {
+				sharedState->mappedPageWarmStates[pageIndex].store(
+					0u, std::memory_order_relaxed);
 			}
 		}
 		sharedState->groupChunkHints = mesh->GetCLodGroupChunkHints();
 
 		// Move hierarchy data into the shared state before the mesh releases its CPU copies.
-		sharedState->groups = mesh->GetCLodGroups();
-		sharedState->segments = mesh->GetCLodSegments();
-		sharedState->groupPageReferences = mesh->GetCLodGroupPageReferences();
-		sharedState->groupPageReferenceOffsets = mesh->GetCLodGroupPageReferenceOffsets();
+		{
+			ZoneScopedN("MeshManager::AddMesh::CopyStreamingHierarchy");
+			sharedState->groups = mesh->GetCLodGroups();
+			sharedState->segments = mesh->GetCLodSegments();
+			sharedState->groupPageReferences = mesh->GetCLodGroupPageReferences();
+			sharedState->groupPageReferenceOffsets = mesh->GetCLodGroupPageReferenceOffsets();
+		}
 
 		// Cache parent-child mapping and error values for streaming snapshots.
 		{
+			ZoneScopedN("MeshManager::AddMesh::BuildParentChildMap");
 			const auto& summary = mesh->GetCLodRuntimeSummary();
 			sharedState->parentGroupByLocal = summary.parentGroupByLocal;
 			sharedState->childrenByLocalParent.resize(sharedState->parentGroupByLocal.size());
@@ -1006,6 +1032,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		std::unique_ptr<BufferView> pageMapView = nullptr;
 		uint32_t pageMapGlobalBase = 0;
 		if (totalPageMapEntries > 0) {
+			ZoneScopedN("MeshManager::AddMesh::InitializePageMap");
 			std::vector<GroupPageMapEntry> initialPageMapEntries(totalPageMapEntries); // zero-init
 			pageMapView = m_clodGroupPageMap->AddData(
 				initialPageMapEntries.data(),
@@ -1125,9 +1152,12 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		sharedState->pageMapEntriesCPU.resize(totalPageMapEntries);
 		sharedState->residentGroupAllocations.resize(sharedState->groupCount);
 
-		m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
-		m_clodSharedStreamingRangesDirty = true;
-		PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::SharedMeshAdded, sharedState);
+		{
+			ZoneScopedN("MeshManager::AddMesh::PublishSharedStreamingState");
+			m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
+			m_clodSharedStreamingRangesDirty = true;
+			PublishCLodStreamingDomainEventForSharedState(CLodStreamingDomainEventKind::SharedMeshAdded, sharedState);
+		}
 	}
 
 	mesh->SetCLodBufferViews(
@@ -1140,9 +1170,12 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		std::move(clusterLODAssemblyInstancesView),
 		std::move(clusterLODAssemblyBoneRemapsView),
 		std::move(clusterLODAssemblyBoneRemapIndicesView));
-	mesh->ReleaseCLodChunkUploadData();
-	mesh->ReleaseCLodHierarchyCpuData();
-	mesh->ReleaseCLodGroupChunkMetadataCpuData();
+	{
+		ZoneScopedN("MeshManager::AddMesh::ReleaseCpuData");
+		mesh->ReleaseCLodChunkUploadData();
+		mesh->ReleaseCLodHierarchyCpuData();
+		mesh->ReleaseCLodGroupChunkMetadataCpuData();
+	}
 
 	return true;
 }
@@ -1219,6 +1252,27 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 		}
 	}
 	TracyPlot("MeshManager.AddMeshesBulk.MeshRows", static_cast<int64_t>(meshRowsToAdd));
+	TracyPlot("MeshManager.AddMeshesBulk.GroupsBytes", static_cast<int64_t>(clodGroupsBytes));
+	TracyPlot("MeshManager.AddMeshesBulk.SegmentsBytes", static_cast<int64_t>(clodSegmentsBytes));
+	TracyPlot("MeshManager.AddMeshesBulk.NodesBytes", static_cast<int64_t>(clodNodesBytes));
+	TracyPlot("MeshManager.AddMeshesBulk.PageMapBytes", static_cast<int64_t>(clodPageMapBytes));
+	TracyPlot(
+		"MeshManager.AddMeshesBulk.TotalMeasuredBytes",
+		static_cast<int64_t>(
+			meshRowsToAdd * sizeof(PerMeshCB) +
+			clodGroupsBytes +
+			clodSegmentsBytes +
+			clodNodesBytes +
+			clodNodeSkinningInfoBytes +
+			clodNodeBoneIndexBytes +
+			clodAssemblyTransformsBytes +
+			clodAssemblyInstancesBytes +
+			clodAssemblyBoneRemapsBytes +
+			clodAssemblyBoneRemapIndicesBytes +
+			clodSharedGroupChunkBytes +
+			clodHierarchyLevelInfoBytes +
+			clodMeshMetadataBytes +
+			clodPageMapBytes));
 
 	if (meshRowsToAdd == 0) {
 		return;
@@ -1262,13 +1316,43 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	}
 
 	{
+		ZoneScopedN("MeshManager::AddMeshesBulk::ReserveCpuShadows");
+		m_perMeshBuffers->ReserveCpuShadowAdditionalBytes(meshRowsToAdd * sizeof(PerMeshCB));
+		m_clusterLODGroups->ReserveCpuShadowAdditionalBytes(clodGroupsBytes);
+		m_clusterLODSegments->ReserveCpuShadowAdditionalBytes(clodSegmentsBytes);
+		m_clusterLODNodes->ReserveCpuShadowAdditionalBytes(clodNodesBytes);
+		m_clusterLODNodeSkinningInfos->ReserveCpuShadowAdditionalBytes(clodNodeSkinningInfoBytes);
+		m_clusterLODNodeBoneIndices->ReserveCpuShadowAdditionalBytes(clodNodeBoneIndexBytes);
+		m_clusterLODAssemblyTransforms->ReserveCpuShadowAdditionalBytes(clodAssemblyTransformsBytes);
+		m_clusterLODAssemblyInstances->ReserveCpuShadowAdditionalBytes(clodAssemblyInstancesBytes);
+		m_clusterLODAssemblyBoneRemaps->ReserveCpuShadowAdditionalBytes(clodAssemblyBoneRemapsBytes);
+		m_clusterLODAssemblyBoneRemapIndices->ReserveCpuShadowAdditionalBytes(clodAssemblyBoneRemapIndicesBytes);
+		m_clodSharedGroupChunks->ReserveCpuShadowAdditionalBytes(clodSharedGroupChunkBytes);
+		m_clodHierarchyLevelInfos->ReserveCpuShadowAdditionalBytes(clodHierarchyLevelInfoBytes);
+		m_clodMeshMetadata->ReserveCpuShadowAdditionalBytes(clodMeshMetadataBytes);
+		m_clodGroupPageMap->ReserveCpuShadowAdditionalBytes(clodPageMapBytes);
+	}
+
+	{
 		ZoneScopedN("MeshManager::AddMeshesBulk::AddMeshes");
+		size_t addedMeshes = 0;
+		size_t failedMeshes = 0;
 		for (auto mesh : meshes) {
 			if (!mesh || mesh->GetPerMeshBufferView()) {
 				continue;
 			}
-			AddMesh(mesh, useMeshletReorderedVertices);
+			{
+				ZoneScopedN("MeshManager::AddMeshesBulk::AddOneMesh");
+				ZoneValue(static_cast<int64_t>(mesh->GetGlobalID()));
+				if (AddMesh(mesh, useMeshletReorderedVertices)) {
+					++addedMeshes;
+				} else {
+					++failedMeshes;
+				}
+			}
 		}
+		TracyPlot("MeshManager.AddMeshesBulk.AddedMeshes", static_cast<int64_t>(addedMeshes));
+		TracyPlot("MeshManager.AddMeshesBulk.FailedMeshes", static_cast<int64_t>(failedMeshes));
 	}
 }
 
@@ -1295,7 +1379,9 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	size_t clodPageMapBytes = 0;
 	size_t templateRowsToAdd = 0;
 	std::unordered_set<Mesh*> uniqueMeshes;
+	std::vector<std::shared_ptr<Mesh>> meshesToPrepare;
 	uniqueMeshes.reserve(requests.size());
+	meshesToPrepare.reserve(requests.size());
 
 	{
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::MeasureResources");
@@ -1305,6 +1391,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 				continue;
 			}
 			if (uniqueMeshes.insert(mesh.get()).second && !mesh->GetPerMeshBufferView()) {
+				meshesToPrepare.push_back(mesh);
 				++meshRowsToAdd;
 				clodGroupsBytes += mesh->GetCLodGroups().size() * sizeof(ClusterLODGroup);
 				clodSegmentsBytes += mesh->GetCLodSegments().size() * sizeof(ClusterLODGroupSegment);
@@ -1334,6 +1421,66 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	}
 	TracyPlot("MeshManager.StaticTemplate.AsyncMeshRows", static_cast<int64_t>(meshRowsToAdd));
 	TracyPlot("MeshManager.StaticTemplate.AsyncTemplateRows", static_cast<int64_t>(templateRowsToAdd));
+
+	if (!meshesToPrepare.empty()) {
+		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
+		size_t preparedContainerCount = 0;
+		for (const auto& mesh : meshesToPrepare) {
+			const auto& pageDiskLocators = mesh->GetCLodPageDiskLocators();
+			if (pageDiskLocators.empty() ||
+				!mesh->HasCLodDiskStreamingSource() ||
+				pageDiskLocators.size() > (std::numeric_limits<uint32_t>::max)()) {
+				continue;
+			}
+
+			const auto cacheSource = mesh->GetCLodCacheSource();
+			if (cacheSource.containerFileName.empty()) {
+				continue;
+			}
+
+			std::wstring resolvedPath;
+			std::shared_ptr<const CLodCache::MappedContainerLease> lease;
+			{
+				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
+				resolvedPath = CLodCache::ResolveContainerPath(cacheSource);
+			}
+			if (resolvedPath.empty()) {
+				continue;
+			}
+			{
+				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
+				CLodCache::AcquireMappedContainer(
+					resolvedPath,
+					static_cast<uint32_t>(pageDiskLocators.size()),
+					lease);
+			}
+			if (!lease) {
+				continue;
+			}
+
+			{
+				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PublishMappedContainer");
+				std::lock_guard preparedLock(m_preparedCLodContainersMutex);
+				for (auto it = m_preparedCLodContainers.begin(); it != m_preparedCLodContainers.end();) {
+					if (it->second.mesh.expired()) {
+						it = m_preparedCLodContainers.erase(it);
+					} else {
+						++it;
+					}
+				}
+				m_preparedCLodContainers[mesh.get()] = PreparedCLodContainer{
+					.mesh = mesh,
+					.resolvedPath = std::move(resolvedPath),
+					.lease = std::move(lease),
+					.pageCount = static_cast<uint32_t>(pageDiskLocators.size()),
+				};
+			}
+			++preparedContainerCount;
+		}
+		TracyPlot(
+			"MeshManager.StaticTemplate.PreparedMappedContainers",
+			static_cast<int64_t>(preparedContainerCount));
+	}
 
 	if (meshRowsToAdd != 0) {
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestMeshResizes");
