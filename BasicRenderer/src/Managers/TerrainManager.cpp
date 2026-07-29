@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -14,6 +15,7 @@
 #include "../generated/BuiltinResources.h"
 #include "Factories/TextureFactory.h"
 #include "Managers/MaterialManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Managers/TextureStreamingManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
@@ -850,6 +852,13 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     set.weightBlockBase = 0;
     set.weightBlockCount = weightBlockCount;
     set.regionSizeWorld = desc.regionSizeWorld > 0.0f ? desc.regionSizeWorld : kDefaultTerrainRegionSizeWorld;
+    // VSM clipmaps are centered on the camera in a rotated light-space basis.
+    // The terrain diagonal is therefore the conservative camera-to-edge extent
+    // needed to fit the same domain used by the RVT clip ladder.
+    const float terrainWidth = static_cast<float>(regionCountX) * set.regionSizeWorld;
+    const float terrainHeight = static_cast<float>(regionCountY) * set.regionSizeWorld;
+    SettingsManager::GetInstance().getSettingSetter<float>("directionalShadowSceneExtent")(
+        std::hypot(terrainWidth, terrainHeight));
     m_desiredSet = set;
     // A terrain set with valid extents is enough for the RVT to begin creating
     // permanent pages.  Do not expose it until every initial streaming owner has
@@ -1067,6 +1076,7 @@ void TerrainManager::ProcessPendingUpdates()
 
 void TerrainManager::ClearActiveTerrain()
 {
+    SettingsManager::GetInstance().getSettingSetter<float>("directionalShadowSceneExtent")(0.0f);
     ++m_terrainGeneration;
     if (m_textureStreamingManager) {
         m_textureStreamingManager->UnregisterTextureBindings(m_streamingBindingIDs);

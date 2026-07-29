@@ -1794,6 +1794,9 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<uint8_t>("numDirectionalLightCascades", numDirectionalCascades);
     settingsManager.registerSetting<float>("maxShadowDistance", maxShadowDistance);
     settingsManager.registerSetting<float>("directionalShadowVerticalExtent", directionalShadowVerticalExtent);
+    // Populated by scene-domain providers such as TerrainManager. Zero retains
+    // the camera-derived clip ladder for scenes without explicit extents.
+    settingsManager.registerSetting<float>("directionalShadowSceneExtent", 0.0f);
         settingsManager.registerSetting<std::vector<float>>("directionalLightCascadeSplits", calculateCascadeSplits(numDirectionalCascades, 0.1f, maxShadowDistance, maxShadowDistance));
     settingsManager.registerSetting<uint16_t>("shadowResolution", 2048);
     settingsManager.registerSetting<float>("cameraSpeed", 10);

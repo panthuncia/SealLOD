@@ -126,7 +126,7 @@ DirectX::XMMATRIX createDirectionalLightViewMatrix(DirectX::XMVECTOR lightDir, D
 
 std::vector<Cascade> setupCascades(int numCascades, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& cascadeSplits);
 
-std::vector<Cascade> setupDirectionalClipmaps(int numClipmaps, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& clipFarPlanes, float clipVerticalExtent);
+std::vector<Cascade> setupDirectionalClipmaps(int numClipmaps, const DirectX::XMVECTOR& lightDir, const DirectX::XMVECTOR& camPos, const DirectX::XMVECTOR& camDir, const DirectX::XMVECTOR& camUp, float nearPlane, float fovY, float aspectRatio, const std::vector<float>& clipFarPlanes, float clipVerticalExtent, float clipSceneExtent);
 
 std::vector<float> calculateCascadeSplits(int numCascades, float zNear, float zFar, float maxDist, float lambda = 0.8f);
 

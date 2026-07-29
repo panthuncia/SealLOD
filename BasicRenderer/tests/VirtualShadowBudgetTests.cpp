@@ -2,8 +2,10 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Utilities/Utilities.h"
 
 namespace {
 struct Case
@@ -371,6 +373,55 @@ void RunAbsolutePageTagCases()
             "VSM absolute page tag wrapping is inconsistent");
     }
 }
+
+void RunDirectionalClipFitCases()
+{
+    constexpr int clipCount = 6;
+    // Keep this below the old one-world-unit floor so the test proves that a
+    // long clip ladder can genuinely fit a small scene instead of overshooting.
+    constexpr float sceneExtent = 3.2f;
+    const std::vector<float> cameraFarPlanes(clipCount, 50000.0f);
+    const auto fitted = setupDirectionalClipmaps(
+        clipCount,
+        DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, -0.9f, -0.5f, 0.0f)),
+        DirectX::XMVectorZero(),
+        DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f),
+        DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f),
+        0.1f,
+        DirectX::XMConvertToRadians(70.0f),
+        16.0f / 9.0f,
+        cameraFarPlanes,
+        100.0f,
+        sceneExtent);
+
+    if (fitted.size() != clipCount) {
+        throw std::runtime_error("scene-fitted VSM returned the wrong clip count");
+    }
+    const float expectedClipZeroDiameter =
+        sceneExtent * 2.0f / std::exp2(static_cast<float>(clipCount - 1));
+    if (std::abs(fitted.front().size - expectedClipZeroDiameter) > 0.001f) {
+        throw std::runtime_error("scene-fitted VSM did not derive clip zero from scene extent");
+    }
+    if (std::abs(fitted.back().size - sceneExtent * 2.0f) > 0.001f) {
+        throw std::runtime_error("scene-fitted VSM outer clip does not cover the scene extent");
+    }
+
+    const auto cameraFitted = setupDirectionalClipmaps(
+        clipCount,
+        DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, -0.9f, -0.5f, 0.0f)),
+        DirectX::XMVectorZero(),
+        DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f),
+        DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f),
+        0.1f,
+        DirectX::XMConvertToRadians(70.0f),
+        16.0f / 9.0f,
+        cameraFarPlanes,
+        100.0f,
+        0.0f);
+    if (cameraFitted.front().size <= fitted.front().size) {
+        throw std::runtime_error("scene-fitted VSM did not improve clip-zero page density");
+    }
+}
 }
 
 int main()
@@ -383,6 +434,7 @@ int main()
         RunFallbackDependencyOverflowLifecycleCase();
         RunExactPageTokenCases();
         RunAbsolutePageTagCases();
+        RunDirectionalClipFitCases();
         std::cout << "Virtual shadow budget tests passed.\n";
         return 0;
     }

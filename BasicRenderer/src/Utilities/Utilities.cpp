@@ -1569,7 +1569,8 @@ std::vector<Cascade> setupDirectionalClipmaps(
     float fovY,
     float aspectRatio,
     const std::vector<float>& clipFarPlanes,
-    float clipVerticalExtent)
+    float clipVerticalExtent,
+    float clipSceneExtent)
 {
     using namespace DirectX;
     std::vector<Cascade> clipmaps;
@@ -1591,9 +1592,18 @@ std::vector<Cascade> setupDirectionalClipmaps(
     const float tanHalfFov = tanf(fovY * 0.5f);
     const float clipZeroHalfHeight = clipZeroFar * tanHalfFov;
     const float clipZeroHalfWidth = clipZeroHalfHeight * aspectRatio;
-    const float clipZeroScale = std::max(
+    const float cameraDerivedClipZeroScale = std::max(
         std::sqrt(clipZeroHalfWidth * clipZeroHalfWidth + clipZeroHalfHeight * clipZeroHalfHeight),
         1.0f);
+    // A positive scene extent is the maximum camera-to-edge distance that the
+    // coarsest clip must cover.  Work backwards through the power-of-two ladder
+    // so the final clip fits that extent exactly, just as the terrain RVT fits
+    // its clip ladder to the terrain domain.  This prevents a very large camera
+    // far plane from making every VSM page unnecessarily coarse.
+    const float clipLadderScale = std::pow(2.0f, static_cast<float>(std::max(numClipmaps - 1, 0)));
+    const float clipZeroScale = clipSceneExtent > 0.0f
+        ? std::max(clipSceneExtent / clipLadderScale, 1.0e-4f)
+        : cameraDerivedClipZeroScale;
     const float ndcPageSize = 2.0f / static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis);
     const float clampedClipVerticalExtent = std::max(clipVerticalExtent, 1.0f);
     const float clipHeightOffsetScale = 5.0f;
