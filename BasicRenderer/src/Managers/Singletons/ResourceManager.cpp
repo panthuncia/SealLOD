@@ -1,5 +1,6 @@
 #include "Managers/Singletons/ResourceManager.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <memory>
@@ -108,6 +109,25 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
         SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName)();
 	perFrameCBData.shadowVirtualSmrtMaxTraceDistanceWorld =
 		SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName)();
+    perFrameCBData.shadowVirtualReceiverTraceEnabled =
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName)() ? 1u : 0u;
+    perFrameCBData.shadowVirtualReceiverTraceSampleCount =
+        std::clamp(
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName)(),
+            1u,
+            32u);
+    perFrameCBData.shadowVirtualReceiverTraceMaxDistanceWorld =
+        std::max(
+            SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName)(),
+            0.0f);
+    perFrameCBData.shadowVirtualReceiverTraceUncertaintyScale =
+        std::max(
+            SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName)(),
+            0.0f);
+    perFrameCBData.shadowVirtualReceiverTraceDepthSafetyScale =
+        std::max(
+            SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName)(),
+            0.0f);
 	perFrameCBData.terrainStochasticSamplingEnabled =
 		SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainStochasticSampling")() ? 1u : 0u;
 	perFrameCBData.terrainStochasticDiffuseEnabled =

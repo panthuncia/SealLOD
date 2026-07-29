@@ -72,6 +72,11 @@ enum OutputType {
 	SKELETONS = 68,
 	SKELETON_BOUNDING_SPHERES = 69,
 	VOXEL_UV_DENSITY = 70,
+	VSM_CACHED_BASIS_CORRECTION = 71,
+	VSM_PAGE_LOCAL_TEXEL = 72,
+	VSM_DEPTH_MARGIN = 73,
+	VSM_CLIP_COMPARISON = 74,
+	VSM_CLIP_GRID_OFFSET = 75,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -146,4 +151,9 @@ inline std::vector<std::string> OutputTypeNames = {
 	"Skeletons",
 	"Skeleton Bounding Spheres",
 	"Voxel UV Density",
+	"VSM Cached Basis Correction",
+	"VSM Page-local Texel",
+	"VSM Depth-test Margin",
+	"VSM Adjacent Clip Comparison",
+	"VSM Adjacent Clip Grid Offset",
 };

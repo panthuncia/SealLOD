@@ -670,6 +670,26 @@ private:
     std::function<float()> getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
     std::function<void(float)> setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
 
+    bool m_clodDirectionalVirtualShadowReceiverTraceEnabled = CLodVirtualShadowDefaultReceiverTraceEnabled;
+    std::function<bool()> getCLodDirectionalVirtualShadowReceiverTraceEnabled;
+    std::function<void(bool)> setCLodDirectionalVirtualShadowReceiverTraceEnabled;
+
+    uint32_t m_clodDirectionalVirtualShadowReceiverTraceSampleCount = CLodVirtualShadowDefaultReceiverTraceSampleCount;
+    std::function<uint32_t()> getCLodDirectionalVirtualShadowReceiverTraceSampleCount;
+    std::function<void(uint32_t)> setCLodDirectionalVirtualShadowReceiverTraceSampleCount;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = CLodVirtualShadowDefaultReceiverTraceMaxDistanceWorld;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale = CLodVirtualShadowDefaultReceiverTraceUncertaintyScale;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale;
+
+    float m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale;
+    std::function<float()> getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale;
+    std::function<void(float)> setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale;
+
     uint8_t m_numDirectionalLightCascades = 0u;
     std::function<uint8_t()> getNumDirectionalLightCascades;
     std::function<void(uint8_t)> setNumDirectionalLightCascades;
@@ -1319,6 +1339,31 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName);
     m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld = getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld();
     observerSetting(m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld, CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingGetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingSetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceEnabled = getCLodDirectionalVirtualShadowReceiverTraceEnabled();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceEnabled, CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceSampleCount = settingsManager.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceSampleCount = settingsManager.getSettingSetter<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceSampleCount = getCLodDirectionalVirtualShadowReceiverTraceSampleCount();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceSampleCount, CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld = getCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld, CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale = getCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale, CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName);
+
+    getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
+    setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
+    m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale = getCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale();
+    observerSetting(m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale, CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName);
 
     getNumDirectionalLightCascades = settingsManager.getSettingGetter<uint8_t>("numDirectionalLightCascades");
     setNumDirectionalLightCascades = settingsManager.getSettingSetter<uint8_t>("numDirectionalLightCascades");
@@ -2150,6 +2195,61 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld(
                 m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld);
         }
+        ImGui::SeparatorText("Adaptive Receiver Screen Trace");
+        if (ImGui::Checkbox(
+                "Enable VSM Receiver Screen Trace",
+                &m_clodDirectionalVirtualShadowReceiverTraceEnabled)) {
+            setCLodDirectionalVirtualShadowReceiverTraceEnabled(
+                m_clodDirectionalVirtualShadowReceiverTraceEnabled);
+        }
+        int receiverTraceSampleCount =
+            static_cast<int>(m_clodDirectionalVirtualShadowReceiverTraceSampleCount);
+        if (ImGui::SliderInt(
+                "VSM Receiver Trace Samples",
+                &receiverTraceSampleCount,
+                1,
+                32)) {
+            m_clodDirectionalVirtualShadowReceiverTraceSampleCount =
+                static_cast<uint32_t>(std::clamp(receiverTraceSampleCount, 1, 32));
+            setCLodDirectionalVirtualShadowReceiverTraceSampleCount(
+                m_clodDirectionalVirtualShadowReceiverTraceSampleCount);
+        }
+        if (ImGui::SliderFloat(
+                "VSM Receiver Trace Max Distance",
+                &m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld,
+                1.0f,
+                4096.0f,
+                "%.1f world units",
+                ImGuiSliderFlags_Logarithmic)) {
+            m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld, 1.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld(
+                m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld);
+        }
+        if (ImGui::SliderFloat(
+                "VSM Receiver Trace Uncertainty",
+                &m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale,
+                0.25f,
+                8.0f,
+                "%.2f pixels")) {
+            m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale, 0.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceUncertaintyScale(
+                m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale);
+        }
+        if (ImGui::SliderFloat(
+                "VSM Receiver Trace Depth Safety",
+                &m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale,
+                0.0f,
+                4.0f,
+                "%.2f pixels")) {
+            m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale =
+                std::max(m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale, 0.0f);
+            setCLodDirectionalVirtualShadowReceiverTraceDepthSafetyScale(
+                m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale);
+        }
+        ImGui::TextDisabled(
+            "Receiver trace uses primary-camera depth and is independent of VSM clip texel size.");
         const CLodVirtualShadowResolutionConfig virtualShadowConfig =
             CLodVirtualShadowBuildRuntimeResolutionConfig();
         const float budgetDirectionalLodBias = m_clodDirectionalVirtualShadowAutoLodBias
@@ -2184,6 +2284,16 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_clodDirectionalVirtualShadowSmrtSamplesPerRayDirectional,
             m_clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees,
             m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
+        ImGui::Text(
+            "Directional VSM SMRT distance: %.1f base, %.1f effective world units",
+            m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld,
+            m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld *
+                m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
+        ImGui::Text(
+            "Receiver trace: %s, %u samples, %.1f world-unit cap",
+            m_clodDirectionalVirtualShadowReceiverTraceEnabled ? "enabled" : "disabled",
+            m_clodDirectionalVirtualShadowReceiverTraceSampleCount,
+            m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld);
         if (ImGui::SliderFloat("Directional Shadow Vertical Extent", &m_directionalShadowVerticalExtent, 1.0f, 1000.0f, "%.1f")) {
             m_directionalShadowVerticalExtent = std::max(m_directionalShadowVerticalExtent, 1.0f);
             setDirectionalShadowVerticalExtent(m_directionalShadowVerticalExtent);

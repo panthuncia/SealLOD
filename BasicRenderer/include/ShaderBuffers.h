@@ -96,6 +96,13 @@ struct PerFrameCB {
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees = 0.0f;
     float shadowVirtualSmrtRayLengthScaleDirectional = 0.0f;
     float shadowVirtualSmrtMaxTraceDistanceWorld = 0.0f;
+    unsigned int shadowVirtualReceiverTraceEnabled = 1u;
+    unsigned int shadowVirtualReceiverTraceSampleCount = 8u;
+    float shadowVirtualReceiverTraceMaxDistanceWorld = 256.0f;
+    float shadowVirtualReceiverTraceUncertaintyScale = 1.5f;
+    float shadowVirtualReceiverTraceDepthSafetyScale = 0.5f;
+    unsigned int shadowVirtualReceiverTracePad0 = 0u;
+    unsigned int shadowVirtualReceiverTracePad1 = 0u;
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;
     unsigned int terrainStochasticNormalEnabled = 1u;
@@ -119,22 +126,24 @@ struct PerFrameCB {
     float objectParallaxHeightScale = 1.0f;
 };
 
-static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 124, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticPad) == 128, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 140, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 144, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 148, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 152, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, heightFadeStartDistance) == 156, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, heightFadeEndDistance) == 160, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainRvtEnabled) == 164, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainRvtForceDirectFallback) == 168, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainRvtDebugView) == 172, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 176, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 180, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 184, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, objectParallaxHeightScale) == 188, "PerFrameCB layout mismatch.");
-static_assert(sizeof(PerFrameCB) == 192, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceDepthSafetyScale) == 116, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 152, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 168, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 172, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 176, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainParallaxMaxSteps) == 180, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, heightFadeStartDistance) == 184, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, heightFadeEndDistance) == 188, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtEnabled) == 192, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtForceDirectFallback) == 196, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtDebugView) == 200, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 204, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 208, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 212, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, objectParallaxHeightScale) == 216, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 224, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;

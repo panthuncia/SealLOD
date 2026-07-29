@@ -366,6 +366,7 @@ public:
         defines.push_back({ L"PSO_TERRAIN", L"1" });
         defines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
         defines.push_back({ L"VISUTIL_USE_COMPACT_MATERIAL_EVAL", L"1" });
+        defines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
         m_pso = PSOManager::GetInstance().MakeComputePipeline(
             PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
             L"shaders/VisUtilEvaluateTerrainRegion.hlsl",
@@ -425,6 +426,7 @@ public:
         b->WithShaderResource(
             "Builtin::VisUtil::TerrainRegionPixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
+            Builtin::PrimaryCamera::LinearDepthMap,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

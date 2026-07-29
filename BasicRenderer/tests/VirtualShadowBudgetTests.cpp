@@ -421,6 +421,37 @@ void RunDirectionalClipFitCases()
     if (cameraFitted.front().size <= fitted.front().size) {
         throw std::runtime_error("scene-fitted VSM did not improve clip-zero page density");
     }
+
+    // Clip views must use one exact light-space basis. In particular, their
+    // X/Y translations must be the integer page offsets expressed in each
+    // level's page size, even at large world coordinates where reconstructing
+    // a view from a world-space eye loses enough precision to move fine texels.
+    const auto largeWorldFitted = setupDirectionalClipmaps(
+        clipCount,
+        DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.31f, -0.88f, -0.36f, 0.0f)),
+        DirectX::XMVectorSet(1000000.0f, 25000.0f, -750000.0f, 1.0f),
+        DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f),
+        DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f),
+        0.1f,
+        DirectX::XMConvertToRadians(70.0f),
+        16.0f / 9.0f,
+        cameraFarPlanes,
+        100000.0f,
+        100000.0f);
+    for (const Cascade& clip : largeWorldFitted) {
+        const float pageWorldSize =
+            clip.size /
+            static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis);
+        const float expectedTranslationX =
+            static_cast<float>(clip.pageOffsetX) * pageWorldSize;
+        const float expectedTranslationY =
+            -static_cast<float>(clip.pageOffsetY) * pageWorldSize;
+        if (DirectX::XMVectorGetX(clip.viewMatrix.r[3]) != expectedTranslationX ||
+            DirectX::XMVectorGetY(clip.viewMatrix.r[3]) != expectedTranslationY) {
+            throw std::runtime_error(
+                "VSM clip view drifted from its integer page-coordinate basis");
+        }
+    }
 }
 }
 

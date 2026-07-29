@@ -30,6 +30,13 @@ struct CLodVirtualShadowDebugInfo
     uint sampledPageEntry;
     uint sampledPhysicalPageIndex;
     uint flags;
+    float2 cachedBasisCorrectionTexels;
+    uint2 sampledPageLocalTexel;
+    float depthDeltaTexels;
+    uint comparisonClipmapIndex;
+    float comparisonDepthDeltaTexels;
+    uint comparisonFlags;
+    float2 comparisonGridOffsetTexels;
 };
 
 struct CLodVirtualShadowLookupResult
@@ -53,6 +60,13 @@ CLodVirtualShadowDebugInfo CLodVirtualShadowInitDebugInfo(uint preferredClipmapI
     debugInfo.sampledPageEntry = 0u;
     debugInfo.sampledPhysicalPageIndex = 0xFFFFFFFFu;
     debugInfo.flags = 0u;
+    debugInfo.cachedBasisCorrectionTexels = 0.0f.xx;
+    debugInfo.sampledPageLocalTexel = uint2(0u, 0u);
+    debugInfo.depthDeltaTexels = 0.0f;
+    debugInfo.comparisonClipmapIndex = 0xFFFFFFFFu;
+    debugInfo.comparisonDepthDeltaTexels = 0.0f;
+    debugInfo.comparisonFlags = 0u;
+    debugInfo.comparisonGridOffsetTexels = 0.0f.xx;
     return debugInfo;
 }
 
@@ -263,34 +277,105 @@ float3 CLodVirtualShadowDebugRerenderedThisFrameColor(CLodVirtualShadowDebugInfo
     return float3(0.08f, 0.08f, 0.08f);
 }
 
-float2 CLodVirtualShadowDirectionalNormalOffsetUv(
-    float3 fragPosWorldSpace,
-    float3 normal,
-    float3 lightToFrag,
-    CLodVirtualShadowClipmapInfo clipmapInfo,
-    CLodVirtualShadowCompactShadowCameraInfo lightCamera)
+float3 CLodVirtualShadowDebugCachedBasisColor(
+    CLodVirtualShadowDebugInfo debugInfo)
 {
-    const float3 surfaceNormal = -normalize(normal);
-    const float3 normalizedLightToFrag = normalize(lightToFrag);
-    const float normalDotLight = saturate(dot(surfaceNormal, normalizedLightToFrag));
-    const float angleScale = 1.0f - normalDotLight;
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
 
-    const float normalOffsetWorld = clipmapInfo.texelWorldSize * (15.0f + 0.1f * angleScale);
-    const float3 offsetWorldPosition = fragPosWorldSpace - surfaceNormal * normalOffsetWorld;
+    // Neutral gray is no correction. R/G encode signed X/Y displacement,
+    // while blue exposes the total magnitude. A one-texel displacement reaches
+    // the end of the signed color range.
+    const float2 signedCorrection =
+        clamp(debugInfo.cachedBasisCorrectionTexels, -1.0f.xx, 1.0f.xx);
+    return float3(
+        signedCorrection * 0.5f + 0.5f,
+        saturate(length(debugInfo.cachedBasisCorrectionTexels)));
+}
 
-    const float4 offsetLightSpace = mul(float4(offsetWorldPosition, 1.0f), lightCamera.viewProjection);
-    const float safeOffsetW = max(abs(offsetLightSpace.w), 1.0e-6f);
-    float2 offsetUv = offsetLightSpace.xy / safeOffsetW;
-    offsetUv = offsetUv * 0.5f + 0.5f;
-    offsetUv.y = 1.0f - offsetUv.y;
+float3 CLodVirtualShadowDebugPageLocalTexelColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
 
-    const float4 baseLightSpace = mul(float4(fragPosWorldSpace, 1.0f), lightCamera.viewProjection);
-    const float safeBaseW = max(abs(baseLightSpace.w), 1.0e-6f);
-    float2 baseUv = baseLightSpace.xy / safeBaseW;
-    baseUv = baseUv * 0.5f + 0.5f;
-    baseUv.y = 1.0f - baseUv.y;
+    const float pageSize =
+        max((float)kCLodVirtualShadowPhysicalPageSize, 1.0f);
+    const float2 pageUv =
+        ((float2)debugInfo.sampledPageLocalTexel + 0.5f) / pageSize;
+    const uint2 edgeDistance = min(
+        debugInfo.sampledPageLocalTexel,
+        (kCLodVirtualShadowPhysicalPageSize - 1u) -
+            debugInfo.sampledPageLocalTexel);
+    const float edge = any(edgeDistance < 2u) ? 1.0f : 0.0f;
+    return float3(pageUv, edge);
+}
 
-    return offsetUv - baseUv;
+float3 CLodVirtualShadowDebugDepthMarginColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.sampledClipmapIndex == 0xFFFFFFFFu ||
+        (debugInfo.flags &
+            (kCLodVirtualShadowDebugFlagFiniteDepthLit |
+             kCLodVirtualShadowDebugFlagFiniteDepthShadowed)) == 0u)
+    {
+        return float3(1.0f, 0.0f, 1.0f);
+    }
+
+    const float normalizedMargin =
+        clamp(debugInfo.depthDeltaTexels * 0.25f, -1.0f, 1.0f);
+    const float3 nearSurface = float3(0.85f, 0.85f, 0.85f);
+    return normalizedMargin >= 0.0f
+        ? lerp(nearSurface, float3(1.0f, 0.05f, 0.0f), normalizedMargin)
+        : lerp(nearSurface, float3(0.0f, 0.25f, 1.0f), -normalizedMargin);
+}
+
+float3 CLodVirtualShadowDebugClipComparisonColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    // Yellow means the adjacent coarser level could not provide a finite
+    // comparison sample. Magenta is an actual lit/shadowed disagreement.
+    if ((debugInfo.comparisonFlags & 0x1u) == 0u)
+    {
+        return float3(1.0f, 0.75f, 0.0f);
+    }
+    if ((debugInfo.comparisonFlags & 0x2u) != 0u)
+    {
+        const float severity = saturate(
+            abs(debugInfo.depthDeltaTexels -
+                debugInfo.comparisonDepthDeltaTexels) * 0.25f);
+        return lerp(
+            float3(0.65f, 0.0f, 0.65f),
+            float3(1.0f, 0.0f, 1.0f),
+            severity);
+    }
+    if ((debugInfo.comparisonFlags & 0x4u) != 0u)
+    {
+        return float3(0.05f, 0.8f, 0.15f);
+    }
+    return float3(0.05f, 0.12f, 0.45f);
+}
+
+float3 CLodVirtualShadowDebugClipGridOffsetColor(
+    CLodVirtualShadowDebugInfo debugInfo)
+{
+    if (debugInfo.comparisonClipmapIndex == 0xFFFFFFFFu)
+    {
+        return float3(1.0f, 0.75f, 0.0f);
+    }
+
+    // Signed adjacent-level texel-center displacement expressed in texels of
+    // the sampled (finer) level. This makes the expected half-fine-texel phase
+    // of a boundary-aligned 2x grid immediately visible.
+    const float2 signedOffset =
+        clamp(debugInfo.comparisonGridOffsetTexels, -1.0f.xx, 1.0f.xx);
+    return float3(
+        signedOffset * 0.5f + 0.5f,
+        saturate(length(debugInfo.comparisonGridOffsetTexels)));
 }
 
 float CLodVirtualShadowReceiverPlaneDepthBias(
@@ -326,6 +411,210 @@ void CLodVirtualShadowProjectWorldToUvDepth(
     const float4 samplePosLightView = mul(float4(samplePosWorldSpace, 1.0f), lightCamera.view);
     linearLightDepth = -samplePosLightView.z;
 }
+
+float2 CLodVirtualShadowQuantizedTexelCenterLightBasis(
+    float2 uv,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    CLodVirtualShadowCompactShadowCameraInfo lightCamera)
+{
+    const float resolution =
+        max((float)clipmapInfo.virtualResolution, 1.0f);
+    const float2 centerUv =
+        (floor(uv * resolution) + 0.5f) / resolution;
+    const float2 centerNdc =
+        float2(centerUv.x * 2.0f - 1.0f,
+            1.0f - centerUv.y * 2.0f);
+    const float2 viewPosition = centerNdc /
+        float2(
+            lightCamera.projection[0][0],
+            lightCamera.projection[1][1]);
+    return viewPosition - lightCamera.view[3].xy;
+}
+
+uint2 CLodVirtualShadowCachedPageAtlasPixel(
+    float2 currentUv,
+    uint physicalPageIndex,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    CLodVirtualShadowCompactShadowCameraInfo currentLightCamera,
+    float4 cachedPageViewRow,
+    out float2 basisCorrectionTexels,
+    out uint2 pageLocalTexel)
+{
+    // Page selection is performed in the current toroidal clipmap, but a
+    // persistent page's texels were rasterized in its cached view basis.
+    // Translate the current UV into that cached basis before taking the
+    // page-local texel coordinate. Work in signed virtual texels so an exact
+    // whole-page camera scroll (or a small correction across a page edge)
+    // wraps to the same physical-page texel.
+    const float2 viewTranslationDelta =
+        cachedPageViewRow.xy - currentLightCamera.view[3].xy;
+    const float4 projectedTranslationDelta =
+        mul(float4(viewTranslationDelta, 0.0f, 0.0f),
+            currentLightCamera.projection);
+    const float2 cachedUv = currentUv +
+        float2(
+            projectedTranslationDelta.x * 0.5f,
+            -projectedTranslationDelta.y * 0.5f);
+    basisCorrectionTexels =
+        (cachedUv - currentUv) * (float)clipmapInfo.virtualResolution;
+
+    const int pageSize = (int)kCLodVirtualShadowPhysicalPageSize;
+    const int2 cachedVirtualTexel =
+        (int2)floor(cachedUv * (float)clipmapInfo.virtualResolution);
+    const int2 localTexel =
+        ((cachedVirtualTexel % pageSize) + pageSize) % pageSize;
+    pageLocalTexel = (uint2)localTexel;
+    return CLodVirtualShadowPhysicalAtlasPixel(
+        physicalPageIndex,
+        pageLocalTexel,
+        clipmapInfo);
+}
+
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+bool CLodVirtualShadowIsValidCameraDepth(float depth)
+{
+    return depth > 0.0f &&
+        asuint(depth) != 0x7F7FFFFFu &&
+        asuint(depth) != 0xFFFFFFFFu;
+}
+
+float CLodVirtualShadowAdaptiveReceiverOffset(
+    float2 pixelCoords,
+    float3 receiverWorldSpace,
+    float3 receiverNormal,
+    float3 fragToLight,
+    Camera mainCamera,
+    Texture2D<float> cameraLinearDepth,
+    uint2 screenSize,
+    uint requestedSampleCount,
+    float maxTraceDistanceWorld,
+    float uncertaintyScale,
+    float depthSafetyScale)
+{
+    if (screenSize.x == 0u || screenSize.y == 0u ||
+        pixelCoords.x < 0.0f || pixelCoords.y < 0.0f ||
+        pixelCoords.x >= (float)screenSize.x ||
+        pixelCoords.y >= (float)screenSize.y)
+    {
+        return 0.0f;
+    }
+
+    const float4 receiverView = mul(float4(receiverWorldSpace, 1.0f), mainCamera.view);
+    const float receiverViewDepth = -receiverView.z;
+    if (receiverViewDepth <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    const uint2 receiverPixel = min(uint2(pixelCoords), screenSize - 1u);
+    const float cameraReceiverDepth = cameraLinearDepth.Load(int3(receiverPixel, 0));
+    if (!CLodVirtualShadowIsValidCameraDepth(cameraReceiverDepth))
+    {
+        return 0.0f;
+    }
+
+    // Reject shading layers which are not represented by the primary camera
+    // depth (for example a transparent layer behind the opaque receiver).
+    const float worldUnitsPerPixel =
+        2.0f * receiverViewDepth *
+        abs(mainCamera.projectionInverse[1][1]) /
+        max((float)screenSize.y, 1.0f);
+    const float receiverAgreementTolerance = max(
+        worldUnitsPerPixel * 2.0f,
+        receiverViewDepth * 1.0e-3f);
+    if (abs(cameraReceiverDepth - receiverViewDepth) > receiverAgreementTolerance)
+    {
+        return 0.0f;
+    }
+
+    // The uncertainty comes from the camera-depth representation that produced
+    // this receiver. It must not depend on VSM clip texel size, or changing
+    // clips changes the effective receiver position.
+    const float representationUncertainty = max(
+        worldUnitsPerPixel * max(uncertaintyScale, 0.0f),
+        1.0e-4f);
+    const float receiverDotLight = abs(dot(
+        normalize(receiverNormal),
+        normalize(fragToLight)));
+    const float analyticEscapeDistance =
+        representationUncertainty / max(receiverDotLight, 0.0625f);
+    const float traceLimit = min(
+        max(maxTraceDistanceWorld, 0.0f),
+        clamp(
+            analyticEscapeDistance,
+            representationUncertainty * 1.5f,
+            representationUncertainty * 16.0f));
+    if (traceLimit <= 1.0e-5f)
+    {
+        return 0.0f;
+    }
+
+    const uint receiverTraceSampleCount =
+        clamp(requestedSampleCount, 1u, 32u);
+    const float cameraDepthSafety = max(
+        worldUnitsPerPixel * max(depthSafetyScale, 0.0f),
+        representationUncertainty * 0.2f);
+    float lastValidDistance = 0.0f;
+
+    [loop]
+    for (uint sampleIndex = 0u;
+         sampleIndex < receiverTraceSampleCount;
+         ++sampleIndex)
+    {
+        // Quadratic spacing concentrates samples around the uncertain receiver.
+        const float sampleAlpha =
+            ((float)sampleIndex + 1.0f) /
+            (float)receiverTraceSampleCount;
+        const float sampleDistance =
+            traceLimit * sampleAlpha * sampleAlpha;
+        const float3 sampleWorldSpace =
+            receiverWorldSpace + normalize(fragToLight) * sampleDistance;
+
+        const float4 sampleClip = mul(
+            float4(sampleWorldSpace, 1.0f),
+            mainCamera.viewProjection);
+        if (sampleClip.w <= 1.0e-6f)
+        {
+            break;
+        }
+
+        float2 sampleUv = sampleClip.xy / sampleClip.w;
+        sampleUv = sampleUv * 0.5f + 0.5f;
+        sampleUv.y = 1.0f - sampleUv.y;
+        if (any(sampleUv < 0.0f) || any(sampleUv >= 1.0f))
+        {
+            break;
+        }
+
+        const uint2 samplePixel = min(
+            uint2(sampleUv * float2(screenSize)),
+            screenSize - 1u);
+        const float sceneDepth = cameraLinearDepth.Load(int3(samplePixel, 0));
+        if (!CLodVirtualShadowIsValidCameraDepth(sceneDepth))
+        {
+            break;
+        }
+
+        const float4 sampleView = mul(
+            float4(sampleWorldSpace, 1.0f),
+            mainCamera.view);
+        const float rayViewDepth = -sampleView.z;
+        lastValidDistance = sampleDistance;
+
+        // The light ray is safely outside the receiver when it is in front of
+        // the camera-depth surface by more than the local representation error.
+        if (rayViewDepth + cameraDepthSafety < sceneDepth)
+        {
+            return sampleDistance;
+        }
+    }
+
+    // If the short trace remained on the camera-depth receiver, bridge the
+    // valid portion only. Off-screen and invalid-depth regions retain the small
+    // baseline SMRT near distance.
+    return lastValidDistance;
+}
+#endif
 
 CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProjected(
     float3 samplePosWorldSpace,
@@ -436,9 +725,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
                     kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
         }
-        // Only the cached depth origin is required here.  Projected page
-        // selection already used the current clipmap transform, and X/Y view
-        // translation cannot contribute to view-space Z.
+        // Depth comparison uses the cached Z origin. Cached X/Y is consumed
+        // below when the current virtual coordinate is translated into the
+        // basis in which this persistent physical page was rasterized.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
@@ -448,8 +737,18 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         if (linearLightDepth <= 0.0f)
             continue;
 
-        const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
-        const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+        float2 basisCorrectionTexels;
+        uint2 pageLocalTexel;
+        const uint2 atlasPixel = CLodVirtualShadowCachedPageAtlasPixel(
+            uv.xy,
+            physicalPageIndex,
+            clipmapInfo,
+            lightCamera,
+            cachedPageViewRow,
+            basisCorrectionTexels,
+            pageLocalTexel);
+        debugInfo.cachedBasisCorrectionTexels = basisCorrectionTexels;
+        debugInfo.sampledPageLocalTexel = pageLocalTexel;
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
 
         result.clipmapInfo = clipmapInfo;
@@ -483,6 +782,8 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         result.depthAvailable = 1u;
         result.closestDepth = closestDepth;
         result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        debugInfo.depthDeltaTexels =
+            depthDelta / max(clipmapInfo.texelWorldSize, 1.0e-6f);
         debugInfo.flags |= result.occlusion > 0.01f
             ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
             : kCLodVirtualShadowDebugFlagFiniteDepthLit;
@@ -570,7 +871,6 @@ float calculateDirectionalVSMShadowDetailed(float3 fragPosWorldSpace, float3 fra
 CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
     float3 samplePosWorldSpace,
     float3 normal,
-    float3 lightToFrag,
     uint activeClipmapCount,
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
     StructuredBuffer<CLodVirtualShadowMainCameraInfo> compactMainCameraBuffer,
@@ -578,7 +878,6 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
     StructuredBuffer<float4> directionalPageViewInfo,
     Texture2DArray<uint> pageTable,
     Texture2D<uint> physicalPages,
-    uint applyReceiverBias,
     float2 ditherWorld,
     out CLodVirtualShadowDebugInfo debugInfo)
 {
@@ -618,19 +917,6 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         float3 uv = samplePosLightSpace.xyz / safeW;
         uv.xy = uv.xy * 0.5f + 0.5f;
         uv.y = 1.0f - uv.y;
-
-        if (attempt == 0u && applyReceiverBias != 0u)
-        {
-            const float2 biasedUv = uv.xy + CLodVirtualShadowDirectionalNormalOffsetUv(
-                samplePosWorldSpace,
-                normal,
-                lightToFrag,
-                clipmapInfo,
-                lightCamera);
-            if (biasedUv.x < 0.0f || biasedUv.x > 1.0f || biasedUv.y < 0.0f || biasedUv.y > 1.0f)
-                continue;
-            uv.xy = biasedUv;
-        }
 
         if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f || uv.z < 0.0f || uv.z > 1.0f)
             continue;
@@ -706,9 +992,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
                     kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
         }
-        // Only the cached depth origin is required here.  Projected page
-        // selection already used the current clipmap transform, and X/Y view
-        // translation cannot contribute to view-space Z.
+        // Depth comparison uses the cached Z origin. Cached X/Y is consumed
+        // below when the current virtual coordinate is translated into the
+        // basis in which this persistent physical page was rasterized.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
@@ -718,8 +1004,18 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         if (linearLightDepth <= 0.0f)
             continue;
 
-        const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(uv.xy, clipmapInfo);
-        const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
+        float2 basisCorrectionTexels;
+        uint2 pageLocalTexel;
+        const uint2 atlasPixel = CLodVirtualShadowCachedPageAtlasPixel(
+            uv.xy,
+            physicalPageIndex,
+            clipmapInfo,
+            lightCamera,
+            cachedPageViewRow,
+            basisCorrectionTexels,
+            pageLocalTexel);
+        debugInfo.cachedBasisCorrectionTexels = basisCorrectionTexels;
+        debugInfo.sampledPageLocalTexel = pageLocalTexel;
 
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
         if (storedDepthBits == 0x7F7FFFFFu)
@@ -753,6 +1049,8 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         result.sampledPhysicalPageIndex = physicalPageIndex;
         const float depthDelta = linearLightDepth - closestDepth;
         result.occlusion = smoothstep(0.0f, clipmapInfo.texelWorldSize * 0.5f, depthDelta);
+        debugInfo.depthDeltaTexels =
+            depthDelta / max(clipmapInfo.texelWorldSize, 1.0e-6f);
         debugInfo.flags |= result.occlusion > 0.01f
             ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
             : kCLodVirtualShadowDebugFlagFiniteDepthLit;
@@ -781,7 +1079,6 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     const CLodVirtualShadowLookupResult receiverLookup = CLodVirtualShadowLookupDirectionalOcclusion(
         fragPosWorldSpace,
         normal,
-        lightToFrag,
         activeClipmapCount,
         clipmapInfos,
         compactMainCameraBuffer,
@@ -789,10 +1086,93 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         directionalPageViewInfo,
         pageTable,
         physicalPages,
-        1u,
         float2(0.0f, 0.0f),
         debugInfo);
     const float hardShadow = receiverLookup.occlusion;
+
+    if ((perFrameBuffer.outputType == OUTPUT_VSM_CLIP_COMPARISON ||
+         perFrameBuffer.outputType == OUTPUT_VSM_CLIP_GRID_OFFSET) &&
+        receiverLookup.valid != 0u &&
+        receiverLookup.depthAvailable != 0u &&
+        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu)
+    {
+        const uint comparisonClipmapIndex =
+            debugInfo.sampledClipmapIndex + 1u;
+        debugInfo.comparisonClipmapIndex = comparisonClipmapIndex;
+        if (comparisonClipmapIndex < activeClipmapCount)
+        {
+            const CLodVirtualShadowCompactShadowCameraInfo
+                comparisonLightCamera =
+                    compactShadowCameraBuffer[comparisonClipmapIndex];
+            float2 comparisonUv;
+            float comparisonLinearDepth;
+            CLodVirtualShadowProjectWorldToUvDepth(
+                fragPosWorldSpace,
+                comparisonLightCamera,
+                comparisonUv,
+                comparisonLinearDepth);
+            const uint baseClipmapIndex =
+                debugInfo.sampledClipmapIndex;
+            const CLodVirtualShadowCompactShadowCameraInfo baseLightCamera =
+                compactShadowCameraBuffer[baseClipmapIndex];
+            float2 baseUv;
+            float baseLinearDepth;
+            CLodVirtualShadowProjectWorldToUvDepth(
+                fragPosWorldSpace,
+                baseLightCamera,
+                baseUv,
+                baseLinearDepth);
+            (void)baseLinearDepth;
+            const float2 baseTexelCenterLightBasis =
+                CLodVirtualShadowQuantizedTexelCenterLightBasis(
+                    baseUv,
+                    clipmapInfos[baseClipmapIndex],
+                    baseLightCamera);
+            const float2 comparisonTexelCenterLightBasis =
+                CLodVirtualShadowQuantizedTexelCenterLightBasis(
+                    comparisonUv,
+                    clipmapInfos[comparisonClipmapIndex],
+                    comparisonLightCamera);
+            debugInfo.comparisonGridOffsetTexels =
+                (comparisonTexelCenterLightBasis -
+                    baseTexelCenterLightBasis) /
+                max(
+                    clipmapInfos[baseClipmapIndex].texelWorldSize,
+                    1.0e-6f);
+
+            CLodVirtualShadowDebugInfo comparisonDebugInfo;
+            const CLodVirtualShadowLookupResult comparisonLookup =
+                CLodVirtualShadowLookupDirectionalOcclusionProjected(
+                    fragPosWorldSpace,
+                    normal,
+                    comparisonClipmapIndex,
+                    comparisonUv,
+                    comparisonLinearDepth,
+                    float2(0.0f, 0.0f),
+                    comparisonClipmapIndex + 1u,
+                    clipmapInfos,
+                    compactShadowCameraBuffer,
+                    directionalPageViewInfo,
+                    pageTable,
+                    physicalPages,
+                    comparisonDebugInfo);
+            if (comparisonLookup.valid != 0u &&
+                comparisonLookup.depthAvailable != 0u)
+            {
+                const bool baseShadowed =
+                    receiverLookup.occlusion > 0.01f;
+                const bool comparisonShadowed =
+                    comparisonLookup.occlusion > 0.01f;
+                debugInfo.comparisonFlags =
+                    0x1u |
+                    (baseShadowed != comparisonShadowed ? 0x2u : 0u) |
+                    (baseShadowed ? 0x4u : 0u) |
+                    (comparisonShadowed ? 0x8u : 0u);
+                debugInfo.comparisonDepthDeltaTexels =
+                    comparisonDebugInfo.depthDeltaTexels;
+            }
+        }
+    }
 
     const uint packedCounts = perFrameBuffer.shadowVirtualSmrtDirectionalCountsPacked;
     const uint rayCount = CLodVirtualShadowSmrtRayCountDirectional(packedCounts);
@@ -824,8 +1204,34 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         return hardShadow;
     }
 
-    const float tNear = max(receiverLookup.clipmapInfo.texelWorldSize * 4.0f, 1.0e-4f);
-    const float tFar = maxTraceDistance;
+    float receiverEscapeDistance = 0.0f;
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+    if (perFrameBuffer.shadowVirtualReceiverTraceEnabled != 0u)
+    {
+        Texture2D<float> cameraLinearDepth =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(
+                Builtin::PrimaryCamera::LinearDepthMap)];
+        receiverEscapeDistance = CLodVirtualShadowAdaptiveReceiverOffset(
+            pixelCoords,
+            fragPosWorldSpace,
+            normal,
+            normalize(lightToFrag),
+            cameraBuffer[perFrameBuffer.mainCameraIndex],
+            cameraLinearDepth,
+            uint2(perFrameBuffer.screenResX, perFrameBuffer.screenResY),
+            perFrameBuffer.shadowVirtualReceiverTraceSampleCount,
+            perFrameBuffer.shadowVirtualReceiverTraceMaxDistanceWorld,
+            perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale,
+            perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale);
+    }
+#endif
+    const float tNear = max(
+        receiverLookup.clipmapInfo.texelWorldSize * 0.25f,
+        max(receiverEscapeDistance, 1.0e-4f));
+    // The screen trace bridges the uncertain receiver region; it must not
+    // consume the SMRT search range. Preserve the configured shadow-ray span
+    // after the adaptive start offset.
+    const float tFar = tNear + maxTraceDistance;
     const float logRatio = log(max(tFar / tNear, 1.0f));
 
     const float3 baseFragToLight = normalize(lightToFrag);

@@ -1648,7 +1648,17 @@ std::vector<Cascade> setupDirectionalClipmaps(
 
         const float lightDistance = std::max(clipHeightOffsetScale * clipScale, farDistance * 0.5f);
         const XMVECTOR lightPos = alignedTargetWorld - normalizedLightDir * lightDistance;
-        const XMMATRIX lightView = XMMatrixLookToRH(lightPos, normalizedLightDir, lightUp);
+        // Build every clip directly in the same light-space basis. Rebuilding
+        // the view from a clip-specific world-space eye performs an
+        // inverse-transform/LookTo round trip whose float cancellation leaves
+        // slightly different X/Y translations at each level. Those residuals
+        // move a projected point relative to the nested texel grids.
+        XMMATRIX lightView = defaultLightView;
+        lightView.r[3] = XMVectorSet(
+            -XMVectorGetX(alignedTargetLightView),
+            -XMVectorGetY(alignedTargetLightView),
+            -XMVectorGetZ(alignedTargetLightView) - lightDistance,
+            1.0f);
         Cascade clipmap;
         clipmap.size = clipScale * 2.0f;
         XMStoreFloat4(&clipmap.worldCenter, lightPos);

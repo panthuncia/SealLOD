@@ -1246,10 +1246,8 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
                         CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_VIEW_INFO_DESCRIPTOR_INDEX];
                 pageViewInfo[physicalPageIndex] =
                     float4(
-                        0.0f,
-                        0.0f,
                         shadowCameras[
-                            clipmapInfo.shadowCameraBufferIndex].view[3].z,
+                            clipmapInfo.shadowCameraBufferIndex].view[3].xyz,
                         asfloat(pageTag));
                 uint ignoredAnd = 0u;
                 InterlockedAnd(
@@ -1926,7 +1924,7 @@ void CLodVirtualShadowStampRenderedPageGenerationsCSMain(uint3 dispatchThreadId 
     const Camera shadowCamera =
         shadowCameras[clipmapInfo.shadowCameraBufferIndex];
     pageViewInfo[physicalPageIndex] =
-        float4(0.0f, 0.0f, shadowCamera.view[3].z, asfloat(pageTag));
+        float4(shadowCamera.view[3].xyz, asfloat(pageTag));
 }
 
 groupshared CLodVirtualShadowPredictiveInvalidationCandidate

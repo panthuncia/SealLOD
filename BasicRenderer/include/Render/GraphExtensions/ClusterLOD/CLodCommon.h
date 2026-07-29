@@ -136,6 +136,11 @@ inline constexpr const char* CLodDirectionalVirtualShadowSmrtSamplesPerRayDirect
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName = "clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName = "clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName = "clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName = "clodDirectionalVirtualShadowReceiverTraceEnabled";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName = "clodDirectionalVirtualShadowReceiverTraceSampleCount";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName = "clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName = "clodDirectionalVirtualShadowReceiverTraceUncertaintyScale";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName = "clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale";
 inline constexpr const char* CLodTransparencyModeSettingName = "clodTransparencyMode";
 enum class CLodPriorityMode : uint8_t {
     Max, // Duplicate group requests keep the maximum reported priority
@@ -495,6 +500,11 @@ inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional =
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees = 5.0f;
 inline constexpr float CLodVirtualShadowDefaultSmrtRayLengthScaleDirectional = 0.02f;
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxTraceDistanceWorld = 150.0f;
+inline constexpr bool CLodVirtualShadowDefaultReceiverTraceEnabled = true;
+inline constexpr uint32_t CLodVirtualShadowDefaultReceiverTraceSampleCount = 8u;
+inline constexpr float CLodVirtualShadowDefaultReceiverTraceMaxDistanceWorld = 256.0f;
+inline constexpr float CLodVirtualShadowDefaultReceiverTraceUncertaintyScale = 1.5f;
+inline constexpr float CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale = 0.5f;
 inline constexpr uint32_t CLodVirtualShadowMarkTileSize = 16u;
 inline constexpr uint32_t CLodVirtualShadowBlockPagesPerAxis = 4u;
 inline constexpr uint32_t CLodVirtualShadowBlockPackedPhysicalPageIndexCount =

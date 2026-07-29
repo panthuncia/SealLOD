@@ -650,6 +650,21 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                                 case OUTPUT_VSM_RERENDERED_THIS_FRAME:
                                     output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugRerenderedThisFrameColor(shadowDebugInfo));
                                     break;
+                                case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugCachedBasisColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugPageLocalTexelColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_DEPTH_MARGIN:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugDepthMarginColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_CLIP_COMPARISON:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipComparisonColor(shadowDebugInfo));
+                                    break;
+                                case OUTPUT_VSM_CLIP_GRID_OFFSET:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipGridOffsetColor(shadowDebugInfo));
+                                    break;
                                 }
                             }
                             break;

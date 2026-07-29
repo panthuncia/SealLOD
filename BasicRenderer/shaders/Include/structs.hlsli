@@ -244,6 +244,13 @@ struct PerFrameBuffer {
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees;
     float shadowVirtualSmrtRayLengthScaleDirectional;
     float shadowVirtualSmrtMaxTraceDistanceWorld;
+    uint shadowVirtualReceiverTraceEnabled;
+    uint shadowVirtualReceiverTraceSampleCount;
+    float shadowVirtualReceiverTraceMaxDistanceWorld;
+    float shadowVirtualReceiverTraceUncertaintyScale;
+    float shadowVirtualReceiverTraceDepthSafetyScale;
+    uint shadowVirtualReceiverTracePad0;
+    uint shadowVirtualReceiverTracePad1;
     uint terrainStochasticSamplingEnabled;
     uint terrainStochasticDiffuseEnabled;
     uint terrainStochasticNormalEnabled;

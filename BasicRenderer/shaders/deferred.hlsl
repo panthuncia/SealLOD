@@ -131,6 +131,11 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             case OUTPUT_VSM_PAGE_STATE:
             case OUTPUT_VSM_PHYSICAL_PAGE:
             case OUTPUT_VSM_RERENDERED_THIS_FRAME:
+            case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+            case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+            case OUTPUT_VSM_DEPTH_MARGIN:
+            case OUTPUT_VSM_CLIP_COMPARISON:
+            case OUTPUT_VSM_CLIP_GRID_OFFSET:
                 payload = lightingOutput.shadowDebugPayload;
                 break;
 #endif

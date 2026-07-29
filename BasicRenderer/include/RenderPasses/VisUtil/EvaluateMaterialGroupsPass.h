@@ -92,6 +92,7 @@ public:
 
         b->WithShaderResource("Builtin::VisUtil::PixelListBuffer",
             Builtin::PrimaryCamera::VisibilityTexture,
+            Builtin::PrimaryCamera::LinearDepthMap,
             //Builtin::PrimaryCamera::VisibleClusterTable,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
