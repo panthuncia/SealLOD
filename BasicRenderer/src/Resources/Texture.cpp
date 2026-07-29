@@ -3065,8 +3065,15 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			const TextureProcessingJobState state = m_processingHandle->state.load(std::memory_order_acquire);
 			if (state == TextureProcessingJobState::GpuReadyToSubmit) {
 				ZoneScopedN("TextureAsset::EnsureUploaded::PollProcessingHandle::SubmitBC7CompressionJob");
-				if (factory.SubmitBC7CompressionJob(m_processingHandle, m_name)) {
-					TextureProcessingManager::GetInstance().MarkGpuJobSubmitted(m_processingHandle);
+				try {
+					if (factory.SubmitBC7CompressionJob(m_processingHandle, m_name)) {
+						TextureProcessingManager::GetInstance().MarkGpuJobSubmitted(m_processingHandle);
+					}
+				}
+				catch (const std::exception& ex) {
+					TextureProcessingManager::GetInstance().FailProcessing(
+						m_processingHandle,
+						std::string("TextureFactory: failed to submit BC7 compression job: ") + ex.what());
 				}
 			}
 

@@ -66,12 +66,20 @@ private:
     };
 
     struct BC7CompressionJob {
+        ~BC7CompressionJob()
+        {
+            if (inFlightCounter) {
+                inFlightCounter->fetch_sub(1u, std::memory_order_acq_rel);
+            }
+        }
+
         std::string debugName;
         std::shared_ptr<TextureProcessingJobHandle> handle;
         std::shared_ptr<PixelBuffer> workingTexture;
         std::shared_ptr<PixelBuffer> compressedTexture;
         std::shared_ptr<Buffer> blockBuffer;
         std::vector<BC7CompressionSubresource> subresources;
+        std::shared_ptr<std::atomic_uint32_t> inFlightCounter;
         uint64_t outputByteSize = 0;
         bool outputHasFullMipChain = true;
     };
@@ -274,4 +282,5 @@ private:
 	std::shared_ptr<ComputePass> m_bc7CompressionPass;
 	std::shared_ptr<RenderPass> m_bc7CompressionCopyPass;
 	std::shared_ptr<CopyPass> m_bc7CompressionReadbackPass;
+    std::shared_ptr<std::atomic_uint32_t> m_bc7InFlightJobs = std::make_shared<std::atomic_uint32_t>(0u);
 };

@@ -1741,9 +1741,8 @@ void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTra
 	std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry> activeEntries;
 	activeEntries.reserve(transaction.skinnedAssemblyPlacements.size());
 	for (auto& pending : transaction.skinnedAssemblyPlacements) {
-		pending.placement.generation = 1u;
-		const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
-		m_skinnedAssemblyPlacementCPU.push_back(pending.placement);
+		const auto placementIndex = AllocateSkinnedAssemblyPlacement(pending.placement);
+		pending.placement = m_skinnedAssemblyPlacementCPU[placementIndex];
 		for (const auto rowIndex : pending.drawRecordRowIndices) {
 			if (rowIndex < transaction.drawRecordRows.size()) {
 				transaction.drawRecordRows[rowIndex].skinnedAssemblyPlacementIndex = placementIndex;
@@ -1762,6 +1761,52 @@ void ObjectManager::PublishSkinnedAssemblyPlacements(MaterializedStaticImportTra
 	m_activeSkinnedAssemblyPlacements->SetLiveSize(m_activeSkinnedAssemblyPlacements->LiveSize() + activeEntries.size());
 	spdlog::info("Skinned assembly placements: published={} total={} activeEntries={}.",
 		activeEntries.size(), m_skinnedAssemblyPlacementCPU.size(), m_activeSkinnedAssemblyPlacements->Size());
+}
+
+std::uint32_t ObjectManager::AllocateSkinnedAssemblyPlacement(SkinnedAssemblyPlacementGPU placement) {
+	while (!m_freeSkinnedAssemblyPlacementIndices.empty()) {
+		const auto placementIndex = m_freeSkinnedAssemblyPlacementIndices.back();
+		m_freeSkinnedAssemblyPlacementIndices.pop_back();
+		if (placementIndex >= m_skinnedAssemblyPlacementCPU.size() ||
+			placementIndex >= m_skinnedAssemblyPlacementFree.size() ||
+			m_skinnedAssemblyPlacementFree[placementIndex] == 0u) {
+			continue;
+		}
+
+		placement.generation = m_skinnedAssemblyPlacementCPU[placementIndex].generation;
+		if (placement.generation == 0u) {
+			placement.generation = 1u;
+		}
+		m_skinnedAssemblyPlacementCPU[placementIndex] = placement;
+		m_skinnedAssemblyPlacementFree[placementIndex] = 0u;
+		return placementIndex;
+	}
+
+	placement.generation = 1u;
+	const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
+	m_skinnedAssemblyPlacementCPU.push_back(placement);
+	m_skinnedAssemblyPlacementFree.push_back(0u);
+	return placementIndex;
+}
+
+void ObjectManager::FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex) {
+	if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) {
+		return;
+	}
+	if (m_skinnedAssemblyPlacementFree.size() < m_skinnedAssemblyPlacementCPU.size()) {
+		m_skinnedAssemblyPlacementFree.resize(m_skinnedAssemblyPlacementCPU.size(), 0u);
+	}
+	if (m_skinnedAssemblyPlacementFree[placementIndex] != 0u) {
+		return;
+	}
+
+	auto& placement = m_skinnedAssemblyPlacementCPU[placementIndex];
+	++placement.generation;
+	if (placement.generation == 0u) {
+		++placement.generation;
+	}
+	m_skinnedAssemblyPlacementFree[placementIndex] = 1u;
+	m_freeSkinnedAssemblyPlacementIndices.push_back(placementIndex);
 }
 
 ObjectManager::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(MaterializedStaticImportTransaction transaction) {
@@ -2429,8 +2474,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					placement.generation = 1u;
 					placement.localBoundingSphere = type.bounds.sphere;
 					placement.boundsScale = type.scale;
-					const auto placementIndex = static_cast<std::uint32_t>(m_skinnedAssemblyPlacementCPU.size());
-					m_skinnedAssemblyPlacementCPU.push_back(placement);
+					const auto placementIndex = AllocateSkinnedAssemblyPlacement(placement);
+					placement = m_skinnedAssemblyPlacementCPU[placementIndex];
 					drawInfos[groupIndex].skinnedAssemblyPlacementIndices.push_back(placementIndex);
 					activePlacements.push_back({ placementIndex, placement.generation });
 				}
@@ -2965,12 +3010,10 @@ void ObjectManager::RemoveStaticObjectsBulk(
 
 	if (totalSkinnedAssemblyPlacements != 0u) {
 		std::size_t invalidated = 0u;
-		for (const auto& payload : payloads) {
+			for (const auto& payload : payloads) {
 			for (const auto placementIndex : payload.skinnedAssemblyPlacementIndices) {
 				if (placementIndex >= m_skinnedAssemblyPlacementCPU.size()) continue;
-				auto& placement = m_skinnedAssemblyPlacementCPU[placementIndex];
-				++placement.generation;
-				if (placement.generation == 0u) ++placement.generation;
+				FreeSkinnedAssemblyPlacement(placementIndex);
 				++invalidated;
 			}
 		}

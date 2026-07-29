@@ -776,6 +776,8 @@ bool TextureFactory::SubmitBC7CompressionJob(
     const std::shared_ptr<TextureProcessingJobHandle>& handle,
     std::string_view debugName) const
 {
+    constexpr uint32_t MaxBC7CompressionJobsInFlight = 4u;
+
     if (!handle) {
         return false;
     }
@@ -807,6 +809,21 @@ bool TextureFactory::SubmitBC7CompressionJob(
             jobName);
         return false;
     }
+
+    uint32_t inFlightJobs = m_bc7InFlightJobs->load(std::memory_order_acquire);
+    while (inFlightJobs < MaxBC7CompressionJobsInFlight &&
+        !m_bc7InFlightJobs->compare_exchange_weak(
+            inFlightJobs,
+            inFlightJobs + 1u,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+    }
+    if (inFlightJobs >= MaxBC7CompressionJobsInFlight) {
+        return false;
+    }
+
+    auto job = std::make_shared<BC7CompressionJob>();
+    job->inFlightCounter = m_bc7InFlightJobs;
 
     const bool preserveAlphaCoverage = ShouldPreserveAlphaCoverage(requestMeta, preparedSourceData->desc);
     const uint32_t preparedMipLevels = GetTextureMipLevelCount(preparedSourceData->desc);
@@ -887,7 +904,6 @@ bool TextureFactory::SubmitBC7CompressionJob(
         true,
         jobName.empty() ? std::string_view("Texture[BC7Blocks]") : std::string_view(jobName + "[BC7Blocks]"));
 
-    auto job = std::make_shared<BC7CompressionJob>();
     job->debugName = jobName;
     job->handle = handle;
     job->workingTexture = std::move(workingTexture);

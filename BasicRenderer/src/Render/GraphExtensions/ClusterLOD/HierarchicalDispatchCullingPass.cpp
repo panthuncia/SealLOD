@@ -381,21 +381,24 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         "CLod.PureCompute.DenseClusterCull");
 
     const ResourceIdentifier voxelDescriptorId{ m_voxelRasterQueueDescriptorResourceId };
-    auto validateVoxelVariant = [&](const PipelineState& pipeline, bool expectsVoxelDescriptor) {
+    auto validateVoxelVariant = [&](const char* pipelineName, const PipelineState& pipeline, bool expectsVoxelDescriptor) {
         const auto& resources = pipeline.GetResourceDescriptorSlots();
         const bool requestsVoxelDescriptor = std::ranges::find(
             resources.mandatoryResourceDescriptorSlots,
             voxelDescriptorId) != resources.mandatoryResourceDescriptorSlots.end();
         if (requestsVoxelDescriptor != expectsVoxelDescriptor) {
             throw std::runtime_error(
-                "CLod pure-compute shader voxel-output variant has an inconsistent resource interface");
+                std::string("CLod pure-compute shader voxel-output variant '") + pipelineName +
+                "' has an inconsistent resource interface (expected=" +
+                (expectsVoxelDescriptor ? "true" : "false") + ", reflected=" +
+                (requestsVoxelDescriptor ? "true" : "false") + ")");
         }
     };
-    validateVoxelVariant(m_pureComputeObjectCullPipelineState, false);
-    validateVoxelVariant(m_pureComputeTraversePipelineState, false);
-    validateVoxelVariant(m_pureComputeLeafPipelineState, false);
-    validateVoxelVariant(m_pureComputeClusterPipelineState, m_voxelRasterWorkCapacity != 0u);
-    validateVoxelVariant(m_pureComputeDenseClusterPipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant("object-cull", m_pureComputeObjectCullPipelineState, false);
+    validateVoxelVariant("traverse", m_pureComputeTraversePipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant("leaf", m_pureComputeLeafPipelineState, m_voxelRasterWorkCapacity != 0u);
+    validateVoxelVariant("cluster", m_pureComputeClusterPipelineState, false);
+    validateVoxelVariant("dense-cluster", m_pureComputeDenseClusterPipelineState, false);
 
     rhi::IndirectArg dispatchArg[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }

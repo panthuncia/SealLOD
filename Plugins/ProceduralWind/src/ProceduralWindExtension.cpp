@@ -13,6 +13,7 @@
 #include "Render/RenderContext.h"
 #include "Render/OutputTypes.h"
 #include "Render/RendererSettings.h"
+#include "Render/MemoryIntrospectionAPI.h"
 #include "RenderPasses/Base/RenderPass.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/PixelBuffer.h"
@@ -30,6 +31,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -40,10 +42,18 @@ namespace {
 
 constexpr std::uint32_t kThreadsPerGroup = 64u;
 constexpr std::uint32_t kMaximumWindLodVariants = 16u;
-constexpr std::uint32_t kTransientBoneCapacity = 1048576;
 constexpr std::uint32_t kLatePhaseBit = 0x80000000u;
 constexpr std::uint32_t kDepthDescriptorMask = 0x7fffffffu;
 constexpr std::uint32_t kWindBoneFlagTrunk = 1u << 0u;
+
+std::uint32_t TransientBoneCapacity()
+{
+	return std::clamp(
+		SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(
+			ProceduralWindTransientBoneCapacitySettingName)(),
+		1024u,
+		1048576u);
+}
 
 std::filesystem::path WindTelemetryPath()
 {
@@ -205,6 +215,23 @@ struct WindSharedResources {
 		, indirectCommands(DynamicStructuredBuffer<WindIndirectCommand>::CreateShared(1u, "ProceduralWind.IndirectCommands", true))
 		, allocationRecords(DynamicStructuredBuffer<WindAllocationRecordGPU>::CreateShared(1u, "ProceduralWind.AllocationRecords", true))
     {
+		const auto tagResource = [](const auto& resource) {
+			rg::memory::SetResourceUsageHint(*resource, "Procedural wind");
+		};
+		tagResource(fieldSlices[0]);
+		tagResource(fieldSlices[1]);
+		tagResource(boneEntries);
+		tagResource(boneRemaps);
+		tagResource(baseTypeLookup);
+		tagResource(windTypes);
+		tagResource(activeInstances);
+		tagResource(typeCounters);
+		tagResource(processedTypeCounts);
+		tagResource(deferredEntries);
+		tagResource(allocationCounters);
+		tagResource(diagnostics);
+		tagResource(indirectCommands);
+		tagResource(allocationRecords);
 		static std::once_flag resetTelemetry;
 		std::call_once(resetTelemetry, [] {
 			const auto path = WindTelemetryPath();
@@ -315,7 +342,7 @@ struct WindSharedResources {
 			// BeginFrame. Keep this value copy current even when the expensive type
 			// layout is unchanged, or compact LODs address the wrong half every other
 			// frame and visibly alternate between current and stale animation poses.
-			transientRegion = update->skeletonManager->ReserveTransientWindRegion(kTransientBoneCapacity);
+			transientRegion = update->skeletonManager->ReserveTransientWindRegion(TransientBoneCapacity());
 			update->skeletonManager->EnsureTransientWindInstanceSlots(transformCount);
 		}
 		if (!structureChanged) {
@@ -519,6 +546,39 @@ struct WindSharedResources {
 			}
 			layoutSummary << ']';
         }
+		std::vector<std::uint32_t> placementCountByFirstVariant(types.size(), 0u);
+		if (update->objectManager && activeSkinnedPlacements) {
+			const auto placementRecords = update->objectManager->GetSkinnedAssemblyPlacementCPU();
+			for (const auto& activeEntry : activeSkinnedPlacements->SnapshotActiveEntries()) {
+				if (activeEntry.drawRecordIndex >= placementRecords.size()) {
+					continue;
+				}
+				const auto& placement = placementRecords[activeEntry.drawRecordIndex];
+				if (placement.generation != activeEntry.generation ||
+					placement.skinningTypeSlot >= sourceSlotToBaseType.size()) {
+					continue;
+				}
+				const auto firstVariant = sourceSlotToBaseType[placement.skinningTypeSlot];
+				if (firstVariant < placementCountByFirstVariant.size()) {
+					++placementCountByFirstVariant[firstVariant];
+				}
+			}
+		}
+		std::uint64_t totalBucketCapacity = 0u;
+		for (auto& type : types) {
+			const auto firstVariant = type.sourceSkinningSlot < sourceSlotToBaseType.size()
+				? sourceSlotToBaseType[type.sourceSkinningSlot]
+				: 0xFFFFFFFFu;
+			const auto bucketCapacity = firstVariant < placementCountByFirstVariant.size()
+				? (std::max)(1u, placementCountByFirstVariant[firstVariant])
+				: 1u;
+			type.bucketBase = static_cast<std::uint32_t>(totalBucketCapacity);
+			type.bucketCapacity = bucketCapacity;
+			totalBucketCapacity += bucketCapacity;
+		}
+		const auto boundedBucketCapacity = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
+			totalBucketCapacity,
+			std::numeric_limits<std::uint32_t>::max()));
         if (!types.empty()) {
             // Shaders use slot zero as shared control metadata even when the first
             // registered wind skeleton occupies a later persistent instance slot.
@@ -544,7 +604,7 @@ struct WindSharedResources {
         typeCount = windTypes->Size();
 		registeredTypeCount = registeredTypes;
         if (registeredTypes != 0u) {
-            transientRegion = update->skeletonManager->ReserveTransientWindRegion(kTransientBoneCapacity);
+            transientRegion = update->skeletonManager->ReserveTransientWindRegion(TransientBoneCapacity());
             update->skeletonManager->EnsureTransientWindInstanceSlots(transformCount);
             residentPlacementCount = activeSkinnedPlacements
                 ? static_cast<std::uint32_t>(activeSkinnedPlacements->ResidentSize())
@@ -558,15 +618,16 @@ struct WindSharedResources {
         deferredEntries->EnsureSize(std::max(1u, residentPlacementCount));
         indirectCommands->EnsureSize(std::max(1u, typeCount));
 		allocationRecords->EnsureSize(std::max(1u, typeCount));
-		activeInstances->EnsureSize((std::max)(1u, typeCount * placementCapacity));
+		activeInstances->EnsureSize((std::max)(1u, boundedBucketCapacity));
         activeBoneCount = std::min(requestedBoneCount, boneEntries->ResidentCapacity());
         TracyPlot("ProceduralWind.CandidatePlacements", static_cast<std::int64_t>(residentPlacementCount));
         TracyPlot("ProceduralWind.RegisteredTypes", static_cast<std::int64_t>(registeredTypes));
         if (registeredTypes != lastLoggedRegisteredTypes || residentPlacementCount != lastLoggedPlacementCount) {
 			EmitWindTelemetry(fmt::format(
-				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketCapacityPerVariant={} distance=unbounded",
+				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketEntries={} legacyBucketEntries={} distance=unbounded",
                 registeredTypes, typeCount, activeBoneCount, residentPlacementCount,
-				transientRegion.capacityMatrices, placementCapacity));
+				transientRegion.capacityMatrices, boundedBucketCapacity,
+				static_cast<std::uint64_t>(typeCount) * placementCapacity));
             lastLoggedRegisteredTypes = registeredTypes;
             lastLoggedPlacementCount = residentPlacementCount;
         }

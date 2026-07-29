@@ -5,8 +5,10 @@
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Managers/Singletons/DescriptorHeapManager.h"
 #include "Managers/Singletons/DeviceManager.h"
+#include "Managers/Singletons/SettingsManager.h"
 #include "Materials/MaterialTextureStreaming.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/RendererSettings.h"
 #include "Render/Runtime/IReadbackService.h"
 #include "RenderPasses/Base/CopyPass.h"
 #include "Resources/Buffers/Buffer.h"
@@ -22,10 +24,12 @@ namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
-	// Retain an unseen texture long enough to survive a normal camera sweep.  The
-	// previous three-second-ish window made a 20-second flight path evict and fully
-	// rebuild the same shared landscape textures on every orbit.
-	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 1800u;
+	uint64_t TextureStreamingIdleFramesBeforeCoarsen() {
+		return (std::max<uint64_t>)(
+			1u,
+			SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+				MaterialTextureStreamingIdleFramesSettingName)());
+	}
 
 	bool MaterialTextureStreamingTransitionLoggingEnabled() {
 		static const bool enabled = [] {
@@ -646,6 +650,7 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		m_streamingTexturesByID.erase(streamingTextureID);
 	}
 
+	const uint64_t idleFramesBeforeCoarsen = TextureStreamingIdleFramesBeforeCoarsen();
 	for (auto it = m_streamingTexturesByID.begin(); it != m_streamingTexturesByID.end();) {
 		auto texture = it->second.lock();
 		if (!texture) {
@@ -659,7 +664,8 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		}
 
 		const TextureStreamingState& state = texture->GetStreamingState();
-		if (state.lastSeenFrame == 0u || frameIndex <= state.lastSeenFrame + kTextureStreamingIdleFramesBeforeCoarsen) {
+		if (state.lastSeenFrame == 0u ||
+			frameIndex <= state.lastSeenFrame + idleFramesBeforeCoarsen) {
 			++it;
 			continue;
 		}

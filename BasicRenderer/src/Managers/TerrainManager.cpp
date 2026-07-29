@@ -126,9 +126,9 @@ namespace {
         return TerrainLayerRefGPU{};
     }
 
-    float MakeFallbackWeightBlock()
+    std::uint32_t MakeFallbackWeightBlock()
     {
-        return 0.0f;
+        return 0u;
     }
 
     TerrainLayerGPU MakeFallbackLayer()
@@ -242,16 +242,16 @@ namespace {
         return (packed >> ((sampleIndex & 3u) * 8u)) & 0xFFu;
     }
 
-    std::vector<float> ExpandTerrainWeightBlocks(
+    std::vector<std::uint32_t> PackTerrainWeightBlocks(
         const std::vector<std::uint32_t>& packedBlocks,
         std::vector<TerrainRegionGPU>& regions)
     {
         if (packedBlocks.empty()) {
-            return std::vector<float>{ MakeFallbackWeightBlock() };
+            return std::vector<std::uint32_t>{ MakeFallbackWeightBlock() };
         }
 
-        std::vector<float> expanded;
-        expanded.reserve(packedBlocks.size() * 4u);
+        std::vector<std::uint32_t> result;
+        result.reserve(packedBlocks.size());
 
         for (auto& region : regions) {
             const std::uint32_t sampleSide = region.weightSampleSide;
@@ -264,23 +264,29 @@ namespace {
 
             const std::size_t packedWordsPerLayer = (static_cast<std::size_t>(samplesPerLayer) + 3u) / 4u;
             const std::size_t packedRegionBase = region.weightBlockStart;
-            region.weightBlockStart = static_cast<std::uint32_t>(expanded.size());
-            expanded.resize(expanded.size() + static_cast<std::size_t>(region.layerRefCount) * samplesPerLayer, 0u);
+            region.weightBlockStart = static_cast<std::uint32_t>(result.size() * 4u);
+            const std::size_t regionSampleCount =
+                static_cast<std::size_t>(region.layerRefCount) * samplesPerLayer;
+            result.resize(result.size() + (regionSampleCount + 3u) / 4u, 0u);
 
             for (std::uint32_t localLayer = 0; localLayer < region.layerRefCount; ++localLayer) {
                 const std::size_t srcLayerBase = packedRegionBase + static_cast<std::size_t>(localLayer) * packedWordsPerLayer;
-                const std::size_t dstLayerBase = static_cast<std::size_t>(region.weightBlockStart) + static_cast<std::size_t>(localLayer) * samplesPerLayer;
+                const std::size_t dstLayerBase =
+                    static_cast<std::size_t>(region.weightBlockStart) +
+                    static_cast<std::size_t>(localLayer) * samplesPerLayer;
                 for (std::uint32_t sampleIndex = 0; sampleIndex < samplesPerLayer; ++sampleIndex) {
-                    expanded[dstLayerBase + sampleIndex] =
-                        static_cast<float>(UnpackTerrainWeightByte(packedBlocks, srcLayerBase, sampleIndex)) * (1.0f / 255.0f);
+                    const std::size_t dstSample = dstLayerBase + sampleIndex;
+                    result[dstSample / 4u] |=
+                        UnpackTerrainWeightByte(packedBlocks, srcLayerBase, sampleIndex)
+                        << ((dstSample & 3u) * 8u);
                 }
             }
         }
 
-        if (expanded.empty()) {
-            expanded.push_back(MakeFallbackWeightBlock());
+        if (result.empty()) {
+            result.push_back(MakeFallbackWeightBlock());
         }
-        return expanded;
+        return result;
     }
 
     DirectX::XMUINT3 NormalChannelsForTexture(const std::shared_ptr<TextureAsset>& texture)
@@ -421,7 +427,7 @@ TerrainManager::TerrainManager()
     m_stochasticLayers = DynamicStructuredBuffer<TerrainStochasticLayerGPU>::CreateShared(1, "Builtin::Terrain::StochasticLayers", true);
     m_layerRefs = DynamicStructuredBuffer<TerrainLayerRefGPU>::CreateShared(1, "Builtin::Terrain::LayerRefs", true);
     m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
-    m_weightBlocks = DynamicStructuredBuffer<float>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
+    m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
     m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
     rg::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
     rg::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
@@ -803,16 +809,16 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
     m_layerRefs->ReplaceData(std::move(layerRefs));
     const auto layerRefsEnd = std::chrono::steady_clock::now();
 
-    std::vector<float> expandedWeightBlocks = ExpandTerrainWeightBlocks(desc.weightBlocks, denseRegions);
-    constexpr std::size_t kMaxTerrainWeightBlockFloats = 256ull * 1024ull * 1024ull;
-    if (expandedWeightBlocks.size() > kMaxTerrainWeightBlockFloats) {
+    std::vector<std::uint32_t> packedWeightBlocks = PackTerrainWeightBlocks(desc.weightBlocks, denseRegions);
+    constexpr std::size_t kMaxTerrainWeightBlockWords = 64ull * 1024ull * 1024ull;
+    if (packedWeightBlocks.size() > kMaxTerrainWeightBlockWords) {
         spdlog::error(
-            "Terrain close-landscape material weight buffer too large: expandedFloats={} packedWords={} regions={} layerRefs={}; using fallback weights",
-            expandedWeightBlocks.size(),
+            "Terrain close-landscape material weight buffer too large: repackedWords={} sourceWords={} regions={} layerRefs={}; using fallback weights",
+            packedWeightBlocks.size(),
             desc.weightBlocks.size(),
             denseRegions.size(),
             desc.layerRefs.size());
-        expandedWeightBlocks = std::vector<float>{ MakeFallbackWeightBlock() };
+        packedWeightBlocks = std::vector<std::uint32_t>{ MakeFallbackWeightBlock() };
         for (auto& region : denseRegions) {
             region.layerRefCount = 0u;
             region.weightBlockStart = 0u;
@@ -820,8 +826,10 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
             region.weightSamplesPerLayer = 1u;
         }
     }
-    const auto weightBlockCount = (std::max)(1u, static_cast<std::uint32_t>(expandedWeightBlocks.size()));
-    m_weightBlocks->ReplaceData(std::move(expandedWeightBlocks));
+    const auto weightBlockCount = (std::max)(
+        1u,
+        static_cast<std::uint32_t>(packedWeightBlocks.size() * 4u));
+    m_weightBlocks->ReplaceData(std::move(packedWeightBlocks));
     const auto weightBlocksEnd = std::chrono::steady_clock::now();
 
     const auto regionCount = static_cast<std::uint32_t>(denseRegions.size());

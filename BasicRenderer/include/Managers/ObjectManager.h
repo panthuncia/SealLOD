@@ -427,6 +427,7 @@ public:
 	}
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>>& GetSkinnedAssemblyPlacements() { return m_skinnedAssemblyPlacements; }
 	std::shared_ptr<SortedUnsignedIntBuffer>& GetActiveSkinnedAssemblyPlacements() { return m_activeSkinnedAssemblyPlacements; }
+	std::span<const SkinnedAssemblyPlacementGPU> GetSkinnedAssemblyPlacementCPU() const { return m_skinnedAssemblyPlacementCPU; }
 
 	std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override;
 	std::vector<ResourceIdentifier> GetSupportedKeys() override;
@@ -449,6 +450,8 @@ public:
 
 private:
 	void PublishSkinnedAssemblyPlacements(MaterializedStaticImportTransaction& transaction);
+	std::uint32_t AllocateSkinnedAssemblyPlacement(SkinnedAssemblyPlacementGPU placement);
+	void FreeSkinnedAssemblyPlacement(std::uint32_t placementIndex);
 	ObjectManager();
 
 	struct DeferredBufferRangeRetire {
@@ -513,6 +516,8 @@ private:
 	std::shared_ptr<DynamicStructuredBuffer<SkinnedAssemblyPlacementGPU>> m_skinnedAssemblyPlacements;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeSkinnedAssemblyPlacements;
 	std::vector<SkinnedAssemblyPlacementGPU> m_skinnedAssemblyPlacementCPU;
+	std::vector<std::uint32_t> m_freeSkinnedAssemblyPlacementIndices;
+	std::vector<std::uint8_t> m_skinnedAssemblyPlacementFree;
 	std::uint64_t m_drawRecordVisibilityRevision = 1;
 	std::uint64_t m_nextStaticImportTransactionID = 1;
 	std::shared_ptr<LazyDynamicStructuredBuffer<PerMeshInstanceCB>> m_perMeshInstanceBuffers; // Indices into m_perObjectBuffers for each mesh instance in each object

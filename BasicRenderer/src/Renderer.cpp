@@ -1805,6 +1805,12 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodCapacityTargetSettingName, 0.95f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
+	settingsManager.registerSetting<uint32_t>(
+		ProceduralWindTransientBoneCapacitySettingName,
+		ReadUintEnvironmentValue("SARP_PROCEDURAL_WIND_TRANSIENT_BONE_CAPACITY", 262144u));
+	settingsManager.registerSetting<uint32_t>(
+		MaterialTextureStreamingIdleFramesSettingName,
+		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_IDLE_FRAMES", 1800u));
 	int32_t forcedSkeletonLod = -1;
 	char* forcedSkeletonLodValue = nullptr;
 	size_t forcedSkeletonLodValueSize = 0;
@@ -1851,12 +1857,12 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
     settingsManager.registerSetting<uint32_t>("terrainRvtBorderTexels", 4u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 64u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 64u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesWide", 48u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", 48u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPhysicalAtlasPoolCount", 1u);
     settingsManager.registerSetting<uint32_t>("terrainRvtClipPageTableResolution", 128u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtMaxTerrainSets", 8u);
-    settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 24u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxTerrainSets", 2u);
+    settingsManager.registerSetting<uint32_t>("terrainRvtMaxClipLevels", 16u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", 1024u);
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
@@ -1949,7 +1955,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
 	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
-    settingsManager.registerSetting<bool>("renderGraphVramDumpEnabled", false);
+    settingsManager.registerSetting<bool>(
+        "renderGraphVramDumpEnabled",
+        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_VRAM_DUMP"));
     settingsManager.registerSetting<bool>("renderGraphDisableCaching", true);
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
 	settingsManager.registerSetting<AutoAliasMode>("autoAliasMode", AutoAliasMode::Balanced);
@@ -1995,7 +2003,7 @@ void Renderer::SetSettings() {
         CLodDirectionalVirtualShadowMaxPhysicalPagesSettingName,
         ReadUintEnvironmentValue(
             "SARP_CLOD_VSM_MAX_PHYSICAL_PAGES",
-            CLodVirtualShadowDefaultPhysicalPageCount));
+            4096u));
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowLodBiasSettingName, CLodVirtualShadowDefaultDirectionalLodBias);
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowAutoLodBiasSettingName,
@@ -4485,9 +4493,9 @@ void Renderer::Cleanup() {
     if (m_pReadbackManager) {
         m_pReadbackManager->Cleanup();
     }
-    ResourceManager::GetInstance().Cleanup();
     SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
+    ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
     currentRenderGraph.reset();
     rg::runtime::SetActiveUploadService(nullptr);

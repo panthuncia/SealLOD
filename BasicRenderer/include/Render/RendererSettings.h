@@ -13,6 +13,8 @@ inline constexpr const char* ProceduralWindSkeletonLodCapacityTargetSettingName 
 inline constexpr const char* ProceduralWindSkeletonLodLateReserveSettingName = "proceduralWindSkeletonLodLateReserve";
 inline constexpr const char* ProceduralWindSkeletonLodHysteresisSettingName = "proceduralWindSkeletonLodHysteresis";
 inline constexpr const char* ProceduralWindForcedSkeletonLodSettingName = "proceduralWindForcedSkeletonLod";
+inline constexpr const char* ProceduralWindTransientBoneCapacitySettingName = "proceduralWindTransientBoneCapacity";
+inline constexpr const char* MaterialTextureStreamingIdleFramesSettingName = "materialTextureStreamingIdleFrames";
 
 enum class WindowResolutionPreset : uint8_t {
     P720,
