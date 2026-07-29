@@ -177,12 +177,10 @@ private:
     std::vector<CLodViewRasterInfo> m_cachedViewRasterInfo;
     std::vector<CLodViewDepthSRVIndex> m_cachedViewDepthSrvIndices;
     std::vector<uint32_t> m_zeroTelemetryScratch;
-    std::array<CLodNodeGpuInput, 5> m_cachedNodeGpuInputs{};
     CLodVoxelRasterQueueDescriptors m_cachedVoxelQueueDescriptors{};
     CLodWorkGraphComputePageJobDescriptors m_cachedPageJobDescriptors{};
     uint64_t m_lastDrawSetDeclarationRevision = 0u;
     uint64_t m_lastViewResourceLayoutRevision = 0u;
-    bool m_hasCachedNodeGpuInputs = false;
     bool m_hasCachedVoxelQueueDescriptors = false;
     bool m_hasCachedPageJobDescriptors = false;
     bool m_hasUploadedViewDepthSrvIndices = false;

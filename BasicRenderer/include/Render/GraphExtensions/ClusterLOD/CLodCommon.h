@@ -44,7 +44,10 @@ inline constexpr const char* CLodPureComputePhase2ExpansionFactorSettingName = "
 inline constexpr const char* CLodPureComputeReplayExpansionFactorSettingName = "clodPureComputeReplayExpansionFactor";
 inline constexpr const char* CLodFrustumCullingSettingName = "clodFrustumCulling";
 inline constexpr const char* CLodLodHeightModeSettingName = "clodLodHeightMode";
-inline constexpr uint32_t CLodDefaultVisibleClusterCapacity = 8u * 1000u * 1000u;
+// The large-scene streaming stress workload peaks at roughly 0.52M opaque
+// visible clusters. Keep nearly 4x headroom while avoiding capacity-scaling
+// every visible-cluster and pure-compute frontier resource to 8M entries.
+inline constexpr uint32_t CLodDefaultVisibleClusterCapacity = 2u * 1000u * 1000u;
 inline constexpr uint32_t CLodMinVisibleClusterCapacity = 1u * 1000u * 1000u;
 inline constexpr uint32_t CLodMaxVisibleClusterCapacity = 30u * 1000u * 1000u;
 inline constexpr uint32_t CLodPureComputePhase2ExpansionFactorDefault = 16u;
@@ -292,16 +295,11 @@ struct RasterizeClustersCommand
 struct CLodSoftwareRasterPageJobRecord
 {
     uint32_t sortedClusterIndex = 0u;
-    uint32_t physicalPageIndex = 0u;
-    uint32_t packedPagePixelOrigin = 0u;
-    uint32_t packedAtlasOrigin = 0u;
-    uint32_t clipmapLayer = 0u;
-    uint32_t wrappedPageX = 0u;
-    uint32_t wrappedPageY = 0u;
-    uint32_t flags = 0u;
+    uint32_t physicalAndPageCoords = 0u;
+    uint32_t wrappedCoordsLayerAndFlags = 0u;
 };
 
-static_assert(sizeof(CLodSoftwareRasterPageJobRecord) == 32u, "CLodSoftwareRasterPageJobRecord size must match HLSL");
+static_assert(sizeof(CLodSoftwareRasterPageJobRecord) == 12u, "CLodSoftwareRasterPageJobRecord size must match HLSL");
 
 struct CLodWorkGraphComputePageJobDescriptors
 {
@@ -816,6 +814,15 @@ static_assert(
 static_assert(
     CLodVirtualShadowMaxPhysicalPageCount <= CLodVirtualShadowPhysicalPageIndexMask,
     "VSM physical page count must fit in the page table physical page index bits");
+static_assert(
+    CLodVirtualShadowMaxPhysicalPageCount <= (1u << 14u),
+    "Packed VSM transient records reserve 14 bits for physical page indices");
+static_assert(
+    CLodVirtualShadowMaxPageTableResolution <= (1u << 7u),
+    "Packed VSM page-job records reserve 7 bits per page coordinate");
+static_assert(
+    CLodVirtualShadowMaxSupportedClipmapCount <= (1u << 5u),
+    "Packed VSM transient records reserve 5 bits for clipmap indices");
 
 struct CLodVirtualShadowClipmapInfo
 {
@@ -955,30 +962,35 @@ static_assert(sizeof(CLodVirtualShadowPredictiveInvalidationCandidate) == 32u, "
 struct CLodVirtualShadowPredictedRawPage
 {
     uint32_t sourceGroupGlobalIndex = 0xFFFFFFFFu;
-    uint32_t physicalPageIndex = 0xFFFFFFFFu;
+    uint32_t physicalClipmapVirtualLow = 0u;
+    uint32_t virtualHighAndInstance = 0u;
     uint32_t allocationGeneration = 0u;
     uint32_t contentGeneration = 0u;
-    uint32_t clipmapIndex = 0xFFFFFFFFu;
-    uint32_t virtualAddress = 0xFFFFFFFFu;
-    uint32_t perMeshInstanceBufferIndex = 0xFFFFFFFFu;
-    uint32_t pad0 = 0u;
 };
 
-static_assert(sizeof(CLodVirtualShadowPredictedRawPage) == 32u, "CLodVirtualShadowPredictedRawPage size must match HLSL");
+static_assert(sizeof(CLodVirtualShadowPredictedRawPage) == 20u, "CLodVirtualShadowPredictedRawPage size must match HLSL");
 
 struct CLodVirtualShadowPredictedPage
 {
     uint32_t sourceGroupGlobalIndex = 0xFFFFFFFFu;
-    uint32_t physicalPageIndex = 0xFFFFFFFFu;
+    uint32_t physicalClipmapVirtualLow = 0u;
+    uint32_t virtualHighAndInstance = 0u;
     uint32_t allocationGeneration = 0u;
     uint32_t contentGeneration = 0u;
-    uint32_t clipmapIndex = 0xFFFFFFFFu;
-    uint32_t virtualAddress = 0xFFFFFFFFu;
-    uint32_t perMeshInstanceBufferIndex = 0xFFFFFFFFu;
-    uint32_t pad0 = 0u;
+
+    [[nodiscard]] uint32_t PhysicalPageIndex() const noexcept {
+        return physicalClipmapVirtualLow & 0x3FFFu;
+    }
+    [[nodiscard]] uint32_t ClipmapIndex() const noexcept {
+        return (physicalClipmapVirtualLow >> 14u) & 0x1Fu;
+    }
+    [[nodiscard]] uint32_t VirtualAddress() const noexcept {
+        return ((physicalClipmapVirtualLow >> 19u) & 0x1FFFu) |
+            ((virtualHighAndInstance & 1u) << 13u);
+    }
 };
 
-static_assert(sizeof(CLodVirtualShadowPredictedPage) == 32u, "CLodVirtualShadowPredictedPage size must match HLSL");
+static_assert(sizeof(CLodVirtualShadowPredictedPage) == 20u, "CLodVirtualShadowPredictedPage size must match HLSL");
 
 struct CLodVirtualShadowPhysicalPageMeta
 {
@@ -1406,14 +1418,26 @@ struct CLodReyesTelemetry
     uint32_t objectReyesAtlasDebugMaxHeightUvSetIndex = 0u;
 };
 
-inline constexpr uint32_t CLodReplayBufferSizeBytes = 200u * 1024u * 1024u;
-inline constexpr uint32_t CLodReplayNodeRegionSizeBytes = 50u * 1024u * 1024u;    // must match HLSL CLOD_REPLAY_NODE_REGION_SIZE_BYTES
+// Stress telemetry observed per-frame peaks of 61,247 node records and 987,466
+// meshlet records with no drops. These sizes retain ~8.5x and ~1.33x headroom,
+// respectively. Reyes replay is unused by the measured workload, but retains
+// independent 8 MiB lanes instead of sharing the old blanket 50 MiB sizing.
+inline constexpr uint32_t CLodReplayNodeRegionSizeBytes = 8u * 1024u * 1024u;
+inline constexpr uint32_t CLodReplayMeshletRegionSizeBytes = 36u * 1024u * 1024u;
+inline constexpr uint32_t CLodReplayReyesSplitRegionSizeBytes = 8u * 1024u * 1024u;
+inline constexpr uint32_t CLodReplayReyesDiceRegionSizeBytes = 8u * 1024u * 1024u;
 inline constexpr uint32_t CLodReplayMeshletRegionOffset = CLodReplayNodeRegionSizeBytes;
-inline constexpr uint32_t CLodReplayReyesSplitRegionOffset = 2u * CLodReplayNodeRegionSizeBytes;
-inline constexpr uint32_t CLodReplayReyesDiceRegionOffset = 3u * CLodReplayNodeRegionSizeBytes;
+inline constexpr uint32_t CLodReplayReyesSplitRegionOffset =
+    CLodReplayMeshletRegionOffset + CLodReplayMeshletRegionSizeBytes;
+inline constexpr uint32_t CLodReplayReyesDiceRegionOffset =
+    CLodReplayReyesSplitRegionOffset + CLodReplayReyesSplitRegionSizeBytes;
+inline constexpr uint32_t CLodReplayBufferSizeBytes =
+    CLodReplayReyesDiceRegionOffset + CLodReplayReyesDiceRegionSizeBytes;
 inline constexpr uint32_t CLodNodeReplayStrideBytes = 16u;   // sizeof(TraverseNodeRecord): 4 uints
 inline constexpr uint32_t CLodClusterRunRecordStrideBytes = 28u; // sizeof(CLodClusterRunRecord): 7 uints
-inline constexpr uint32_t CLodMeshletReplayStrideBytes = 32u;    // replay records retain one padding uint
+inline constexpr uint32_t CLodMeshletReplayStrideBytes = CLodClusterRunRecordStrideBytes;
+inline constexpr uint32_t CLodPureComputeNodeFrontierStrideBytes = 12u;
+inline constexpr uint32_t CLodPureComputeClusterFrontierStrideBytes = 20u;
 inline constexpr uint32_t CLodReyesSplitReplayStrideBytes = sizeof(CLodReyesSplitQueueEntry);
 inline constexpr uint32_t CLodReyesDiceReplayStrideBytes = sizeof(CLodReyesDiceQueueEntry);
 inline constexpr uint32_t CLodVoxelRasterThreadsPerGroup = 64u;

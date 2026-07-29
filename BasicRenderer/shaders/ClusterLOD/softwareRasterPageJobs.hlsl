@@ -16,13 +16,10 @@
 struct CLodSoftwareRasterPageJobRecord
 {
     uint sortedClusterIndex;
-    uint physicalPageIndex;
-    uint packedPagePixelOrigin;
-    uint packedAtlasOrigin;
-    uint clipmapLayer;
-    uint wrappedPageX;
-    uint wrappedPageY;
-    uint flags;
+    // physical page [0..13], page X [14..20], page Y [21..27]
+    uint physicalAndPageCoords;
+    // wrapped X [0..6], wrapped Y [7..13], clipmap [14..18], flags [19..]
+    uint wrappedCoordsLayerAndFlags;
 };
 
 static const uint kCLodSoftwareRasterPageJobDoubleSidedFlag = 1u;
@@ -323,17 +320,18 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
 
         CLodSoftwareRasterPageJobRecord rec = (CLodSoftwareRasterPageJobRecord)0;
         rec.sortedClusterIndex = sortedClusterIndex;
-        rec.physicalPageIndex = physicalPageIndex;
-        rec.packedPagePixelOrigin = ((pageX * kCLodVirtualShadowPhysicalPageSize) & 0xFFFFu) |
-            (((pageY * kCLodVirtualShadowPhysicalPageSize) & 0xFFFFu) << 16u);
-        rec.packedAtlasOrigin = (((physicalPageIndex % physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize) & 0xFFFFu) |
-            ((((physicalPageIndex / physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize) & 0xFFFFu) << 16u);
-        rec.clipmapLayer = clipmapInfo.pageTableLayer;
+        rec.physicalAndPageCoords =
+            (physicalPageIndex & 0x3fffu) |
+            ((pageX & 0x7fu) << 14u) |
+            ((pageY & 0x7fu) << 21u);
         const uint2 wrappedCoords = CLodVirtualShadowWrappedPageCoords(uint2(pageX, pageY), clipmapInfo);
-        rec.wrappedPageX = wrappedCoords.x;
-        rec.wrappedPageY = wrappedCoords.y;
+        rec.wrappedCoordsLayerAndFlags =
+            (wrappedCoords.x & 0x7fu) |
+            ((wrappedCoords.y & 0x7fu) << 7u) |
+            ((clipmapInfo.pageTableLayer & 0x1fu) << 14u);
 #if defined(PSO_DOUBLE_SIDED)
-        rec.flags = kCLodSoftwareRasterPageJobDoubleSidedFlag;
+        rec.wrappedCoordsLayerAndFlags |=
+            kCLodSoftwareRasterPageJobDoubleSidedFlag << 19u;
 #endif
         pageJobRecords[gs_expandBaseIndex + GI] = rec;
     }
@@ -382,20 +380,29 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     StructuredBuffer<CLodSoftwareRasterPageJobRecord> pageJobRecords = ResourceDescriptorHeap[CLOD_RASTER_PAGE_JOB_RECORDS_DESCRIPTOR_INDEX];
     const CLodSoftwareRasterPageJobRecord rec = pageJobRecords[pageJobIndex];
     const uint sortedClusterIndex = rec.sortedClusterIndex;
-    const uint pagePixelMinX = rec.packedPagePixelOrigin & 0xFFFFu;
-    const uint pagePixelMinY = (rec.packedPagePixelOrigin >> 16u) & 0xFFFFu;
-    const uint atlasBaseX = rec.packedAtlasOrigin & 0xFFFFu;
-    const uint atlasBaseY = (rec.packedAtlasOrigin >> 16u) & 0xFFFFu;
-    const uint wrappedPageX = rec.wrappedPageX;
-    const uint wrappedPageY = rec.wrappedPageY;
-    const uint clipmapLayer = rec.clipmapLayer;
+    const uint physicalPageIndex = rec.physicalAndPageCoords & 0x3fffu;
+    const uint pageX = (rec.physicalAndPageCoords >> 14u) & 0x7fu;
+    const uint pageY = (rec.physicalAndPageCoords >> 21u) & 0x7fu;
+    const uint wrappedPageX = rec.wrappedCoordsLayerAndFlags & 0x7fu;
+    const uint wrappedPageY = (rec.wrappedCoordsLayerAndFlags >> 7u) & 0x7fu;
+    const uint clipmapLayer = (rec.wrappedCoordsLayerAndFlags >> 14u) & 0x1fu;
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
+    const uint pagePixelMinX = pageX * kCLodVirtualShadowPhysicalPageSize;
+    const uint pagePixelMinY = pageY * kCLodVirtualShadowPhysicalPageSize;
+    const uint atlasBaseX =
+        (physicalPageIndex % physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize;
+    const uint atlasBaseY =
+        (physicalPageIndex / physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize;
 #if defined(PSO_SKINNED)
     const bool dynamicLayer = true;
 #else
     const bool dynamicLayer = false;
 #endif
     const bool doubleSided =
-        (rec.flags & kCLodSoftwareRasterPageJobDoubleSidedFlag) != 0u;
+        ((rec.wrappedCoordsLayerAndFlags >> 19u) &
+            kCLodSoftwareRasterPageJobDoubleSidedFlag) != 0u;
     const bool telemetryEnabled =
         CLOD_RASTER_VIRTUAL_SHADOW_TELEMETRY_ENABLED != 0u;
     ByteAddressBuffer compactedVisibleClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
@@ -456,9 +463,6 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
-    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
-        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
-    const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
     const float visWidth = float(max(clipmapInfo.virtualResolution, 1u));
     const float visHeight = visWidth;
     const float screenScaleX = 0.5f * visWidth;
@@ -631,7 +635,7 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
                     const float pageSpaceDepth = dynamicLayer
                         ? CLodVirtualShadowDepthToCachedPageSpace(
                             depth,
-                            rec.physicalPageIndex,
+                            physicalPageIndex,
                             clipmapInfo.shadowCameraBufferIndex)
                         : depth;
                     InterlockedMin(

@@ -1,6 +1,72 @@
 #define CLOD_COMPUTE_INCLUDE_ONLY 1
 #include "ClusterLOD/workGraphCulling.hlsl"
 
+// Pure-compute frontiers are internal scratch data and do not have the work
+// graph ABI/stable-address requirements of replay records. Pack the fields that
+// already have renderer-wide bounds: draw indices use 24 bits, view IDs 8 bits,
+// descriptors 20 bits, and page slab offsets are 256 KiB aligned within a
+// 256 MiB slab.
+struct PureComputeTraverseNodeRecord
+{
+    uint instanceAndView;
+    uint nodeIdPacked;
+    uint assemblyTransformIndex;
+};
+
+struct PureComputeClusterRunRecord
+{
+    uint instanceAndView;
+    uint groupIdPacked;
+    uint clusterIndexAndCount;
+    uint pageLocatorPacked;
+    uint assemblyTransformIndex;
+};
+
+PureComputeTraverseNodeRecord PackPureComputeTraverseNodeRecord(TraverseNodeRecord record)
+{
+    PureComputeTraverseNodeRecord packed;
+    packed.instanceAndView = (record.instanceIndex & 0x00ffffffu) | ((record.viewId & 0xffu) << 24u);
+    packed.nodeIdPacked = record.nodeIdPacked;
+    packed.assemblyTransformIndex = record.assemblyTransformIndex;
+    return packed;
+}
+
+TraverseNodeRecord UnpackPureComputeTraverseNodeRecord(PureComputeTraverseNodeRecord packed)
+{
+    TraverseNodeRecord record = (TraverseNodeRecord)0;
+    record.instanceIndex = packed.instanceAndView & 0x00ffffffu;
+    record.viewId = packed.instanceAndView >> 24u;
+    record.nodeIdPacked = packed.nodeIdPacked;
+    record.assemblyTransformIndex = packed.assemblyTransformIndex;
+    return record;
+}
+
+PureComputeClusterRunRecord PackPureComputeClusterRunRecord(CLodClusterRunRecord record)
+{
+    PureComputeClusterRunRecord packed;
+    packed.instanceAndView = (record.instanceIndex & 0x00ffffffu) | ((record.viewId & 0xffu) << 24u);
+    packed.groupIdPacked = record.groupIdPacked;
+    packed.clusterIndexAndCount = record.clusterIndexAndCount;
+    packed.pageLocatorPacked =
+        (record.pageSlabDescriptorIndex & 0x000fffffu) |
+        (((record.pageSlabByteOffset >> 18u) & 0x3ffu) << 20u);
+    packed.assemblyTransformIndex = record.assemblyTransformIndex;
+    return packed;
+}
+
+CLodClusterRunRecord UnpackPureComputeClusterRunRecord(PureComputeClusterRunRecord packed)
+{
+    CLodClusterRunRecord record = (CLodClusterRunRecord)0;
+    record.instanceIndex = packed.instanceAndView & 0x00ffffffu;
+    record.viewId = packed.instanceAndView >> 24u;
+    record.groupIdPacked = packed.groupIdPacked;
+    record.clusterIndexAndCount = packed.clusterIndexAndCount;
+    record.pageSlabDescriptorIndex = packed.pageLocatorPacked & 0x000fffffu;
+    record.pageSlabByteOffset = ((packed.pageLocatorPacked >> 20u) & 0x3ffu) << 18u;
+    record.assemblyTransformIndex = packed.assemblyTransformIndex;
+    return record;
+}
+
 uint PureComputeNormalizePhase2ExpansionFactor(uint value)
 {
     value = min(max(value, 1u), 64u);
@@ -79,7 +145,7 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
 {
     RWByteAddressBuffer replayBuffer = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<TraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeTraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint count = min(replayState[0].nodeWriteCount, min(CLOD_WG_VISIBLE_CLUSTERS_CAPACITY, CLOD_NODE_REPLAY_CAPACITY));
@@ -130,7 +196,7 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     InterlockedAdd(outCounter[0], 1u, outputIndex);
     if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
     {
-        outFrontier[outputIndex] = record;
+        outFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(record);
     }
 }
 
@@ -139,7 +205,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
 {
     RWByteAddressBuffer replayBuffer = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_BUFFER_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodReplayBufferState> replayState = ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<CLodClusterRunRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeClusterRunRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint count = min(replayState[0].meshletWriteCount, min(CLOD_WG_VISIBLE_CLUSTERS_CAPACITY, CLOD_MESHLET_REPLAY_CAPACITY));
@@ -153,7 +219,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
 
     const uint byteOffset = CLOD_REPLAY_MESHLET_REGION_OFFSET + index * CLOD_MESHLET_REPLAY_STRIDE_BYTES;
     const uint4 head = replayBuffer.Load4(byteOffset);
-    const uint4 tail = replayBuffer.Load4(byteOffset + 16u);
+    const uint3 tail = replayBuffer.Load3(byteOffset + 16u);
 
     CLodClusterRunRecord record = (CLodClusterRunRecord)0;
     record.instanceIndex = head.x;
@@ -163,7 +229,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
     record.pageSlabDescriptorIndex = tail.x;
     record.pageSlabByteOffset = tail.y;
     record.assemblyTransformIndex = tail.z;
-    outFrontier[index] = record;
+    outFrontier[index] = PackPureComputeClusterRunRecord(record);
 }
 
 [numthreads(64, 1, 1)]
@@ -309,7 +375,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
-    RWStructuredBuffer<TraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeTraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     uint outputIndex = 0u;
@@ -318,11 +384,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
-    outFrontier[outputIndex].viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
-    outFrontier[outputIndex].instanceIndex = drawRecordIndex;
-    outFrontier[outputIndex].nodeIdPacked =
-        PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u, 0u);
-    outFrontier[outputIndex].assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    TraverseNodeRecord rootRecord = (TraverseNodeRecord)0;
+    rootRecord.viewId = CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX;
+    rootRecord.instanceIndex = drawRecordIndex;
+    rootRecord.nodeIdPacked = PackTraverseNodeId(rootNodeId, CLOD_RECORD_SOURCE_PASS1, 1u, 0u);
+    rootRecord.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    outFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(rootRecord);
 
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_VISIBLE_THREADS, 1);
     WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_TRAVERSE_RECORDS, 1);
@@ -340,15 +407,15 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 [numthreads(64, 1, 1)]
 void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThreadID)
 {
-    StructuredBuffer<TraverseNodeRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<PureComputeTraverseNodeRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
 #if !CLOD_PC_LEAF_ONLY
-    RWStructuredBuffer<TraverseNodeRecord> nextFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeTraverseNodeRecord> nextFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<TraverseNodeRecord> nextLeafFrontier = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeTraverseNodeRecord> nextLeafFrontier = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> nextLeafCounter = ResourceDescriptorHeap[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 #endif
-    RWStructuredBuffer<CLodClusterRunRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<PureComputeClusterRunRecord> clusterFrontier = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> clusterCounter = ResourceDescriptorHeap[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -359,7 +426,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         return;
     }
 
-    const TraverseNodeRecord rec = inputFrontier[index];
+    const TraverseNodeRecord rec = UnpackPureComputeTraverseNodeRecord(inputFrontier[index]);
     const bool parentAllowsRefine = (UnpackAllowRefine(rec.nodeIdPacked) != 0u);
     if (UnpackSourceTag(rec.nodeIdPacked) == CLOD_RECORD_SOURCE_REPLAY) {
         WGTelemetryAdd(WG_COUNTER_PHASE2_REPLAY_TRAVERSE_RECORDS_CONSUMED, 1);
@@ -531,7 +598,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                             assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
                                 ? rec.assemblyTransformIndex
                                 : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
-                        nextFrontier[outputIndex] = childRecord;
+                        nextFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);
                         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
                     }
                 }
@@ -684,7 +751,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 outRecord.pageSlabDescriptorIndex = pageEntry.slabDescriptorIndex;
                 outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
                 outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
-                clusterFrontier[outputIndex] = outRecord;
+                clusterFrontier[outputIndex] = PackPureComputeClusterRunRecord(outRecord);
             }
             meshletBase += chunkCount;
             remainingMeshlets -= chunkCount;
@@ -844,10 +911,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             PackTraverseNodeId(childNodeId, sourceTag, 1u, isSkinned ? 0u : 1u);
         childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
         if (childIsLeaf) {
-            nextLeafFrontier[outputIndex] = childRecord;
+            nextLeafFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);
         }
         else {
-            nextFrontier[outputIndex] = childRecord;
+            nextFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);
         }
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
         emittedChildCount++;
@@ -860,7 +927,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 [numthreads(32, 1, 1)]
 void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThreadID, const uint GI : SV_GroupIndex)
 {
-    StructuredBuffer<CLodClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<PureComputeClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -870,7 +937,7 @@ void PureComputeClusterFrontierCS(const uint3 dispatchThreadID : SV_DispatchThre
     const bool hasBucket = (index < inputCount);
     CLodClusterRunRecord bucket = (CLodClusterRunRecord)0;
     if (hasBucket) {
-        bucket = inputFrontier[index];
+        bucket = UnpackPureComputeClusterRunRecord(inputFrontier[index]);
     }
 
     uint swPending = 0u;
@@ -889,7 +956,7 @@ void PureComputeDenseClusterWorkCS(
     const uint3 groupID : SV_GroupID,
     const uint GI : SV_GroupIndex)
 {
-    StructuredBuffer<CLodClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
+    StructuredBuffer<PureComputeClusterRunRecord> inputFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX];
     StructuredBuffer<uint> inputCountBuffer = ResourceDescriptorHeap[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX];
 
     const uint inputCount = inputCountBuffer[0];
@@ -904,7 +971,7 @@ void PureComputeDenseClusterWorkCS(
     if (GI < recordsPerGroup) {
         const uint recordIndex = groupRecordBase + GI;
         if (recordIndex < inputCount) {
-            gs_phase2Records[GI] = inputFrontier[recordIndex];
+            gs_phase2Records[GI] = UnpackPureComputeClusterRunRecord(inputFrontier[recordIndex]);
         } else {
             gs_phase2Records[GI] = (CLodClusterRunRecord)0;
         }

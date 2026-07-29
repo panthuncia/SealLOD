@@ -602,19 +602,22 @@ CLodVoxelAttributeSample CLodLoadVoxelAttributeSampleFromPage(GroupPageMapEntry 
     return sample;
 }
 
-// Replay buffer: single physical buffer split into four 50 MB regions.
+// Replay buffer: one physical buffer split into independently sized regions.
 // Node/meshlet replay are always present; Reyes split/dice replay are consumed by the WG Reyes experiment.
-static const uint CLOD_REPLAY_BUFFER_SIZE_BYTES          = 200u * 1024u * 1024u;
-static const uint CLOD_REPLAY_NODE_REGION_SIZE_BYTES     = 50u * 1024u * 1024u;
+static const uint CLOD_REPLAY_NODE_REGION_SIZE_BYTES     = 8u * 1024u * 1024u;
+static const uint CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES  = 36u * 1024u * 1024u;
+static const uint CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES = 8u * 1024u * 1024u;
+static const uint CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES  = 8u * 1024u * 1024u;
 static const uint CLOD_REPLAY_MESHLET_REGION_OFFSET      = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET  = 2u * CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_REYES_DICE_REGION_OFFSET   = 3u * CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
-static const uint CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES  = CLOD_REPLAY_NODE_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET  =
+    CLOD_REPLAY_MESHLET_REGION_OFFSET + CLOD_REPLAY_MESHLET_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_REYES_DICE_REGION_OFFSET   =
+    CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET + CLOD_REPLAY_REYES_SPLIT_REGION_SIZE_BYTES;
+static const uint CLOD_REPLAY_BUFFER_SIZE_BYTES =
+    CLOD_REPLAY_REYES_DICE_REGION_OFFSET + CLOD_REPLAY_REYES_DICE_REGION_SIZE_BYTES;
 
 static const uint CLOD_NODE_REPLAY_STRIDE_BYTES    = 16u;  // 4 uints (TraverseNodeRecord)
-static const uint CLOD_CLUSTER_RUN_RECORD_STRIDE_BYTES = 32u;
+static const uint CLOD_CLUSTER_RUN_RECORD_STRIDE_BYTES = 28u;
 static const uint CLOD_MESHLET_REPLAY_STRIDE_BYTES = CLOD_CLUSTER_RUN_RECORD_STRIDE_BYTES;
 static const uint CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES = 60u; // sizeof(CLodReyesSplitQueueEntry)
 static const uint CLOD_REYES_DICE_REPLAY_STRIDE_BYTES  = 68u; // sizeof(CLodReyesDiceQueueEntry)

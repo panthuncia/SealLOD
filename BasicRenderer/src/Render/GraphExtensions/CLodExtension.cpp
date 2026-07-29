@@ -787,13 +787,27 @@ void CLodExtension::InitializeCoreResources()
         .add<CLodExtensionTypeTag>(typeEntity);
 
     // HLSL binds this as RWByteAddressBuffer; publish a raw UAV so Store/Load offsets are byte offsets.
-    m_occlusionReplayBuffer = CreateAliasedUnmaterializedRawBuffer(CLodReplayBufferSizeBytes, true, false, false); // TODO: Alias this when we don't need the gpu address in node input during setup
+    m_occlusionReplayBuffer = CreateAliasedUnmaterializedRawBuffer(
+        CLodReplayBufferSizeBytes,
+        true,
+        false,
+        true);
     m_occlusionReplayBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Replay Buffer"));
 
     m_occlusionReplayStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReplayBufferState), true, false, false, false);
     m_occlusionReplayStateBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Replay State Buffer"));
+    m_occlusionReplayStateBuffer->GetECSEntity()
+        .set<Components::Resource>({ m_occlusionReplayStateBuffer })
+        .add<CLodOcclusionReplayStateBufferTag>()
+        .add<CLodExtensionTypeTag>(typeEntity);
 
-    m_occlusionNodeGpuInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(5, sizeof(CLodNodeGpuInput), true, false, false, false);
+    m_occlusionNodeGpuInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        5,
+        sizeof(CLodNodeGpuInput),
+        true,
+        false,
+        false,
+        true);
     m_occlusionNodeGpuInputsBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Node GPU Inputs Buffer"));
 
     m_viewDepthSrvIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(CLodMaxViewDepthIndices, sizeof(CLodViewDepthSRVIndex), true, false, false, false);
@@ -1584,6 +1598,12 @@ void CLodExtension::Shutdown(RenderGraph& rg)
 void CLodExtension::OnRegistryReset(ResourceRegistry* reg)
 {
     m_providerRegisteredForCurrentRegistry = false;
+    // Extension backings are released below, including upload buffers that the
+    // streaming service maps persistently. Quiesce the shared service first so
+    // no worker can retain or write through a backing that is being destroyed.
+    if (m_streamingSystem) {
+        m_streamingSystem->QuiesceGraphResourceAccess();
+    }
     ReleaseBufferBackings();
     ReleaseTransparencyResourceBackings();
     ReleaseShadowResourceBackings();

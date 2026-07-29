@@ -1,68 +1,59 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodPageLRU.h"
 
 CLodPageLRU::~CLodPageLRU() {
-    Clear();
 }
 
 void CLodPageLRU::Insert(uint32_t pageID) {
-    auto it = m_map.find(pageID);
-    if (it != m_map.end()) {
+    if (pageID >= m_nodes.size()) {
+        m_nodes.resize(static_cast<size_t>(pageID) + 1u);
+    }
+    if (m_nodes[pageID].present) {
         // Already present - move to MRU position.
-        Unlink(it->second);
-        PushBack(it->second);
+        Unlink(pageID);
+        PushBack(pageID);
         return;
     }
 
-    auto* node = new Node();
-    node->pageID = pageID;
-    m_map[pageID] = node;
-    PushBack(node);
+    m_nodes[pageID].present = true;
+    ++m_size;
+    PushBack(pageID);
 }
 
 void CLodPageLRU::Remove(uint32_t pageID) {
-    auto it = m_map.find(pageID);
-    if (it == m_map.end()) return;
+    if (!Contains(pageID)) return;
 
-    Unlink(it->second);
-    delete it->second;
-    m_map.erase(it);
+    Unlink(pageID);
+    m_nodes[pageID].present = false;
+    --m_size;
 }
 
 void CLodPageLRU::Touch(uint32_t pageID) {
-    auto it = m_map.find(pageID);
-    if (it == m_map.end()) return;
+    if (!Contains(pageID) || pageID == m_tail) return;
 
-    Unlink(it->second);
-    PushBack(it->second);
+    Unlink(pageID);
+    PushBack(pageID);
 }
 
 uint32_t CLodPageLRU::PopOldest() {
-    if (m_head == nullptr) {
+    if (m_head == ~0u) {
         return ~0u;
     }
 
-    Node* node = m_head;
-    const uint32_t pageID = node->pageID;
-    Unlink(node);
-    PushBack(node);
+    const uint32_t pageID = m_head;
+    Unlink(pageID);
+    PushBack(pageID);
     return pageID;
 }
 
 bool CLodPageLRU::Contains(uint32_t pageID) const {
-    return m_map.count(pageID) != 0;
+    return pageID < m_nodes.size() && m_nodes[pageID].present;
 }
 
 void CLodPageLRU::Clear() {
-    Node* cur = m_head;
-    while (cur) {
-        Node* next = cur->next;
-        delete cur;
-        cur = next;
-    }
-    m_head = nullptr;
-    m_tail = nullptr;
-    m_map.clear();
-    m_pinned.clear();
+    m_head = ~0u;
+    m_tail = ~0u;
+    m_size = 0u;
+    m_nodes.clear();
 }
 
 // Pinned page tracking is disabled for the simplified streaming experiment.
@@ -80,32 +71,34 @@ bool CLodPageLRU::IsPinned(uint32_t) const {
 
 // list helpers
 
-void CLodPageLRU::Unlink(Node* node) {
-    if (node->prev) {
-        node->prev->next = node->next;
+void CLodPageLRU::Unlink(uint32_t pageID) {
+    Node& node = m_nodes[pageID];
+    if (node.prev != ~0u) {
+        m_nodes[node.prev].next = node.next;
     } else {
-        m_head = node->next;
+        m_head = node.next;
     }
 
-    if (node->next) {
-        node->next->prev = node->prev;
+    if (node.next != ~0u) {
+        m_nodes[node.next].prev = node.prev;
     } else {
-        m_tail = node->prev;
+        m_tail = node.prev;
     }
 
-    node->prev = nullptr;
-    node->next = nullptr;
+    node.prev = ~0u;
+    node.next = ~0u;
 }
 
-void CLodPageLRU::PushBack(Node* node) {
-    node->prev = m_tail;
-    node->next = nullptr;
+void CLodPageLRU::PushBack(uint32_t pageID) {
+    Node& node = m_nodes[pageID];
+    node.prev = m_tail;
+    node.next = ~0u;
 
-    if (m_tail) {
-        m_tail->next = node;
+    if (m_tail != ~0u) {
+        m_nodes[m_tail].next = pageID;
     } else {
-        m_head = node;
+        m_head = pageID;
     }
 
-    m_tail = node;
+    m_tail = pageID;
 }

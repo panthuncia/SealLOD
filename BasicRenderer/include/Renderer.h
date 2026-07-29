@@ -364,6 +364,7 @@ private:
     uint64_t m_lastCLodVisibilityTelemetryRequestFrame = UINT64_MAX;
     bool m_clodTelemetryReadbackPending = false;
     bool m_clodVisibleCounterReadbackPending = false;
+    bool m_clodReplayStateReadbackPending = false;
     bool m_loggedCLodVisibilityTelemetryEnabled = false;
     bool m_clodVisibilityTelemetryDebugEnabledByRenderer = false;
     uint64_t m_lastCLodVirtualShadowTelemetryRequestFrame = UINT64_MAX;

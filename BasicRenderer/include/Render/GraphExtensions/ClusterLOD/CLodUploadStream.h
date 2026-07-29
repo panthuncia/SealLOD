@@ -57,7 +57,11 @@ struct CLodUploadBatch {
 // reads batches but never mutates allocator state.
 class CLodUploadStream {
 public:
-    static constexpr size_t DefaultPageSize = 16u * 1024u * 1024u;
+    // Streaming payloads are normally much smaller than a page. Smaller pages
+    // reduce tail waste, while four recycled pages still cover 16 MiB of burst
+    // staging without an allocation.
+    static constexpr size_t DefaultPageSize = 4u * 1024u * 1024u;
+    static constexpr size_t MaxCachedPages = 4u;
 
     explicit CLodUploadStream(size_t pageSize = DefaultPageSize) : m_pageSize(pageSize) {}
 

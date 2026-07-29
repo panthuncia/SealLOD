@@ -1,8 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <unordered_map>
-#include <unordered_set>
+#include <vector>
 
 // Page-level doubly-linked list LRU for cluster-LOD streaming.
 //
@@ -40,7 +39,7 @@ public:
     bool Contains(uint32_t pageID) const;
 
     // Number of pages tracked by the LRU.
-    uint32_t Size() const { return static_cast<uint32_t>(m_map.size()); }
+    uint32_t Size() const { return m_size; }
 
     // Clear all entries (LRU + pinned).
     void Clear();
@@ -53,23 +52,21 @@ public:
 
 private:
     struct Node {
-        uint32_t pageID = 0;
-        Node* prev = nullptr;
-        Node* next = nullptr;
+        uint32_t prev = ~0u;
+        uint32_t next = ~0u;
+        bool present = false;
     };
 
     // Unlink a node from the list without destroying it.
-    void Unlink(Node* node);
+    void Unlink(uint32_t pageID);
 
     // Append a node at the back of the list.
-    void PushBack(Node* node);
+    void PushBack(uint32_t pageID);
 
-    Node* m_head = nullptr;
-    Node* m_tail = nullptr;
-
-    // pageID -> Node* for O(1) lookup.
-    std::unordered_map<uint32_t, Node*> m_map;
-
-    // Retained only to avoid churn in the class layout during the experiment.
-    std::unordered_set<uint32_t> m_pinned;
+    uint32_t m_head = ~0u;
+    uint32_t m_tail = ~0u;
+    uint32_t m_size = 0u;
+    // Physical page IDs are dense, so direct indexing avoids a hash lookup and
+    // one heap allocation per page in this hot bookkeeping structure.
+    std::vector<Node> m_nodes;
 };

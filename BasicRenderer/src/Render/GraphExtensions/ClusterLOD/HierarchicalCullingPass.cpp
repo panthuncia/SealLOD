@@ -941,6 +941,20 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     uintRootConstants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = m_occlusionNodeGpuInputsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     uintRootConstants[CLOD_CREATE_NUM_RASTER_BUCKETS] = context.materialManager->GetRasterBucketCount();
     uintRootConstants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
+    const uint64_t replayAddress =
+        GetNativeBufferDeviceAddress(m_occlusionReplayBuffer->GetAPIResource());
+    const uint64_t nodeInputAddress =
+        GetNativeBufferDeviceAddress(m_occlusionNodeGpuInputsBuffer->GetAPIResource());
+    uintRootConstants[CLOD_CREATE_REPLAY_ADDRESS_LOW] =
+        static_cast<uint32_t>(replayAddress);
+    uintRootConstants[CLOD_CREATE_REPLAY_ADDRESS_HIGH] =
+        static_cast<uint32_t>(replayAddress >> 32u);
+    uintRootConstants[CLOD_CREATE_NODE_INPUT_ADDRESS_LOW] =
+        static_cast<uint32_t>(nodeInputAddress);
+    uintRootConstants[CLOD_CREATE_NODE_INPUT_ADDRESS_HIGH] =
+        static_cast<uint32_t>(nodeInputAddress >> 32u);
+    uintRootConstants[CLOD_CREATE_NODE_INPUT_COUNT] =
+        m_workGraphReyesVisibility ? 4u : 2u;
     commandList.PushConstants(
         rhi::ShaderStage::Compute,
         0,
@@ -1208,6 +1222,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             0);
     }
 
+#if 0 // Replaced by runtime GPU-address patching in the phase-1 command shader.
     {
         ZoneScopedN("HierarchicalCullingPass::UpdateReplayNodeInputs");
         CLodNodeGpuInput nodeGpuInputs[5] = {};
@@ -1278,6 +1293,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
                 0);
         }
     }
+#endif
 
     if (IsCLodWorkGraphTelemetryEnabled()) {
         ZoneScopedN("HierarchicalCullingPass::UploadTelemetryReset");

@@ -63,6 +63,7 @@ public:
     void Initialize(RenderGraph& rg);
     void Shutdown();
     void ShutdownGraphResources();
+    void QuiesceGraphResourceAccess();
     void OnRegistryReset(ResourceRegistry* reg);
     void GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
     void GatherStructuralTailPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses);
@@ -196,6 +197,7 @@ private:
         uint32_t groupIndex);
     void QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex);
     void PublishVirtualShadowUpgradeUpload();
+    void InvalidateVirtualShadowUpgradeUploadMappings();
     void ClearVirtualShadowUpgradeState();
     void ReconcileStaleDiskIoRequests(MeshManager* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
@@ -361,6 +363,8 @@ private:
     std::vector<uint32_t> m_usedGroupsBitsCpu; // groups reported as visible by the GPU last frame
     std::vector<uint32_t> m_usedGroupsWordsCpu;
     std::vector<uint64_t> m_groupLastUsedTick;
+    std::vector<uint32_t> m_recentlyUsedGroupsCpu;
+    std::vector<uint8_t> m_recentlyUsedGroupTrackedCpu;
     std::vector<uint32_t> m_parentGroupByGroup;
     std::unordered_map<uint32_t, CachedChildGroupLayout> m_prefetchedChildLayoutsByGroup;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_prefetchedChildLayoutKeysByOwner;
@@ -557,6 +561,7 @@ private:
     struct VirtualShadowUpgradeUploadSlot {
         std::shared_ptr<Buffer> buffer;
         void* mapped = nullptr;
+        uint64_t mappedBackingGeneration = 0u;
         std::atomic<VirtualShadowUpgradeUploadState> state{
             VirtualShadowUpgradeUploadState::Free};
         std::atomic<uint32_t> inputCount{0u};
@@ -691,7 +696,8 @@ private:
     };
     // Decoded requests produced by the worker, consumed by the streaming service.
     std::vector<DecodedStreamingRequest> m_decodedReadbackBatch;
-    // Deduplicated group indices from the GPU used-groups buffer, consumed by the main thread to touch LRU.
+    // Deduplicated group indices from the GPU used-groups buffer, consumed by
+    // the streaming service for page protection and LRU bookkeeping.
     std::vector<uint32_t> m_decodedUsedGroupsBatch;
     uint64_t m_decodedUsedGroupsSampleGeneration = 0;
     uint64_t m_usedGroupsCpuSampleGeneration = 0;
@@ -699,8 +705,6 @@ private:
     std::vector<uint32_t> m_usedGroupsBatchScratch;
     std::vector<uint32_t> m_expiredReadbackGapGroupsScratch;
     std::vector<uint32_t> m_parentChainScratch;
-    std::vector<uint32_t> m_lruTouchedGroupsBitsScratch;
-    std::vector<uint32_t> m_lruTouchedGroupWordsScratch;
     std::vector<uint32_t> m_protectedGroupsBitsScratch;
     std::vector<uint32_t> m_protectedGroupWordsScratch;
     std::vector<uint32_t> m_decodeSeenGenerationByGroup;

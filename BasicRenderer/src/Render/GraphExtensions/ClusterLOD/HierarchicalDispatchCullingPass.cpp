@@ -28,28 +28,12 @@
 #include "Resources/Resolvers/ECSResourceResolver.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "ShaderBuffers.h"
-#include <rhi_interop.h>
-#include <rhi_interop_dx12.h>
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodPureComputeCullingRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodWorkGraphRootConstants.h"
 
 namespace {
-
-uint64_t GetNativeBufferDeviceAddress(rhi::Resource resource) noexcept
-{
-    if (ID3D12Resource* nativeResource = rhi::dx12::get_resource(resource)) {
-        return nativeResource->GetGPUVirtualAddress();
-    }
-
-    rhi::VulkanResourceInfo vulkanInfo{};
-    if (rhi::QueryNativeResource(resource, rhi::RHI_IID_VK_RESOURCE, &vulkanInfo, sizeof(vulkanInfo))) {
-        return vulkanInfo.deviceAddress;
-    }
-
-    return 0u;
-}
 
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeTraverseThreadsPerGroup = 64u;
@@ -239,27 +223,27 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     }
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
-    const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodNodeReplayStrideBytes;
-    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodClusterRunRecordStrideBytes;
+    const uint64_t nodeFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodPureComputeNodeFrontierStrideBytes;
+    const uint64_t clusterFrontierBytes = static_cast<uint64_t>(frontierCapacity) * CLodPureComputeClusterFrontierStrideBytes;
     spdlog::info(
         "CLod pure compute frontier allocation '{}': capacity={} nodeFrontier={} MiB each clusterFrontier={} MiB",
         passIdentifierForLog,
         frontierCapacity,
         static_cast<double>(nodeFrontierBytes) / (1024.0 * 1024.0),
         static_cast<double>(clusterFrontierBytes) / (1024.0 * 1024.0));
-    m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeCurrentNodeFrontierBuffer->SetName("CLod Pure Compute Current Node Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeNextNodeFrontierBuffer->SetName("CLod Pure Compute Next Node Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeCurrentLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeCurrentLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeCurrentLeafFrontierBuffer->SetName("CLod Pure Compute Current Leaf Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeNextLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodNodeReplayStrideBytes, true, false, false, true);
+    m_pureComputeNextLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeNextLeafFrontierBuffer->SetName("CLod Pure Compute Next Leaf Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeNextLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
-    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodClusterRunRecordStrideBytes, true, false, false, true);
+    m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeClusterFrontierStrideBytes, true, false, false, true);
     m_pureComputeClusterFrontierBuffer->SetName("CLod Pure Compute Cluster Frontier");
     rg::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeCurrentNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
@@ -457,7 +441,6 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
             m_workGraphTelemetryBuffer,
             m_occlusionReplayBuffer,
             m_occlusionReplayStateBuffer,
-            m_occlusionNodeGpuInputsBuffer,
             m_pureComputeCurrentNodeFrontierBuffer,
             m_pureComputeNextNodeFrontierBuffer,
             m_pureComputeCurrentLeafFrontierBuffer,
@@ -1393,7 +1376,9 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     createRootConstants[CLOD_CREATE_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetSRVInfo(0).slot.index;
     createRootConstants[CLOD_CREATE_RASTER_BUCKET_HISTOGRAM_COMMAND_DESCRIPTOR_INDEX] = m_histogramIndirectCommand->GetUAVShaderVisibleInfo(0).slot.index;
     createRootConstants[CLOD_CREATE_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX] = m_occlusionReplayStateBuffer->GetSRVInfo(0).slot.index;
-    createRootConstants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = m_occlusionNodeGpuInputsBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    // Pure-compute replay seeds descriptor-backed frontiers directly; it does
+    // not consume D3D12 work-graph node-input records.
+    createRootConstants[CLOD_CREATE_WORKGRAPH_NODE_INPUTS_DESCRIPTOR_INDEX] = 0xFFFFFFFFu;
     createRootConstants[CLOD_CREATE_NUM_RASTER_BUCKETS] = context.materialManager->GetRasterBucketCount();
     createRootConstants[CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
     commandList.PushConstants(
@@ -1665,58 +1650,6 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             sizeof(CLodReplayBufferState),
             rg::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
             0);
-    }
-
-    {
-        ZoneScopedN("HierarchicalDispatchCullingPass::UpdateReplayNodeInputs");
-        CLodNodeGpuInput nodeGpuInputs[3] = {};
-        CLodMultiNodeGpuInput multiNodeGpuInput{};
-        multiNodeGpuInput.numNodeInputs = 2;
-        multiNodeGpuInput.pad0 = 0;
-        multiNodeGpuInput.nodeInputStride = sizeof(CLodNodeGpuInput);
-
-        if (!m_occlusionNodeGpuInputsBuffer->IsMaterialized()) {
-            m_occlusionNodeGpuInputsBuffer->Materialize();
-        }
-        if (!m_occlusionReplayBuffer->IsMaterialized()) {
-            m_occlusionReplayBuffer->Materialize();
-        }
-
-        if (const uint64_t nodeInputBufferAddress = GetNativeBufferDeviceAddress(m_occlusionNodeGpuInputsBuffer->GetAPIResource())) {
-            multiNodeGpuInput.nodeInputsAddress = nodeInputBufferAddress + sizeof(CLodNodeGpuInput);
-        }
-
-        if (const uint64_t replayAddress = GetNativeBufferDeviceAddress(m_occlusionReplayBuffer->GetAPIResource())) {
-            nodeGpuInputs[1].entrypointIndex = 1;
-            nodeGpuInputs[1].numRecords = 0;
-            nodeGpuInputs[1].recordsAddress = replayAddress;
-            nodeGpuInputs[1].recordStride = CLodNodeReplayStrideBytes;
-
-            nodeGpuInputs[2].entrypointIndex = 2;
-            nodeGpuInputs[2].numRecords = 0;
-            nodeGpuInputs[2].recordsAddress = replayAddress + CLodReplayMeshletRegionOffset;
-            nodeGpuInputs[2].recordStride = CLodMeshletReplayStrideBytes;
-        }
-
-        static_assert(sizeof(CLodMultiNodeGpuInput) == sizeof(CLodNodeGpuInput));
-        std::memcpy(&nodeGpuInputs[0], &multiNodeGpuInput, sizeof(CLodMultiNodeGpuInput));
-
-        if (!m_hasCachedNodeGpuInputs
-            || !std::equal(
-                std::begin(nodeGpuInputs),
-                std::end(nodeGpuInputs),
-                m_cachedNodeGpuInputs.begin(),
-                [](const CLodNodeGpuInput& left, const CLodNodeGpuInput& right) {
-                    return BytesEqual(left, right);
-                })) {
-            std::copy(std::begin(nodeGpuInputs), std::end(nodeGpuInputs), m_cachedNodeGpuInputs.begin());
-            m_hasCachedNodeGpuInputs = true;
-            BUFFER_UPLOAD(
-                nodeGpuInputs,
-                sizeof(nodeGpuInputs),
-                rg::runtime::UploadTarget::FromShared(m_occlusionNodeGpuInputsBuffer),
-                0);
-        }
     }
 
     if (IsCLodWorkGraphTelemetryEnabled()) {

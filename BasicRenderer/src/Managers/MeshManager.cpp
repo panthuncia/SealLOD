@@ -16,6 +16,7 @@
 #include "Import/CLodCache.h"
 #include "Materials/Material.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Telemetry/Timing.h"
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <unordered_set>
 #include <cassert>
@@ -423,12 +425,20 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 				if (loaded) {
 					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges");
 					ZoneValue(layout.pageBlobSizes.size());
+					const bool recordWarmTiming =
+						br::telemetry::timing::Enabled();
+					if (recordWarmTiming) {
+						br::telemetry::timing::AddCounter(
+							"CLod.DiskStreaming.Prefetch.CandidatePages",
+							layout.pageBlobSizes.size());
+					}
 					thread_local std::vector<uint64_t> warmOffsets;
 					thread_local std::vector<uint32_t> warmSizes;
 					thread_local std::vector<uint32_t> warmPageIndices;
 					warmOffsets.clear();
 					warmSizes.clear();
 					warmPageIndices.clear();
+					uint64_t alreadyWarmPageCount = 0u;
 					{
 						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges::SelectColdPages");
 						warmOffsets.reserve(layout.pageBlobSizes.size());
@@ -458,6 +468,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 												std::memory_order_acquire);
 							}
 							if (!shouldWarm) {
+								++alreadyWarmPageCount;
 								continue;
 							}
 							warmOffsets.push_back(
@@ -467,14 +478,49 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 							warmPageIndices.push_back(meshPageIndex);
 						}
 					}
+					if (recordWarmTiming && alreadyWarmPageCount != 0u) {
+						br::telemetry::timing::AddCounter(
+							"CLod.DiskStreaming.Prefetch.AlreadyWarmPages",
+							alreadyWarmPageCount);
+					}
 					if (!warmOffsets.empty()) {
 						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges::PrefetchColdPages");
-						loaded = mappedContainer->WarmBlobs(
-							warmOffsets, warmSizes);
-						if (!loaded &&
+						const uint64_t warmStartNs = recordWarmTiming
+							? br::telemetry::timing::NowNs()
+							: 0u;
+						if (recordWarmTiming) {
+							br::telemetry::timing::AddCounter(
+								"CLod.DiskStreaming.Prefetch.Calls");
+							br::telemetry::timing::AddCounter(
+								"CLod.DiskStreaming.Prefetch.ColdPages",
+								warmOffsets.size());
+							br::telemetry::timing::AddCounter(
+								"CLod.DiskStreaming.Prefetch.ColdBytes",
+								std::accumulate(
+									warmSizes.begin(),
+									warmSizes.end(),
+									uint64_t{0u}));
+						}
+						const bool prefetched =
+							mappedContainer->WarmBlobs(
+								warmOffsets,
+								warmSizes);
+						if (recordWarmTiming) {
+							br::telemetry::timing::Record(
+								"CLod.DiskStreaming.PrefetchColdPages",
+								br::telemetry::timing::NowNs() -
+									warmStartNs);
+							if (!prefetched) {
+								br::telemetry::timing::AddCounter(
+									"CLod.DiskStreaming.Prefetch.Failures");
+							}
+						}
+						if (!prefetched &&
 							sharedState->mappedPageWarmStates !=
 								nullptr) {
-							for (uint32_t meshPageIndex :
+							// This is a latency hint; the mapping remains
+							// valid and can fault normally during upload.
+							for (const uint32_t meshPageIndex :
 								warmPageIndices) {
 								if (meshPageIndex <
 									sharedState->

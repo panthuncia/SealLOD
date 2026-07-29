@@ -3109,7 +3109,9 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         m_totalFramesRendered - m_lastCLodVisibilityTelemetryRequestFrame < kCaptureIntervalFrames) {
         return;
     }
-    if (m_clodTelemetryReadbackPending || m_clodVisibleCounterReadbackPending) {
+    if (m_clodTelemetryReadbackPending ||
+        m_clodVisibleCounterReadbackPending ||
+        m_clodReplayStateReadbackPending) {
         return;
     }
 
@@ -3143,7 +3145,18 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             }
         });
 
-    if (!telemetryResource || !visibleCounterResource) {
+    std::shared_ptr<Resource> replayStateResource;
+    world.query_builder<const Components::Resource>()
+        .with<CLodOcclusionReplayStateBufferTag>()
+        .with<CLodExtensionTypeTag>(visibilityTag)
+        .build()
+        .each([&](const Components::Resource& component) {
+            if (!replayStateResource) {
+                replayStateResource = component.resource.lock();
+            }
+        });
+
+    if (!telemetryResource || !visibleCounterResource || !replayStateResource) {
         return;
     }
 
@@ -3151,6 +3164,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     m_lastCLodVisibilityTelemetryRequestFrame = requestedFrame;
     m_clodTelemetryReadbackPending = true;
     m_clodVisibleCounterReadbackPending = true;
+    m_clodReplayStateReadbackPending = true;
 
     if (auto* objectManager = m_managerInterface.GetObjectManager()) {
         auto activeStats = objectManager->SnapshotActiveDrawSetDebugStats();
@@ -3390,6 +3404,19 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedInvalidSlotFallbacks),
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedNoValidBoneFallbacks),
 				counter(CLodWorkGraphCounterIndex::MeshletBoundsSkinnedFallbackFrustumRejected));
+            spdlog::info(
+                "SARP CLOD occlusion replay telemetry: frame={} node_enqueue_attempts={} cluster_enqueue_attempts={} "
+                "phase2_node_launches={} phase2_node_inputs={} phase2_node_emitted={} "
+                "phase2_meshlet_launches={} phase2_meshlet_inputs={} phase2_meshlet_emitted={}",
+                requestedFrame,
+                counter(CLodWorkGraphCounterIndex::Phase1OcclusionNodeReplayEnqueueAttempts),
+                counter(CLodWorkGraphCounterIndex::Phase1OcclusionClusterReplayEnqueueAttempts),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayNodeLaunches),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayNodeInputRecords),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayNodeRecordsEmitted),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletLaunches),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletInputRecords),
+                counter(CLodWorkGraphCounterIndex::Phase2ReplayMeshletBucketRecordsEmitted));
         });
 
     readbackService->RequestReadbackCapture(
@@ -3413,6 +3440,38 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 "SARP CLOD visibility counter: frame={} visible_clusters={}",
                 requestedFrame,
                 visibleClusters);
+        });
+
+    readbackService->RequestReadbackCapture(
+        "CLodOpaque::HierarchicalCullingPass2",
+        replayStateResource.get(),
+        RangeSpec{},
+        [this, requestedFrame](ReadbackCaptureResult&& result) {
+            m_clodReplayStateReadbackPending = false;
+
+            if (result.data.size() < sizeof(CLodReplayBufferState)) {
+                spdlog::warn(
+                    "SARP CLOD replay-state telemetry: frame={} payload too small ({} bytes).",
+                    requestedFrame,
+                    result.data.size());
+                return;
+            }
+
+            CLodReplayBufferState state{};
+            std::memcpy(&state, result.data.data(), sizeof(state));
+            spdlog::info(
+                "SARP CLOD replay-state telemetry: frame={} node_writes={} node_dropped={} "
+                "meshlet_writes={} meshlet_dropped={} reyes_split_writes={} reyes_split_dropped={} "
+                "reyes_dice_writes={} reyes_dice_dropped={}",
+                requestedFrame,
+                state.nodeWriteCount,
+                state.nodeDropped,
+                state.meshletWriteCount,
+                state.meshletDropped,
+                state.reyesSplitWriteCount,
+                state.reyesSplitDropped,
+                state.reyesDiceWriteCount,
+                state.reyesDiceDropped);
         });
 
 }

@@ -23,6 +23,7 @@ struct VisibleClustersBufferTag {};
 struct VisibleClusterTransformIndicesBufferTag {};
 struct VisibleClustersCounterTag {};
 struct CLodWorkGraphTelemetryBufferTag {};
+struct CLodOcclusionReplayStateBufferTag {};
 struct CLodReyesDiceQueueTag {};
 struct CLodReyesTessTableConfigsTag {};
 struct CLodReyesTessTableVerticesTag {};

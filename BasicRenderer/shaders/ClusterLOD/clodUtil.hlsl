@@ -85,26 +85,36 @@ struct CLodVirtualShadowPredictiveInvalidationCandidate
 struct CLodVirtualShadowPredictedRawPage
 {
     uint sourceGroupGlobalIndex;
-    uint physicalPageIndex;
+    uint physicalClipmapVirtualLow;
+    uint virtualHighAndInstance;
     uint allocationGeneration;
     uint contentGeneration;
-    uint clipmapIndex;
-    uint virtualAddress;
-    uint perMeshInstanceBufferIndex;
-    uint pad0;
 };
 
 struct CLodVirtualShadowPredictedPage
 {
     uint sourceGroupGlobalIndex;
-    uint physicalPageIndex;
+    uint physicalClipmapVirtualLow;
+    uint virtualHighAndInstance;
     uint allocationGeneration;
     uint contentGeneration;
-    uint clipmapIndex;
-    uint virtualAddress;
-    uint perMeshInstanceBufferIndex;
-    uint pad0;
 };
+
+uint CLodPredictedPhysicalPageIndex(CLodVirtualShadowPredictedRawPage page)
+{
+    return page.physicalClipmapVirtualLow & 0x3fffu;
+}
+
+uint CLodPredictedClipmapIndex(CLodVirtualShadowPredictedRawPage page)
+{
+    return (page.physicalClipmapVirtualLow >> 14u) & 0x1fu;
+}
+
+uint CLodPredictedVirtualAddress(CLodVirtualShadowPredictedRawPage page)
+{
+    return ((page.physicalClipmapVirtualLow >> 19u) & 0x1fffu) |
+        ((page.virtualHighAndInstance & 1u) << 13u);
+}
 
 struct CLodVirtualShadowUpgradeInvalidationInput
 {
@@ -838,22 +848,32 @@ void CLodAppendVirtualShadowPredictedRawPage(
     {
         CLodVirtualShadowPredictedRawPage rawPage;
         rawPage.sourceGroupGlobalIndex = sourceGroupGlobalIndex;
-        rawPage.physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        const uint physicalPageIndex =
+            pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        const uint clipmapIndex = clipmapInfo.pageTableLayer;
+        const uint virtualAddress =
+            CLodVirtualShadowWrappedVirtualAddress(
+                wrappedPageCoords,
+                clipmapInfo.pageTableResolution);
+        rawPage.physicalClipmapVirtualLow =
+            (physicalPageIndex & 0x3fffu) |
+            ((clipmapIndex & 0x1fu) << 14u) |
+            ((virtualAddress & 0x1fffu) << 19u);
+        rawPage.virtualHighAndInstance =
+            ((virtualAddress >> 13u) & 1u) |
+            (perMeshInstanceBufferIndex << 1u);
         rawPage.allocationGeneration =
             CLodVirtualShadowPhysicalPageAllocationGeneration(pageMeta.z);
         rawPage.contentGeneration = pageMeta.y;
-        rawPage.clipmapIndex = clipmapInfo.pageTableLayer;
-        rawPage.virtualAddress =
-            CLodVirtualShadowWrappedVirtualAddress(wrappedPageCoords, clipmapInfo.pageTableResolution);
-        rawPage.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
-        rawPage.pad0 = 0u;
         rawPages[rawPageIndex] = rawPage;
     }
 }
 
 uint CLodVirtualShadowPredictedPageKey(CLodVirtualShadowPredictedRawPage rawPage)
 {
-    return rawPage.clipmapIndex * kCLodVirtualShadowPredictedPageEntriesPerClipmap + rawPage.virtualAddress;
+    return CLodPredictedClipmapIndex(rawPage) *
+        kCLodVirtualShadowPredictedPageEntriesPerClipmap +
+        CLodPredictedVirtualAddress(rawPage);
 }
 
 bool CLodTrySetPredictedPageBit(RWStructuredBuffer<uint> bitsetWords, uint key)
@@ -1659,17 +1679,20 @@ void CLodVirtualShadowQueueFallbackDependencyRetry(
     RWStructuredBuffer<uint> dirtyFlags,
     RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer)
 {
-    if (rawPage.physicalPageIndex >=
+    const uint physicalPageIndex = CLodPredictedPhysicalPageIndex(rawPage);
+    const uint virtualAddress = CLodPredictedVirtualAddress(rawPage);
+    const uint clipmapIndex = CLodPredictedClipmapIndex(rawPage);
+    if (physicalPageIndex >=
         CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PHYSICAL_PAGE_COUNT)
     {
         return;
     }
     const uint2 pageCoords = uint2(
-        rawPage.virtualAddress % kCLodVirtualShadowMaxPageTableResolution,
-        rawPage.virtualAddress / kCLodVirtualShadowMaxPageTableResolution);
-    const uint3 tableCoords = uint3(pageCoords, rawPage.clipmapIndex);
+        virtualAddress % kCLodVirtualShadowMaxPageTableResolution,
+        virtualAddress / kCLodVirtualShadowMaxPageTableResolution);
+    const uint3 tableCoords = uint3(pageCoords, clipmapIndex);
     const uint pageEntry = pageTable[tableCoords];
-    const uint4 meta = pageMetadata[rawPage.physicalPageIndex];
+    const uint4 meta = pageMetadata[physicalPageIndex];
     if ((pageEntry & (kCLodVirtualShadowAllocatedMask |
             kCLodVirtualShadowContentValidMask |
             kCLodVirtualShadowRerenderedThisFrameMask)) !=
@@ -1677,9 +1700,9 @@ void CLodVirtualShadowQueueFallbackDependencyRetry(
                 kCLodVirtualShadowContentValidMask |
                 kCLodVirtualShadowRerenderedThisFrameMask) ||
         (pageEntry & kCLodVirtualShadowPhysicalPageIndexMask) !=
-            rawPage.physicalPageIndex ||
-        meta.x != rawPage.virtualAddress ||
-        meta.w != rawPage.clipmapIndex ||
+            physicalPageIndex ||
+        meta.x != virtualAddress ||
+        meta.w != clipmapIndex ||
         CLodVirtualShadowPhysicalPageAllocationGeneration(meta.z) !=
             rawPage.allocationGeneration ||
         meta.y != rawPage.contentGeneration)
@@ -1693,8 +1716,8 @@ void CLodVirtualShadowQueueFallbackDependencyRetry(
         kCLodVirtualShadowDirtyMask,
         ignored);
     InterlockedOr(
-        dirtyFlags[rawPage.physicalPageIndex >> 5u],
-        1u << (rawPage.physicalPageIndex & 31u));
+        dirtyFlags[physicalPageIndex >> 5u],
+        1u << (physicalPageIndex & 31u));
     InterlockedAdd(statsBuffer[0].invalidUpgradeDependencyCount, 1u);
 }
 
@@ -1714,8 +1737,6 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_OUTPUT_PAGE_COUNT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_STATS_DESCRIPTOR_INDEX];
-    ConstantBuffer<PerFrameBuffer> perFrameBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     RWTexture2DArray<uint> pageTable =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_PAGE_TABLE_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint4> pageMetadata =
@@ -1731,21 +1752,25 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
     }
 
     const CLodVirtualShadowPredictedRawPage rawPage = rawPages[rawPageIndex];
-    if (rawPage.clipmapIndex >= kCLodVirtualShadowClipmapCount ||
-        rawPage.virtualAddress >= kCLodVirtualShadowPredictedPageEntriesPerClipmap)
+    const uint rawPhysicalPageIndex =
+        CLodPredictedPhysicalPageIndex(rawPage);
+    if (CLodPredictedClipmapIndex(rawPage) >=
+            kCLodVirtualShadowClipmapCount ||
+        CLodPredictedVirtualAddress(rawPage) >=
+            kCLodVirtualShadowPredictedPageEntriesPerClipmap)
     {
         return;
     }
 
     const uint64_t dependencyKey =
         (uint64_t(rawPage.sourceGroupGlobalIndex) << 32u) |
-        uint64_t(rawPage.physicalPageIndex);
+        uint64_t(rawPhysicalPageIndex);
     // Collisions are resolved against the full 64-bit key, so the slot hash
     // only needs good avalanche behavior.  Mix the two dense 32-bit fields in
     // native integer arithmetic instead of emulating two 64-bit multiplies.
     uint mixedDependencyKey =
         rawPage.sourceGroupGlobalIndex * 0x9E3779B9u +
-        rawPage.physicalPageIndex * 0x85EBCA6Bu;
+        rawPhysicalPageIndex * 0x85EBCA6Bu;
     mixedDependencyKey ^= mixedDependencyKey >> 16u;
     mixedDependencyKey *= 0x7FEB352Du;
     mixedDependencyKey ^= mixedDependencyKey >> 15u;
@@ -1804,13 +1829,11 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
 
     CLodVirtualShadowPredictedPage outputPage;
     outputPage.sourceGroupGlobalIndex = rawPage.sourceGroupGlobalIndex;
-    outputPage.physicalPageIndex = rawPage.physicalPageIndex;
+    outputPage.physicalClipmapVirtualLow =
+        rawPage.physicalClipmapVirtualLow;
+    outputPage.virtualHighAndInstance = rawPage.virtualHighAndInstance;
     outputPage.allocationGeneration = rawPage.allocationGeneration;
     outputPage.contentGeneration = rawPage.contentGeneration;
-    outputPage.clipmapIndex = rawPage.clipmapIndex;
-    outputPage.virtualAddress = rawPage.virtualAddress;
-    outputPage.perMeshInstanceBufferIndex = rawPage.perMeshInstanceBufferIndex;
-    outputPage.pad0 = perFrameBuffer.frameIndex;
     outputPages[outputPageIndex] = outputPage;
     InterlockedAdd(statsBuffer[0].readyUpgradePageCount, 1u);
 }
@@ -3573,19 +3596,47 @@ void CreateRasterBucketsHistogramCommandCSMain()
         const uint meshletReplayCount = min(replayState.meshletWriteCount, CLOD_MESHLET_REPLAY_CAPACITY);
         const uint reyesSplitReplayCount = min(replayState.reyesSplitWriteCount, CLOD_REYES_SPLIT_REPLAY_CAPACITY);
         const uint reyesDiceReplayCount = min(replayState.reyesDiceWriteCount, CLOD_REYES_DICE_REPLAY_CAPACITY);
+        const uint64_t replayAddress =
+            (uint64_t(CLOD_CREATE_REPLAY_ADDRESS_HIGH) << 32u) |
+            uint64_t(CLOD_CREATE_REPLAY_ADDRESS_LOW);
+        const uint64_t nodeInputAddress =
+            (uint64_t(CLOD_CREATE_NODE_INPUT_ADDRESS_HIGH) << 32u) |
+            uint64_t(CLOD_CREATE_NODE_INPUT_ADDRESS_LOW);
 
         // Slot 0 is CLodMultiNodeGpuInput (CPU initialized); slot 1+ are CLodNodeGpuInput records.
-        // Entry point 1 = TraverseNodes (node replay region, 12-byte stride).
-        // Entry point 2 = ClusterCull1  (meshlet replay region, 24-byte stride).
-        // recordsAddress for meshlet region is patched by C++ to include CLOD_REPLAY_MESHLET_REGION_OFFSET.
+        // Runtime patching occurs after render-graph alias placement, so these
+        // addresses remain valid for the complete phase-2 replay lifetime.
+        nodeInputs[0].entrypointIndex = CLOD_CREATE_NODE_INPUT_COUNT;
+        nodeInputs[0].numRecords = 0u;
+        nodeInputs[0].recordsAddress = nodeInputAddress + 24u;
+        nodeInputs[0].recordStride = 24u;
+
+        // Entry point 1 = TraverseNodes.
+        nodeInputs[1].entrypointIndex = 1u;
         nodeInputs[1].numRecords = nodeReplayCount;
+        nodeInputs[1].recordsAddress = replayAddress;
         nodeInputs[1].recordStride = CLOD_NODE_REPLAY_STRIDE_BYTES;
+
+        // Entry point 2 = ClusterCull1.
+        nodeInputs[2].entrypointIndex = 2u;
         nodeInputs[2].numRecords = meshletReplayCount;
+        nodeInputs[2].recordsAddress =
+            replayAddress + CLOD_REPLAY_MESHLET_REGION_OFFSET;
         nodeInputs[2].recordStride = CLOD_MESHLET_REPLAY_STRIDE_BYTES;
-        nodeInputs[3].numRecords = reyesSplitReplayCount;
-        nodeInputs[3].recordStride = CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES;
-        nodeInputs[4].numRecords = reyesDiceReplayCount;
-        nodeInputs[4].recordStride = CLOD_REYES_DICE_REPLAY_STRIDE_BYTES;
+
+        if (CLOD_CREATE_NODE_INPUT_COUNT > 2u)
+        {
+            nodeInputs[3].entrypointIndex = 3u;
+            nodeInputs[3].numRecords = reyesSplitReplayCount;
+            nodeInputs[3].recordsAddress =
+                replayAddress + CLOD_REPLAY_REYES_SPLIT_REGION_OFFSET;
+            nodeInputs[3].recordStride = CLOD_REYES_SPLIT_REPLAY_STRIDE_BYTES;
+            nodeInputs[4].entrypointIndex = 4u;
+            nodeInputs[4].numRecords = reyesDiceReplayCount;
+            nodeInputs[4].recordsAddress =
+                replayAddress + CLOD_REPLAY_REYES_DICE_REGION_OFFSET;
+            nodeInputs[4].recordStride = CLOD_REYES_DICE_REPLAY_STRIDE_BYTES;
+        }
     }
 }
 

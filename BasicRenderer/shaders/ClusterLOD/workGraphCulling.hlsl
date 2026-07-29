@@ -1644,12 +1644,13 @@ bool ReplayTryAppendMeshlet(uint instanceIndex, uint viewId, uint groupId, uint 
     }
 
     // CLodClusterRunRecord layout: instanceIndex, viewId, groupIdPacked,
-    // clusterIndexAndCount, pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex, pad.
+    // clusterIndexAndCount, pageSlabDescriptorIndex, pageSlabByteOffset,
+    // assemblyTransformIndex. This is also the work-graph node-record ABI.
     const uint byteOffset = CLOD_REPLAY_MESHLET_REGION_OFFSET + slot * CLOD_MESHLET_REPLAY_STRIDE_BYTES;
     replayBuffer.Store4(byteOffset,       uint4(instanceIndex, viewId,
                                                 PackGroupId(groupId, CLOD_RECORD_SOURCE_REPLAY),
                                                 PackClusterIndexAndCount(localMeshletIndex, 1u)));
-    replayBuffer.Store4(byteOffset + 16u, uint4(pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex, 0u));
+    replayBuffer.Store3(byteOffset + 16u, uint3(pageSlabDescriptorIndex, pageSlabByteOffset, assemblyTransformIndex));
     return true;
 }
 

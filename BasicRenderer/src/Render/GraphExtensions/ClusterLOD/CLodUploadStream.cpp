@@ -269,7 +269,8 @@ std::shared_ptr<CLodUploadBatch> CLodUploadStream::Seal(
 void CLodUploadStream::Recycle(const std::shared_ptr<CLodUploadBatch>& batch) {
     if (!batch) return;
     for (const auto& page : batch->pages) {
-        if (page && page->capacity == m_pageSize) {
+        if (page && page->capacity == m_pageSize &&
+            m_freePages.size() < MaxCachedPages) {
             page->tail = 0;
             m_freePages.push_back(page);
         }

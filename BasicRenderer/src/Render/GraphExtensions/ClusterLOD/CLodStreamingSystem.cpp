@@ -874,6 +874,7 @@ CLodStreamingSystem::CLodStreamingSystem() {
     m_streamingPinnedGroupsBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
     m_streamingResidencyInitializedBitsCpu.assign(CLodBitsetWordCount(m_streamingStorageGroupCapacity), 0u);
     m_groupLastUsedTick.assign(m_streamingStorageGroupCapacity, 0u);
+    m_recentlyUsedGroupTrackedCpu.assign(m_streamingStorageGroupCapacity, 0u);
     m_streamingRequestStateByGroup.assign(m_streamingStorageGroupCapacity, StreamingRequestState::None);
     m_pendingLoadPriorityByGroup.assign(m_streamingStorageGroupCapacity, 0u);
     m_pendingStreamingRequestHeapIndexByGroup.assign(m_streamingStorageGroupCapacity, UINT32_MAX);
@@ -1085,6 +1086,11 @@ void CLodStreamingSystem::ShutdownGraphResources() {
     m_streamingReadbackDiscardedFenceCounter.store(
         m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
         std::memory_order_release);
+}
+
+void CLodStreamingSystem::QuiesceGraphResourceAccess() {
+    StopStreamingWorker();
+    InvalidateVirtualShadowUpgradeUploadMappings();
 }
 
 void CLodStreamingSystem::Shutdown() {
@@ -1326,6 +1332,7 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     m_pendingResidencyCommitGroups.clear();
     m_groupsUsingPinnedStorage.clear();
     m_usedGroupsWordsCpu.clear();
+    m_recentlyUsedGroupsCpu.clear();
     std::fill(m_parentGroupByGroup.begin(), m_parentGroupByGroup.end(), UINT32_MAX);
     m_pageLruInitialized = false;
     m_streamingResidentGroupsCount = 0u;
@@ -1338,6 +1345,10 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     std::fill(m_streamingPinnedGroupsBitsCpu.begin(), m_streamingPinnedGroupsBitsCpu.end(), 0u);
     std::fill(m_streamingResidencyInitializedBitsCpu.begin(), m_streamingResidencyInitializedBitsCpu.end(), 0u);
     std::fill(m_groupLastUsedTick.begin(), m_groupLastUsedTick.end(), 0u);
+    std::fill(
+        m_recentlyUsedGroupTrackedCpu.begin(),
+        m_recentlyUsedGroupTrackedCpu.end(),
+        0u);
     std::fill(m_streamingRequestStateByGroup.begin(), m_streamingRequestStateByGroup.end(), StreamingRequestState::None);
     std::fill(m_pendingLoadPriorityByGroup.begin(), m_pendingLoadPriorityByGroup.end(), 0u);
     std::fill(m_pendingStreamingRequestHeapIndexByGroup.begin(), m_pendingStreamingRequestHeapIndexByGroup.end(), UINT32_MAX);
@@ -2515,11 +2526,11 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies(
             // when the source group is already resident.
             QueueVirtualShadowReadyDependency(VirtualShadowDependency{
                 CLodVirtualShadowPageToken{
-                    request.physicalPageIndex,
+                    request.PhysicalPageIndex(),
                     request.allocationGeneration,
                     request.contentGeneration,
-                    request.clipmapIndex,
-                    request.virtualAddress},
+                    request.ClipmapIndex(),
+                    request.VirtualAddress()},
                 m_virtualShadowResidencyGenerationByGroup[sourceGroup]});
             ++m_virtualShadowUpgradeStats.dependenciesObserved;
             ++m_virtualShadowUpgradeStats.lateResidentDependencies;
@@ -2589,11 +2600,11 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies(
             m_virtualShadowBatchSourceChainCountByGroup[sourceGroup];
         VirtualShadowDependency dependency{
             CLodVirtualShadowPageToken{
-                request.physicalPageIndex,
+                request.PhysicalPageIndex(),
                 request.allocationGeneration,
                 request.contentGeneration,
-                request.clipmapIndex,
-                request.virtualAddress},
+                request.ClipmapIndex(),
+                request.VirtualAddress()},
             0u};
         for (uint32_t missingIndex = 0u;
              missingIndex < chainCount;
@@ -2720,8 +2731,23 @@ void CLodStreamingSystem::PublishVirtualShadowUpgradeUpload() {
     }
 
     auto& slot = m_virtualShadowUpgradeUploadSlots[slotIndex];
+    const uint64_t backingGeneration =
+        slot.buffer ? slot.buffer->GetBackingGeneration() : 0u;
+    if (slot.mapped != nullptr &&
+        (backingGeneration == 0u ||
+         slot.mappedBackingGeneration != backingGeneration)) {
+        // Logical graph resources can survive a rebuild while their backing
+        // allocations do not. A pointer returned by Map belongs to one
+        // particular backing generation and must never cross rematerialization.
+        slot.mapped = nullptr;
+        slot.mappedBackingGeneration = 0u;
+    }
     if (slot.mapped == nullptr && slot.buffer && slot.buffer->IsMaterialized()) {
         slot.buffer->GetAPIResource().Map(&slot.mapped, 0, 0);
+        if (slot.mapped != nullptr) {
+            slot.mappedBackingGeneration =
+                slot.buffer->GetBackingGeneration();
+        }
     }
     if (slot.mapped == nullptr) {
         slot.state.store(VirtualShadowUpgradeUploadState::Free, std::memory_order_release);
@@ -2774,22 +2800,34 @@ void CLodStreamingSystem::SetVirtualShadowUpgradeUploadBuffers(
     const uint32_t count = std::min<uint32_t>(
         static_cast<uint32_t>(buffers.size()),
         VirtualShadowUpgradeUploadSlotCapacity);
+    InvalidateVirtualShadowUpgradeUploadMappings();
     m_virtualShadowReadyUploadSlots.Reset();
     m_virtualShadowUpgradeUploadSlotCount = count;
     for (uint32_t index = 0u; index < VirtualShadowUpgradeUploadSlotCapacity;
          ++index) {
         auto& slot = m_virtualShadowUpgradeUploadSlots[index];
-        if (slot.mapped != nullptr && slot.buffer && slot.buffer->IsMaterialized()) {
-            slot.buffer->GetAPIResource().Unmap(0, 0);
-        }
         slot.buffer = index < count ? std::move(buffers[index]) : nullptr;
         slot.mapped = nullptr;
+        slot.mappedBackingGeneration = 0u;
         slot.inputCount.store(0u, std::memory_order_relaxed);
         slot.state.store(
             VirtualShadowUpgradeUploadState::Free,
             std::memory_order_relaxed);
     }
     RequestStreamingFrameWork();
+}
+
+void CLodStreamingSystem::InvalidateVirtualShadowUpgradeUploadMappings() {
+    for (auto& slot : m_virtualShadowUpgradeUploadSlots) {
+        if (slot.mapped != nullptr && slot.buffer &&
+            slot.buffer->IsMaterialized() &&
+            slot.mappedBackingGeneration ==
+                slot.buffer->GetBackingGeneration()) {
+            slot.buffer->GetAPIResource().Unmap(0, 0);
+        }
+        slot.mapped = nullptr;
+        slot.mappedBackingGeneration = 0u;
+    }
 }
 
 bool CLodStreamingSystem::TryAcquireVirtualShadowUpgradeUpload(
@@ -2864,6 +2902,7 @@ void CLodStreamingSystem::ClearVirtualShadowUpgradeState() {
     m_virtualShadowBatchSourceChainCountByGroup.clear();
     m_virtualShadowBatchSourceGeneration = 0u;
     m_virtualShadowReadyUploadSlots.Reset();
+    InvalidateVirtualShadowUpgradeUploadMappings();
     for (uint32_t index = 0u; index < m_virtualShadowUpgradeUploadSlotCount; ++index) {
         auto& slot = m_virtualShadowUpgradeUploadSlots[index];
         slot.inputCount.store(0u, std::memory_order_relaxed);
@@ -6007,6 +6046,7 @@ void CLodStreamingSystem::EnsureStreamingStorageCapacity(uint32_t requiredGroupC
     m_virtualShadowBatchSourceChainOffsetByGroup.resize(newCapacity, 0u);
     m_virtualShadowBatchSourceChainCountByGroup.resize(newCapacity, 0u);
     m_groupLastUsedTick.resize(newCapacity, 0u);
+    m_recentlyUsedGroupTrackedCpu.resize(newCapacity, 0u);
     m_streamingRequestStateByGroup.resize(newCapacity, StreamingRequestState::None);
     m_pendingLoadPriorityByGroup.resize(newCapacity, 0u);
     m_pendingStreamingRequestHeapIndexByGroup.resize(newCapacity, UINT32_MAX);
@@ -7811,66 +7851,27 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
                 }
                 if (groupIndex < m_groupLastUsedTick.size()) {
                     m_groupLastUsedTick[groupIndex] = m_streamingDiagnosticTick;
+                    if (!m_recentlyUsedGroupTrackedCpu[groupIndex]) {
+                        m_recentlyUsedGroupTrackedCpu[groupIndex] = 1u;
+                        m_recentlyUsedGroupsCpu.push_back(groupIndex);
+                    }
                 }
             }
         }
     }
 
-    // Touch the page LRU for all GPU-reported visible groups and their parent chains.
+    // ProtectReferencedPages::UsedGroups immediately follows this poll in the
+    // streaming service. It already walks the same selected-parent chains and
+    // touches their pages, so doing that here as well only duplicates the work.
     {
         ZoneScopedN("CLodStreamingSystem::PollCompletedReadbackSlots::TouchVisibleGroupsLru");
-        for (const uint32_t word : m_lruTouchedGroupWordsScratch) {
-            if (word < m_lruTouchedGroupsBitsScratch.size()) {
-                m_lruTouchedGroupsBitsScratch[word] = 0u;
-            }
-        }
-        m_lruTouchedGroupWordsScratch.clear();
-        if (m_lruTouchedGroupsBitsScratch.size() < m_streamingActiveGroupsBitsCpu.size()) {
-            m_lruTouchedGroupsBitsScratch.resize(m_streamingActiveGroupsBitsCpu.size(), 0u);
-        }
-
-        auto touchGroupPagesOnce = [this](uint32_t touchedGroup) {
-            const uint32_t wordAddress = BitWordAddress(touchedGroup);
-            if (wordAddress >= m_lruTouchedGroupsBitsScratch.size()) {
-                return;
-            }
-
-            const uint32_t bitMask = BitMask(touchedGroup);
-            uint32_t& touchedWord = m_lruTouchedGroupsBitsScratch[wordAddress];
-            if ((touchedWord & bitMask) != 0u) {
-                return;
-            }
-            if (touchedWord == 0u) {
-                m_lruTouchedGroupWordsScratch.push_back(wordAddress);
-            }
-            touchedWord |= bitMask;
-
-            auto pagesIt = m_groupOwnedPages.find(touchedGroup);
-            if (pagesIt == m_groupOwnedPages.end()) {
-                return;
-            }
-
-            for (uint32_t page : pagesIt->second) {
-                if (page != ~0u) {
-                    m_pageLru.Touch(page);
-                }
-            }
-        };
-
-        for (const uint32_t groupIndex : m_usedGroupsBatchScratch) {
-            touchGroupPagesOnce(groupIndex);
-
-            uint32_t current = groupIndex;
-            for (size_t hop = 0; hop < m_streamingStorageGroupCapacity; ++hop) {
-                uint32_t parent = 0u;
-                if (!TryGetCachedParentGroup(current, parent) ||
-                    parent == current) {
-                    break;
-                }
-
-                touchGroupPagesOnce(parent);
-                current = parent;
-            }
+        const bool recordCpuTiming = br::telemetry::timing::Enabled();
+        const uint64_t timingStartNs =
+            recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+        if (recordCpuTiming) {
+            br::telemetry::timing::Record(
+                "CLod.Bookkeeping.TouchVisibleGroupsLRU",
+                br::telemetry::timing::NowNs() - timingStartNs);
         }
     }
 
@@ -8364,6 +8365,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::UsedGroups");
+            const bool recordCpuTiming = br::telemetry::timing::Enabled();
+            const uint64_t timingStartNs =
+                recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
             for (uint32_t wordIndex : m_usedGroupsWordsCpu) {
                 if (wordIndex >= m_usedGroupsBitsCpu.size()) {
                     continue;
@@ -8375,16 +8379,48 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                     ProtectGroupAndAncestors((wordIndex << 5u) | bit);
                 }
             }
+            if (recordCpuTiming) {
+                br::telemetry::timing::Record(
+                    "CLod.Bookkeeping.ProtectReferencedPages.UsedGroups",
+                    br::telemetry::timing::NowNs() - timingStartNs);
+            }
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::RecentlyUsedOwnedGroups");
+            const bool recordCpuTiming = br::telemetry::timing::Enabled();
+            const uint64_t timingStartNs =
+                recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
             const uint64_t protectedUsedWindow = static_cast<uint64_t>(std::max<uint32_t>(m_streamingReadbackRingSize, 1u) + 1u);
-            for (const auto& [groupIndex, _] : m_groupOwnedPages) {
-                if (groupIndex < m_groupLastUsedTick.size() &&
+            size_t retainedGroupCount = 0u;
+            for (const uint32_t groupIndex : m_recentlyUsedGroupsCpu) {
+                const bool remainsRecent =
+                    groupIndex < m_groupLastUsedTick.size() &&
                     m_groupLastUsedTick[groupIndex] != 0u &&
-                    m_streamingDiagnosticTick <= m_groupLastUsedTick[groupIndex] + protectedUsedWindow) {
+                    m_streamingDiagnosticTick <=
+                        m_groupLastUsedTick[groupIndex] + protectedUsedWindow;
+                if (!remainsRecent) {
+                    if (groupIndex < m_recentlyUsedGroupTrackedCpu.size()) {
+                        m_recentlyUsedGroupTrackedCpu[groupIndex] = 0u;
+                    }
+                    continue;
+                }
+
+                m_recentlyUsedGroupsCpu[retainedGroupCount++] = groupIndex;
+                const uint32_t protectedWord = BitWordAddress(groupIndex);
+                if (protectedWord < m_protectedGroupsBitsScratch.size() &&
+                    (m_protectedGroupsBitsScratch[protectedWord] &
+                        BitMask(groupIndex)) != 0u) {
+                    continue;
+                }
+                if (m_groupOwnedPages.contains(groupIndex)) {
                     ProtectGroupAndAncestors(groupIndex);
                 }
+            }
+            m_recentlyUsedGroupsCpu.resize(retainedGroupCount);
+            if (recordCpuTiming) {
+                br::telemetry::timing::Record(
+                    "CLod.Bookkeeping.ProtectReferencedPages.RecentlyUsedOwnedGroups",
+                    br::telemetry::timing::NowNs() - timingStartNs);
             }
         }
         {

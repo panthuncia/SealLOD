@@ -1064,9 +1064,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         auto baseScene = std::make_shared<Scene>();
 
-        //auto dragonScene = LoadModel("models/dragon.glb");
-        //dragonScene->GetRoot().set<Components::Scale>({ 100, 100, 100 });
-        //dragonScene->GetRoot().set<Components::Position>({ 0.0, 1, 1.0 });
+        auto dragonScene = LoadModel("models/dragon.glb");
+        dragonScene->GetRoot().set<Components::Scale>({ 100, 100, 100 });
+        dragonScene->GetRoot().set<Components::Position>({ -3, 5, 0 });
 
     //auto carScene = LoadModel("models/porche.glb");
     //carScene->GetRoot().set<Components::Scale>({ 0.6, 0.6, 0.6 });
@@ -1079,7 +1079,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     auto tigerScene = LoadModel("models/tiger.glb");
     tigerScene->GetRoot().set<Components::Scale>({ 0.01, 0.01, 0.01 });
-	tigerScene->GetRoot().set<Components::Position>({30, 5, 0});
+	tigerScene->GetRoot().set<Components::Position>({3, 5, 0});
 
 	//auto shiba = LoadModel("models/shiba.glb");
 
@@ -1224,7 +1224,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
  //   mountainScene->GetRoot().set<Components::Position>({ 0.0, -10.0, 0.0 });
 	//renderer.GetCurrentScene()->AppendScene(mountainScene->Clone());
 
-	//renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
+	renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
     
 	renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
 
@@ -1244,8 +1244,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(20.f, 10.f, 0.f);
-        XMFLOAT3 lookAt = XMFLOAT3(21.0f, 5.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(10.f, 5.f, 0.f);
+        XMFLOAT3 lookAt = XMFLOAT3(11.0f, 5.0f, 0.0f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;
@@ -1285,7 +1285,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         scene->SetCamera(pos, lookAt, up, fov, aspectRatio, zNear, zFar);
     
-	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(0, -6, -1));
+	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(-0.1, -0.5, -0.9));
         //auto light3 = renderer.GetCurrentScene()->CreateSpotLightECS(L"light3", XMFLOAT3(0, 10, 3), XMFLOAT3(1, 1, 1), 2000.0, {0, -1, 0}, .5, .8, 0.0, 0.0, 1.0);
         //auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light1", XMFLOAT3(0, 1, 3), XMFLOAT3(1, 1, 1), 100.0, 0.0, 0.0, 1.0);
     
@@ -1403,14 +1403,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     5.0f + ((leg % 3u) == 2u ? 4.0f : 0.0f),
                     std::sin(angle) * radius};
                 if (frameIndex == 1u || frameIndex % 30u == 0u) {
-                    renderer.GetCurrentScene()->SetCamera(
-                        stressPosition,
-                        XMFLOAT3(0.0f, 5.0f, 0.0f),
-                        XMFLOAT3(0.0f, 1.0f, 0.0f),
-                        kStressFov,
-                        kStressAspect,
-                        0.1f,
-                        1000.0f);
+                    const XMFLOAT3 stressTarget{0.0f, 5.0f, 0.0f};
+                    const XMFLOAT3 stressUp{0.0f, 1.0f, 0.0f};
+                    const XMMATRIX stressView = XMMatrixLookAtRH(
+                        XMLoadFloat3(&stressPosition),
+                        XMLoadFloat3(&stressTarget),
+                        XMLoadFloat3(&stressUp));
+                    const XMMATRIX stressModel = XMMatrixInverse(nullptr, stressView);
+                    const XMVECTOR stressRotation = XMQuaternionNormalize(
+                        XMQuaternionRotationMatrix(stressModel));
+                    auto& stressCamera =
+                        renderer.GetCurrentScene()->GetPrimaryCamera();
+                    auto stressCameraComponent =
+                        stressCamera.get<Components::Camera>();
+                    stressCameraComponent.fov = kStressFov;
+                    stressCameraComponent.aspect = kStressAspect;
+                    stressCameraComponent.zNear = 0.1f;
+                    stressCameraComponent.zFar = 1000.0f;
+                    stressCamera
+                        .set<Components::Camera>(stressCameraComponent)
+                        .set<Components::Position>(
+                            {stressPosition.x,
+                             stressPosition.y,
+                             stressPosition.z})
+                        .set<Components::Rotation>(stressRotation)
+                        .set<Components::Matrix>(stressModel);
                 }
 
                 if (frameIndex % 120u == 0u) {
