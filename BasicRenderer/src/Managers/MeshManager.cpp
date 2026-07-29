@@ -192,9 +192,12 @@ MeshManager::MeshManager() {
 	// Page pool
 	{
 		PagePool::Config ppConfig;
-		ppConfig.pageSize     = 256 * 1024;         // 256 KB
 		ppConfig.slabSize     = 128 * 1024 * 1024;  // 128 MB
-		ppConfig.numStreamingSlabs = 8;
+		ppConfig.pinnedSlabSize = 4 * 1024 * 1024;  // Small per-class pinned growth
+		ppConfig.numStreamingSlabs = 8;             // Shared 1 GiB cap across classes
+		// Full-Skyrim telemetry: 1/1/1/2/3 slabs for 16/32/64/128/256 KiB.
+		// This consumes the same eight 128 MiB slabs as the old fixed pool.
+		ppConfig.initialStreamingSlabs = { 1u, 1u, 1u, 2u, 3u };
 		ppConfig.debugName    = "CLodPagePool";
 		m_clodPagePool = std::make_unique<PagePool>(ppConfig);
 	}
@@ -2292,7 +2295,7 @@ MeshManager::DiskStreamingApplyResult MeshManager::PrepareCompletedCLodDiskStrea
 			}
 
 			const uint32_t blobSize = result.directStoragePageBlobSizes[ci];
-			if (blobSize == 0u || blobSize > m_clodPagePool->GetPageSize()) {
+			if (blobSize == 0u || blobSize > m_clodPagePool->GetPageSize(page)) {
 				spdlog::error(
 					"CLod streaming: DirectStorage GPU upload for group {} page {} has invalid payload size {}",
 					result.groupGlobalIndex,
@@ -2575,7 +2578,7 @@ bool MeshManager::CommitCLodGroupResidency(
 			if (pageMapEntries[i].slabDescriptorIndex != expectedSlabDescriptor ||
 				pageMapEntries[i].slabByteOffset != expectedSlabByteOffset) {
 				spdlog::warn(
-					"CLod streaming: refusing to commit group {} residency because page {} map entry points at slab/offset {}:{} but allocation page {} resolves to {}:{}",
+					"CLod streaming: refusing to commit group {} residency because page {} map entry points at descriptor/offset {}:{} but allocation page {} resolves to {}:{}",
 					groupGlobalIndex,
 					i,
 					pageMapEntries[i].slabDescriptorIndex,
@@ -2593,6 +2596,12 @@ bool MeshManager::CommitCLodGroupResidency(
 	auto& residentAllocations = sharedState->residentGroupAllocations[localIndex];
 	const bool wasResident = IsCLodGroupResident(*sharedState, localIndex);
 	const uint32_t previousAllocationCount = static_cast<uint32_t>(residentAllocations.pageAllocations.size());
+	uint64_t previousAllocationBytes = 0u;
+	if (m_clodPagePool != nullptr) {
+		for (const PagePool::PageAllocation& allocation : residentAllocations.pageAllocations) {
+			previousAllocationBytes += m_clodPagePool->GetPageSize(allocation.firstPageID);
+		}
+	}
 
 	residentAllocations.Reset();
 	residentAllocations.pageAllocations.assign(pageAllocations.begin(), pageAllocations.end());
@@ -2619,6 +2628,24 @@ bool MeshManager::CommitCLodGroupResidency(
 		m_debugTotalStreamedBytes.fetch_add(streamedBytes, std::memory_order_relaxed);
 	}
 	const uint32_t newAllocationCount = static_cast<uint32_t>(residentAllocations.pageAllocations.size());
+	uint64_t newAllocationBytes = 0u;
+	if (m_clodPagePool != nullptr) {
+		for (const PagePool::PageAllocation& allocation : residentAllocations.pageAllocations) {
+			newAllocationBytes += m_clodPagePool->GetPageSize(allocation.firstPageID);
+		}
+	}
+	if (newAllocationBytes >= previousAllocationBytes) {
+		m_debugResidentAllocationBytes.fetch_add(
+			newAllocationBytes - previousAllocationBytes,
+			std::memory_order_relaxed);
+	} else {
+		const uint64_t difference = previousAllocationBytes - newAllocationBytes;
+		const uint64_t previous =
+			m_debugResidentAllocationBytes.load(std::memory_order_relaxed);
+		m_debugResidentAllocationBytes.store(
+			previous >= difference ? previous - difference : 0u,
+			std::memory_order_relaxed);
+	}
 	if (newAllocationCount >= previousAllocationCount) {
 		m_debugResidentAllocations.fetch_add(newAllocationCount - previousAllocationCount, std::memory_order_relaxed);
 	} else {
@@ -2972,6 +2999,13 @@ MeshManager::CLodGroupStreamingInfo MeshManager::GetCLodGroupStreamingInfo(uint3
 		info.group = group;
 		info.pageMapBase = group.pageMapBase;
 		info.meshPageIndices = GetCLodGroupMeshPageIndices(*sharedState, localIndex);
+		info.meshPageBlobSizes.reserve(info.meshPageIndices.size());
+		for (uint32_t meshPageIndex : info.meshPageIndices) {
+			info.meshPageBlobSizes.push_back(
+				meshPageIndex < sharedState->pageDiskLocators.size()
+					? sharedState->pageDiskLocators[meshPageIndex].blobSizeBytes
+					: 0u);
+		}
 		info.pageCount = static_cast<uint32_t>(info.meshPageIndices.size());
 		const uint32_t firstSegment = group.firstSegment;
 		const uint32_t segmentCount = group.segmentCount;
@@ -3212,10 +3246,21 @@ bool MeshManager::ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32
 	if (groupLocalIndex < state.residentGroupAllocations.size()) {
 		auto& allocs = state.residentGroupAllocations[groupLocalIndex];
 		const uint32_t ac = static_cast<uint32_t>(allocs.pageAllocations.size());
+		uint64_t allocationBytes = 0u;
+		if (m_clodPagePool != nullptr) {
+			for (const PagePool::PageAllocation& allocation : allocs.pageAllocations) {
+				allocationBytes += m_clodPagePool->GetPageSize(allocation.firstPageID);
+			}
+		}
 		{
 			uint32_t prevAllocs = m_debugResidentAllocations.load(std::memory_order_relaxed);
 			m_debugResidentAllocations.store((prevAllocs >= ac) ? (prevAllocs - ac) : 0u, std::memory_order_relaxed);
 		}
+		const uint64_t previousBytes =
+			m_debugResidentAllocationBytes.load(std::memory_order_relaxed);
+		m_debugResidentAllocationBytes.store(
+			previousBytes >= allocationBytes ? previousBytes - allocationBytes : 0u,
+			std::memory_order_relaxed);
 	}
 	DeallocateCLodGroupChunkAllocations(state, groupLocalIndex);
 	UploadCLodGroupChunk(state, groupLocalIndex);
@@ -3357,9 +3402,8 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 	CLodStreamingDebugStats stats{};
 	stats.residentGroups = m_debugResidentGroups.load(std::memory_order_relaxed);
 	stats.residentAllocations = m_debugResidentAllocations.load(std::memory_order_relaxed);
-	stats.residentAllocationBytes = m_clodPagePool
-		? static_cast<uint64_t>(stats.residentAllocations) * m_clodPagePool->GetPageSize()
-		: 0ull;
+	stats.residentAllocationBytes =
+		m_debugResidentAllocationBytes.load(std::memory_order_relaxed);
 	stats.totalStreamedBytes = m_debugTotalStreamedBytes.load(std::memory_order_relaxed);
 	stats.ioAdmissionTarget = CLodIoAdmissionTarget();
 	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().GetNumIoThreads();

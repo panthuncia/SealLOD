@@ -240,6 +240,7 @@ public:
 		std::vector<ClusterLODGroupSegment> segments;
 		std::vector<ReferencedPageSegment> referencedPageSegments;
 		std::vector<uint32_t> meshPageIndices;
+		std::vector<uint32_t> meshPageBlobSizes;
 		uint32_t vertexByteSize = 0;
 		bool valid = false;
 	};
@@ -385,6 +386,7 @@ private:
 	// Incremental debug-stats counters — updated in place by residency mutations.
 	std::atomic<uint32_t> m_debugResidentGroups{0};
 	std::atomic<uint32_t> m_debugResidentAllocations{0};
+	std::atomic<uint64_t> m_debugResidentAllocationBytes{0};
 	std::atomic<uint64_t> m_debugTotalStreamedBytes{0};
 	std::atomic<uint32_t> m_clodActiveMaxTraversalDepth{0};
 

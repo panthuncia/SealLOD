@@ -465,7 +465,10 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
                 CLodVisibleClusterMarkVoxelPayload(blockPayload);
         }
         uint4 expandedCluster = packedCluster;
-        expandedCluster.w = blockPayload;
+        expandedCluster.w =
+            (packedCluster.w &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_MASK) |
+            blockPayload;
         CLodStoreVisibleClusterPackedWordsRW(
             expandedClusters,
             gs_outputBaseIndex + outputIndex,

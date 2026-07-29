@@ -42,7 +42,7 @@ bool AcquireMappedContainer(
 	uint32_t expectedPageCount,
 	std::shared_ptr<const MappedContainerLease>& outLease);
 
-inline constexpr uint32_t kSchemaVersion = 78;
+inline constexpr uint32_t kSchemaVersion = 79;
 
 struct CacheKey {
 	std::string sourceIdentifier;

@@ -792,8 +792,8 @@ struct VisibleCluster {
     unsigned int instanceID;
     unsigned int localMeshletIndex;       // page-local meshlet index
     unsigned int groupID;
-    unsigned int pageSlabDescriptorIndex; // pre-resolved page slab descriptor
-    unsigned int pageSlabByteOffset;      // pre-resolved page slab byte offset
+    unsigned int pageSlabDescriptorIndex;
+    unsigned int pageSlabByteOffset;
     unsigned int shadowClipmapIndex;      // Virtual shadow clipmap index, or 0xFFFFFFFF when not applicable
     unsigned int virtualShadowPayload;
     bool hasVirtualShadowBlockData;
@@ -811,9 +811,9 @@ inline constexpr uint32_t PackedVisibleClusterInstanceBits = 24u;
 inline constexpr uint32_t PackedVisibleClusterLocalMeshletBits = 14u;
 inline constexpr uint32_t PackedVisibleClusterGroupBits = 20u;
 inline constexpr uint32_t PackedVisibleClusterPageDescriptorBits = 20u;
-inline constexpr uint32_t PackedVisibleClusterPageIndexBits = 10u;
-inline constexpr uint32_t PackedVisibleClusterPageShift = 18u;
-inline constexpr uint32_t PackedVisibleClusterPageSizeBytes = 1u << PackedVisibleClusterPageShift;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetLowBits = 10u;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetHighBits = 4u;
+inline constexpr uint32_t PackedVisibleClusterPageOffsetShift = 14u;
 inline constexpr uint32_t PackedVisibleClusterInvalidShadowClipmapIndex = 0xFFFFFFFFu;
 inline constexpr uint32_t PackedVisibleClusterStrideBytes = 16u;
 inline constexpr uint32_t PackedVisibleClusterVsmClipmapBits = 5u;
@@ -848,8 +848,11 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
     cluster.localMeshletIndex = word1 & 0x3FFFu;
     cluster.groupID = ((word1 >> PackedVisibleClusterLocalMeshletBits) & 0x3FFFFu) | ((word2 & 0x3u) << 18u);
     cluster.pageSlabDescriptorIndex = (word2 >> 2u) & 0xFFFFFu;
-    cluster.pageSlabByteOffset = ((word2 >> 22u) & 0x3FFu) << PackedVisibleClusterPageShift;
-    cluster.virtualShadowPayload = word3;
+    const uint32_t pageOffsetUnits =
+        ((word2 >> 22u) & 0x3FFu) |
+        (((word3 >> 25u) & 0xFu) << PackedVisibleClusterPageOffsetLowBits);
+    cluster.pageSlabByteOffset = pageOffsetUnits << PackedVisibleClusterPageOffsetShift;
+    cluster.virtualShadowPayload = word3 & ~(0xFu << 25u);
 
     const uint32_t encodedClipmapIndex =
         (word3 >> PackedVisibleClusterVsmClipmapShift) & PackedVisibleClusterVsmClipmapMask;

@@ -4,8 +4,7 @@
 // Pure-compute frontiers are internal scratch data and do not have the work
 // graph ABI/stable-address requirements of replay records. Pack the fields that
 // already have renderer-wide bounds: draw indices use 24 bits, view IDs 8 bits,
-// descriptors 20 bits, and page slab offsets are 256 KiB aligned within a
-// 256 MiB slab.
+// page addresses remain exact. This scratch ABI can afford two uints for them.
 struct PureComputeTraverseNodeRecord
 {
     uint instanceAndView;
@@ -18,7 +17,8 @@ struct PureComputeClusterRunRecord
     uint instanceAndView;
     uint groupIdPacked;
     uint clusterIndexAndCount;
-    uint pageLocatorPacked;
+    uint pageSlabDescriptorIndex;
+    uint pageSlabByteOffset;
     uint assemblyTransformIndex;
 };
 
@@ -47,9 +47,8 @@ PureComputeClusterRunRecord PackPureComputeClusterRunRecord(CLodClusterRunRecord
     packed.instanceAndView = (record.instanceIndex & 0x00ffffffu) | ((record.viewId & 0xffu) << 24u);
     packed.groupIdPacked = record.groupIdPacked;
     packed.clusterIndexAndCount = record.clusterIndexAndCount;
-    packed.pageLocatorPacked =
-        (record.pageSlabDescriptorIndex & 0x000fffffu) |
-        (((record.pageSlabByteOffset >> 18u) & 0x3ffu) << 20u);
+    packed.pageSlabDescriptorIndex = record.pageSlabDescriptorIndex;
+    packed.pageSlabByteOffset = record.pageSlabByteOffset;
     packed.assemblyTransformIndex = record.assemblyTransformIndex;
     return packed;
 }
@@ -61,8 +60,8 @@ CLodClusterRunRecord UnpackPureComputeClusterRunRecord(PureComputeClusterRunReco
     record.viewId = packed.instanceAndView >> 24u;
     record.groupIdPacked = packed.groupIdPacked;
     record.clusterIndexAndCount = packed.clusterIndexAndCount;
-    record.pageSlabDescriptorIndex = packed.pageLocatorPacked & 0x000fffffu;
-    record.pageSlabByteOffset = ((packed.pageLocatorPacked >> 20u) & 0x3ffu) << 18u;
+    record.pageSlabDescriptorIndex = packed.pageSlabDescriptorIndex;
+    record.pageSlabByteOffset = packed.pageSlabByteOffset;
     record.assemblyTransformIndex = packed.assemblyTransformIndex;
     return record;
 }

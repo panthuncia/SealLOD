@@ -1268,7 +1268,9 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     }
 
     m_pendingStreamingRequests.clear();
-    m_pageLru.Clear();
+    for (CLodPageLRU& lru : m_pageLrus) {
+        lru.Clear();
+    }
     m_pageOwnerGroup.clear();
     m_pageOwnerSegment.clear();
     m_pageOwnerMeshPageKey.clear();
@@ -3089,9 +3091,8 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
     auto* pool = meshManager->GetCLodPagePool();
     if (!pool) return;
 
-    const uint32_t generalPages = pool->GetGeneralPageCount();
     const uint32_t totalPages = pool->GetTotalPageCount();
-    if (generalPages == 0 || totalPages == 0) return;
+    if (pool->GetGeneralPageCount() == 0 || totalPages == 0) return;
 
     m_pageOwnerGroup.assign(totalPages, -1);
     m_pageOwnerSegment.resize(totalPages, 0u);
@@ -3115,8 +3116,13 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
 
     {
         ZoneScopedN("CLodStreamingSystem::InitializePageLru::PopulateFreePages");
-        for (uint32_t p = 0; p < generalPages; ++p) {
-            m_pageLru.Insert(p);
+        for (uint32_t classIndex = 0u;
+            classIndex < PagePool::GetPageSizeClassCount();
+            ++classIndex) {
+            const uint32_t classSize = 16u * 1024u << classIndex;
+            for (uint32_t page : pool->GetGeneralPageIDs(classSize)) {
+                m_pageLrus[classIndex].Insert(page);
+            }
         }
     }
 
@@ -3124,7 +3130,30 @@ void CLodStreamingSystem::InitializePageLru(MeshManager* meshManager) {
 
     // Route PagePool uploads through the worker-owned CLod upload stream.
     InstallStreamingUploadFunction(meshManager);
-    spdlog::info("CLodPageLRU initialized with {} general pages", generalPages);
+    spdlog::info(
+        "CLodPageLRU initialized with {} general pages across {} size classes",
+        pool->GetGeneralPageCount(),
+        PagePool::GetPageSizeClassCount());
+}
+
+CLodPageLRU& CLodStreamingSystem::PageLruForPage(uint32_t page) {
+    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    return m_pageLrus[pool != nullptr ? pool->GetPageSizeClassIndex(page) : 0u];
+}
+
+const CLodPageLRU& CLodStreamingSystem::PageLruForPage(uint32_t page) const {
+    MeshManager* meshManager = m_getMeshManager ? m_getMeshManager() : nullptr;
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    return m_pageLrus[pool != nullptr ? pool->GetPageSizeClassIndex(page) : 0u];
+}
+
+uint32_t CLodStreamingSystem::TotalPageLruSize() const {
+    uint32_t total = 0u;
+    for (const CLodPageLRU& lru : m_pageLrus) {
+        total += lru.Size();
+    }
+    return total;
 }
 
 void CLodStreamingSystem::EnsurePageTrackingCapacity(MeshManager* meshManager) {
@@ -4494,7 +4523,7 @@ void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshMan
         page < m_pageReuseNonResidentQueuedTick.size() ? m_pageReuseNonResidentQueuedTick[page] : 0u,
         page < m_pageRetireAfterTick.size() ? m_pageRetireAfterTick[page] : 0u,
         m_streamingDiagnosticTick);
-    m_pageLru.Remove(page);
+    PageLruForPage(page).Remove(page);
     (void)meshManager;
 }
 
@@ -4541,7 +4570,7 @@ void CLodStreamingSystem::DrainRetiredPhysicalPages(MeshManager* meshManager) {
                 m_pagePinnedStorage[page] = 0u;
             }
         } else {
-            m_pageLru.Insert(page);
+            PageLruForPage(page).Insert(page);
             ++availablePageCredits;
         }
     }
@@ -4737,7 +4766,7 @@ void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
         for (uint32_t page : pagesIt->second) {
             if (page != ~0u && page < m_pageProtectedThisUpdate.size()) {
                 MarkPageProtectedThisUpdate(page);
-                m_pageLru.Touch(page);
+                PageLruForPage(page).Touch(page);
             }
         }
         return true;
@@ -4821,16 +4850,23 @@ bool CLodStreamingSystem::EvictPhysicalPage(uint32_t page, MeshManager* meshMana
     return true;
 }
 
-std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshManager* meshManager) {
-    return PopFreePages(count, meshManager, nullptr);
-}
-
-std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshManager* meshManager, PagePopFailureStats* outStats) {
+std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
+    std::span<const uint32_t> pageSizeBytes,
+    MeshManager* meshManager,
+    PagePopFailureStats* outStats) {
     ZoneScopedN("CLodStreamingSystem::PopFreePages");
+    const uint32_t count = static_cast<uint32_t>(pageSizeBytes.size());
     ZoneValue(count);
 
     std::vector<uint32_t> pages;
     pages.reserve(count);
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    if (count == 0u || pool == nullptr) {
+        return pages;
+    }
+    const uint32_t desiredPageSize = pool->SelectPageSize(pageSizeBytes.front());
+    CLodPageLRU& pageLru =
+        m_pageLrus[pool->SelectPageSizeClassIndex(desiredPageSize)];
 
     const auto recordDirtyMetadata = [&]() {
         if (outStats != nullptr) {
@@ -4874,7 +4910,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
             ++outStats->freeClean;
         }
 
-        m_pageLru.Remove(page);
+        PageLruForPage(page).Remove(page);
         if (!IsPhysicalPageCleanForFreshAllocation(page)) {
             recordDirtyMetadata();
             const uint64_t ownerKey = page < m_pageOwnerMeshPageKey.size()
@@ -4896,7 +4932,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
         return true;
     };
 
-    const uint32_t lruSize = m_pageLru.Size();
+    uint32_t lruSize = pageLru.Size();
     const uint32_t requestScanLimit = count > UINT32_MAX / 64u ? UINT32_MAX : count * 64u;
     const uint32_t backlogPressure = std::max<uint32_t>(m_pendingStreamingRequestCount, m_streamingRequestsInProgressCount);
     const uint32_t pressureScanLimit = std::clamp<uint32_t>(backlogPressure / 8u, 64u, 2048u);
@@ -4919,7 +4955,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
         ZoneScopedN("CLodStreamingSystem::PopFreePages::ScanFreePages");
         uint32_t attemptsRemaining = scanLimit;
         while (pages.size() < count && attemptsRemaining-- > 0u) {
-            uint32_t page = m_pageLru.PopOldest();
+            uint32_t page = pageLru.PopOldest();
             if (page == ~0u) {
                 break;
             }
@@ -4944,10 +4980,32 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(uint32_t count, MeshMana
     }
 
     {
+        std::vector<uint32_t> newPages =
+            pool->GrowGeneralPageClass(desiredPageSize);
+        if (!newPages.empty()) {
+            EnsurePageTrackingCapacity(meshManager);
+            for (uint32_t page : newPages) {
+                pageLru.Insert(page);
+            }
+            while (pages.size() < count) {
+                const uint32_t page = pageLru.PopOldest();
+                if (page == ~0u || !tryAcquireCleanFreePage(page)) {
+                    break;
+                }
+            }
+            if (pages.size() >= count) {
+                stampFinalStats();
+                return pages;
+            }
+            lruSize = pageLru.Size();
+        }
+    }
+
+    {
         ZoneScopedN("CLodStreamingSystem::PopFreePages::EvictResidentPages");
         uint32_t attemptsRemaining = scanLimit;
         while (pages.size() < count && attemptsRemaining-- > 0u) {
-            uint32_t page = m_pageLru.PopOldest();
+            uint32_t page = pageLru.PopOldest();
             if (page == ~0u) break;
             if (outStats != nullptr) {
                 ++outStats->scanned;
@@ -5030,6 +5088,9 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
         std::span<const uint32_t>(
             info.meshPageIndices.data(),
             info.meshPageIndices.size()),
+        std::span<const uint32_t>(
+            info.meshPageBlobSizes.data(),
+            info.meshPageBlobSizes.size()),
         meshManager,
         info.valid);
 }
@@ -5038,6 +5099,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
     uint32_t groupIndex,
     uint32_t groupsBase,
     std::span<const uint32_t> meshPageIndices,
+    std::span<const uint32_t> meshPageBlobSizes,
     MeshManager* meshManager,
     bool buildMeshPageKeys) {
     ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup");
@@ -5087,7 +5149,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                 result.segmentNeedsFetch[seg] = false;
                 MarkPageProtectedThisUpdate(existingPage);
                 if (!IsPhysicalPagePinnedStorage(existingPage)) {
-                    m_pageLru.Touch(existingPage);
+                    PageLruForPage(existingPage).Touch(existingPage);
                 }
                 continue;
             }
@@ -5100,7 +5162,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                 result.segmentNeedsFetch[seg] = false;
                 MarkPageProtectedThisUpdate(existingPage);
                 if (!IsPhysicalPagePinnedStorage(existingPage)) {
-                    m_pageLru.Touch(existingPage);
+                    PageLruForPage(existingPage).Touch(existingPage);
                 }
                 spdlog::debug(
                     "CLod streaming: group {} reusing pending physical page {} for mesh-page key {} seg {}",
@@ -5116,17 +5178,27 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
     }
 
     std::vector<uint32_t> freshPages;
+    std::vector<uint32_t> missingPageSizes;
+    missingPageSizes.reserve(missingCount);
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    for (uint32_t seg = 0u; seg < segmentCount; ++seg) {
+        if (result.pagesBySegment[seg] == ~0u) {
+            missingPageSizes.push_back(
+                seg < meshPageBlobSizes.size() && meshPageBlobSizes[seg] != 0u
+                    ? meshPageBlobSizes[seg]
+                    : (pool != nullptr ? static_cast<uint32_t>(pool->GetPageSize()) : 256u * 1024u));
+        }
+    }
     if (missingCount == 0u) {
         freshPages.clear();
     } else if (result.usesPinnedStorage) {
         ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup::AllocatePinnedPages");
         ZoneValue(missingCount);
-        auto* pool = meshManager ? meshManager->GetCLodPagePool() : nullptr;
         if (pool == nullptr) {
             return PreAllocatedPages{};
         }
 
-        freshPages = pool->AllocatePinnedPages(missingCount);
+        freshPages = pool->AllocatePinnedPages(missingPageSizes);
         {
             ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup::AllocatePinnedPages::EnsurePageTrackingCapacity");
             EnsurePageTrackingCapacity(meshManager);
@@ -5145,7 +5217,15 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
         ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup::PopFreePages");
         ZoneValue(missingCount);
         PagePopFailureStats popStats{};
-        freshPages = PopFreePages(missingCount, meshManager, &popStats);
+        for (uint32_t requestedSize : missingPageSizes) {
+            const std::array<uint32_t, 1> singleRequest{ requestedSize };
+            std::vector<uint32_t> allocated =
+                PopFreePages(singleRequest, meshManager, &popStats);
+            if (allocated.empty()) {
+                break;
+            }
+            freshPages.push_back(allocated.front());
+        }
         if (freshPages.size() < missingCount) {
             {
                 ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup::PopFreePages::FailureDiagnostics");
@@ -5166,7 +5246,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                         groupIndex,
                         missingCount,
                         static_cast<uint32_t>(freshPages.size()),
-                        m_pageLru.Size(),
+                        TotalPageLruSize(),
                         popStats.scanned,
                         popStats.scanLimit,
                         popStats.rejectedProtected,
@@ -5189,7 +5269,7 @@ CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForG
                 ZoneScopedN("CLodStreamingSystem::PreAllocatePagesForGroup::PopFreePages::RestorePartialPages");
                 for (uint32_t page : freshPages) {
                     if (IsPhysicalPageCleanForFreshAllocation(page)) {
-                        m_pageLru.Insert(page);
+                        PageLruForPage(page).Insert(page);
                     }
                 }
             }
@@ -5335,7 +5415,7 @@ bool CLodStreamingSystem::AssignPagesToGroup(uint32_t groupIndex, const PreAlloc
                 m_pendingPageOwnerGroup[page] = groupIndex;
                 m_pendingPageOwnerSegment[page] = seg;
                 AddPendingMeshPageReference(page, meshPageKey);
-                m_pageLru.Remove(page);
+                PageLruForPage(page).Remove(page);
             } else if (IsPhysicalPageResidentForKey(page, meshPageKey)) {
                 m_pageState[page] = CLodPhysicalPageState::Resident;
                 m_pendingPageOwnerGroup[page] = ~0u;
@@ -5353,11 +5433,11 @@ bool CLodStreamingSystem::AssignPagesToGroup(uint32_t groupIndex, const PreAlloc
                 // it must not publish resident state until the shared upload
                 // drains.
                 AddPendingMeshPageReference(page, meshPageKey);
-                m_pageLru.Remove(page);
+                PageLruForPage(page).Remove(page);
             }
             if (!IsPhysicalPagePinnedStorage(page) && !fetchedPage) {
                 if (IsPhysicalPageResidentForKey(page, meshPageKey)) {
-                    m_pageLru.Insert(page);
+                    PageLruForPage(page).Insert(page);
                 }
             }
         }
@@ -5396,7 +5476,7 @@ void CLodStreamingSystem::ReleasePreAllocatedPages(const PreAllocatedPages& page
                         m_pagePinnedStorage[page] = 0u;
                     }
                 } else if (IsPhysicalPageCleanForFreshAllocation(page)) {
-                    m_pageLru.Insert(page);
+                    PageLruForPage(page).Insert(page);
                 }
             }
             continue;
@@ -5828,7 +5908,7 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
             }
             ReleasePendingMeshPageReference(page, key);
             if (!IsPhysicalPagePinnedStorage(page)) {
-                m_pageLru.Insert(page);
+                PageLruForPage(page).Insert(page);
             }
             continue;
         }
@@ -5869,7 +5949,7 @@ bool CLodStreamingSystem::PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex)
             m_pageResidentGroups[page].insert(groupIndex);
         }
         if (!IsPhysicalPagePinnedStorage(page)) {
-            m_pageLru.Insert(page);
+            PageLruForPage(page).Insert(page);
         }
         WakeReadyCompletionsForPage(page, key);
     }
@@ -5999,7 +6079,7 @@ void CLodStreamingSystem::TouchGroupPages(uint32_t groupIndex) {
     if (it != m_groupOwnedPages.end()) {
         for (uint32_t page : it->second) {
             if (page != ~0u) {
-                m_pageLru.Touch(page);
+                PageLruForPage(page).Touch(page);
             }
         }
     }
@@ -6015,7 +6095,7 @@ void CLodStreamingSystem::TouchGroupPages(uint32_t groupIndex) {
         if (pagesIt != m_groupOwnedPages.end()) {
             for (uint32_t page : pagesIt->second) {
                 if (page != ~0u) {
-                    m_pageLru.Touch(page);
+                    PageLruForPage(page).Touch(page);
                 }
             }
         }
@@ -7436,6 +7516,16 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         completion.meshPageIndices.size());
                     if (expectedPageCount > 0u) {
                         ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::AllocatePagesAfterReadFallback");
+                        std::vector<uint32_t> completionPageSizes(expectedPageCount, 0u);
+                        for (uint32_t pageIndex = 0u; pageIndex < expectedPageCount; ++pageIndex) {
+                            if (pageIndex < completion.mappedPageBlobSizes.size()) {
+                                completionPageSizes[pageIndex] =
+                                    completion.mappedPageBlobSizes[pageIndex];
+                            } else if (pageIndex < completion.pageBlobs.size()) {
+                                completionPageSizes[pageIndex] =
+                                    static_cast<uint32_t>(completion.pageBlobs[pageIndex].size());
+                            }
+                        }
                         const uint64_t allocateStartNs =
                             recordCpuTiming
                                 ? br::telemetry::timing::NowNs()
@@ -7446,6 +7536,9 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                             std::span<const uint32_t>(
                                 completion.meshPageIndices.data(),
                                 completion.meshPageIndices.size()),
+                            std::span<const uint32_t>(
+                                completionPageSizes.data(),
+                                completionPageSizes.size()),
                             meshManager);
                         if (recordCpuTiming) {
                             allocatePagesNs +=
@@ -7619,10 +7712,10 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         recordCpuTiming
                             ? br::telemetry::timing::NowNs()
                             : 0u;
-                    const size_t pageSize =
-                        pool != nullptr ? pool->GetPageSize() : 0u;
                     for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const uint32_t page = preAlloc.pagesBySegment[seg];
+                    const size_t pageSize =
+                        pool != nullptr ? pool->GetPageSize(page) : 0u;
                     PagePool::PageAllocation allocation{ page, 1u };
                     if (!payloadGpuReady) {
                         completion.pageAllocations[seg] = allocation;

@@ -4,8 +4,13 @@
 #include "include/clodVirtualShadowClipmap.hlsli"
 
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_STRIDE = 16u;
-static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_SHIFT = 18u;
-static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_MASK = 0x3FFu;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT = 14u;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK = 0x3FFu;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK = 0xFu;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT = 25u;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_MASK =
+    CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK <<
+    CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_BITS = 5u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_BLOCK_COORD_BITS = 5u;
@@ -108,7 +113,7 @@ uint CLodVisibleClusterPageSlabDescriptorIndex(uint4 packedCluster)
 uint CLodVisibleClusterVoxelClusterIndex(uint4 packedCluster)
 {
     return CLodVisibleClusterLocalMeshletIndex(packedCluster) |
-        (CLodVisibleClusterPageSlabDescriptorIndex(packedCluster) << 14u);
+        (((packedCluster.z >> 2u) & 0xFFFFFu) << 14u);
 }
 
 uint CLodVisibleClusterVoxelCubeIndex(uint4 packedCluster)
@@ -118,12 +123,24 @@ uint CLodVisibleClusterVoxelCubeIndex(uint4 packedCluster)
 
 uint CLodVisibleClusterPageSlabByteOffset(uint4 packedCluster)
 {
-    return ((packedCluster.z >> 22u) & CLOD_PACKED_VISIBLE_CLUSTER_PAGE_MASK) << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_SHIFT;
+    const uint pageOffsetUnits =
+        ((packedCluster.z >> 22u) &
+            CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK) |
+        (((packedCluster.w >>
+            CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT) &
+            CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK) << 10u);
+    return pageOffsetUnits << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
+}
+
+uint CLodVisibleClusterVoxelPageIndex(uint4 packedCluster)
+{
+    return (packedCluster.z >> 2u) & 0xFFFFFu;
 }
 
 uint CLodVisibleClusterVsmPayload(uint4 packedCluster)
 {
-    return packedCluster.w;
+    return packedCluster.w &
+        ~CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_MASK;
 }
 
 bool CLodVisibleClusterIsVoxel(uint4 packedCluster)
@@ -226,12 +243,19 @@ uint4 CLodPackVisibleCluster(
     uint pageSlabByteOffset,
     uint shadowClipmapIndex)
 {
-    const uint pageIndex = pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_SHIFT;
+    const uint pageOffsetUnits =
+        pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
     return uint4(
         (viewID & 0xFFu) | ((instanceID & 0xFFFFFFu) << 8u),
         (localMeshletIndex & 0x3FFFu) | ((groupID & 0x3FFFFu) << 14u),
-        ((groupID >> 18u) & 0x3u) | ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) | ((pageIndex & CLOD_PACKED_VISIBLE_CLUSTER_PAGE_MASK) << 22u),
-        CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex));
+        ((groupID >> 18u) & 0x3u) |
+            ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) |
+            ((pageOffsetUnits &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK) << 22u),
+        CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex) |
+            (((pageOffsetUnits >> 10u) &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK) <<
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT));
 }
 
 uint4 CLodPackVisibleClusterWithVsmPayload(
@@ -243,12 +267,19 @@ uint4 CLodPackVisibleClusterWithVsmPayload(
     uint pageSlabByteOffset,
     uint vsmPayload)
 {
-    const uint pageIndex = pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_SHIFT;
+    const uint pageOffsetUnits =
+        pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
     return uint4(
         (viewID & 0xFFu) | ((instanceID & 0xFFFFFFu) << 8u),
         (localMeshletIndex & 0x3FFFu) | ((groupID & 0x3FFFFu) << 14u),
-        ((groupID >> 18u) & 0x3u) | ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) | ((pageIndex & CLOD_PACKED_VISIBLE_CLUSTER_PAGE_MASK) << 22u),
-        vsmPayload);
+        ((groupID >> 18u) & 0x3u) |
+            ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) |
+            ((pageOffsetUnits &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK) << 22u),
+        vsmPayload |
+            (((pageOffsetUnits >> 10u) &
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK) <<
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT));
 }
 
 void CLodStoreVisibleClusterRW(

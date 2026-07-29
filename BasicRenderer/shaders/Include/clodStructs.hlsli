@@ -67,8 +67,8 @@ struct CLodHierarchyLevelInfo
 // GPU-visible page table entry - maps a virtual page ID to a slab + byte offset.
 struct PageTableEntry
 {
-    uint slabIndex;      // Which slab ByteAddressBuffer this page lives in.
-    uint slabByteOffset; // Byte offset of the page start within that slab.
+    uint slabIndex;
+    uint slabByteOffset;
 };
 
 static const uint CLOD_PAGE_ATTRIBUTE_NORMAL = 1u << 0;

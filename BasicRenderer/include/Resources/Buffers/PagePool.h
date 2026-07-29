@@ -1,10 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <span>
 #include <vector>
 
 #include "Resources/Resource.h"
@@ -15,12 +17,12 @@
 
 class GpuBufferBacking;
 
-// Fixed-size page allocator backed by multiple GPU "slab" ByteAddressBuffers.
+// Size-class page allocator backed by multiple GPU "slab" ByteAddressBuffers.
 //
 // - Each **slab** is a single D3D12 ByteAddressBuffer (e.g. 256 MB).
-// - Each **page** is a fixed-size region within a slab (e.g. 64 KB).
-// - Groups allocate one or more contiguous pages.
-// - A GPU-visible **page table** maps virtual page IDs -> (slab, offset).
+// - Every slab contains pages of exactly one size class.
+// - Logical pages are single LRU/eviction units; no contiguous-run allocation.
+// - A GPU-visible **page table** maps virtual page IDs -> slab locations.
 //
 // Advantages over per-stream DynamicBuffer pools:
 //   - No single D3D12 resource grows past the slab cap.
@@ -31,9 +33,15 @@ class PagePool {
 public:
 	// Configuration for the page pool.
 	struct Config {
-		uint64_t pageSize     = 256 * 1024; // Bytes per page (default 256 KB).
-		uint64_t slabSize     = 256 * 1024 * 1024; // Bytes per slab (default 256 MB).
-		uint32_t numStreamingSlabs = 16; // General-purpose streaming slabs created up-front.
+		std::array<uint32_t, 5> pageSizes{
+			16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024
+		};
+		uint64_t slabSize     = 256 * 1024 * 1024; // General streaming slab size.
+		uint64_t pinnedSlabSize = 4 * 1024 * 1024; // Per-class pinned growth increment.
+		uint32_t numStreamingSlabs = 16; // Shared cap across all size classes.
+		std::array<uint32_t, 5> initialStreamingSlabs{
+			1u, 1u, 1u, 2u, 3u
+		};
 		std::string debugName = "CLodPagePool";
 	};
 
@@ -63,7 +71,6 @@ public:
 
 	// Number of slabs currently allocated.
 	uint32_t GetSlabCount() const;
-
 	// Get the static Buffer backing slab `slabIndex` (for resource registration).
 	std::shared_ptr<Buffer> GetSlab(uint32_t slabIndex) const;
 
@@ -79,8 +86,13 @@ public:
 	// Total pages across general-purpose slabs.
 	uint32_t GetGeneralPageCount() const;
 
-	// Page size in bytes.
-	uint64_t GetPageSize() const { return m_config.pageSize; }
+	// Largest supported page size (legacy payload validation accessor).
+	uint64_t GetPageSize() const { return m_config.pageSizes.back(); }
+	uint32_t GetPageSize(uint32_t globalPageID) const;
+	uint32_t GetPageSizeClassIndex(uint32_t globalPageID) const;
+	uint32_t SelectPageSize(uint64_t payloadBytes) const;
+	uint32_t SelectPageSizeClassIndex(uint64_t payloadBytes) const;
+	static constexpr uint32_t GetPageSizeClassCount() { return 5u; }
 
 	// Slab size in bytes.
 	uint64_t GetSlabSize() const { return m_config.slabSize; }
@@ -88,18 +100,10 @@ public:
 	// Number of streaming slabs created up-front.
 	uint32_t GetNumStreamingSlabs() const { return m_config.numStreamingSlabs; }
 
-	// Pages per slab.
-	uint32_t GetPagesPerSlab() const { return m_pagesPerSlab; }
-
-	// Compute the slab index for a global page ID.
-	uint32_t PageToSlabIndex(uint32_t globalPageID) const {
-		return globalPageID / m_pagesPerSlab;
-	}
+	uint32_t PageToSlabIndex(uint32_t globalPageID) const;
 
 	// Compute the byte offset within a slab for a global page ID.
-	uint64_t PageToSlabByteOffset(uint32_t globalPageID) const {
-		return static_cast<uint64_t>(globalPageID % m_pagesPerSlab) * m_config.pageSize;
-	}
+	uint64_t PageToSlabByteOffset(uint32_t globalPageID) const;
 
 	// Get the GPU descriptor-heap index of the slab that the given
 	// allocation lives in.  Returns 0 if the allocation is invalid.
@@ -109,8 +113,13 @@ public:
 	// Should be called once per frame after any alloc/free operations.
 	void FlushPageTableUpdates();
 
-	// Allocate pages from dedicated pinned slabs. The returned pages do not
-	// participate in the CLod eviction LRU.
+	// Add a general slab for a class, respecting the shared slab cap. Returns
+	// the page IDs added so the matching LRU can be populated.
+	std::vector<uint32_t> GrowGeneralPageClass(uint32_t pageSizeBytes);
+	std::vector<uint32_t> GetGeneralPageIDs(uint32_t pageSizeBytes) const;
+
+	// Allocate/free pinned pages from per-class small slabs.
+	std::vector<uint32_t> AllocatePinnedPages(std::span<const uint32_t> pageSizeBytes);
 	std::vector<uint32_t> AllocatePinnedPages(uint32_t count);
 
 	// Return pinned pages to the dedicated pinned-slab free list.
@@ -132,16 +141,17 @@ private:
 	struct Slab {
 		std::shared_ptr<Buffer> buffer; // The GPU ByteAddressBuffer.
 		SlabRole role = SlabRole::General;
+		uint32_t firstPageID = 0;
+		uint32_t pageCount = 0;
+		uint32_t pageSize = 0;
 	};
 
 	Config     m_config;
-	uint32_t   m_pagesPerSlab = 0;
 	uint32_t   m_totalPageCapacity = 0;
 	uint32_t   m_generalSlabCount = 0;
 
 	std::vector<Slab> m_slabs;
-	std::vector<uint32_t> m_freePinnedPageIDs;
-
+	std::array<std::vector<uint32_t>, 5> m_freePinnedPageIDs;
 	// CPU-side mirror of the page table: indexed by global page ID.
 	std::vector<PageTableEntry> m_pageTableCpu;
 	bool                        m_pageTableDirty = false;
@@ -156,7 +166,7 @@ private:
 	UploadFn m_uploadFn;
 
 	// Allocate a new slab. Streaming slabs are capped by numStreamingSlabs.
-	bool AllocateNewSlab(SlabRole role);
+	bool AllocateNewSlab(SlabRole role, uint32_t pageSizeBytes, std::vector<uint32_t>* outPageIDs = nullptr);
 
 	// Update the page table CPU mirror entries for pages [firstGlobal, firstGlobal+count).
 	void UpdatePageTableEntries(uint32_t firstGlobalPageID, uint32_t count);

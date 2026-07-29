@@ -281,8 +281,13 @@ private:
         uint32_t evicted = 0;
         uint32_t freeClean = 0;
     };
-    std::vector<uint32_t> PopFreePages(uint32_t count, MeshManager* meshManager);
-    std::vector<uint32_t> PopFreePages(uint32_t count, MeshManager* meshManager, PagePopFailureStats* outStats);
+    std::vector<uint32_t> PopFreePages(
+        std::span<const uint32_t> pageSizeBytes,
+        MeshManager* meshManager,
+        PagePopFailureStats* outStats = nullptr);
+    CLodPageLRU& PageLruForPage(uint32_t page);
+    const CLodPageLRU& PageLruForPage(uint32_t page) const;
+    uint32_t TotalPageLruSize() const;
     void ReleaseOwnedPagesForGroup(uint32_t groupIndex, MeshManager* meshManager);
     void ReleaseGroupResidency(uint32_t groupIndex, MeshManager* meshManager, bool clearPageMapEntries);
     void RetirePhysicalPage(uint32_t page, MeshManager* meshManager, bool pinned);
@@ -335,6 +340,7 @@ private:
         uint32_t groupIndex,
         uint32_t groupsBase,
         std::span<const uint32_t> meshPageIndices,
+        std::span<const uint32_t> meshPageBlobSizes,
         MeshManager* meshManager,
         bool buildMeshPageKeys = true);
     bool AssignPagesToGroup(uint32_t groupIndex, const PreAllocatedPages& pages, MeshManager* meshManager);
@@ -369,7 +375,7 @@ private:
     std::unordered_map<uint32_t, CachedChildGroupLayout> m_prefetchedChildLayoutsByGroup;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_prefetchedChildLayoutKeysByOwner;
     std::unordered_set<uint32_t> m_errorOverriddenGroups; // groups whose GPU error is currently 0
-    CLodPageLRU m_pageLru;
+    std::array<CLodPageLRU, PagePool::GetPageSizeClassCount()> m_pageLrus;
 	std::vector<int32_t> m_pageOwnerGroup;       // page ID to group global index (-1 = unowned)
 	std::vector<uint32_t> m_pageOwnerSegment;    // page ID to segment index within owning group
     std::vector<CLodPhysicalPageState> m_pageState;

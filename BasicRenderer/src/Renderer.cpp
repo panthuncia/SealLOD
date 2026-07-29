@@ -869,6 +869,9 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
     if (m_pMeshManager) {
         const auto clodStats = m_pMeshManager->GetCLodStreamingDebugStats();
         snapshot.residentClodGroups = clodStats.residentGroups;
+        snapshot.residentClodAllocations = clodStats.residentAllocations;
+        snapshot.residentClodAllocationBytes = clodStats.residentAllocationBytes;
+        snapshot.totalClodStreamedBytes = clodStats.totalStreamedBytes;
         snapshot.queuedClodRequests = clodStats.queuedRequests;
         snapshot.inFlightClodGroups = clodStats.queuedOrInFlightGroups + clodStats.dispatchedOrInFlightGroups;
         snapshot.completedClodResults = clodStats.completedResults;

@@ -4,7 +4,16 @@
 #include "Mesh/VoxelGroupBuilder.h"
 
 #include <span>
+#include <cstdint>
 #include <string>
+
+// Associates page-packing telemetry emitted by builders on the current thread
+// with the logical asset being preprocessed. Telemetry is disabled unless
+// BASICRENDERER_CLOD_PAGE_PACKING_TELEMETRY names an output CSV file.
+void SetClusterLODPagePackingTelemetryContext(
+	std::string sourceIdentifier,
+	std::uint64_t referenceCount = 0);
+void ClearClusterLODPagePackingTelemetryContext();
 
 bool ValidateClusterLODPageRepresentations(
 	const ClusterLODPrebuiltData& prebuiltData,

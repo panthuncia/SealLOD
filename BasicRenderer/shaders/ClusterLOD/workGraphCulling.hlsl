@@ -3727,7 +3727,9 @@ void ClusterCullBody(
     if (hasBucket && b.pageSlabDescriptorIndex != 0u)
     {
         commonPagePrefix =
-            CLodLoadClusterPagePrefix(b.pageSlabDescriptorIndex, b.pageSlabByteOffset);
+            CLodLoadClusterPagePrefix(
+                b.pageSlabDescriptorIndex,
+                b.pageSlabByteOffset);
         const uint firstCluster = UnpackClusterFirstIndex(b.clusterIndexAndCount);
         const uint runClusterCount = UnpackClusterCount(b.clusterIndexAndCount);
         commonPageValid =

@@ -1413,7 +1413,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
 
     const uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
     const uint localGroupId = CLodVisibleClusterGroupID(packedCluster);
-    const uint localPageIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
+    const uint localPageIndex = CLodVisibleClusterVoxelPageIndex(packedCluster);
     const uint pageLocalClusterIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
     if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX == 0xFFFFFFFFu)

@@ -87,6 +87,9 @@ public:
         uint32_t pendingTextureReloads = 0;
         uint32_t fullResolutionTextures = 0;
         uint32_t residentClodGroups = 0;
+        uint32_t residentClodAllocations = 0;
+        uint64_t residentClodAllocationBytes = 0;
+        uint64_t totalClodStreamedBytes = 0;
         uint32_t queuedClodRequests = 0;
         uint32_t inFlightClodGroups = 0;
         uint32_t completedClodResults = 0;
