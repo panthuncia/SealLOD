@@ -60,18 +60,26 @@ function Get-Median([double[]]$Values) {
 }
 
 function Get-TimingMetric($Report, [string]$Name) {
-    $property = $Report.timings.PSObject.Properties[$Name]
-    if ($null -eq $property) {
+    $scope = $Report.scopes | Where-Object { $_.name -eq $Name } |
+        Select-Object -First 1
+    if ($null -eq $scope) {
         return [pscustomobject]@{
             count = 0; mean_us = 0.0; p50_us = 0.0
             p95_us = 0.0; p99_us = 0.0; max_us = 0.0
         }
     }
-    return $property.Value
+    return [pscustomobject]@{
+        count = [uint64]$scope.inclusive_ns.count
+        mean_us = [double]$scope.inclusive_ns.mean / 1000.0
+        p50_us = [double]$scope.inclusive_ns.median / 1000.0
+        p95_us = [double]$scope.inclusive_ns.p95 / 1000.0
+        p99_us = [double]$scope.inclusive_ns.p99 / 1000.0
+        max_us = [double]$scope.inclusive_ns.max / 1000.0
+    }
 }
 
 $environmentNames = @(
-    "SARP_TIMING_REPORT_OUTPUT",
+    "BASIC_TELEMETRY_OUTPUT_DIR",
     "SARP_CLOD_REQUEST_TRACE_OUTPUT",
     "SARP_CLOD_IO_ADMISSION_DEPTH",
     "SARP_CLOD_IO_WORKER_COUNT",
@@ -90,12 +98,13 @@ try {
     for ($run = 1; $run -le $Runs; ++$run) {
         $runDir = Join-Path $OutputRoot ("run-{0:D2}" -f $run)
         New-Item -ItemType Directory -Path $runDir -Force | Out-Null
-        $timingPath = Join-Path $runDir "timing.json"
+        $telemetryDir = Join-Path $runDir "telemetry"
+        $timingPath = Join-Path $telemetryDir "summary.json"
         $tracePath = Join-Path $runDir "request-trace.json"
         $stdoutPath = Join-Path $runDir "stdout.log"
         $stderrPath = Join-Path $runDir "stderr.log"
 
-        $env:SARP_TIMING_REPORT_OUTPUT = $timingPath
+        $env:BASIC_TELEMETRY_OUTPUT_DIR = $telemetryDir
         $env:SARP_CLOD_REQUEST_TRACE_OUTPUT =
             if ($RequestTrace) { $tracePath } else { $null }
         $env:SARP_CLOD_IO_ADMISSION_DEPTH =

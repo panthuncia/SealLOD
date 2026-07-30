@@ -369,20 +369,7 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.queueSchedulingCrossQueueHandoffPenalty = sm.getSettingGetter<float>("queueSchedulingCrossQueueHandoffPenalty")();
     orgSettings.autoAliasPoolRetireIdleFrames = sm.getSettingGetter<uint32_t>("autoAliasPoolRetireIdleFrames")();
     orgSettings.autoAliasPoolGrowthHeadroom = sm.getSettingGetter<float>("autoAliasPoolGrowthHeadroom")();
-    const bool renderGraphDisableCaching = sm.getSettingGetter<bool>("renderGraphDisableCaching")();
-    orgSettings.renderGraphRegionMode = renderGraphDisableCaching
-        ? rg::runtime::RenderGraphRegionMode::Disabled
-        : static_cast<rg::runtime::RenderGraphRegionMode>(sm.getSettingGetter<uint8_t>("renderGraphRegionMode")());
     orgSettings.transitionPlacementMode = static_cast<rg::runtime::TransitionPlacementMode>(sm.getSettingGetter<uint8_t>("transitionPlacementMode")());
-    orgSettings.renderGraphRegionMinPassCount = sm.getSettingGetter<uint32_t>("renderGraphRegionMinPassCount")();
-    orgSettings.renderGraphRegionMaxPassCount = sm.getSettingGetter<uint32_t>("renderGraphRegionMaxPassCount")();
-    orgSettings.renderGraphRegionDiagnosticsEnabled = sm.getSettingGetter<bool>("renderGraphRegionDiagnosticsEnabled")();
-    orgSettings.renderGraphRegionShadowStrictBatchMatch = sm.getSettingGetter<bool>("renderGraphRegionShadowStrictBatchMatch")();
-    orgSettings.renderGraphReplaySegmentCacheMaxEntries = sm.getSettingGetter<uint32_t>("renderGraphReplaySegmentCacheMaxEntries")();
-    orgSettings.renderGraphReplaySegmentCacheMaxVariants = sm.getSettingGetter<uint32_t>("renderGraphReplaySegmentCacheMaxVariants")();
-    orgSettings.renderGraphReplaySegmentCacheMaxVariantsPerKey = sm.getSettingGetter<uint32_t>("renderGraphReplaySegmentCacheMaxVariantsPerKey")();
-    orgSettings.renderGraphReplaySegmentCacheMaxAgeFrames = sm.getSettingGetter<uint32_t>("renderGraphReplaySegmentCacheMaxAgeFrames")();
-    orgSettings.renderGraphReplayRelaxAliasPlacement = sm.getSettingGetter<bool>("renderGraphReplayRelaxAliasPlacement")();
     orgSettings.heavyDebug = sm.getSettingGetter<bool>("heavyDebug")();
     rg::runtime::SetOpenRenderGraphSettings(orgSettings);
 }
@@ -1964,7 +1951,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         "renderGraphVramDumpEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_VRAM_DUMP"));
-    settingsManager.registerSetting<bool>("renderGraphDisableCaching", true);
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
 	settingsManager.registerSetting<AutoAliasMode>("autoAliasMode", AutoAliasMode::Balanced);
     settingsManager.registerSetting<AutoAliasPackingStrategy>("autoAliasPackingStrategy", AutoAliasPackingStrategy::GreedySweepLine);
@@ -1983,17 +1969,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("queueSchedulingCrossQueueHandoffPenalty", 2.0f);
 	settingsManager.registerSetting<uint32_t>("autoAliasPoolRetireIdleFrames", 120u);
 	settingsManager.registerSetting<float>("autoAliasPoolGrowthHeadroom", 1.5f);
-    settingsManager.registerSetting<uint8_t>("renderGraphRegionMode", static_cast<uint8_t>(rg::runtime::RenderGraphRegionMode::ReplayAuthoritative));
     settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(rg::runtime::TransitionPlacementMode::CanonicalThenOptimize));
-    settingsManager.registerSetting<uint32_t>("renderGraphRegionMinPassCount", 2u);
-    settingsManager.registerSetting<uint32_t>("renderGraphRegionMaxPassCount", 0u);
-    settingsManager.registerSetting<bool>("renderGraphRegionDiagnosticsEnabled", false);
-    settingsManager.registerSetting<bool>("renderGraphRegionShadowStrictBatchMatch", false);
-    settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxEntries", 256u);
-    settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxVariants", 128u);
-    settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxVariantsPerKey", 32u);
-    settingsManager.registerSetting<uint32_t>("renderGraphReplaySegmentCacheMaxAgeFrames", 0u);
-    settingsManager.registerSetting<bool>("renderGraphReplayRelaxAliasPlacement", true);
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);

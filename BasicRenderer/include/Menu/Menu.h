@@ -868,10 +868,6 @@ private:
 	std::function<bool()> getHeavyDebug;
 	std::function<void(bool)> setHeavyDebug;
 
-	bool m_renderGraphDisableCaching = false;
-	std::function<bool()> getRenderGraphDisableCaching;
-	std::function<void(bool)> setRenderGraphDisableCaching;
-
     bool m_renderGraphBatchTraceEnabled = false;
     std::function<bool()> getRenderGraphBatchTraceEnabled;
     std::function<void(bool)> setRenderGraphBatchTraceEnabled;
@@ -1625,11 +1621,6 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	setHeavyDebug = settingsManager.getSettingSetter<bool>("heavyDebug");
 	m_heavyDebug = getHeavyDebug();
 	observerSetting(m_heavyDebug, "heavyDebug");
-
-	getRenderGraphDisableCaching = settingsManager.getSettingGetter<bool>("renderGraphDisableCaching");
-	setRenderGraphDisableCaching = settingsManager.getSettingSetter<bool>("renderGraphDisableCaching");
-	m_renderGraphDisableCaching = getRenderGraphDisableCaching();
-	observerSetting(m_renderGraphDisableCaching, "renderGraphDisableCaching");
 
     getRenderGraphBatchTraceEnabled = settingsManager.getSettingGetter<bool>("renderGraphBatchTraceEnabled");
     setRenderGraphBatchTraceEnabled = settingsManager.getSettingSetter<bool>("renderGraphBatchTraceEnabled");
@@ -2512,9 +2503,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		if (ImGui::Checkbox("Heavy Debug (1 pass/batch + GPU drain)", &m_heavyDebug)) {
 			setHeavyDebug(m_heavyDebug);
 		}
-		if (ImGui::Checkbox("Disable Render Graph Caching", &m_renderGraphDisableCaching)) {
-			setRenderGraphDisableCaching(m_renderGraphDisableCaching);
-		}
         if (ImGui::Checkbox("Render Graph Batch Trace", &m_renderGraphBatchTraceEnabled)) {
             setRenderGraphBatchTraceEnabled(m_renderGraphBatchTraceEnabled);
         }
@@ -2758,12 +2746,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             opts.imguiGpuHandle = [this](uint32_t idx) { return GetImGuiGpuDescriptorHandle(idx); };
             opts.imguiHeapHandle = GetImGuiHeapHandle();
         }
-        opts.cacheOverlayProvider = [this]() -> std::vector<RGCacheOverlayRange> {
-            if (!m_renderGraph) {
-                return {};
-            }
-            return m_renderGraph->BuildReplayCacheOverlayRanges();
-        };
         RGInspector::Show(m_renderGraph->GetBatches(),
             m_renderGraph->GetQueueRegistry(),
             PassUsesResourceAdapter,

@@ -16,7 +16,7 @@
 #include "Import/CLodCache.h"
 #include "Materials/Material.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
-#include "Telemetry/Timing.h"
+#include <BasicTelemetry/Telemetry.h>
 #include "Utilities/CachePathUtilities.h"
 #include <algorithm>
 #include <bit>
@@ -429,9 +429,9 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 					ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges");
 					ZoneValue(layout.pageBlobSizes.size());
 					const bool recordWarmTiming =
-						br::telemetry::timing::Enabled();
+						basic_telemetry::Enabled();
 					if (recordWarmTiming) {
-						br::telemetry::timing::AddCounter(
+						basic_telemetry::AddCounter(
 							"CLod.DiskStreaming.Prefetch.CandidatePages",
 							layout.pageBlobSizes.size());
 					}
@@ -482,22 +482,22 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 						}
 					}
 					if (recordWarmTiming && alreadyWarmPageCount != 0u) {
-						br::telemetry::timing::AddCounter(
+						basic_telemetry::AddCounter(
 							"CLod.DiskStreaming.Prefetch.AlreadyWarmPages",
 							alreadyWarmPageCount);
 					}
 					if (!warmOffsets.empty()) {
 						ZoneScopedN("CLodDiskStreaming::AcquireMappedPayloadViews::WarmRanges::PrefetchColdPages");
 						const uint64_t warmStartNs = recordWarmTiming
-							? br::telemetry::timing::NowNs()
+							? basic_telemetry::NowNs()
 							: 0u;
 						if (recordWarmTiming) {
-							br::telemetry::timing::AddCounter(
+							basic_telemetry::AddCounter(
 								"CLod.DiskStreaming.Prefetch.Calls");
-							br::telemetry::timing::AddCounter(
+							basic_telemetry::AddCounter(
 								"CLod.DiskStreaming.Prefetch.ColdPages",
 								warmOffsets.size());
-							br::telemetry::timing::AddCounter(
+							basic_telemetry::AddCounter(
 								"CLod.DiskStreaming.Prefetch.ColdBytes",
 								std::accumulate(
 									warmSizes.begin(),
@@ -509,12 +509,12 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 								warmOffsets,
 								warmSizes);
 						if (recordWarmTiming) {
-							br::telemetry::timing::Record(
+							basic_telemetry::Record(
 								"CLod.DiskStreaming.PrefetchColdPages",
-								br::telemetry::timing::NowNs() -
+								basic_telemetry::NowNs() -
 									warmStartNs);
 							if (!prefetched) {
-								br::telemetry::timing::AddCounter(
+								basic_telemetry::AddCounter(
 									"CLod.DiskStreaming.Prefetch.Failures");
 							}
 						}

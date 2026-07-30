@@ -34,7 +34,7 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "Resources/Buffers/DynamicBuffer.h"
 #include "Telemetry/NvPerfIntegration.h"
-#include "Telemetry/Timing.h"
+#include <BasicTelemetry/Telemetry.h>
 #include "Mesh/ClusterLODShaderTypes.h"
 #include "BuiltinResources.h"
 
@@ -162,7 +162,7 @@ uint64_t CLodReadyCompletionStorageBytes(
 
 uint64_t CLodRequestTraceNowNs()
 {
-    return br::telemetry::timing::NowNs();
+    return basic_telemetry::NowNs();
 }
 }
 
@@ -2362,7 +2362,7 @@ void CLodStreamingSystem::RehashVirtualShadowDependencyBucket(
     bucket.dependencies.assign(capacity, VirtualShadowDependency{});
     m_virtualShadowActiveDependencySlotCount += capacity;
     m_virtualShadowActiveDependencySlotCount -= previousCapacity;
-    br::telemetry::timing::AddCounter(
+    basic_telemetry::AddCounter(
         "CLod.VSM.DependencyBucketRehashes");
     bucket.dependencyCount = 0u;
     const size_t mask = capacity - 1u;
@@ -2500,7 +2500,7 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies(
         return;
     }
     ZoneScopedN("CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies");
-    BR_TIMING_SCOPE("CLod.VSM.DependencyBatch");
+    BASIC_TELEMETRY_SCOPE("CLod.VSM.DependencyBatch");
     size_t expandedPairCount = 0u;
 
     ++m_virtualShadowBatchSourceGeneration;
@@ -2663,23 +2663,23 @@ void CLodStreamingSystem::RecordVirtualShadowUpgradeDependencies(
         "CLodStreaming.VSMUpgrade.ActiveDependencySlots",
         static_cast<int64_t>(
             m_virtualShadowActiveDependencySlotCount));
-    br::telemetry::timing::AddCounter(
+    basic_telemetry::AddCounter(
         "CLod.VSM.InputRecords",
         requests.size());
-    br::telemetry::timing::AddCounter(
+    basic_telemetry::AddCounter(
         "CLod.VSM.ExpandedDependencyPairs",
         expandedPairCount);
-    br::telemetry::timing::MaxGauge(
+    basic_telemetry::MaxGauge(
         "CLod.VSM.PeakActiveDependencyPairs",
         m_virtualShadowActiveDependencyPairCount);
-    br::telemetry::timing::MaxGauge(
+    basic_telemetry::MaxGauge(
         "CLod.VSM.PeakActiveDependencySlots",
         m_virtualShadowActiveDependencySlotCount);
 }
 
 void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIndex) {
     ZoneScopedN("CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion");
-    BR_TIMING_SCOPE("CLod.VSM.Promotion");
+    BASIC_TELEMETRY_SCOPE("CLod.VSM.Promotion");
     auto dependencies = RemoveVirtualShadowDependencyBucket(groupIndex);
     if (dependencies.empty()) {
         ++m_virtualShadowUpgradeStats.promotionsWithoutDependencies;
@@ -2708,7 +2708,7 @@ void CLodStreamingSystem::QueueVirtualShadowUpgradeForPromotion(uint32_t groupIn
 
 void CLodStreamingSystem::PublishVirtualShadowUpgradeUpload() {
     ZoneScopedN("CLodStreamingSystem::PublishVirtualShadowUpgradeUpload");
-    BR_TIMING_SCOPE("CLod.VSM.PublishUpload");
+    BASIC_TELEMETRY_SCOPE("CLod.VSM.PublishUpload");
     if (m_virtualShadowReadyTouchedPhysicalPages.empty() ||
         m_virtualShadowUpgradeUploadSlotCount == 0u) {
         return;
@@ -2836,7 +2836,7 @@ bool CLodStreamingSystem::TryAcquireVirtualShadowUpgradeUpload(
     uint32_t& slotIndex,
     uint32_t& inputCount) {
     ZoneScopedN("CLodStreamingSystem::TryAcquireVirtualShadowUpgradeUpload");
-    BR_TIMING_SCOPE("CLod.VSM.AcquireUpload");
+    BASIC_TELEMETRY_SCOPE("CLod.VSM.AcquireUpload");
     if (!m_virtualShadowReadyUploadSlots.TryPop(slotIndex) ||
         slotIndex >= m_virtualShadowUpgradeUploadSlotCount) {
         return false;
@@ -7405,9 +7405,9 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
         ZoneScopedN("CLodStreamingSystem::ApplyDiskStreamingCompletions::ApplyCompletions");
         m_uploadStream->BeginBulkUpload();
         const bool recordCpuTiming =
-            br::telemetry::timing::Enabled() && !completions.empty();
+            basic_telemetry::Enabled() && !completions.empty();
         const uint64_t applyLoopStartNs =
-            recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+            recordCpuTiming ? basic_telemetry::NowNs() : 0u;
         uint64_t allocatePagesNs = 0u;
         uint64_t resolvePayloadsNs = 0u;
         for (uint32_t completionIndex = 0; completionIndex < static_cast<uint32_t>(completions.size()); ++completionIndex) {
@@ -7528,7 +7528,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                         }
                         const uint64_t allocateStartNs =
                             recordCpuTiming
-                                ? br::telemetry::timing::NowNs()
+                                ? basic_telemetry::NowNs()
                                 : 0u;
                         preAlloc = PreAllocatePagesForGroup(
                             groupIndex,
@@ -7542,7 +7542,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                             meshManager);
                         if (recordCpuTiming) {
                             allocatePagesNs +=
-                                br::telemetry::timing::NowNs() -
+                                basic_telemetry::NowNs() -
                                 allocateStartNs;
                         }
                         preAlloc.requestGeneration = groupIndex < m_pendingStreamingRequestGenerationByGroup.size()
@@ -7710,7 +7710,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                     ZoneValue(expectedPageCount);
                     const uint64_t resolveStartNs =
                         recordCpuTiming
-                            ? br::telemetry::timing::NowNs()
+                            ? basic_telemetry::NowNs()
                             : 0u;
                     for (uint32_t seg = 0; seg < expectedPageCount; ++seg) {
                     const uint32_t page = preAlloc.pagesBySegment[seg];
@@ -7775,7 +7775,7 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
                 }
                 if (recordCpuTiming) {
                     resolvePayloadsNs +=
-                        br::telemetry::timing::NowNs() -
+                        basic_telemetry::NowNs() -
                         resolveStartNs;
                 }
                 }
@@ -7884,29 +7884,29 @@ void CLodStreamingSystem::ApplyDiskStreamingCompletions(MeshManager* meshManager
             }
         }
         const uint64_t stagePayloadsStartNs =
-            recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+            recordCpuTiming ? basic_telemetry::NowNs() : 0u;
         m_uploadStream->EndBulkUpload();
         const uint64_t stagePayloadsNs = recordCpuTiming
-            ? br::telemetry::timing::NowNs() - stagePayloadsStartNs
+            ? basic_telemetry::NowNs() - stagePayloadsStartNs
             : 0u;
         if (recordCpuTiming) {
             const uint64_t applyLoopNs =
-                br::telemetry::timing::NowNs() - applyLoopStartNs;
-            br::telemetry::timing::Record(
+                basic_telemetry::NowNs() - applyLoopStartNs;
+            basic_telemetry::Record(
                 "CLod.ApplyCompletions",
                 applyLoopNs);
-            br::telemetry::timing::Record(
+            basic_telemetry::Record(
                 "CLod.ApplyCompletions.AllocatePages",
                 allocatePagesNs);
-            br::telemetry::timing::Record(
+            basic_telemetry::Record(
                 "CLod.ApplyCompletions.ResolvePayloads",
                 resolvePayloadsNs);
             if (stagePayloadsNs != 0u) {
-                br::telemetry::timing::Record(
+                basic_telemetry::Record(
                     "CLod.ApplyCompletions.StagePayloads",
                     stagePayloadsNs);
             }
-            br::telemetry::timing::AddCounter(
+            basic_telemetry::AddCounter(
                 "CLod.ApplyCompletions.Processed",
                 completions.size());
         }
@@ -7958,13 +7958,13 @@ void CLodStreamingSystem::PollCompletedReadbackSlots() {
     // touches their pages, so doing that here as well only duplicates the work.
     {
         ZoneScopedN("CLodStreamingSystem::PollCompletedReadbackSlots::TouchVisibleGroupsLru");
-        const bool recordCpuTiming = br::telemetry::timing::Enabled();
+        const bool recordCpuTiming = basic_telemetry::Enabled();
         const uint64_t timingStartNs =
-            recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+            recordCpuTiming ? basic_telemetry::NowNs() : 0u;
         if (recordCpuTiming) {
-            br::telemetry::timing::Record(
+            basic_telemetry::Record(
                 "CLod.Bookkeeping.TouchVisibleGroupsLRU",
-                br::telemetry::timing::NowNs() - timingStartNs);
+                basic_telemetry::NowNs() - timingStartNs);
         }
     }
 
@@ -8458,9 +8458,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::UsedGroups");
-            const bool recordCpuTiming = br::telemetry::timing::Enabled();
+            const bool recordCpuTiming = basic_telemetry::Enabled();
             const uint64_t timingStartNs =
-                recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+                recordCpuTiming ? basic_telemetry::NowNs() : 0u;
             for (uint32_t wordIndex : m_usedGroupsWordsCpu) {
                 if (wordIndex >= m_usedGroupsBitsCpu.size()) {
                     continue;
@@ -8473,16 +8473,16 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
                 }
             }
             if (recordCpuTiming) {
-                br::telemetry::timing::Record(
+                basic_telemetry::Record(
                     "CLod.Bookkeeping.ProtectReferencedPages.UsedGroups",
-                    br::telemetry::timing::NowNs() - timingStartNs);
+                    basic_telemetry::NowNs() - timingStartNs);
             }
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::RecentlyUsedOwnedGroups");
-            const bool recordCpuTiming = br::telemetry::timing::Enabled();
+            const bool recordCpuTiming = basic_telemetry::Enabled();
             const uint64_t timingStartNs =
-                recordCpuTiming ? br::telemetry::timing::NowNs() : 0u;
+                recordCpuTiming ? basic_telemetry::NowNs() : 0u;
             const uint64_t protectedUsedWindow = static_cast<uint64_t>(std::max<uint32_t>(m_streamingReadbackRingSize, 1u) + 1u);
             size_t retainedGroupCount = 0u;
             for (const uint32_t groupIndex : m_recentlyUsedGroupsCpu) {
@@ -8511,9 +8511,9 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
             }
             m_recentlyUsedGroupsCpu.resize(retainedGroupCount);
             if (recordCpuTiming) {
-                br::telemetry::timing::Record(
+                basic_telemetry::Record(
                     "CLod.Bookkeeping.ProtectReferencedPages.RecentlyUsedOwnedGroups",
-                    br::telemetry::timing::NowNs() - timingStartNs);
+                    basic_telemetry::NowNs() - timingStartNs);
             }
         }
         {

@@ -31,3 +31,6 @@
 [submodule "geometry-central"]
 	path = geometry-central
 	url = https://github.com/nmwsharp/geometry-central.git
+[submodule "BasicTelemetry"]
+	path = BasicTelemetry
+	url = git@github.com:panthuncia/BasicTelemetry.git

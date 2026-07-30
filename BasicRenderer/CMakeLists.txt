@@ -25,6 +25,7 @@ option(BASICRENDERER_USE_PACKAGE_DEPS "Prefer preinstalled BasicRHI/OpenRenderGr
 option(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK "Allow fallback to in-tree BasicRHI/OpenRenderGraph" ON)
 
 if(BASICRENDERER_USE_PACKAGE_DEPS)
+    find_package(BasicTelemetry CONFIG QUIET)
     find_package(BasicScene CONFIG QUIET)
     find_package(BasicRHI CONFIG QUIET)
     find_package(OpenRenderGraph CONFIG QUIET)
@@ -43,6 +44,12 @@ if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
 endif()
 
 if(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK)
+    if(NOT TARGET BasicTelemetry::Core AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry/CMakeLists.txt")
+        set(BASICTELEMETRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(BASICTELEMETRY_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicTelemetry" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicTelemetry")
+    endif()
+
     if(NOT TARGET BasicScene::BasicScene AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../BasicScene/CMakeLists.txt")
         add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../BasicScene" "${CMAKE_CURRENT_BINARY_DIR}/_deps/BasicScene")
     endif()
@@ -176,6 +183,10 @@ if(WIN32 AND BASICRENDERER_ENABLE_NVPERF AND NOT TARGET NVPerf::Host)
             "Set BASICRENDERER_NVPERF_SDK_ROOT or NVPERF_SDK_ROOT to the SDK's NvPerf directory."
         )
     endif()
+endif()
+
+if(NOT TARGET BasicTelemetry::Core)
+    message(FATAL_ERROR "BasicRenderer requires BasicTelemetry::Core. Install BasicTelemetry or provide it as a sibling project.")
 endif()
 
 set(BASICRENDERER_HAS_DIRECTSTORAGE FALSE)
@@ -1160,6 +1171,7 @@ PRIVATE
     Boost::interprocess
     TBB::tbb
     Tracy::TracyClient
+    BasicTelemetry::Core
     unofficial::sqlite3::sqlite3
     slang::slang
     "${BASICRENDERER_SOURCE_ROOT}/WinPixEventRuntime.lib" 

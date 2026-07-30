@@ -358,6 +358,7 @@ endif()
 
 add_subdirectory("ThirdParty")
 add_subdirectory("BasicRHI")
+add_subdirectory("BasicTelemetry")
 add_subdirectory("OpenRenderGraph")
 add_subdirectory("BasicScene")
 add_subdirectory ("BasicRenderer")
