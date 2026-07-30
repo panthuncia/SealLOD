@@ -26,6 +26,23 @@ namespace rg::runtime {
 class IReadbackService;
 }
 
+struct MaterialTextureStreamingRecord {
+	std::string identifier;
+	uint64_t residentBytes = 0;
+	uint32_t residentWidth = 0;
+	uint32_t residentHeight = 0;
+	uint32_t expectedResidentWidth = 0;
+	uint32_t expectedResidentHeight = 0;
+	uint32_t totalMipCount = 0;
+	uint32_t residentTopMip = 0;
+	uint32_t residentMipCount = 0;
+	uint32_t requestedTopMip = 0;
+	uint32_t feedbackTopMip = UINT32_MAX;
+	bool eligible = false;
+	bool enabled = false;
+	bool alphaTested = false;
+};
+
 struct MaterialTextureStreamingStats {
 	uint32_t uniqueMaterialTextureCount = 0;
 	uint32_t uniqueStreamableTextureCount = 0;
@@ -36,6 +53,22 @@ struct MaterialTextureStreamingStats {
 	uint64_t totalResidentBytes = 0;
 	uint64_t streamableResidentBytes = 0;
 	std::vector<uint32_t> residentTopMipHistogram = {};
+	std::vector<uint32_t> requestedTopMipHistogram = {};
+	std::vector<uint32_t> feedbackTopMipHistogram = {};
+	uint32_t texturesWithoutFeedback = 0;
+	std::vector<uint64_t> residentBytesByTopMip = {};
+	uint32_t residentShapeMismatchTextureCount = 0;
+	uint64_t residentShapeMismatchBytes = 0;
+	uint32_t distinctPreparedTextureCount = 0;
+	uint64_t distinctPreparedTextureBytes = 0;
+	uint32_t activeMaterialResourceCount = 0;
+	uint64_t activeMaterialResourceBytes = 0;
+	uint32_t externallyManagedActiveResourceCount = 0;
+	uint64_t externallyManagedActiveResourceBytes = 0;
+	uint32_t alphaTestedTextureCount = 0;
+	uint32_t alphaTestedMipCapViolationCount = 0;
+	std::vector<uint64_t> publishedResourceIDs = {};
+	std::vector<MaterialTextureStreamingRecord> largestResidentTextures = {};
 };
 
 class TextureStreamingManager : public IResourceProvider {
@@ -57,7 +90,8 @@ public:
 		const std::shared_ptr<TextureAsset>& texture,
 		BindingChangedCallback onBindingChanged,
 		std::string debugLabel = {},
-		bool seedCurrentBinding = true);
+		bool seedCurrentBinding = true,
+		bool alphaTested = false);
 	void UnregisterTextureBinding(uint64_t bindingID);
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
 
@@ -78,6 +112,7 @@ private:
 		uint32_t streamingTextureID = 0;
 		std::weak_ptr<TextureAsset> texture;
 		std::string debugLabel;
+		bool alphaTested = false;
 	};
 	struct WorkerCommand {
 		enum class Kind : uint8_t { Register, Unregister, MarkDirty, FrameTick } kind = Kind::FrameTick;
@@ -86,6 +121,7 @@ private:
 		std::shared_ptr<TextureAsset> texture;
 		std::string debugLabel;
 		bool seedCurrentBinding = true;
+		bool alphaTested = false;
 		bool needsUploadAdvance = false;
 		std::string reason;
 	};
@@ -147,6 +183,7 @@ private:
 	std::unordered_set<uint32_t> m_texturesNeedingUploadAdvanceSet;
 	std::unordered_map<uint64_t, TextureBindingOwner> m_bindingsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_bindingIDsByStreamingTextureID;
+	std::unordered_map<uint32_t, uint32_t> m_alphaTestedBindingCountsByStreamingTextureID;
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
 	std::thread m_workerThread;

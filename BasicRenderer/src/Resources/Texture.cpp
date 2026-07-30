@@ -953,6 +953,58 @@ std::shared_ptr<TextureSourceData> ClipTextureSourceDataTopMip(
 	return clipped;
 }
 
+uint32_t InferTextureSourceTopMip(
+	const TextureDescription& desc,
+	uint32_t fullWidth,
+	uint32_t fullHeight,
+	uint32_t totalMipCount)
+{
+	if (desc.imageDimensions.empty() || fullWidth == 0u || fullHeight == 0u || totalMipCount == 0u) {
+		return 0u;
+	}
+
+	const ImageDimensions& firstMip = desc.imageDimensions.front();
+	for (uint32_t mip = 0u; mip < totalMipCount; ++mip) {
+		const uint32_t expectedWidth = (std::max)(1u, fullWidth >> mip);
+		const uint32_t expectedHeight = (std::max)(1u, fullHeight >> mip);
+		if (firstMip.width == expectedWidth && firstMip.height == expectedHeight) {
+			return mip;
+		}
+	}
+	return 0u;
+}
+
+std::shared_ptr<TextureSourceData> ShapeTextureSourceDataForResidentTopMip(
+	const std::shared_ptr<TextureSourceData>& sourceData,
+	uint32_t fullWidth,
+	uint32_t fullHeight,
+	uint32_t totalMipCount,
+	uint32_t desiredResidentTopMip)
+{
+	if (!sourceData || sourceData->desc.imageDimensions.empty() || desiredResidentTopMip == 0u) {
+		return sourceData;
+	}
+
+	const uint32_t sourceTopMip = InferTextureSourceTopMip(
+		sourceData->desc,
+		fullWidth,
+		fullHeight,
+		totalMipCount);
+	if (sourceTopMip >= desiredResidentTopMip) {
+		return sourceData;
+	}
+
+	const uint32_t relativeTopMip = desiredResidentTopMip - sourceTopMip;
+	const uint32_t sourceMipCount = CalcMipCountFromDescription(sourceData->desc);
+	if (relativeTopMip >= sourceMipCount) {
+		// The supplied source does not contain the requested coarse mip. Preserve
+		// the usable source and report its actual residency so a later reload can
+		// obtain a complete source instead of publishing false residency metadata.
+		return sourceData;
+	}
+	return ClipTextureSourceDataTopMip(sourceData, relativeTopMip);
+}
+
 std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 	const TextureFactory& factory,
 	const TextureProcessingSettings& settings)
@@ -2119,6 +2171,9 @@ bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIn
 	constexpr uint32_t kStreamingMipLevelStep = 4u;
 	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const uint32_t rawClampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
+	if (!forceResidencyChange) {
+		m_streamingState.lastFeedbackTopMip = rawClampedTopMip;
+	}
 	// Every streamed image is a complete replacement, so changing residency by one
 	// mip at a time is disproportionately expensive.  Quantize upgrades toward the
 	// finer end of a four-mip bucket: this never supplies less detail than feedback
@@ -2266,7 +2321,7 @@ void TextureAsset::NoteTextureSeen(uint64_t frameIndex) {
 }
 
 void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
-	const uint32_t residentTopMip = GetDesiredResidentTopMip();
+	const uint32_t desiredResidentTopMip = GetDesiredResidentTopMip();
 	if (image && !image->HasValidBackingResource()) {
 		image.reset();
 	}
@@ -2277,8 +2332,13 @@ void TextureAsset::AdoptUploadedImage(std::shared_ptr<PixelBuffer> image) {
 	m_hasUploadedFinalImage = (m_image != nullptr);
 	m_hasUploadedPlaceholder = false;
 	RefreshStreamingStateFromDescription();
-	SetResidentMipWindow(residentTopMip, CalcMipCountFromDescription(m_desc));
-	SetPendingTopMip(residentTopMip);
+	const uint32_t actualResidentTopMip = InferTextureSourceTopMip(
+		m_desc,
+		GetFullMip0Width(),
+		GetFullMip0Height(),
+		m_streamingState.residency.totalMipCount);
+	SetResidentMipWindow(actualResidentTopMip, CalcMipCountFromDescription(m_desc));
+	SetPendingTopMip(desiredResidentTopMip);
 	BumpBindingRevision();
 	if (!m_name.empty() && HasUsableImage()) {
 		m_image->SetName(m_name);
@@ -2633,20 +2693,37 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			return false;
 		}
 
-		const uint32_t residentMipCount = CalcMipCountFromDescription(sourceDataToUpload->desc);
-		m_desc = sourceDataToUpload->desc;
+		const auto shapedSourceData = m_streamingState.enabled
+			? ShapeTextureSourceDataForResidentTopMip(
+				sourceDataToUpload,
+				GetFullMip0Width(),
+				GetFullMip0Height(),
+				m_streamingState.residency.totalMipCount,
+				desiredResidentTopMip)
+			: sourceDataToUpload;
+		if (!shapedSourceData || shapedSourceData->desc.imageDimensions.empty()) {
+			return false;
+		}
+
+		const uint32_t actualResidentTopMip = InferTextureSourceTopMip(
+			shapedSourceData->desc,
+			GetFullMip0Width(),
+			GetFullMip0Height(),
+			m_streamingState.residency.totalMipCount);
+		const uint32_t residentMipCount = CalcMipCountFromDescription(shapedSourceData->desc);
+		m_desc = shapedSourceData->desc;
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::UploadSourceDataThroughFactory::RefreshStreamingState");
 			RefreshStreamingStateFromDescription();
 		}
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::UploadSourceDataThroughFactory::CreateAlwaysResidentPixelBuffer");
-			TracyPlot("SARP.Texture.MainThreadUpload.Subresources", static_cast<int64_t>(sourceDataToUpload->subresources.size()));
+			TracyPlot("SARP.Texture.MainThreadUpload.Subresources", static_cast<int64_t>(shapedSourceData->subresources.size()));
 			m_image = factory.CreateAlwaysResidentPixelBuffer(
-				sourceDataToUpload->desc,
-				TextureFactory::TextureInitialData::FromBytes(sourceDataToUpload->subresources),
+				shapedSourceData->desc,
+				TextureFactory::TextureInitialData::FromBytes(shapedSourceData->subresources),
 				m_name,
-				ShouldPreserveAlphaCoverage(m_meta, sourceDataToUpload->desc),
+				ShouldPreserveAlphaCoverage(m_meta, shapedSourceData->desc),
 				false,
 				m_meta.processing.maxMipLevels);
 			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
@@ -2657,7 +2734,7 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::UploadSourceDataThroughFactory::UpdateResidencyState");
-			SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
+			SetResidentMipWindow(actualResidentTopMip, residentMipCount);
 			SetPendingTopMip(desiredResidentTopMip);
 		}
 		{
@@ -2903,7 +2980,6 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		}
 		if (!m_processingHandle && !TextureProcessingManager::GetInstance().NeedsProcessing(*sourceData, m_meta)) {
 			ZoneScopedN("TextureAsset::EnsureUploaded::ShouldProcessTextureInitial::NoProcessingNeeded");
-			const uint32_t residentMipCount = CalcMipCountFromDescription(sourceData->desc);
 			if (m_meta.processing.allowCpuBootstrapBeforeAsyncProcessing && !HasUsableImage()) {
 				if (uploadSourceDataThroughFactory(
 						sourceData,
@@ -2975,32 +3051,10 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			}
 			else {
 				ZoneScopedN("TextureAsset::EnsureUploaded::NoProcessingNeeded::ImmediateCpuUpload");
-				m_desc = sourceData->desc;
-				RefreshStreamingStateFromDescription();
-				{
-					ZoneScopedN("TextureAsset::EnsureUploaded::NoProcessingNeeded::CreateAlwaysResidentPixelBuffer");
-					m_image = factory.CreateAlwaysResidentPixelBuffer(
-						sourceData->desc,
-						TextureFactory::TextureInitialData::FromBytes(sourceData->subresources),
-						m_name,
-						ShouldPreserveAlphaCoverage(m_meta, sourceData->desc),
-						false,
-						m_meta.processing.maxMipLevels);
-					if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
-				}
-				m_hasUploadedFinalImage = true;
-				m_hasUploadedPlaceholder = false;
-				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
-				SetPendingTopMip(desiredResidentTopMip);
-				RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture data uploaded through TextureFactory without async processing");
-				didMainThreadUpload = true;
-				BumpBindingRevision();
-				if (!m_initialDataString.empty()) {
-					m_initialStorage = m_initialDataString;
-				}
-				else {
-					m_initialStorage = std::monostate{};
-				}
+				uploadSourceDataThroughFactory(
+					sourceData,
+					TextureUploadPathTelemetry::CpuImmediateUpload,
+					"texture data uploaded through TextureFactory without async processing");
 				return makeResult();
 			}
 		}
@@ -3282,30 +3336,14 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					try {
 						ZoneScopedN("TextureAsset::EnsureUploaded::ProcessingFailed::ConditionedFallback::BlockingBuildAndUpload");
 						const auto fallbackSourceData = BuildSourceData("ProcessingFailed::ConditionedBlockingFallback");
-						const uint32_t residentMipCount = CalcMipCountFromDescription(fallbackSourceData->desc);
 						m_meta.isProcessingCacheArtifact = false;
-						m_desc = fallbackSourceData->desc;
-						m_image = factory.CreateAlwaysResidentPixelBuffer(
-							fallbackSourceData->desc,
-							TextureFactory::TextureInitialData::FromBytes(fallbackSourceData->subresources),
-							m_name,
-							ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
-							false,
-							m_meta.processing.maxMipLevels);
-						if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
-						RefreshStreamingStateFromDescription();
-						SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
-						SetPendingTopMip(desiredResidentTopMip);
-						RecordUploadPath(
+						uploadSourceDataThroughFactory(
+							fallbackSourceData,
 							TextureUploadPathTelemetry::ProcessingFailedFallback,
 							processingError.empty()
 								? "async processing failed; conditioned residency unavailable, uploaded original bytes through TextureFactory"
 								: "async processing failed ('" + processingError + "'); conditioned residency unavailable, uploaded original bytes through TextureFactory");
-						m_hasUploadedFinalImage = true;
-						m_hasUploadedPlaceholder = false;
-						didMainThreadUpload = true;
 						m_processingFallbackRequested = false;
-						BumpBindingRevision();
 					}
 					catch (const std::exception& ex) {
 						spdlog::warn(
@@ -3325,33 +3363,14 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					ZoneScopedN("TextureAsset::EnsureUploaded::ProcessingFailed::BlockingBuildSourceData");
 					fallbackSourceData = BuildSourceData("ProcessingFailed::BlockingOriginalFallback");
 				}
-				const uint32_t residentMipCount = CalcMipCountFromDescription(fallbackSourceData->desc);
 				m_meta.isProcessingCacheArtifact = false;
-				m_desc = fallbackSourceData->desc;
-				{
-					ZoneScopedN("TextureAsset::EnsureUploaded::ProcessingFailed::CreateAlwaysResidentPixelBuffer");
-					m_image = factory.CreateAlwaysResidentPixelBuffer(
-						fallbackSourceData->desc,
-						TextureFactory::TextureInitialData::FromBytes(fallbackSourceData->subresources),
-						m_name,
-						ShouldPreserveAlphaCoverage(m_meta, fallbackSourceData->desc),
-						false,
-						m_meta.processing.maxMipLevels);
-					if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
-				}
-				RefreshStreamingStateFromDescription();
-				SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
-				SetPendingTopMip(desiredResidentTopMip);
-				RecordUploadPath(
+				uploadSourceDataThroughFactory(
+					fallbackSourceData,
 					TextureUploadPathTelemetry::ProcessingFailedFallback,
 					processingError.empty()
 						? "async processing failed; uploaded original bytes through TextureFactory"
 						: "async processing failed ('" + processingError + "'); uploaded original bytes through TextureFactory");
-				m_hasUploadedFinalImage = true;
-				m_hasUploadedPlaceholder = false;
-				didMainThreadUpload = true;
 				m_processingFallbackRequested = false;
-				BumpBindingRevision();
 				m_processingHandle.reset();
 				return makeResult();
 			}
@@ -3432,33 +3451,10 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 			ZoneScopedN("TextureAsset::EnsureUploaded::NoUsableImageFallback::BlockingBuildSourceData");
 			immediateSourceData = BuildSourceData("NoUsableImageFallback::BlockingSourceBuild");
 		}
-		const uint32_t residentMipCount = CalcMipCountFromDescription(immediateSourceData->desc);
-		m_desc = immediateSourceData->desc;
-		{
-			ZoneScopedN("TextureAsset::EnsureUploaded::NoUsableImageFallback::CreateAlwaysResidentPixelBuffer");
-			m_image = factory.CreateAlwaysResidentPixelBuffer(
-				immediateSourceData->desc,
-				TextureFactory::TextureInitialData::FromBytes(immediateSourceData->subresources),
-				m_name,
-				ShouldPreserveAlphaCoverage(m_meta, immediateSourceData->desc),
-				false,
-				m_meta.processing.maxMipLevels);
-			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
-		}
-		RecordUploadPath(TextureUploadPathTelemetry::CpuImmediateUpload, "texture uploaded through TextureFactory without preprocessing");
-		m_hasUploadedFinalImage = true;
-		m_hasUploadedPlaceholder = false;
-		didMainThreadUpload = true;
-		RefreshStreamingStateFromDescription();
-		SetResidentMipWindow(desiredResidentTopMip, residentMipCount);
-		SetPendingTopMip(desiredResidentTopMip);
-		BumpBindingRevision();
-		if (!m_initialDataString.empty()) {
-			m_initialStorage = m_initialDataString;
-		}
-		else {
-			m_initialStorage = std::monostate{};
-		}
+		uploadSourceDataThroughFactory(
+			immediateSourceData,
+			TextureUploadPathTelemetry::CpuImmediateUpload,
+			"texture uploaded through TextureFactory without preprocessing");
 	}
 	return makeResult();
 }

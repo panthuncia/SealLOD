@@ -164,6 +164,7 @@ struct TextureStreamingState {
     TextureMipResidencyWindow residency = {};
     uint32_t requestedTopMip = 0;
     uint32_t pendingTopMip = 0;
+    uint32_t lastFeedbackTopMip = UINT32_MAX;
     uint64_t lastSeenFrame = 0;
     uint64_t stateRevision = 0;
     uint64_t bindingRevision = 0;

@@ -744,6 +744,8 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 				continue;
 			}
 			TracyPlot("MaterialManager.RegisterBinding.StreamingTextureID", static_cast<int64_t>(streamingTextureID));
+			const bool alphaTested =
+				(material.Technique().compileFlags & MaterialCompileFlags::MaterialCompileAlphaTest) != 0u;
 
 			const uint64_t bindingID = m_textureStreamingManager->RegisterTextureBinding(
 				texture,
@@ -753,7 +755,9 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 						MarkMaterialDirty(*materialIt->second);
 					}
 				},
-				"material:" + std::to_string(materialID));
+				"material:" + std::to_string(materialID),
+				true,
+				alphaTested);
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
 				streamingTextureIDs.push_back(streamingTextureID);

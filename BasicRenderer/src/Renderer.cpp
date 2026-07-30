@@ -852,6 +852,53 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
         const auto textureStats = m_pMaterialManager->GetMaterialTextureStreamingStats();
         snapshot.pendingTextureReloads = textureStats.pendingReloadTextureCount;
         snapshot.fullResolutionTextures = textureStats.fullResolutionResidentTextureCount;
+        snapshot.materialTextures = textureStats.uniqueMaterialTextureCount;
+        snapshot.streamableMaterialTextures = textureStats.uniqueStreamableTextureCount;
+        snapshot.streamingEnabledMaterialTextures = textureStats.uniqueStreamingEnabledTextureCount;
+        snapshot.streamableFullResolutionTextures = textureStats.streamableFullResolutionResidentTextureCount;
+        snapshot.materialTextureResidentBytes = textureStats.totalResidentBytes;
+        snapshot.streamableMaterialTextureResidentBytes = textureStats.streamableResidentBytes;
+        snapshot.materialTextureResidentTopMipHistogram = textureStats.residentTopMipHistogram;
+        snapshot.materialTextureRequestedTopMipHistogram = textureStats.requestedTopMipHistogram;
+        snapshot.materialTextureFeedbackTopMipHistogram = textureStats.feedbackTopMipHistogram;
+        snapshot.materialTexturesWithoutFeedback = textureStats.texturesWithoutFeedback;
+        snapshot.materialTextureResidentBytesByTopMip = textureStats.residentBytesByTopMip;
+        snapshot.materialTextureResidentShapeMismatchCount = textureStats.residentShapeMismatchTextureCount;
+        snapshot.materialTextureResidentShapeMismatchBytes = textureStats.residentShapeMismatchBytes;
+        snapshot.materialTextureDistinctPreparedCount = textureStats.distinctPreparedTextureCount;
+        snapshot.materialTextureDistinctPreparedBytes = textureStats.distinctPreparedTextureBytes;
+        snapshot.activeMaterialTextureResourceCount = textureStats.activeMaterialResourceCount;
+        snapshot.activeMaterialTextureResourceBytes = textureStats.activeMaterialResourceBytes;
+        snapshot.externallyManagedActiveTextureResourceCount = textureStats.externallyManagedActiveResourceCount;
+        snapshot.externallyManagedActiveTextureResourceBytes = textureStats.externallyManagedActiveResourceBytes;
+        snapshot.alphaTestedMaterialTextureCount = textureStats.alphaTestedTextureCount;
+        snapshot.alphaTestedMaterialTextureMipCapViolationCount = textureStats.alphaTestedMipCapViolationCount;
+        snapshot.materialTexturePublishedResourceIDs = textureStats.publishedResourceIDs;
+        snapshot.largestMaterialTextureRecords.reserve(textureStats.largestResidentTextures.size());
+        for (const auto& record : textureStats.largestResidentTextures) {
+            std::ostringstream stream;
+            stream
+                << "bytes=" << record.residentBytes
+                << " resident_dimensions=" << record.residentWidth << "x" << record.residentHeight
+                << " expected_resident_dimensions=" << record.expectedResidentWidth << "x" << record.expectedResidentHeight
+                << " total_mips=" << record.totalMipCount
+                << " resident_top_mip=" << record.residentTopMip
+                << " resident_mip_count=" << record.residentMipCount
+                << " requested_top_mip=" << record.requestedTopMip
+                << " feedback_top_mip=";
+            if (record.feedbackTopMip == UINT32_MAX) {
+                stream << "none";
+            }
+            else {
+                stream << record.feedbackTopMip;
+            }
+            stream
+                << " eligible=" << (record.eligible ? 1 : 0)
+                << " enabled=" << (record.enabled ? 1 : 0)
+                << " alpha_tested=" << (record.alphaTested ? 1 : 0)
+                << " identifier=\"" << record.identifier << "\"";
+            snapshot.largestMaterialTextureRecords.push_back(stream.str());
+        }
     }
     if (m_pMeshManager) {
         const auto clodStats = m_pMeshManager->GetCLodStreamingDebugStats();
@@ -869,6 +916,18 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
     snapshot.ioTasks = taskStats.ioQueued + taskStats.ioActive;
     snapshot.backgroundTasks = taskStats.backgroundQueued + taskStats.backgroundActive;
     snapshot.shaderCompileTasks = taskStats.shaderCompileQueued + taskStats.shaderCompileActive;
+    const auto deferredReleaseStats = DescriptorHeapManager::GetInstance().GetDeferredReleaseStats();
+    snapshot.deferredGpuReleaseCount = deferredReleaseStats.releaseCount;
+    snapshot.deferredGpuReleaseResourceCount = deferredReleaseStats.resourceCount;
+    snapshot.blockedGpuReleaseCount = deferredReleaseStats.blockedReleaseCount;
+    snapshot.invalidGpuReleaseTimelineCount = deferredReleaseStats.invalidTimelineCount;
+    snapshot.deviceErrorGpuReleaseTimelineCount = deferredReleaseStats.deviceErrorTimelineCount;
+    snapshot.incompleteGpuReleaseTimelineCount = deferredReleaseStats.incompleteTimelineCount;
+    snapshot.deferredGpuReleaseResourceIDs = std::move(deferredReleaseStats.resourceIDs);
+    const auto deletionStats = DeletionManager::GetInstance().GetStats();
+    snapshot.deletionQueueObjectCount = deletionStats.objectCount;
+    snapshot.deletionQueueAllocationCount = deletionStats.allocationCount;
+    snapshot.deletionQueueTrackedAllocationCount = deletionStats.trackedAllocationCount;
     if (m_pObjectManager) {
         const auto objectStats = m_pObjectManager->GetStats();
         snapshot.deferredRetireQueueDepth = objectStats.deferredRetireQueueDepth;
@@ -1804,6 +1863,11 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<uint32_t>(
 		MaterialTextureStreamingIdleFramesSettingName,
 		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_IDLE_FRAMES", 1800u));
+	settingsManager.registerSetting<uint32_t>(
+		AlphaTestedMaterialTextureMaxResidentTopMipSettingName,
+		ReadUintEnvironmentValue(
+			"SARP_ALPHA_TESTED_TEXTURE_MAX_RESIDENT_TOP_MIP",
+			AlphaTestedMaterialTextureMaxResidentTopMipDefault));
 	int32_t forcedSkeletonLod = -1;
 	char* forcedSkeletonLodValue = nullptr;
 	size_t forcedSkeletonLodValueSize = 0;
