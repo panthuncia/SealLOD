@@ -318,13 +318,11 @@ bool WindCandidateHigherPriority(WindActiveInstanceGPU left, WindActiveInstanceG
 [numthreads(64,1,1)]
 void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
 {
-    StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
     if (WT_TYPE_COUNT == 0u) return;
-    WindTypeGPU control = types[0];
     RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
     RWStructuredBuffer<uint> typeCounters = ResourceDescriptorHeap[WT_TYPE_COUNTERS];
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
-    if (tid.x < control.transformCount) {
+    if (tid.x < WT_PLACEMENT_COUNT) {
         const uint slot = WindTransientSlotBase + tid.x;
         SkinningInstanceGPUInfo info = infos[slot];
         // Invalidate the current-frame lookup without discarding the palette
@@ -335,12 +333,12 @@ void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
     }
     if (tid.x < WT_TYPE_COUNT) typeCounters[tid.x] = 0u;
     if (tid.x < WT_TYPE_COUNT) {
-        RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[control.processedTypeCountsDescriptor];
+        RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
         processedTypeCounts[tid.x] = 0u;
     }
     if (tid.x < 15u) counters[tid.x] = 0u;
 	if (tid.x < 112u) {
-        RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
+        RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[WT_BONES];
         diagnostics[tid.x] = 0u;
     }
 }
@@ -408,7 +406,6 @@ float WindDesiredSkeletonQuality(float screenFraction)
 void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 {
     StructuredBuffer<WindTypeGPU> types = ResourceDescriptorHeap[WT_TYPES];
-    const WindTypeGPU control = types[0];
     const bool latePhase = (WT_PHASE_DEPTH & WindLatePhaseBit) != 0u;
     const uint depthMapDescriptorIndex = WT_PHASE_DEPTH & WindDepthDescriptorMask;
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[WT_COUNTERS];
@@ -416,12 +413,12 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     if (latePhase) {
         const uint deferredCount = min(counters[10], WT_PLACEMENT_COUNT);
         if (activeEntryIndex >= deferredCount) return;
-        StructuredBuffer<uint> deferredEntries = ResourceDescriptorHeap[control.deferredEntriesDescriptor];
+        StructuredBuffer<uint> deferredEntries = ResourceDescriptorHeap[WT_FIELD1];
         activeEntryIndex = deferredEntries[activeEntryIndex];
     }
     else if (activeEntryIndex >= WT_PLACEMENT_COUNT) return;
 
-    StructuredBuffer<uint2> activeEntries = ResourceDescriptorHeap[control.activeEntriesDescriptor];
+    StructuredBuffer<uint2> activeEntries = ResourceDescriptorHeap[WT_FIELD0];
     const uint2 activeEntry = activeEntries[activeEntryIndex];
     StructuredBuffer<SkinnedAssemblyPlacementGPU> placements = ResourceDescriptorHeap[WT_GENERATIONS];
     const SkinnedAssemblyPlacementGPU placement = placements[activeEntry.x];
@@ -440,8 +437,8 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 	float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
 	const float screenFraction = radiusWS * abs(camera.projection._22) /
 		max(abs(centerVS.z), radiusWS + 1.0e-3f);
-	if (placement.skinningTypeSlot >= control.baseTypeLookupCount) return;
-	StructuredBuffer<uint> baseTypeLookup = ResourceDescriptorHeap[control.baseTypeLookupDescriptor];
+	if (placement.skinningTypeSlot >= WT_ALLOCATION_RECORDS) return;
+	StructuredBuffer<uint> baseTypeLookup = ResourceDescriptorHeap[WT_FIELD_DIMS];
 	const uint firstVariant = baseTypeLookup[placement.skinningTypeSlot];
 	if (firstVariant >= WT_TYPE_COUNT) return;
 	const uint variantCount = min(types[firstVariant].variantCount, 16u);
@@ -497,7 +494,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
             uint deferredIndex;
             InterlockedAdd(counters[10], 1u, deferredIndex);
             if (deferredIndex < WT_PLACEMENT_COUNT) {
-                RWStructuredBuffer<uint> deferredEntries = ResourceDescriptorHeap[control.deferredEntriesDescriptor];
+                RWStructuredBuffer<uint> deferredEntries = ResourceDescriptorHeap[WT_FIELD1];
                 deferredEntries[deferredIndex] = activeEntryIndex;
                 InterlockedAdd(counters[11], 1u);
             }
@@ -507,7 +504,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
         }
         return;
     }
-	RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
+	RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[WT_BONES];
 	InterlockedAdd(lodDiagnostics[40u + min(lodLevel, 15u)], 1u);
 	if (screenFraction < WT_STATIC_CUTOFF) {
 		InterlockedAdd(lodDiagnostics[56], 1u);
@@ -550,7 +547,7 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     if (latePhase) InterlockedAdd(counters[13], 1u);
     InterlockedAdd(counters[9], 1u);
 	if (localIndex == 0u && typeId == 0u) {
-        RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[control.diagnosticsDescriptor];
+        RWStructuredBuffer<uint> diagnostics = ResourceDescriptorHeap[WT_BONES];
         diagnostics[0] = asuint(length(objectData.model[0].xyz));
         diagnostics[1] = asuint(length(objectData.model[1].xyz));
         diagnostics[2] = asuint(length(objectData.model[2].xyz));
@@ -572,7 +569,7 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
     RWStructuredBuffer<WindActiveInstanceGPU> activeInstances = ResourceDescriptorHeap[WT_ACTIVE];
     RWStructuredBuffer<SkinningInstanceGPUInfo> infos = ResourceDescriptorHeap[WT_SKIN_INFO];
     RWStructuredBuffer<WindAllocationRecordGPU> allocationRecords = ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
-    RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[types[0].processedTypeCountsDescriptor];
+    RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[WT_FIELD0];
     const bool latePhase = (WT_PHASE_DEPTH & WindLatePhaseBit) != 0u;
 
     // A single thread walks types in stable order. This makes matrix allocation exact and
@@ -670,7 +667,7 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 			}
 		}
 		if (acceptedCount != 0u) {
-			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[WT_BONES];
 			InterlockedAdd(lodDiagnostics[24u + min(type.lodLevel, 15u)], acceptedCount);
 		}
 		const uint demotedCount = newCandidateCount - acceptedCount;
@@ -687,7 +684,7 @@ void BuildWindCommandsCS(uint3 tid : SV_DispatchThreadID)
 			}
 		}
 		else if (demotedCount != 0u) {
-			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+			RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[WT_BONES];
 			InterlockedAdd(lodDiagnostics[58], demotedCount);
 			for (uint i = 0u; i < demotedCount; ++i) {
 				const WindActiveInstanceGPU rejected = activeInstances[type.bucketBase + processedCount + acceptedCount + i];
@@ -763,7 +760,7 @@ void FinalizeWindAllocationsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 	const uint transientSlot = WindTransientSlotBase + active.instanceTransformIndex;
 	const SkinningInstanceGPUInfo oldInfo = infos[transientSlot];
 	if (oldInfo.boneCount != 0u && oldInfo.stableSceneId == active.stableSceneId) {
-		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[WT_BONES];
 		InterlockedAdd(lodDiagnostics[59], 1u);
 		lodDiagnostics[60] = active.stableSceneId;
 		lodDiagnostics[61] = (oldInfo.skeletonLodVariant & 0xffffu) | ((type.lodLevel & 0xffffu) << 16u);
@@ -776,7 +773,7 @@ void FinalizeWindAllocationsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 		oldInfo.skeletonLodVariant == type.lodLevel;
 	if ((oldInfo.flags & WindHistoryValidFlag) != 0u && oldInfo.stableSceneId == active.stableSceneId &&
 		oldInfo.skeletonLodVariant != type.lodLevel) {
-		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+		RWStructuredBuffer<uint> lodDiagnostics = ResourceDescriptorHeap[WT_BONES];
 		InterlockedAdd(lodDiagnostics[57], 1u);
 	}
 
@@ -784,7 +781,7 @@ void FinalizeWindAllocationsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 	transientInfo.transformOffsetMatrices = active.transformOffsetMatrices;
 	transientInfo.inverseSkinOffsetMatrices = active.inverseSkinOffsetMatrices;
 	transientInfo.boneCount = type.boneCount;
-	transientInfo.boneRemapDescriptor = type.remapDescriptor;
+	transientInfo.boneRemapDescriptor = WT_FIELD0;
 	transientInfo.boneRemapOffset = type.remapOffset;
 	transientInfo.sourceBoneCount = type.sourceBoneCount;
 	transientInfo.skeletonLodVariant = type.lodLevel;
@@ -960,7 +957,7 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     // their logical matrices directly, so readers never need orientation branches.
     forward[inst.transformOffsetMatrices+tid.x]=result;
     inverse[inst.inverseSkinOffsetMatrices+tid.x]=resultInverse;
-    RWStructuredBuffer<uint> diagnostics=ResourceDescriptorHeap[types[0].diagnosticsDescriptor];
+    RWStructuredBuffer<uint> diagnostics=ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
     const bool finiteResult = all(isfinite(result[0])) && all(isfinite(result[1])) && all(isfinite(result[2])) && all(isfinite(result[3]));
     InterlockedAdd(diagnostics[finiteResult ? 12u : 13u], 1u);
     if (target.simulationGroup != WindInvalidIndex) InterlockedAdd(diagnostics[14], 1u);

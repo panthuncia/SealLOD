@@ -4899,10 +4899,18 @@ void Renderer::CreateRenderGraph() {
 
     newGraph->ResetForRebuild();
     // CreateRenderGraph stalls every queue before teardown. ResetForRebuild
-    // therefore leaves only GPU-idle objects in the deletion queues, and it is
-    // safe (and important) to release them before materializing the candidate
-    // graph. Otherwise two complete alias-pool generations overlap for the
-    // normal frames-in-flight retirement delay and can exhaust VRAM.
+    // can retire another wave of resources/descriptors after the pre-reset
+    // descriptor drain above. Consume that wave before draining API objects:
+    // destroying those resources can enqueue their native resources in
+    // DeletionManager. If it is left until normal frame maintenance, those
+    // native objects survive for numFramesInFlight + 1 frames and can retain
+    // stale graph backing through the rebuilt graph's first frames.
+    DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+
+    // Everything released above is GPU-idle, so it is safe (and important) to
+    // release its native objects before materializing the candidate graph.
+    // Otherwise two complete alias-pool generations overlap for the normal
+    // frames-in-flight retirement delay and can exhaust VRAM.
     DeletionManager::GetInstance().DrainAll();
     probeGraphBuildPhase("CreateRenderGraph after ResetForRebuild");
 

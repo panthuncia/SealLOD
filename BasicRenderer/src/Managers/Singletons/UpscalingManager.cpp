@@ -363,6 +363,7 @@ void UpscalingManager::Setup() {
         {
             // Handle error here, check the logs
         }
+        m_resetUpscalerHistory = true;
 
         break;
     }
@@ -458,7 +459,8 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     consts.depthInverted = sl::Boolean::eTrue; // Reverse-Z: near=1, far=0
     consts.cameraMotionIncluded = sl::Boolean::eTrue;
     consts.motionVectors3D = sl::Boolean::eFalse;
-    consts.reset = sl::Boolean::eFalse;
+    const bool resetHistory = m_resetUpscalerHistory;
+    consts.reset = resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 
     if (SL_FAILED(result, slSetConstants(consts, *frameToken, myViewport))) // constants are changing per frame so frame index is required
     {
@@ -525,6 +527,17 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
                 static_cast<const void*>(pDepthTexture),
                 static_cast<const void*>(pMotionVectors));
         }
+        else if (resetHistory)
+        {
+            m_resetUpscalerHistory = false;
+            spdlog::info(
+                "DLSS history reset submitted for frame {} render={}x{} output={}x{}",
+                frameNumber,
+                renderRes.x,
+                renderRes.y,
+                outputRes.x,
+                outputRes.y);
+        }
 
         rhi::TextureBarrier streamlineOutputBarrier{};
         streamlineOutputBarrier.texture = pUpscaledHDRTarget->GetAPIResource().GetHandle();
@@ -558,6 +571,17 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
                 static_cast<const void*>(pUpscaledHDRTarget),
                 static_cast<const void*>(pDepthTexture),
                 static_cast<const void*>(pMotionVectors));
+        }
+        else if (resetHistory)
+        {
+            m_resetUpscalerHistory = false;
+            spdlog::info(
+                "DLSS history reset submitted for frame {} render={}x{} output={}x{}",
+                frameNumber,
+                renderRes.x,
+                renderRes.y,
+                outputRes.x,
+                outputRes.y);
         }
         else
         {

@@ -136,6 +136,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             case OUTPUT_VSM_DEPTH_MARGIN:
             case OUTPUT_VSM_CLIP_COMPARISON:
             case OUTPUT_VSM_CLIP_GRID_OFFSET:
+            case OUTPUT_VSM_TRACE_FOOTPRINT:
                 payload = lightingOutput.shadowDebugPayload;
                 break;
 #endif

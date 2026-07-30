@@ -557,6 +557,51 @@ uint2 CLodVirtualShadowPhysicalAtlasPixel(uint physicalPageIndex, uint2 virtualT
     return CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapData.physicalAtlasPagesWide);
 }
 
+float CLodVirtualShadowContinuousClipmapLevel(
+    float3 positionWS,
+    float3 cameraPositionWS,
+    float clip0TexelWorldSize,
+    float directionalLodBias,
+    uint activeClipmapCount)
+{
+    if (activeClipmapCount == 0u)
+    {
+        return 0.0f;
+    }
+
+    const float pageCount = (float)kCLodVirtualShadowFixedVirtualPageCountPerAxis;
+    const float scaleRatio = pageCount > 0.0f ? max((pageCount - 2.0f) / pageCount, 0.0f) : 1.0f;
+    const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
+    const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
+    const float distanceFromCamera = length(positionWS - cameraPositionWS);
+    // Clip selection ultimately addresses an integer level. Preserve its
+    // existing bias semantics while retaining the fractional distance term for
+    // smoothly varying trace/filter parameters between transitions.
+    const float clipLevel =
+        log2(max(distanceFromCamera / baseScale, 1.0f)) +
+        floor(directionalLodBias);
+    return clamp(
+        clipLevel,
+        0.0f,
+        (float)(activeClipmapCount - 1u));
+}
+
+float CLodVirtualShadowContinuousTexelWorldSize(
+    float3 positionWS,
+    float3 cameraPositionWS,
+    float clip0TexelWorldSize,
+    float directionalLodBias,
+    uint activeClipmapCount)
+{
+    return max(clip0TexelWorldSize, 1.0e-5f) * exp2(
+        CLodVirtualShadowContinuousClipmapLevel(
+            positionWS,
+            cameraPositionWS,
+            clip0TexelWorldSize,
+            directionalLodBias,
+            activeClipmapCount));
+}
+
 uint CLodVirtualShadowSelectClipmapIndex(
     float3 positionWS,
     float3 cameraPositionWS,
@@ -569,13 +614,14 @@ uint CLodVirtualShadowSelectClipmapIndex(
         return 0u;
     }
 
-    const float pageCount = (float)kCLodVirtualShadowFixedVirtualPageCountPerAxis;
-    const float scaleRatio = pageCount > 0.0f ? max((pageCount - 2.0f) / pageCount, 0.0f) : 1.0f;
-    const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
-    const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
-    const float distanceFromCamera = length(positionWS - cameraPositionWS);
-    const float clipLevel = ceil(log2(max(distanceFromCamera / baseScale, 1.0f))) + directionalLodBias;
-    return min((uint)max(clipLevel, 0.0f), activeClipmapCount - 1u);
+    const float clipLevel = ceil(
+        CLodVirtualShadowContinuousClipmapLevel(
+            positionWS,
+            cameraPositionWS,
+            clip0TexelWorldSize,
+            directionalLodBias,
+            activeClipmapCount));
+    return min((uint)clipLevel, activeClipmapCount - 1u);
 }
 
 #endif

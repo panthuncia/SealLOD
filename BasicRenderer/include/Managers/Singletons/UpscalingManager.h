@@ -122,9 +122,13 @@ private:
     UpscaleQualityMode m_upscaleQualityMode = UpscaleQualityMode::Balanced;
     std::function<DirectX::XMUINT2()> m_getRenderRes;
 	std::function<DirectX::XMUINT2()> m_getOutputRes;
-    bool m_fsrIntialized = false;
+	bool m_fsrIntialized = false;
     ffx::Context m_fsrUpscalingContext = nullptr;
 	bool m_dlssSupported = false;
+    // Streamline history is tied to the input/output dimensions selected by
+    // Setup(). A quality-mode or output-size change must invalidate it on the
+    // first evaluation using the replacement render targets.
+    bool m_resetUpscalerHistory = true;
 };
 
 inline UpscalingManager& UpscalingManager::GetInstance() {

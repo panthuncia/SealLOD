@@ -830,6 +830,12 @@ public:
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
+        // Descriptor slots can be rebound by a structural graph rebuild while
+        // the CPU type-layout revision remains unchanged. Never bootstrap live
+        // descriptors or bounds from the cached windTypes control row.
+        c.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
+        c.placementCount = m_resources->residentTransformCount;
+        c.allocationRecords = m_resources->processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
         PrepareTransient(context, m_pso, c);
         BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
         context.commandList.Dispatch(((std::max)({ m_resources->residentTransformCount, c.typeCount, 64u }) + 63u) / 64u, 1u, 1u);
@@ -877,6 +883,16 @@ public:
             if (const auto* view = rc->viewManager->Get(rc->primaryViewID)) c.cameraIndex = view->gpu.cameraBufferIndex;
         }
         SetActivationPhaseAndDepth(c, rc, m_latePhase);
+        // As in Reset, source every live descriptor from the current resource
+        // objects rather than the cached windTypes control row. Reuse constants
+        // that this entry point otherwise does not consume.
+        c.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
+        c.fieldSlice0 = m_resources->activeSkinnedPlacements
+            ? m_resources->activeSkinnedPlacements->GetSRVInfo(0).slot.index
+            : 0u;
+        c.fieldSlice1 = m_resources->deferredEntries->GetUAVShaderVisibleInfo(0).slot.index;
+        c.fieldDimensions = m_resources->baseTypeLookup->GetSRVInfo(0).slot.index;
+        c.allocationRecords = m_resources->baseTypeLookup->Size();
         PrepareTransient(context, m_pso, c);
         BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
         context.commandList.Dispatch((c.placementCount + 63u) / 64u, 1u, 1u);
@@ -906,6 +922,8 @@ public:
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
             m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
         c.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        c.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
+        c.fieldSlice0 = m_resources->processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
         PrepareTransient(context, m_pso, c);
         BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
         context.commandList.Dispatch(1u, 1u, 1u); return {};
@@ -940,6 +958,8 @@ public:
 			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),
 			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),
 			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
+		constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
+		constants.fieldSlice0 = m_resources->boneRemaps->GetSRVInfo(0).slot.index;
 		PrepareTransient(context, m_pso, constants);
 		BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
 		context.commandList.Dispatch(
@@ -968,6 +988,7 @@ public:
         if (!m_resources->typeCount) return {};
         auto c=MakeTransientConstants(*m_resources,m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::SkinningInstanceInfo),m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::BoneTransforms),m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseSkinMatrices),m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
         c.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        c.allocationRecords = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
         auto* rc=context.hostData->Get<RenderContext>(); auto& cmd=context.commandList; cmd.SetDescriptorHeaps(rc->textureDescriptorHeap.GetHandle(),rc->samplerDescriptorHeap.GetHandle()); cmd.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle()); cmd.BindPipeline(m_pso.GetAPIPipelineState().GetHandle()); BindResourceDescriptorIndices(cmd, m_pso.GetResourceDescriptorSlots()); cmd.PushConstants(rhi::ShaderStage::Compute,0,MiscUintRootSignatureIndex,0,sizeof(c)/4,reinterpret_cast<const uint32_t*>(&c)); cmd.ExecuteIndirect(m_signature->GetHandle(),m_resources->indirectCommands->GetAPIResource().GetHandle(),0,m_resources->allocationCounters->GetAPIResource().GetHandle(),sizeof(uint32_t),m_resources->typeCount); return {};
     }
     void Cleanup() override { m_signature.Reset(); }
@@ -1112,8 +1133,15 @@ void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vecto
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
 	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::SimulateInstancesPhase2", std::make_shared<WindIndirectSimulatePass>(resources, true)).At(lateInsertion));
-    out.push_back(RenderGraph::ExternalPassDesc::Render("ProceduralWind::DebugActiveSkeletons", std::make_shared<WindSkeletonDebugPass>(resources))
-        .At(RenderGraph::ExternalInsertPoint::After("TonemappingPass")));
+    auto debugInsertion = RenderGraph::ExternalInsertPoint::After("TonemappingPass");
+    // This pass writes the swapchain backbuffer. PresentPass must remain the
+    // final backbuffer access so the enhanced RENDER_TARGET -> PRESENT
+    // transition is not undone before IDXGISwapChain::Present.
+    debugInsertion.AlsoBefore("PresentPass");
+    out.push_back(RenderGraph::ExternalPassDesc::Render(
+        "ProceduralWind::DebugActiveSkeletons",
+        std::make_shared<WindSkeletonDebugPass>(resources))
+        .At(debugInsertion));
 }
 
 } // namespace br::wind

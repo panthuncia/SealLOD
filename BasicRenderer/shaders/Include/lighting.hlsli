@@ -665,6 +665,9 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                                 case OUTPUT_VSM_CLIP_GRID_OFFSET:
                                     output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipGridOffsetColor(shadowDebugInfo));
                                     break;
+                                case OUTPUT_VSM_TRACE_FOOTPRINT:
+                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugTraceFootprintColor(shadowDebugInfo));
+                                    break;
                                 }
                             }
                             break;

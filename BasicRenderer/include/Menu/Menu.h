@@ -2238,7 +2238,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 m_clodDirectionalVirtualShadowReceiverTraceUncertaintyScale);
         }
         if (ImGui::SliderFloat(
-                "VSM Receiver Trace Depth Safety",
+                "VSM Trace Depth Safety",
                 &m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale,
                 0.0f,
                 4.0f,
@@ -2906,6 +2906,12 @@ inline void Menu::DrawOutputTypeDropdown() {
         ImGui::TextDisabled(
             "VSM static lifecycle: orange = static page rendered this frame, "
             "dark gray = cached, magenta = missing depth.");
+    }
+    else if (selectedItemIndex ==
+        static_cast<unsigned int>(OutputType::VSM_TRACE_FOOTPRINT)) {
+        ImGui::TextDisabled(
+            "VSM trace footprint: red = continuous LOD phase, green = sampled "
+            "texel / visual footprint excess, blue = camera / visual footprint.");
     }
 }
 

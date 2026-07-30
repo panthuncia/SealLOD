@@ -77,6 +77,7 @@ enum OutputType {
 	VSM_DEPTH_MARGIN = 73,
 	VSM_CLIP_COMPARISON = 74,
 	VSM_CLIP_GRID_OFFSET = 75,
+	VSM_TRACE_FOOTPRINT = 76,
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -156,4 +157,5 @@ inline std::vector<std::string> OutputTypeNames = {
 	"VSM Depth-test Margin",
 	"VSM Adjacent Clip Comparison",
 	"VSM Adjacent Clip Grid Offset",
+	"VSM Trace Footprint",
 };
