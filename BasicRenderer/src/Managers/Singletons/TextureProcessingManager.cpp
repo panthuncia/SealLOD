@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,8 @@
 using namespace DirectX;
 
 namespace {
+constexpr uint32_t kTextureProcessingCacheVersion = 16u;
+
 std::string FormatHRESULT(HRESULT hr) {
 	std::ostringstream oss;
 	oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
@@ -1330,6 +1333,75 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 	return BuildSourceDataFromScratchImage(compressedImage);
 }
 
+bool ShouldTraceTextureProcessing(std::string_view cachePath, std::string_view sourcePath) {
+	const char* filterValue = std::getenv("SARP_TEXTURE_PROCESSING_TRACE_FILTER");
+	if (filterValue == nullptr || *filterValue == '\0') {
+		return false;
+	}
+
+	std::string_view filters(filterValue);
+	while (!filters.empty()) {
+		const size_t separator = filters.find(';');
+		const std::string_view filter = filters.substr(0, separator);
+		if (!filter.empty() &&
+			(cachePath.find(filter) != std::string_view::npos || sourcePath.find(filter) != std::string_view::npos))
+		{
+			return true;
+		}
+		if (separator == std::string_view::npos) {
+			break;
+		}
+		filters.remove_prefix(separator + 1u);
+	}
+	return false;
+}
+
+bool HasNonTransparentPreparedPixels(const TextureSourceData& sourceData)
+{
+	if (sourceData.desc.channels != 4u) {
+		return false;
+	}
+
+	for (const auto& subresource : sourceData.subresources) {
+		if (!subresource) {
+			continue;
+		}
+		for (size_t byte = 3u; byte < subresource->size(); byte += 4u) {
+			if ((*subresource)[byte] != 0u) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool IsCanonicalTransparentBlackBc7Chain(const TextureSourceData& sourceData)
+{
+	const auto format = rhi::helpers::stripSrgb(sourceData.desc.format);
+	if (format != rhi::Format::BC7_UNorm || sourceData.subresources.empty()) {
+		return false;
+	}
+
+	bool sawBlock = false;
+	for (const auto& subresource : sourceData.subresources) {
+		if (!subresource || subresource->empty() || (subresource->size() % 16u) != 0u) {
+			return false;
+		}
+		for (size_t blockOffset = 0; blockOffset < subresource->size(); blockOffset += 16u) {
+			sawBlock = true;
+			if ((*subresource)[blockOffset] != 0x40u) {
+				return false;
+			}
+			for (size_t byte = 1u; byte < 16u; ++byte) {
+				if ((*subresource)[blockOffset + byte] != 0u) {
+					return false;
+				}
+			}
+		}
+	}
+	return sawBlock;
+}
+
 PreparedTextureProcessingData ProcessTextureSourceData(
 	const std::shared_ptr<TextureSourceData>& sourceData,
 	const TextureFileMeta& meta)
@@ -1620,7 +1692,10 @@ std::string TextureProcessingManager::BuildProcessingCacheKey(
 	boost::hash_combine(seed, static_cast<uint32_t>(meta.processing.normalConvention));
 	boost::hash_combine(seed, meta.processing.maxMipLevels);
 	boost::hash_combine(seed, meta.alphaIsAllOpaque);
-	boost::hash_combine(seed, 6u); // texture processing algorithm/cache version
+	// Any change that can alter processed pixels, formats, or the exported mip
+	// chain must increment this version. Version 16 invalidates artifacts built
+	// while concurrent graph compilation could race the BC7 pass job queues.
+	boost::hash_combine(seed, kTextureProcessingCacheVersion);
 	return normalizedIdentity + "#" + TextureSemanticToString(meta.processing.semantic) + "#" + std::to_string(seed);
 }
 
@@ -1658,6 +1733,20 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 
 	const std::string cacheKey = BuildProcessingCacheKey(meta);
 	const std::string key = BuildProcessingJobKey(sourceData, meta);
+	const std::string traceCachePath = ws2s(BuildProcessingCachePath(cacheKey));
+	if (ShouldTraceTextureProcessing(traceCachePath, meta.filePath)) {
+		spdlog::info(
+			"TextureProcessingManager trace: cache='{}' source='{}' identity='{}' semantic={} sourceHash={} format={} dims={}x{} subresources={}",
+			traceCachePath,
+			meta.filePath,
+			meta.processing.sourceIdentity,
+			TextureSemanticToString(meta.processing.semantic),
+			HashTextureSourceBaseSubresource(*sourceData),
+			static_cast<uint32_t>(sourceData->desc.format),
+			sourceData->desc.imageDimensions.empty() ? 0u : sourceData->desc.imageDimensions[0].width,
+			sourceData->desc.imageDimensions.empty() ? 0u : sourceData->desc.imageDimensions[0].height,
+			sourceData->subresources.size());
+	}
 
 	auto handle = std::make_shared<TextureProcessingJobHandle>();
 	handle->requestMeta = meta;
@@ -1834,6 +1923,62 @@ void TextureProcessingManager::CompleteGpuProcessing(
 	bool writeCacheArtifact)
 {
 	if (!handle) {
+		return;
+	}
+
+	std::shared_ptr<TextureSourceData> preparedSourceData;
+	TextureFileMeta requestMeta;
+	std::string cacheKey;
+	std::string processingKey;
+	{
+		std::scoped_lock lock(handle->mutex);
+		preparedSourceData = handle->preparedSourceData;
+		requestMeta = handle->requestMeta;
+		cacheKey = handle->cacheKey;
+		processingKey = handle->processingKey;
+	}
+
+	// Mode 6 encodes transparent black as 40 00 ... 00. A complete chain made
+	// only of that block cannot be correct when the uploaded RGBA source has
+	// visible pixels. Never persist such an artifact: retry just this texture on
+	// the CPU so an ordering regression cannot poison the durable cache again.
+	if (result && preparedSourceData &&
+		HasNonTransparentPreparedPixels(*preparedSourceData) &&
+		IsCanonicalTransparentBlackBc7Chain(*result))
+	{
+		spdlog::error(
+			"TextureProcessingManager: rejected unexpected transparent-black GPU BC7 output for '{}'; retrying this texture on CPU",
+			processingKey);
+		handle->state.store(TextureProcessingJobState::CpuPreparing, std::memory_order_release);
+		TaskSchedulerManager::GetInstance().RunBackgroundTask(
+			"TextureProcessingManager::GpuBc7ValidationFallback",
+			[handle, preparedSourceData, requestMeta, cacheKey, processingKey]() {
+				try {
+					auto cpuResult = FinalizeTextureSourceDataOnCpu(preparedSourceData, requestMeta);
+					std::wstring cpuCachePath;
+					if (cpuResult && !cacheKey.empty()) {
+						cpuCachePath = TryWriteTextureSourceDataToCache(cacheKey, *cpuResult);
+					}
+					{
+						std::scoped_lock lock(handle->mutex);
+						handle->conditionedCachePath = ws2s(cpuCachePath);
+						handle->preparedSourceData.reset();
+						handle->result = std::move(cpuResult);
+						handle->uploadedImage.reset();
+						handle->loadedFromCache = false;
+						handle->requiresGpuCompression = false;
+						handle->completedOnGpu = false;
+						handle->error.clear();
+					}
+					handle->state.store(TextureProcessingJobState::Ready, std::memory_order_release);
+					spdlog::info(
+						"TextureProcessingManager: CPU fallback completed for rejected GPU BC7 output '{}'",
+						processingKey);
+				}
+				catch (const std::exception& ex) {
+					TextureProcessingManager::GetInstance().FailProcessing(handle, ex.what());
+				}
+			});
 		return;
 	}
 

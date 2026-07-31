@@ -98,6 +98,12 @@ public:
 			if (auto upload = uploadService->GetUploadPass()) {
 				auto lateUploadsInsertPoint = RenderGraph::ExternalInsertPoint::After("Builtin::Uploads");
 				lateUploadsInsertPoint.AlsoBefore("ClearVisibilityBufferPass");
+				// Texture processing jobs may be submitted while frame passes are
+				// gathered, after the structural upload pass has already captured
+				// its work. Ensure those uploads complete before either mip
+				// generation or BC7 compression consumes the new texture.
+				lateUploadsInsertPoint.AlsoBefore("Builtin::Mipmapping");
+				lateUploadsInsertPoint.AlsoBefore("Builtin::BC7Compression");
 				outPasses.push_back(
 					RenderGraph::ExternalPassDesc::Render("Builtin::LateUploads", upload)
 						.At(std::move(lateUploadsInsertPoint)));

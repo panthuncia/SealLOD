@@ -1350,6 +1350,7 @@ void TextureFactory::BC7CompressionPass::EnqueueJob(const std::shared_ptr<BC7Com
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1382,12 +1383,18 @@ PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
 
 void TextureFactory::BC7CompressionPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) {
         return;
     }
 
     for (const auto& job : m_pending) {
         if (!job || !job->workingTexture || !job->blockBuffer) {
+            continue;
+        }
+        const auto stage = job->stage.load(std::memory_order_acquire);
+        if (stage != BC7CompressionJob::Stage::WaitingForSourceUpload &&
+            stage != BC7CompressionJob::Stage::ReadyForCompression) {
             continue;
         }
 
@@ -1400,6 +1407,7 @@ void TextureFactory::BC7CompressionPass::DeclareResourceUsages(ComputePassBuilde
 
 PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& executionContext)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) {
         return {};
     }
@@ -1415,8 +1423,33 @@ PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& exe
     commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
     commandList.BindPipeline(GetOrCreatePipeline().GetAPIPipelineState().GetHandle());
 
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->workingTexture || !job->blockBuffer) {
+            continue;
+        }
+
+        const auto stage = job->stage.load(std::memory_order_acquire);
+        if (stage == BC7CompressionJob::Stage::WaitingForSourceUpload) {
+            // Upload work can arrive after the upload pass captured its
+            // dynamic declarations. Keep the source declared as an SRV and
+            // wait one full frames-in-flight cycle before sampling it.
+            const uint32_t remaining = job->sourceUploadWaitExecutions.fetch_sub(1u, std::memory_order_acq_rel);
+            if (remaining > 1u) {
+                waiting.push_back(job);
+                continue;
+            }
+            job->stage.store(BC7CompressionJob::Stage::ReadyForCompression, std::memory_order_release);
+            job->stageFrameIndex.store(executionContext.frameIndex, std::memory_order_release);
+            waiting.push_back(job);
+            continue;
+        }
+        if (stage != BC7CompressionJob::Stage::ReadyForCompression) {
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == executionContext.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1443,9 +1476,11 @@ PassReturn TextureFactory::BC7CompressionPass::Execute(PassExecutionContext& exe
             const uint32_t dispatchY = (blocksY + 7u) / 8u;
             commandList.Dispatch(dispatchX, dispatchY, 1);
         }
+        job->stageFrameIndex.store(executionContext.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::CompressionRecorded, std::memory_order_release);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
     return {};
 }
@@ -1464,6 +1499,7 @@ void TextureFactory::BC7CompressionCopyPass::EnqueueJob(const std::shared_ptr<BC
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1475,12 +1511,16 @@ void TextureFactory::BC7CompressionCopyPass::Update(const UpdateExecutionContext
 
 void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) {
         return;
     }
 
     for (const auto& job : m_pending) {
         if (!job || !job->blockBuffer || !job->compressedTexture) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CompressionRecorded) {
             continue;
         }
 
@@ -1491,8 +1531,19 @@ void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBui
 
 void TextureFactory::BC7CompressionCopyPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->blockBuffer || !job->compressedTexture) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CompressionRecorded) {
+            waiting.push_back(job);
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == context.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1507,9 +1558,11 @@ void TextureFactory::BC7CompressionCopyPass::RecordImmediateCommands(ImmediateEx
                 0,
                 0);
         }
+        job->stageFrameIndex.store(context.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::CopyRecorded, std::memory_order_release);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
 }
 
@@ -1532,6 +1585,7 @@ void TextureFactory::BC7CompressionReadbackPass::EnqueueJob(const std::shared_pt
         return;
     }
 
+    std::scoped_lock lock(m_pendingMutex);
     m_pending.push_back(job);
     m_declaredResourcesChanged = true;
 }
@@ -1543,6 +1597,7 @@ void TextureFactory::BC7CompressionReadbackPass::Update(const UpdateExecutionCon
 
 void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassBuilder* builder)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) {
         return;
     }
@@ -1552,6 +1607,9 @@ void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassB
         if (!job || !job->compressedTexture) {
             continue;
         }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CopyRecorded) {
+            continue;
+        }
 
         builder->WithCopySource(job->compressedTexture);
     }
@@ -1559,6 +1617,7 @@ void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassB
 
 void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (!m_readbackService) {
         for (const auto& job : m_pending) {
             if (!job || !job->handle) {
@@ -1574,8 +1633,18 @@ void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(Immedia
         return;
     }
 
+    std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
+    waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->compressedTexture || !job->handle) {
+            continue;
+        }
+        if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CopyRecorded) {
+            waiting.push_back(job);
+            continue;
+        }
+        if (job->stageFrameIndex.load(std::memory_order_acquire) == context.frameIndex) {
+            waiting.push_back(job);
             continue;
         }
 
@@ -1652,25 +1721,36 @@ void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(Immedia
 
         const auto token = m_readbackService->EnqueueCapture(std::move(request));
         m_pendingCaptureIds.push_back(token.id);
+        job->stageFrameIndex.store(context.frameIndex, std::memory_order_release);
+        job->stage.store(BC7CompressionJob::Stage::ReadbackRecorded, std::memory_order_release);
         TextureProcessingManager::GetInstance().MarkGpuJobReadbackPending(job->handle);
     }
 
-    m_pending.clear();
+    m_pending = std::move(waiting);
     m_declaredResourcesChanged = true;
 }
 
 PassReturn TextureFactory::BC7CompressionReadbackPass::Execute(PassExecutionContext& context)
 {
+    std::scoped_lock lock(m_pendingMutex);
     if (!m_readbackService || m_pendingCaptureIds.empty()) {
         return {};
     }
 
+    // Frames can submit out of CPU order, so a pass-wide monotonically
+    // increasing external fence can be signaled out of order. Give each
+    // recorded batch its own timeline; the readback request owns it until the
+    // callback completes, preventing timeline-slot reuse while it is pending.
     auto signalFenceOwner = std::make_shared<rhi::TimelinePtr>();
     context.device.CreateTimeline(*signalFenceOwner);
     const rhi::Timeline signalFence = signalFenceOwner->Get();
     constexpr uint64_t fenceValue = 1;
     for (uint64_t captureId : m_pendingCaptureIds) {
-        m_readbackService->FinalizeCapture(rg::runtime::ReadbackCaptureToken{ captureId }, QueueKind::Copy, signalFenceOwner, fenceValue);
+        m_readbackService->FinalizeCapture(
+            rg::runtime::ReadbackCaptureToken{ captureId },
+            QueueKind::Copy,
+            signalFenceOwner,
+            fenceValue);
     }
 
     m_pendingCaptureIds.clear();

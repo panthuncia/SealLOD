@@ -1897,6 +1897,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 		if (ImGui::Checkbox("Shadows", &shadowsEnabled)) {
 			setShadowsEnabled(shadowsEnabled);
 		}
+        if (ImGui::Checkbox("Remember Camera Pose", &m_rememberCameraPose)) {
+            setRememberCameraPose(m_rememberCameraPose);
+        }
         ImGui::Separator();
 
         if (ImGui::CollapsingHeader("Geometry and Culling")) {
@@ -2450,9 +2453,6 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
         if (ImGui::Checkbox("Enable Jitter", &m_jitterEnabled)) {
             setJitterEnabled(m_jitterEnabled);
-        }
-        if (ImGui::Checkbox("Remember Camera Pose", &m_rememberCameraPose)) {
-            setRememberCameraPose(m_rememberCameraPose);
         }
         }
 

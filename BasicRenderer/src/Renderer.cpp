@@ -750,6 +750,17 @@ void Renderer::Initialize(
         m_pReadbackManager->RequestReadback(std::move(texture), std::move(outputFile), std::move(callback), cubemap);
     });
 	m_pMaterialManager = MaterialManager::CreateUnique();
+    m_pMaterialManager->SetRequestTextureReadbackFn(
+        [this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
+            if (!m_pReadbackManager) {
+                return;
+            }
+            m_pReadbackManager->RequestReadback(
+                std::move(texture),
+                std::move(outputFile),
+                std::move(callback),
+                false);
+        });
     m_pTerrainManager = TerrainManager::CreateUnique();
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
 	m_pLightManager->SetViewManager(m_pViewManager.get()); // Light manager needs access to view manager for shadow cameras
@@ -2992,6 +3003,45 @@ void Renderer::Update(float elapsedSeconds) {
         ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
+        static bool materialBufferReadbackRequested = false;
+        if (!materialBufferReadbackRequested && m_totalFramesRendered >= 120u &&
+            currentRenderGraph && m_pMaterialManager) {
+            wchar_t* outputPath = nullptr;
+            size_t outputPathLength = 0;
+            if (_wdupenv_s(
+                    &outputPath,
+                    &outputPathLength,
+                    L"SARP_MATERIAL_BUFFER_READBACK_PATH") == 0 &&
+                outputPath != nullptr && outputPath[0] != L'\0') {
+                const std::filesystem::path path(outputPath);
+                std::free(outputPath);
+                outputPath = nullptr;
+                if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
+                    auto resource = m_pMaterialManager->ProvideResource(
+                        ResourceIdentifier("Builtin::PerMaterialEvalDataBuffer"));
+                    if (resource) {
+                        materialBufferReadbackRequested = true;
+                        readbackService->RequestReadbackCapture(
+                            "MenuRenderPass",
+                            resource.get(),
+                            RangeSpec{},
+                            [path](ReadbackCaptureResult&& result) {
+                                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                                if (output && !result.data.empty()) {
+                                    output.write(
+                                        reinterpret_cast<const char*>(result.data.data()),
+                                        static_cast<std::streamsize>(result.data.size()));
+                                }
+                                spdlog::info(
+                                    "SARP material texture trace: material eval GPU readback bytes={} output='{}'.",
+                                    result.data.size(),
+                                    path.string());
+                            });
+                    }
+                }
+            }
+            std::free(outputPath);
+        }
     };
 
     auto& deviceManager = DeviceManager::GetInstance();

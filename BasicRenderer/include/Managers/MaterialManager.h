@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <chrono>
+#include <functional>
 
 #include "Materials/Material.h"
 #include "Managers/TextureStreamingManager.h"
@@ -44,6 +45,11 @@ public:
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }
+	using RequestTextureReadbackFn =
+		std::function<void(std::shared_ptr<PixelBuffer>, std::wstring, std::function<void()>)>;
+	void SetRequestTextureReadbackFn(RequestTextureReadbackFn fn) {
+		m_requestTextureReadback = std::move(fn);
+	}
 
 	void UpdateMaterialDataBuffer(Material& material);
 	void MarkMaterialDirty(Material& material);
@@ -144,4 +150,8 @@ private:
 	std::vector<uint32_t> m_dirtyMaterialIDs;
 	std::unordered_set<uint32_t> m_dirtyMaterialIDSet;
 	std::chrono::steady_clock::time_point m_lastMaterialUpdateStatsLog = {};
+	RequestTextureReadbackFn m_requestTextureReadback;
+	std::unordered_set<uint64_t> m_traceReadbackResourceIDs;
+	std::weak_ptr<TextureAsset> m_traceBaseColorTexture;
+	bool m_traceLateReadbackRequested = false;
 };

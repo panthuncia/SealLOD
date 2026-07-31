@@ -8,8 +8,12 @@
 #include "Render/Runtime/IReadbackService.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
+#include <string>
 #include <unordered_set>
 
 #include <tracy/Tracy.hpp>
@@ -20,6 +24,69 @@ namespace {
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
 	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
+
+	const std::string& MaterialTextureTraceFilter() {
+		static const std::string filter = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_TRACE_FILTER") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::string{};
+			}
+			std::string result(value);
+			std::free(value);
+			std::ranges::transform(result, result.begin(), [](unsigned char ch) {
+				return static_cast<char>(std::tolower(ch));
+			});
+			return result;
+		}();
+		return filter;
+	}
+
+	bool ShouldTraceMaterialTexture(std::string_view identifier) {
+		const auto& filter = MaterialTextureTraceFilter();
+		if (filter.empty() || identifier.empty()) {
+			return false;
+		}
+		std::string normalized(identifier);
+		std::ranges::transform(normalized, normalized.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		return normalized.find(filter) != std::string::npos;
+	}
+
+	const std::wstring& MaterialTextureReadbackPath() {
+		static const std::wstring path = [] {
+			wchar_t* value = nullptr;
+			size_t valueLength = 0;
+			if (_wdupenv_s(&value, &valueLength, L"SARP_MATERIAL_TEXTURE_READBACK_PATH") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::wstring{};
+			}
+			std::wstring result(value);
+			std::free(value);
+			return result;
+		}();
+		return path;
+	}
+
+	const std::wstring& MaterialTextureLateReadbackPath() {
+		static const std::wstring path = [] {
+			wchar_t* value = nullptr;
+			size_t valueLength = 0;
+			if (_wdupenv_s(&value, &valueLength, L"SARP_MATERIAL_TEXTURE_LATE_READBACK_PATH") != 0 ||
+				value == nullptr) {
+				std::free(value);
+				return std::wstring{};
+			}
+			std::wstring result(value);
+			std::free(value);
+			return result;
+		}();
+		return path;
+	}
 
 	uint64_t ComputeTextureResidentBytes(const TextureDescription& desc) {
 		uint64_t totalBytes = 0;
@@ -392,6 +459,29 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 		m_textureStreamingManager->DrainPendingBindingChanges();
 	}
 	const auto streamingEnd = std::chrono::steady_clock::now();
+	const auto& lateReadbackPath = MaterialTextureLateReadbackPath();
+	if (!m_traceLateReadbackRequested && frameIndex >= 600u && !lateReadbackPath.empty()) {
+		if (const auto texture = m_traceBaseColorTexture.lock()) {
+			const auto published = texture->GetPublishedBindingSnapshot().image;
+			if (published && published->HasValidBackingResource() && m_requestTextureReadback) {
+				m_traceLateReadbackRequested = true;
+				const uint64_t resourceID = published->GetGlobalResourceID();
+				spdlog::info(
+					"SARP material texture trace: requesting late base-color readback resource={} frame={}.",
+					resourceID,
+					frameIndex);
+				m_requestTextureReadback(
+					published,
+					lateReadbackPath,
+					[resourceID, lateReadbackPath]() {
+						spdlog::info(
+							"SARP material texture trace: completed late base-color readback resource={} output='{}'.",
+							resourceID,
+							std::filesystem::path(lateReadbackPath).string());
+					});
+			}
+		}
+	}
 
 	std::vector<uint32_t> dirtyMaterialIDs;
 	{
@@ -557,6 +647,103 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			!BytewiseEqual(signature.openPBRData, openPBRData);
 	}
 	const auto descForAtlasDebug = material.ToCacheDescription();
+	if (ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) ||
+		ShouldTraceMaterialTexture(descForAtlasDebug.normal.sourcePath)) {
+		auto textureState = [](const std::shared_ptr<TextureAsset>& texture) {
+			if (!texture) {
+				return std::string("texture=null");
+			}
+			const auto published = texture->GetPublishedBindingSnapshot();
+			const auto prepared = texture->PreparedImagePtr();
+			const auto streaming = texture->GetStreamingState();
+			const auto pending = texture->GetPendingDebugInfo();
+			const auto srv = [](const std::shared_ptr<PixelBuffer>& image) {
+				return image && image->HasValidBackingResource()
+					? image->GetSRVInfo(0).slot.index
+					: UINT32_MAX;
+			};
+			return fmt::format(
+				"streamingID={} bindingRevision={} publishedRevision={} publishedResource={} publishedSrv={} "
+				"preparedResource={} preparedSrv={} residentTopMip={} requestedTopMip={} pendingTopMip={} "
+				"usable={} fallback={} initialData='{}' loadPath={} uploadPath={}",
+				texture->GetStreamingTextureID(),
+				texture->GetBindingRevision(),
+				published.bindingRevision,
+				published.image ? published.image->GetGlobalResourceID() : 0u,
+				srv(published.image),
+				prepared ? prepared->GetGlobalResourceID() : 0u,
+				srv(prepared),
+				streaming.residency.residentTopMip,
+				streaming.requestedTopMip,
+				streaming.pendingTopMip,
+				texture->HasUsableImage(),
+				texture->IsUsingFallbackImage(),
+				pending.initialData,
+				pending.loadPath,
+				pending.uploadPath);
+		};
+		spdlog::info(
+			"SARP material texture trace: materialID={} slot={} name='{}' dataChanged={} refreshedTextures={} "
+			"flags=0x{:x} compileFlags=0x{:x} baseFactor=({},{},{},{}) baseChannels=({},{},{},{}) "
+			"baseUv={} normalUv={} basePath='{}' baseCB=(descriptor={},sampler={},streamingID={}) baseState=[{}] "
+			"normalPath='{}' normalCB=(descriptor={},streamingID={}) normalState=[{}]",
+			material.GetMaterialID(),
+			materialSlot,
+			descForAtlasDebug.name,
+			dataChanged,
+			refreshedTextures,
+			materialData.materialFlags,
+			static_cast<std::uint64_t>(material.Technique().compileFlags),
+			materialData.baseColorFactor.x,
+			materialData.baseColorFactor.y,
+			materialData.baseColorFactor.z,
+			materialData.baseColorFactor.w,
+			materialData.baseColorChannels.x,
+			materialData.baseColorChannels.y,
+			materialData.baseColorChannels.z,
+			materialData.baseColorChannels.w,
+			materialData.baseColorUvSetIndex,
+			materialData.normalUvSetIndex,
+			descForAtlasDebug.baseColor.sourcePath,
+			materialData.baseColorTextureIndex,
+			materialData.baseColorSamplerIndex,
+			materialData.baseColorStreamingTextureID,
+			textureState(descForAtlasDebug.baseColor.texture),
+			descForAtlasDebug.normal.sourcePath,
+			materialData.normalTextureIndex,
+			materialData.normalStreamingTextureID,
+			textureState(descForAtlasDebug.normal.texture));
+
+		const auto& readbackPath = MaterialTextureReadbackPath();
+		const auto& baseTexture = descForAtlasDebug.baseColor.texture;
+		if (ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) && baseTexture) {
+			m_traceBaseColorTexture = baseTexture;
+		}
+		if (!readbackPath.empty() &&
+			ShouldTraceMaterialTexture(descForAtlasDebug.baseColor.sourcePath) &&
+			baseTexture &&
+			baseTexture->GetStreamingState().residency.residentTopMip == 0u) {
+			const auto published = baseTexture->GetPublishedBindingSnapshot().image;
+			if (published && published->HasValidBackingResource()) {
+				const uint64_t resourceID = published->GetGlobalResourceID();
+				if (m_requestTextureReadback && m_traceReadbackResourceIDs.insert(resourceID).second) {
+					spdlog::info(
+						"SARP material texture trace: requesting published base-color readback resource={} path='{}'.",
+						resourceID,
+						descForAtlasDebug.baseColor.sourcePath);
+					m_requestTextureReadback(
+						published,
+						readbackPath,
+						[resourceID, readbackPath]() {
+							spdlog::info(
+								"SARP material texture trace: completed published base-color readback resource={} output='{}'.",
+								resourceID,
+								std::filesystem::path(readbackPath).string());
+						});
+				}
+			}
+		}
+	}
 	const bool isObjectReyesAtlasHeightMaterial =
 		descForAtlasDebug.heightMap.sourcePath.find("object_reyes_atlas_height") != std::string::npos ||
 		descForAtlasDebug.heightMap.uvSetName == "__object_reyes_atlas_height" ||

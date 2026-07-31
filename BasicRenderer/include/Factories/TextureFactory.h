@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string_view>
 
@@ -66,6 +68,14 @@ private:
     };
 
     struct BC7CompressionJob {
+        enum class Stage : uint8_t {
+            WaitingForSourceUpload,
+            ReadyForCompression,
+            CompressionRecorded,
+            CopyRecorded,
+            ReadbackRecorded,
+        };
+
         ~BC7CompressionJob()
         {
             if (inFlightCounter) {
@@ -80,6 +90,9 @@ private:
         std::shared_ptr<Buffer> blockBuffer;
         std::vector<BC7CompressionSubresource> subresources;
         std::shared_ptr<std::atomic_uint32_t> inFlightCounter;
+        std::atomic<Stage> stage = Stage::WaitingForSourceUpload;
+        std::atomic<uint32_t> stageFrameIndex = UINT32_MAX;
+        std::atomic<uint32_t> sourceUploadWaitExecutions = 4u;
         uint64_t outputByteSize = 0;
         bool outputHasFullMipChain = true;
     };
@@ -206,7 +219,7 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
@@ -214,9 +227,10 @@ private:
         PipelineState CreatePipeline() const;
 
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
+        mutable std::mutex m_pendingMutex;
         PipelineState m_psoMode6;
         bool m_hasPsoMode6 = false;
-        bool m_declaredResourcesChanged = true;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     class BC7CompressionCopyPass : public RenderPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
@@ -234,12 +248,13 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
-        bool m_declaredResourcesChanged = true;
+        mutable std::mutex m_pendingMutex;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     class BC7CompressionReadbackPass : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
@@ -261,14 +276,15 @@ private:
         void Cleanup() override;
 
         bool DeclaredResourcesChanged() const override {
-            return m_declaredResourcesChanged;
+            return m_declaredResourcesChanged.load(std::memory_order_acquire);
         }
 
     private:
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         std::vector<uint64_t> m_pendingCaptureIds;
+        mutable std::mutex m_pendingMutex;
         rg::runtime::IReadbackService* m_readbackService = nullptr;
-        bool m_declaredResourcesChanged = true;
+        std::atomic_bool m_declaredResourcesChanged = true;
     };
 
     TextureFactory() {
