@@ -110,7 +110,11 @@ struct PerFrameCB {
     float terrainStochasticBlendCurve = 0.65f;
     unsigned int terrainGaussianStochasticEnabled = 0u;
     unsigned int terrainStochasticRegisterPad = 0u;
-    DirectX::XMUINT3 terrainStochasticPad{};
+    // Keep these scalar on both CPU and HLSL. An HLSL uint3 cannot straddle a
+    // 16-byte constant-buffer register, while XMUINT3 has only scalar alignment.
+    unsigned int terrainStochasticPad0 = 0u;
+    unsigned int terrainStochasticPad1 = 0u;
+    unsigned int terrainStochasticPad2 = 0u;
     unsigned int parallaxOcclusionMappingEnabled = 1u;
     unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
     float terrainParallaxHeightScale = 0.03f;
@@ -129,7 +133,9 @@ struct PerFrameCB {
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceDepthSafetyScale) == 116, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 152, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticPad) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad0) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad1) == 160, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, terrainStochasticPad2) == 164, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 168, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 172, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 176, "PerFrameCB layout mismatch.");

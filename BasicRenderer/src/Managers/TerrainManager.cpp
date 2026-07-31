@@ -22,6 +22,10 @@
 
 namespace {
     constexpr std::uint32_t kInvalidDescriptor = 0xffffffffu;
+    // RVT source sampling normally refines this further through feedback. Keep a
+    // modest guaranteed floor so cached pages cannot make the source look idle
+    // and collapse it to a one-mip image before newly exposed pages are rendered.
+    constexpr std::uint32_t kTerrainTextureMaximumResidentTopMip = 2u;
 
     bool TerrainTextureDiagnosticsEnabled()
     {
@@ -772,7 +776,11 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                         terrainGeneration,
                         dependencyIndex);
                 },
-                "terrain-layer:" + std::to_string(pending.layerIndex));
+                "terrain-layer:" + std::to_string(pending.layerIndex),
+                TextureStreamingBindingOptions{
+                    .allowIdleCoarsening = false,
+                    .maximumResidentTopMip = kTerrainTextureMaximumResidentTopMip,
+                });
             if (bindingID != 0u) {
                 m_streamingBindingIDs.push_back(bindingID);
             }
@@ -1036,6 +1044,12 @@ void TerrainManager::RefreshTerrainLayerTextureBinding(
 
 void TerrainManager::InvalidateAndScheduleTerrainSetActivation()
 {
+    // Descriptor replacements commonly arrive as one batch. The set is already
+    // empty while activation is pending, so repeated callbacks do not require
+    // another empty-set upload or another delay-frame restart.
+    if (m_pendingTerrainSetActivation) {
+        return;
+    }
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_terrainSetActive = false;
     m_pendingTerrainSetActivation = true;

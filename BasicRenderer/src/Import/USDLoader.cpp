@@ -3244,20 +3244,8 @@ namespace USDLoader {
 		}
 
 		MeshPreprocessResult& first = preprocessed[group.front()].value();
-		const unsigned int vertexSize = first.ingest.GetVertexSize();
-		const unsigned int skinningVertexSize = first.ingest.GetSkinningVertexSize();
-		const unsigned int vertexFlags = first.ingest.GetFlags();
-		if (skinningVertexSize != 0u) {
-			spdlog::warn("Object Reyes atlas bake skipped: skinned meshes are not supported.");
-			return std::nullopt;
-		}
-
-		std::vector<br::import::ObjectReyesAtlasSourceMesh> sources;
-		sources.reserve(group.size());
-		float texelsPerUnitSum = 0.0f;
-		std::uint32_t texelsPerUnitCount = 0u;
-		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
-			const std::size_t index = group[groupEntry];
+		unsigned int vertexFlags = 0u;
+		for (const std::size_t index : group) {
 			const MeshPreprocessWorkItem& item = workItems[index];
 			if (!preprocessed[index] ||
 				!item.subsets.empty() ||
@@ -3266,20 +3254,64 @@ namespace USDLoader {
 				return std::nullopt;
 			}
 			const MeshPreprocessResult& result = preprocessed[index].value();
-			if (result.ingest.GetVertexSize() != vertexSize ||
-				result.ingest.GetSkinningVertexSize() != skinningVertexSize ||
-				result.ingest.GetFlags() != vertexFlags) {
-				spdlog::warn(
-					"Object Reyes atlas bake skipped under '{}': incompatible sibling vertex layout.",
-					ParentPrimPath(workItems[group.front()].mesh.GetPrim().GetPath().GetString()));
+			if (result.ingest.GetSkinningVertexSize() != 0u) {
+				spdlog::warn("Object Reyes atlas bake skipped: skinned meshes are not supported.");
 				return std::nullopt;
+			}
+			vertexFlags |= result.ingest.GetFlags();
+		}
+		const unsigned int vertexSize = MeshVertexLayout::VertexSize(vertexFlags);
+		const unsigned int skinningVertexSize = 0u;
+
+		std::vector<br::import::ObjectReyesAtlasSourceMesh> sources;
+		sources.reserve(group.size());
+		std::vector<std::vector<std::byte>> normalizedSourceVertices(group.size());
+		float texelsPerUnitSum = 0.0f;
+		std::uint32_t texelsPerUnitCount = 0u;
+		for (std::size_t groupEntry = 0; groupEntry < group.size(); ++groupEntry) {
+			const std::size_t index = group[groupEntry];
+			const MeshPreprocessWorkItem& item = workItems[index];
+			const MeshPreprocessResult& result = preprocessed[index].value();
+			const unsigned int sourceFlags = result.ingest.GetFlags();
+			const unsigned int sourceVertexSize = result.ingest.GetVertexSize();
+			const auto& sourceVertices = result.ingest.GetVertices();
+			const std::size_t sourceVertexCount = sourceVertexSize != 0u
+				? sourceVertices.size() / sourceVertexSize
+				: 0u;
+			auto& normalizedVertices = normalizedSourceVertices[groupEntry];
+			normalizedVertices.assign(sourceVertexCount * static_cast<std::size_t>(vertexSize), std::byte{ 0 });
+			for (std::size_t vertexIndex = 0; vertexIndex < sourceVertexCount; ++vertexIndex) {
+				const std::byte* sourceVertex = sourceVertices.data() + vertexIndex * sourceVertexSize;
+				std::byte* normalizedVertex = normalizedVertices.data() + vertexIndex * vertexSize;
+				std::memcpy(normalizedVertex, sourceVertex, MeshVertexLayout::BaseVertexSize);
+				if (MeshVertexLayout::HasTangents(vertexFlags)) {
+					DirectX::XMFLOAT4 tangent{ 1.0f, 0.0f, 0.0f, 1.0f };
+					if (MeshVertexLayout::HasTangents(sourceFlags)) {
+						std::memcpy(std::addressof(tangent), sourceVertex + MeshVertexLayout::TangentOffset(sourceFlags), sizeof(tangent));
+					}
+					std::memcpy(normalizedVertex + MeshVertexLayout::TangentOffset(vertexFlags), std::addressof(tangent), sizeof(tangent));
+				}
+				if (MeshVertexLayout::HasTexcoords(vertexFlags)) {
+					DirectX::XMFLOAT2 texcoord{ 0.0f, 0.0f };
+					if (MeshVertexLayout::HasTexcoords(sourceFlags)) {
+						std::memcpy(std::addressof(texcoord), sourceVertex + MeshVertexLayout::TexcoordOffset(sourceFlags), sizeof(texcoord));
+					}
+					std::memcpy(normalizedVertex + MeshVertexLayout::TexcoordOffset(vertexFlags), std::addressof(texcoord), sizeof(texcoord));
+				}
+				if (MeshVertexLayout::HasColors(vertexFlags)) {
+					DirectX::XMFLOAT3 color{ 1.0f, 1.0f, 1.0f };
+					if (MeshVertexLayout::HasColors(sourceFlags)) {
+						std::memcpy(std::addressof(color), sourceVertex + MeshVertexLayout::ColorOffset(sourceFlags), sizeof(color));
+					}
+					std::memcpy(normalizedVertex + MeshVertexLayout::ColorOffset(vertexFlags), std::addressof(color), sizeof(color));
+				}
 			}
 			if (std::isfinite(result.objectSurfaceTexelDensity) && result.objectSurfaceTexelDensity > 0.0f) {
 				texelsPerUnitSum += result.objectSurfaceTexelDensity;
 				++texelsPerUnitCount;
 			}
 			sources.push_back(br::import::ObjectReyesAtlasSourceMesh{
-				.vertices = std::addressof(result.ingest.GetVertices()),
+				.vertices = std::addressof(normalizedVertices),
 				.indices = std::addressof(result.ingest.GetIndices()),
 				.uvSets = std::addressof(result.ingest.GetUvSets()),
 				.vertexSize = vertexSize,
@@ -3504,7 +3536,7 @@ namespace USDLoader {
 			const MeshPreprocessWorkItem& item = workItems[workIndex];
 			CLodCacheLoader::MeshCacheIdentity identity = preprocessed[workIndex]->cacheIdentity;
 			identity.subsetName = "object-reyes-atlas-baked-height-" + item.mesh.GetPrim().GetName().GetString();
-			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=16";
+			identity.sourceIdentifier += "#object_reyes_atlas_baked_height_version=18";
 			identity.sourceIdentifier += "#object_reyes_atlas_parent=" + parentPath;
 			identity.sourceIdentifier += "#object_reyes_atlas_render_material=" + std::to_string(groupEntry);
 			identity.sourceIdentifier += "#object_reyes_atlas_uv=" + std::to_string(atlasResult.atlasUvSetIndex);
@@ -3518,6 +3550,30 @@ namespace USDLoader {
 			}
 
 			ClusterLODPrebuildArtifacts artifacts = ingest.BuildClusterLODArtifacts();
+			bool atlasUvPresentInEveryPage =
+				artifacts.prebuiltData.trianglePageCount != 0u &&
+				artifacts.prebuiltData.trianglePageCount <= artifacts.cacheBuildData.meshPageBlobs.size();
+			for (std::uint32_t pageIndex = 0u;
+				atlasUvPresentInEveryPage && pageIndex < artifacts.prebuiltData.trianglePageCount;
+				++pageIndex) {
+				const auto& page = artifacts.cacheBuildData.meshPageBlobs[pageIndex];
+				if (page.size() < sizeof(CLodPageHeader)) {
+					atlasUvPresentInEveryPage = false;
+					break;
+				}
+				CLodPageHeader header{};
+				std::memcpy(std::addressof(header), page.data(), sizeof(header));
+				atlasUvPresentInEveryPage =
+					header.formatAndKind == CLOD_TRIANGLE_PAGE_MAGIC &&
+					atlasResult.atlasUvSetIndex < header.uvSetCount;
+			}
+			if (!atlasUvPresentInEveryPage) {
+				spdlog::error(
+					"Object Reyes atlas-baked CLod build under '{}' lost required UV set {} before cache publication.",
+					parentPath,
+					atlasResult.atlasUvSetIndex);
+				return std::nullopt;
+			}
 			ClusterLODPrebuiltData savedPrebuiltData;
 			std::optional<ClusterLODPrebuiltData> prebuiltData;
 			if (CLodCacheLoader::SavePrebuiltLocked(identity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData)) {

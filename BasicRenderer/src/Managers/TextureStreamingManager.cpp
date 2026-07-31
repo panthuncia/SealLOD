@@ -352,8 +352,7 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	const std::shared_ptr<TextureAsset>& texture,
 	BindingChangedCallback onBindingChanged,
 	std::string debugLabel,
-	bool seedCurrentBinding,
-	bool alphaTested)
+	TextureStreamingBindingOptions options)
 {
 	ZoneScopedN("TextureStreamingManager::RegisterTextureBinding");
 	if (!debugLabel.empty()) {
@@ -386,8 +385,7 @@ uint64_t TextureStreamingManager::RegisterTextureBinding(
 	command.bindingID = bindingID;
 	command.texture = texture;
 	command.debugLabel = std::move(debugLabel);
-	command.seedCurrentBinding = seedCurrentBinding;
-	command.alphaTested = alphaTested;
+	command.options = options;
 	QueueCommand(std::move(command));
 	return bindingID;
 }
@@ -402,19 +400,33 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 		.streamingTextureID = streamingTextureID,
 		.texture = texture,
 		.debugLabel = std::move(command.debugLabel),
-		.alphaTested = command.alphaTested,
+		.options = command.options,
 	});
 	m_bindingIDsByStreamingTextureID[streamingTextureID].push_back(command.bindingID);
-	if (command.alphaTested) {
+	if (command.options.alphaTested) {
 		++m_alphaTestedBindingCountsByStreamingTextureID[streamingTextureID];
-		const uint32_t cappedTopMip = GetAlphaTestedMaterialTextureMaxResidentTopMipSetting();
-		if (texture->GetStreamingState().requestedTopMip > cappedTopMip) {
-			(void)texture->ApplyStreamingSystemRequest(cappedTopMip, 0u, true);
-		}
+	}
+	if (!command.options.allowIdleCoarsening) {
+		++m_idleCoarseningDisabledBindingCountsByStreamingTextureID[streamingTextureID];
+	}
+	if (command.options.maximumResidentTopMip != (std::numeric_limits<uint32_t>::max)()) {
+		++m_maximumResidentTopMipBindingCountsByStreamingTextureID[streamingTextureID]
+			[command.options.maximumResidentTopMip];
+	}
+	uint32_t cappedTopMip = texture->GetStreamingState().residency.totalMipCount - 1u;
+	if (command.options.alphaTested) {
+		cappedTopMip = (std::min)(cappedTopMip, GetAlphaTestedMaterialTextureMaxResidentTopMipSetting());
+	}
+	if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
+		capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
+		cappedTopMip = (std::min)(cappedTopMip, capIt->second.begin()->first);
+	}
+	if (texture->GetStreamingState().requestedTopMip > cappedTopMip) {
+		(void)texture->ApplyStreamingSystemRequest(cappedTopMip, 0u, true);
 	}
 	TrackTexture(texture);
 	MarkTextureStreamingMetadataDirty(texture, true, "track_binding");
-	if (command.seedCurrentBinding) {
+	if (command.options.seedCurrentBinding) {
 		auto preparedImage = texture->PreparedImagePtr();
 		const auto published = texture->GetPublishedBindingSnapshot();
 		if (preparedImage &&
@@ -466,13 +478,13 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 	}
 
 	const uint32_t streamingTextureID = bindingIt->second.streamingTextureID;
-	const bool wasAlphaTested = bindingIt->second.alphaTested;
+	const TextureStreamingBindingOptions removedOptions = bindingIt->second.options;
 	ZoneValue(streamingTextureID);
 	{
 		ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseBinding");
 		m_bindingsByID.erase(bindingIt);
 	}
-	if (wasAlphaTested) {
+	if (removedOptions.alphaTested) {
 		auto alphaCountIt = m_alphaTestedBindingCountsByStreamingTextureID.find(streamingTextureID);
 		if (alphaCountIt != m_alphaTestedBindingCountsByStreamingTextureID.end()) {
 			if (alphaCountIt->second <= 1u) {
@@ -481,6 +493,24 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 			else {
 				--alphaCountIt->second;
 			}
+		}
+	}
+	if (!removedOptions.allowIdleCoarsening) {
+		auto countIt = m_idleCoarseningDisabledBindingCountsByStreamingTextureID.find(streamingTextureID);
+		if (countIt != m_idleCoarseningDisabledBindingCountsByStreamingTextureID.end()) {
+			if (countIt->second <= 1u) m_idleCoarseningDisabledBindingCountsByStreamingTextureID.erase(countIt);
+			else --countIt->second;
+		}
+	}
+	if (removedOptions.maximumResidentTopMip != (std::numeric_limits<uint32_t>::max)()) {
+		auto textureCapsIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
+		if (textureCapsIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end()) {
+			auto capIt = textureCapsIt->second.find(removedOptions.maximumResidentTopMip);
+			if (capIt != textureCapsIt->second.end()) {
+				if (capIt->second <= 1u) textureCapsIt->second.erase(capIt);
+				else --capIt->second;
+			}
+			if (textureCapsIt->second.empty()) m_maximumResidentTopMipBindingCountsByStreamingTextureID.erase(textureCapsIt);
 		}
 	}
 	auto ownersIt = m_bindingIDsByStreamingTextureID.find(streamingTextureID);
@@ -496,6 +526,8 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 			m_streamingTexturesByID.erase(streamingTextureID);
 			m_textureStreamingMetadataRevisions.erase(streamingTextureID);
 			m_alphaTestedBindingCountsByStreamingTextureID.erase(streamingTextureID);
+			m_idleCoarseningDisabledBindingCountsByStreamingTextureID.erase(streamingTextureID);
+			m_maximumResidentTopMipBindingCountsByStreamingTextureID.erase(streamingTextureID);
 			m_dirtyTextureStreamingIDSet.erase(streamingTextureID);
 			m_texturesNeedingUploadAdvanceSet.erase(streamingTextureID);
 			{
@@ -668,6 +700,10 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 				policyTopMip,
 				GetAlphaTestedMaterialTextureMaxResidentTopMipSetting());
 		}
+		if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
+			capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
+			policyTopMip = (std::min)(policyTopMip, capIt->second.begin()->first);
+		}
 		const uint64_t previousRevision = texture->GetStreamingStateRevision();
 		const bool needsUploadAdvance = texture->ApplyStreamingSystemRequest(policyTopMip, frameIndex);
 		if (texture->GetStreamingStateRevision() != previousRevision) {
@@ -693,25 +729,34 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		}
 
 		const TextureStreamingState& state = texture->GetStreamingState();
+		uint32_t bindingMipCap = state.residency.totalMipCount - 1u;
+		if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(it->first);
+			capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
+			bindingMipCap = (std::min)(bindingMipCap, capIt->second.begin()->first);
+		}
 		if (m_alphaTestedBindingCountsByStreamingTextureID.contains(it->first)) {
-			const uint32_t mipCap = (std::min)(
-				GetAlphaTestedMaterialTextureMaxResidentTopMipSetting(),
-				state.residency.totalMipCount - 1u);
-			if (state.requestedTopMip > mipCap ||
-				state.pendingTopMip > mipCap ||
-				state.residency.residentTopMip > mipCap) {
+			bindingMipCap = (std::min)(
+				bindingMipCap,
+				GetAlphaTestedMaterialTextureMaxResidentTopMipSetting());
+		}
+		if (state.requestedTopMip > bindingMipCap ||
+			state.pendingTopMip > bindingMipCap ||
+			state.residency.residentTopMip > bindingMipCap) {
 				const uint64_t previousRevision = texture->GetStreamingStateRevision();
 				const bool needsUploadAdvance =
-					texture->ApplyStreamingSystemRequest(mipCap, 0u, true);
+					texture->ApplyStreamingSystemRequest(bindingMipCap, 0u, true);
 				if (texture->GetStreamingStateRevision() != previousRevision) {
 					MarkTextureStreamingMetadataDirty(
 						texture,
 						needsUploadAdvance,
-						"alpha_tested_mip_cap");
+						"binding_mip_cap");
 				}
 				++it;
 				continue;
-			}
+		}
+		if (m_idleCoarseningDisabledBindingCountsByStreamingTextureID.contains(it->first)) {
+			++it;
+			continue;
 		}
 		if (state.lastSeenFrame == 0u ||
 			frameIndex <= state.lastSeenFrame + idleFramesBeforeCoarsen) {
@@ -1445,6 +1490,14 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 		const uint32_t requestedTopMip = streamingState.requestedTopMip;
 		const bool alphaTested =
 			m_alphaTestedBindingCountsByStreamingTextureID.contains(texture->GetStreamingTextureID());
+		const uint32_t streamingTextureID = texture->GetStreamingTextureID();
+		const bool idleCoarseningDisabled =
+			m_idleCoarseningDisabledBindingCountsByStreamingTextureID.contains(streamingTextureID);
+		auto residencyConstraintIt =
+			m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
+		const bool residencyConstrained =
+			residencyConstraintIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() &&
+			!residencyConstraintIt->second.empty();
 		const uint64_t residentBytes = ComputeTextureResidentBytes(image->GetDescription());
 		const auto pendingInfo = texture->GetPendingDebugInfo();
 		const auto& imageDesc = image->GetDescription();
@@ -1480,6 +1533,16 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 			stats.residentShapeMismatchBytes += residentBytes;
 		}
 		stats.totalResidentBytes += residentBytes;
+		if (idleCoarseningDisabled) stats.idleCoarseningDisabledTextureCount++;
+		if (residencyConstrained) {
+			stats.residencyConstrainedTextureCount++;
+			const uint32_t mipCap = (std::min)(
+				residencyConstraintIt->second.begin()->first,
+				streamingState.residency.totalMipCount - 1u);
+			if (residentTopMip > mipCap || requestedTopMip > mipCap) {
+				stats.residencyConstraintViolationCount++;
+			}
+		}
 		if (alphaTested) {
 			stats.alphaTestedTextureCount++;
 			const uint32_t mipCap = (std::min)(

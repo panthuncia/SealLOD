@@ -943,8 +943,9 @@ void MaterialManager::TrackMaterialTextureAssets(const Material& material, int d
 					}
 				},
 				"material:" + std::to_string(materialID),
-				true,
-				alphaTested);
+				TextureStreamingBindingOptions{
+					.alphaTested = alphaTested,
+				});
 			if (bindingID != 0u) {
 				bindingIDs.push_back(bindingID);
 				streamingTextureIDs.push_back(streamingTextureID);

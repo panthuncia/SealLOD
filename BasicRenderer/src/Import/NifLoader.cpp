@@ -50,7 +50,7 @@ namespace {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 constexpr std::string_view kNifMetaCacheSuffix = ".nifmeta";
-constexpr std::string_view kObjectReyesConfigVersion = "35";
+constexpr std::string_view kObjectReyesConfigVersion = "37";
 constexpr std::string_view kNifTreeWindCacheVersion = "4";
 
 std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end)
@@ -1968,6 +1968,43 @@ bool ReadPrebuilt(BinaryReader& reader, ClusterLODPrebuiltData& data)
         reader.Pod(data.maxTraversalDepth);
 }
 
+bool PrebuiltContainsObjectReyesAtlasUvSet(
+	const ClusterLODPrebuiltData& prebuilt,
+	std::uint32_t requiredUvSetIndex)
+{
+	if (prebuilt.trianglePageCount == 0u ||
+		prebuilt.trianglePageCount > prebuilt.pageDiskLocators.size()) {
+		return false;
+	}
+	const std::wstring containerPath = CLodCache::ResolveContainerPath(prebuilt.cacheSource);
+	if (containerPath.empty()) {
+		return false;
+	}
+	std::shared_ptr<const CLodCache::MappedContainerLease> container;
+	if (!CLodCache::AcquireMappedContainer(
+		containerPath,
+		static_cast<std::uint32_t>(prebuilt.pageDiskLocators.size()),
+		container)) {
+		return false;
+	}
+	for (std::uint32_t pageIndex = 0u; pageIndex < prebuilt.trianglePageCount; ++pageIndex) {
+		const auto& locator = prebuilt.pageDiskLocators[pageIndex];
+		std::span<const std::byte> page;
+		if (locator.blobSizeBytes < sizeof(CLodPageHeader) ||
+			!container->GetBlob(locator.blobOffset, locator.blobSizeBytes, page) ||
+			page.size() < sizeof(CLodPageHeader)) {
+			return false;
+		}
+		CLodPageHeader header{};
+		std::memcpy(std::addressof(header), page.data(), sizeof(header));
+		if (header.formatAndKind != CLOD_TRIANGLE_PAGE_MAGIC ||
+			requiredUvSetIndex >= header.uvSetCount) {
+			return false;
+		}
+	}
+	return true;
+}
+
 std::optional<SkeletonArtifactReference> SaveWindSkeletonArtifact(const Skeleton& skeleton, std::string* error)
 {
     const auto names = skeleton.GetBoneNames();
@@ -2233,6 +2270,15 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                 expectedBuildConfigHash);
             return std::nullopt;
         }
+		if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight &&
+			!PrebuiltContainsObjectReyesAtlasUvSet(prebuilt, desc.heightMap.uvSetIndex)) {
+			spdlog::warn(
+				"nif_asset_payload_cache: rejecting Object Reyes mesh {} for '{}' because its CLod pages do not contain required atlas UV set {}",
+				meshIndex,
+				normalizedCacheKey,
+				desc.heightMap.uvSetIndex);
+			return std::nullopt;
+		}
         if (prebuilt.nodeSkinningInfos.size() != prebuilt.nodes.size() ||
             prebuilt.nodeBoneLimit < 1u || prebuilt.nodeBoneLimit > CLOD_NODE_BONE_LIMIT_HARD_MAX) {
             spdlog::info(
@@ -2800,6 +2846,12 @@ bool FinalizeObjectReyesPayloadCache(
 		if (prebuilt.cacheSource.sourceIdentifier.find(uvIdentityMarker) == std::string::npos) {
 			if (failureReason) {
 				*failureReason = "staging payload CLod identity does not include its atlas UV set";
+			}
+			return false;
+		}
+		if (!PrebuiltContainsObjectReyesAtlasUvSet(prebuilt, recipe->atlasUvSetIndex)) {
+			if (failureReason) {
+				*failureReason = "staging payload CLod pages do not contain the required atlas UV set";
 			}
 			return false;
 		}

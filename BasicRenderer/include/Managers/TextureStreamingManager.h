@@ -6,6 +6,8 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -67,8 +69,18 @@ struct MaterialTextureStreamingStats {
 	uint64_t externallyManagedActiveResourceBytes = 0;
 	uint32_t alphaTestedTextureCount = 0;
 	uint32_t alphaTestedMipCapViolationCount = 0;
+	uint32_t idleCoarseningDisabledTextureCount = 0;
+	uint32_t residencyConstrainedTextureCount = 0;
+	uint32_t residencyConstraintViolationCount = 0;
 	std::vector<uint64_t> publishedResourceIDs = {};
 	std::vector<MaterialTextureStreamingRecord> largestResidentTextures = {};
+};
+
+struct TextureStreamingBindingOptions {
+	bool seedCurrentBinding = true;
+	bool alphaTested = false;
+	bool allowIdleCoarsening = true;
+	uint32_t maximumResidentTopMip = (std::numeric_limits<uint32_t>::max)();
 };
 
 class TextureStreamingManager : public IResourceProvider {
@@ -90,8 +102,7 @@ public:
 		const std::shared_ptr<TextureAsset>& texture,
 		BindingChangedCallback onBindingChanged,
 		std::string debugLabel = {},
-		bool seedCurrentBinding = true,
-		bool alphaTested = false);
+		TextureStreamingBindingOptions options = {});
 	void UnregisterTextureBinding(uint64_t bindingID);
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
 
@@ -112,7 +123,7 @@ private:
 		uint32_t streamingTextureID = 0;
 		std::weak_ptr<TextureAsset> texture;
 		std::string debugLabel;
-		bool alphaTested = false;
+		TextureStreamingBindingOptions options{};
 	};
 	struct WorkerCommand {
 		enum class Kind : uint8_t { Register, Unregister, MarkDirty, FrameTick } kind = Kind::FrameTick;
@@ -120,8 +131,7 @@ private:
 		uint64_t frameIndex = 0;
 		std::shared_ptr<TextureAsset> texture;
 		std::string debugLabel;
-		bool seedCurrentBinding = true;
-		bool alphaTested = false;
+		TextureStreamingBindingOptions options{};
 		bool needsUploadAdvance = false;
 		std::string reason;
 	};
@@ -184,6 +194,8 @@ private:
 	std::unordered_map<uint64_t, TextureBindingOwner> m_bindingsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_bindingIDsByStreamingTextureID;
 	std::unordered_map<uint32_t, uint32_t> m_alphaTestedBindingCountsByStreamingTextureID;
+	std::unordered_map<uint32_t, uint32_t> m_idleCoarseningDisabledBindingCountsByStreamingTextureID;
+	std::unordered_map<uint32_t, std::map<uint32_t, uint32_t>> m_maximumResidentTopMipBindingCountsByStreamingTextureID;
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
 	std::thread m_workerThread;
