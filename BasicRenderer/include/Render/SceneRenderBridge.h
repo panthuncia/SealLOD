@@ -76,7 +76,7 @@ private:
     uint16_t m_lastShadowResolution = 0;
     uint8_t m_lastDirectionalCascadeCount = 0;
     float m_lastMaxShadowDistance = 0.0f;
-    float m_lastDirectionalShadowVerticalExtent = 0.0f;
+    float m_lastDirectionalShadowDistanceLowerBound = 0.0f;
     float m_lastDirectionalShadowSceneExtent = 0.0f;
     bool m_lastHasPrimaryCamera = false;
     bool m_hasLightResourceSettings = false;

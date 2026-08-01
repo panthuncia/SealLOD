@@ -366,7 +366,9 @@ bool VoxelRasterWriteVirtualShadow(
         : linearDepth;
     InterlockedMin(
         physicalPages[atlasPixel],
-        asuint(pageSpaceLinearDepth));
+        CLodVirtualShadowEncodeDepth(
+            pageSpaceLinearDepth,
+            clipmapInfo));
     uint ignored = 0u;
     if (PSO_SKINNED == 0)
     {

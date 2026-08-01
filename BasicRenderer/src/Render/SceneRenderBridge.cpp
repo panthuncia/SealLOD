@@ -945,7 +945,7 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
     uint16_t shadowResolution = 0;
     uint8_t directionalCascadeCount = 0;
     float maxShadowDistance = 0.0f;
-    float directionalShadowVerticalExtent = 0.0f;
+    float directionalShadowDistanceLowerBound = 0.0f;
     float directionalShadowSceneExtent = 0.0f;
     CLodLodHeightMode clodLodHeightMode = CLodLodHeightMode::OutputHeight;
     {
@@ -955,7 +955,7 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
         shadowResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("shadowResolution")();
         directionalCascadeCount = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades")();
         maxShadowDistance = SettingsManager::GetInstance().getSettingGetter<float>("maxShadowDistance")();
-        directionalShadowVerticalExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")();
+        directionalShadowDistanceLowerBound = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")();
         directionalShadowSceneExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowSceneExtent")();
         clodLodHeightMode = SettingsManager::GetInstance().getSettingGetter<CLodLodHeightMode>(CLodLodHeightModeSettingName)();
     }
@@ -966,7 +966,7 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
         m_lastShadowResolution != shadowResolution ||
         m_lastDirectionalCascadeCount != directionalCascadeCount ||
         m_lastMaxShadowDistance != maxShadowDistance ||
-        m_lastDirectionalShadowVerticalExtent != directionalShadowVerticalExtent ||
+        m_lastDirectionalShadowDistanceLowerBound != directionalShadowDistanceLowerBound ||
         m_lastDirectionalShadowSceneExtent != directionalShadowSceneExtent ||
         m_lastHasPrimaryCamera != snapshot.hasPrimaryCamera;
 
@@ -1133,7 +1133,7 @@ void SceneRenderBridge::IngestSnapshot(const SceneFrameSnapshot& snapshot, const
     m_lastShadowResolution = shadowResolution;
     m_lastDirectionalCascadeCount = directionalCascadeCount;
     m_lastMaxShadowDistance = maxShadowDistance;
-    m_lastDirectionalShadowVerticalExtent = directionalShadowVerticalExtent;
+    m_lastDirectionalShadowDistanceLowerBound = directionalShadowDistanceLowerBound;
     m_lastDirectionalShadowSceneExtent = directionalShadowSceneExtent;
     m_lastHasPrimaryCamera = snapshot.hasPrimaryCamera;
     m_hasLightResourceSettings = true;

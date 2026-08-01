@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/structs.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/skinningCommon.hlsli"
@@ -1281,14 +1282,14 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
             const uint2 atlasPixel = atlasBasePixel + uint2(localX, localY);
             if (gCLodVirtualShadowShouldClearPage != 0u)
             {
-                staticPages[atlasPixel] = 0x7F7FFFFFu;
+                staticPages[atlasPixel] = kCLodVirtualShadowClearedDepth;
             }
             if (gCLodVirtualShadowShouldClearDynamicPage != 0u)
             {
                 dynamicPages[atlasPixel] =
                     gCLodVirtualShadowInitializeDynamicFromStatic != 0u
                         ? staticPages[atlasPixel]
-                        : 0x7F7FFFFFu;
+                        : kCLodVirtualShadowClearedDepth;
             }
         }
     }

@@ -62,7 +62,9 @@ void ReyesTryWriteVirtualShadowTexel(
             physicalPageIndex,
             clipmapInfo.shadowCameraBufferIndex)
         : depth;
-    InterlockedMin(physicalPages[atlasPixel], asuint(pageSpaceDepth));
+    InterlockedMin(
+        physicalPages[atlasPixel],
+        CLodVirtualShadowEncodeDepth(pageSpaceDepth, clipmapInfo));
 
     if (!dynamicLayer)
     {

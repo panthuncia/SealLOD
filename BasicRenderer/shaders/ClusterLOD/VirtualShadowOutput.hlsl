@@ -88,6 +88,10 @@ CLodVirtualShadowClipmapInfo WaveLoadVirtualShadowClipmapInfo(
     result.pageTableResolution = WaveReadLaneAt(result.pageTableResolution, leaderLane);
     result.physicalAtlasPagesWide = WaveReadLaneAt(result.physicalAtlasPagesWide, leaderLane);
     result.physicalAtlasPagesHigh = WaveReadLaneAt(result.physicalAtlasPagesHigh, leaderLane);
+    result.unwrappedPageOffsetX = WaveReadLaneAt(result.unwrappedPageOffsetX, leaderLane);
+    result.unwrappedPageOffsetY = WaveReadLaneAt(result.unwrappedPageOffsetY, leaderLane);
+    result.depthNear = WaveReadLaneAt(result.depthNear, leaderLane);
+    result.depthRange = WaveReadLaneAt(result.depthRange, leaderLane);
     return result;
 }
 
@@ -188,7 +192,9 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     {
         return;
     }
-    const uint newDepthBits = asuint(pageSpaceLinearDepth);
+    const uint newDepthBits = CLodVirtualShadowEncodeDepth(
+        pageSpaceLinearDepth,
+        clipmapInfo);
     InterlockedMin(physicalPages[atlasPixel], newDepthBits);
     // Stamp page completion once per unique page in the wave. The old
     // per-fragment InterlockedOr serialized thousands of lanes on a single

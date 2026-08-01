@@ -3,6 +3,7 @@
 
 #include "include/cbuffers.hlsli"
 #include "include/clodVirtualShadowClipmap.hlsli"
+#include "include/clodVirtualShadowDepth.hlsli"
 #include "include/structs.hlsli"
 #include "include/utilities.hlsli"
 
@@ -803,7 +804,7 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         result.sampledLinearDepth = linearLightDepth;
         result.sampledClipmapIndex = candidateIndex;
         result.sampledPhysicalPageIndex = physicalPageIndex;
-        if (storedDepthBits == 0x7F7FFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowClearedDepth)
         {
             // This is the texel actually selected by lookup, even when the
             // preferred clipmap fell back to a coarser one. Restricting this
@@ -813,10 +814,10 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
                 kCLodVirtualShadowDebugFlagSampledTexelCleared;
             result.depthAvailable = 0u;
             result.occlusion = 0.0f;
-            result.closestDepth = asfloat(storedDepthBits);
+            result.closestDepth = clipmapInfo.depthNear + clipmapInfo.depthRange;
             return result;
         }
-        if (storedDepthBits == 0xFFFFFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowMissingDepth)
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledDepthMissing;
@@ -824,7 +825,9 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
             continue;
         }
 
-        const float closestDepth = asfloat(storedDepthBits);
+        const float closestDepth = CLodVirtualShadowDecodeDepth(
+            storedDepthBits,
+            clipmapInfo);
         const float depthDelta = linearLightDepth - closestDepth;
         result.depthAvailable = 1u;
         result.closestDepth = closestDepth;
@@ -1087,7 +1090,7 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
         debugInfo.sampledPageLocalTexel = pageLocalTexel;
 
         const uint storedDepthBits = physicalPages.Load(int3(atlasPixel, 0));
-        if (storedDepthBits == 0x7F7FFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowClearedDepth)
         {
             // Report the state of the page that was actually sampled. Coarse
             // fallback samples are just as authoritative as attempt zero.
@@ -1097,19 +1100,21 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
             result.valid = 1u;
             result.depthAvailable = 0u;
             result.occlusion = 0.0f;
-            result.closestDepth = asfloat(storedDepthBits);
+            result.closestDepth = clipmapInfo.depthNear + clipmapInfo.depthRange;
             result.sampledClipmapIndex = candidateIndex;
             result.sampledPhysicalPageIndex = physicalPageIndex;
             return result;
         }
-        if (storedDepthBits == 0xFFFFFFFFu)
+        if (storedDepthBits == kCLodVirtualShadowMissingDepth)
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledDepthMissing;
             continue;
         }
 
-        const float closestDepth = asfloat(storedDepthBits);
+        const float closestDepth = CLodVirtualShadowDecodeDepth(
+            storedDepthBits,
+            clipmapInfo);
         result.clipmapInfo = clipmapInfo;
         debugInfo.actualTexelWorldSize = clipmapInfo.texelWorldSize;
         result.valid = 1u;

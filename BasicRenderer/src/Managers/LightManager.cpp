@@ -258,8 +258,8 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		std::max(getMaxShadowDistance(), camera.zNear));
 
 	// Virtual shadow clip levels are nested around the primary camera.
-	const float clipVerticalExtent = std::max(
-		SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")(),
+	const float shadowDistanceLowerBound = std::max(
+		SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 		1.0f);
 	auto cascades = setupDirectionalClipmaps(numCascades, info.dirWorldSpace,
 		DirectX::XMLoadFloat3(&posFloats), 
@@ -267,7 +267,7 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		GetUpFromMatrix(matrix),
 		camera.zNear, camera.fov, camera.aspect,
 		directionalClipFarPlanes,
-		clipVerticalExtent,
+		shadowDistanceLowerBound,
 		std::max(getDirectionalShadowSceneExtent(), 0.0f));
 
 	// Collect the frustum planes from each cascade.
@@ -449,10 +449,10 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 			camera.zNear,
 			camera.zFar,
 			std::max(getMaxShadowDistance(), camera.zNear));
-		const float clipVerticalExtent = std::max(
-			SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowVerticalExtent")(),
+		const float shadowDistanceLowerBound = std::max(
+			SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 			1.0f);
-		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, clipVerticalExtent, std::max(getDirectionalShadowSceneExtent(), 0.0f));
+		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, shadowDistanceLowerBound, std::max(getDirectionalShadowSceneExtent(), 0.0f));
 		PublishDirectionalShadowDebug(cascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);

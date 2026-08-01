@@ -85,6 +85,8 @@ struct CLodVirtualShadowClipmapInfo
     uint physicalAtlasPagesHigh;
     int unwrappedPageOffsetX;
     int unwrappedPageOffsetY;
+    float depthNear;
+    float depthRange;
 };
 
 struct CLodVirtualShadowMainCameraInfo

@@ -694,9 +694,9 @@ private:
     std::function<uint8_t()> getNumDirectionalLightCascades;
     std::function<void(uint8_t)> setNumDirectionalLightCascades;
 
-    float m_directionalShadowVerticalExtent = 0.0f;
-    std::function<float()> getDirectionalShadowVerticalExtent;
-    std::function<void(float)> setDirectionalShadowVerticalExtent;
+    float m_directionalShadowDistanceLowerBound = 0.0f;
+    std::function<float()> getDirectionalShadowDistanceLowerBound;
+    std::function<void(float)> setDirectionalShadowDistanceLowerBound;
 
     bool wireframeEnabled = false;
 	std::function<bool()> getWireframeEnabled;
@@ -1366,10 +1366,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_numDirectionalLightCascades = getNumDirectionalLightCascades();
     observerSetting(m_numDirectionalLightCascades, "numDirectionalLightCascades");
 
-    getDirectionalShadowVerticalExtent = settingsManager.getSettingGetter<float>("directionalShadowVerticalExtent");
-    setDirectionalShadowVerticalExtent = settingsManager.getSettingSetter<float>("directionalShadowVerticalExtent");
-    m_directionalShadowVerticalExtent = getDirectionalShadowVerticalExtent();
-    observerSetting(m_directionalShadowVerticalExtent, "directionalShadowVerticalExtent");
+    getDirectionalShadowDistanceLowerBound = settingsManager.getSettingGetter<float>("directionalShadowDistanceLowerBound");
+    setDirectionalShadowDistanceLowerBound = settingsManager.getSettingSetter<float>("directionalShadowDistanceLowerBound");
+    m_directionalShadowDistanceLowerBound = getDirectionalShadowDistanceLowerBound();
+    observerSetting(m_directionalShadowDistanceLowerBound, "directionalShadowDistanceLowerBound");
 
 	setWireframeEnabled = settingsManager.getSettingSetter<bool>("enableWireframe");
 	getWireframeEnabled = settingsManager.getSettingGetter<bool>("enableWireframe");
@@ -2288,9 +2288,15 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             m_clodDirectionalVirtualShadowReceiverTraceEnabled ? "enabled" : "disabled",
             m_clodDirectionalVirtualShadowReceiverTraceSampleCount,
             m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld);
-        if (ImGui::SliderFloat("Directional Shadow Vertical Extent", &m_directionalShadowVerticalExtent, 1.0f, 1000.0f, "%.1f")) {
-            m_directionalShadowVerticalExtent = std::max(m_directionalShadowVerticalExtent, 1.0f);
-            setDirectionalShadowVerticalExtent(m_directionalShadowVerticalExtent);
+        if (ImGui::SliderFloat(
+                "Directional Shadow Distance Lower Bound",
+                &m_directionalShadowDistanceLowerBound,
+                1.0f,
+                1000000.0f,
+                "%.1f",
+                ImGuiSliderFlags_Logarithmic)) {
+            m_directionalShadowDistanceLowerBound = std::max(m_directionalShadowDistanceLowerBound, 1.0f);
+            setDirectionalShadowDistanceLowerBound(m_directionalShadowDistanceLowerBound);
         }
         }
 

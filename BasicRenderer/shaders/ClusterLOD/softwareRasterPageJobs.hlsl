@@ -642,7 +642,9 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
                         physicalPages[uint2(
                             atlasBaseX + uint(px - int(pagePixelMinX)),
                             atlasBaseY + uint(py - int(pagePixelMinY)))],
-                        asuint(pageSpaceDepth));
+                        CLodVirtualShadowEncodeDepth(
+                            pageSpaceDepth,
+                            clipmapInfo));
                     localAnyPixelWritten = true;
                     if (telemetryEnabled) localCoveredPixelCount++;
                 }

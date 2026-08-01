@@ -274,7 +274,9 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
             physicalPageIndex,
             clipmapInfo.shadowCameraBufferIndex)
         : linearDepth;
-    InterlockedMin(physicalPages[atlasPixel], asuint(pageSpaceLinearDepth));
+    InterlockedMin(
+        physicalPages[atlasPixel],
+        CLodVirtualShadowEncodeDepth(pageSpaceLinearDepth, clipmapInfo));
     uint ignored = 0u;
     if (!dynamicLayer)
     {

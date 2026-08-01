@@ -451,6 +451,15 @@ void RunDirectionalClipFitCases()
             throw std::runtime_error(
                 "VSM clip view drifted from its integer page-coordinate basis");
         }
+        if (clip.farPlane < 100000.0f) {
+            throw std::runtime_error(
+                "VSM clip contracted below the configured shadow distance lower bound");
+        }
+    }
+    if (largeWorldFitted.front().farPlane != 100000.0f ||
+        largeWorldFitted.back().farPlane <= largeWorldFitted.front().farPlane) {
+        throw std::runtime_error(
+            "VSM clip depth lower bound replaced per-level precision scaling");
     }
 }
 }

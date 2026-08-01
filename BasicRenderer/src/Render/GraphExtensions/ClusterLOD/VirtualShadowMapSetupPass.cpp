@@ -82,6 +82,8 @@ bool ClipmapStructureEquals(const CLodVirtualShadowClipmapInfo& lhs, const CLodV
 {
     return NearlyEqualFloat(lhs.texelWorldSize, rhs.texelWorldSize) &&
         NearlyEqualFloat(lhs.directionalLodBias, rhs.directionalLodBias) &&
+        NearlyEqualFloat(lhs.depthNear, rhs.depthNear) &&
+        NearlyEqualFloat(lhs.depthRange, rhs.depthRange) &&
         lhs.pageTableLayer == rhs.pageTableLayer &&
         lhs.clipLevel == rhs.clipLevel &&
         lhs.virtualResolution == rhs.virtualResolution &&
@@ -293,6 +295,10 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                     static_cast<int32_t>(pageOffsetX);
                 clipmapInfo.unwrappedPageOffsetY =
                     static_cast<int32_t>(pageOffsetY);
+                clipmapInfo.depthNear = view->cameraInfo.zNear;
+                clipmapInfo.depthRange = std::max(
+                    view->cameraInfo.zFar - view->cameraInfo.zNear,
+                    1.0e-6f);
 
                 auto& markData = markClipmapData[clipmapIndex];
                 markData.texelWorldSize = clipmapInfo.texelWorldSize;

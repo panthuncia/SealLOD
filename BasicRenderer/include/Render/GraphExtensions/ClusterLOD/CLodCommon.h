@@ -855,9 +855,11 @@ struct CLodVirtualShadowClipmapInfo
     uint32_t physicalAtlasPagesHigh = CLodVirtualShadowDefaultPhysicalAtlasPagesHigh;
     int32_t unwrappedPageOffsetX = 0;
     int32_t unwrappedPageOffsetY = 0;
+    float depthNear = 0.0f;
+    float depthRange = 1.0f;
 };
 
-static_assert(sizeof(CLodVirtualShadowClipmapInfo) == 76u, "CLodVirtualShadowClipmapInfo size must match HLSL");
+static_assert(sizeof(CLodVirtualShadowClipmapInfo) == 84u, "CLodVirtualShadowClipmapInfo size must match HLSL");
 
 struct CLodVirtualShadowMainCameraInfo
 {

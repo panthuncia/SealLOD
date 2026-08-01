@@ -533,7 +533,9 @@ void WG_PageJobRasterPage(
                         : depth;
                     InterlockedMin(
                         physicalPages[atlasPixel],
-                        asuint(pageSpaceDepth));
+                        CLodVirtualShadowEncodeDepth(
+                            pageSpaceDepth,
+                            clipmapInfo));
                     anyPixelWritten = true;
                 }
                 b0 += dx_b0;

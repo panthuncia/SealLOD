@@ -1569,7 +1569,7 @@ std::vector<Cascade> setupDirectionalClipmaps(
     float fovY,
     float aspectRatio,
     const std::vector<float>& clipFarPlanes,
-    float clipVerticalExtent,
+    float shadowDistanceLowerBound,
     float clipSceneExtent)
 {
     using namespace DirectX;
@@ -1605,7 +1605,7 @@ std::vector<Cascade> setupDirectionalClipmaps(
         ? std::max(clipSceneExtent / clipLadderScale, 1.0e-4f)
         : cameraDerivedClipZeroScale;
     const float ndcPageSize = 2.0f / static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis);
-    const float clampedClipVerticalExtent = std::max(clipVerticalExtent, 1.0f);
+    const float clampedShadowDistanceLowerBound = std::max(shadowDistanceLowerBound, 1.0f);
     const float clipHeightOffsetScale = 5.0f;
     const float clipNearScale = 0.01f;
     const float clipFarScale = 10.0f;
@@ -1613,14 +1613,15 @@ std::vector<Cascade> setupDirectionalClipmaps(
     for (int i = 0; i < numClipmaps; ++i)
     {
         const float clipScale = clipZeroScale * std::pow(2.0f, static_cast<float>(i));
-        // The user-configured vertical extent acts as a minimum clip depth, but
-        // coarse clipmaps still need their light-space depth and origin offset to
-        // grow with XY coverage or they stop containing the scene.
+        // Preserve per-level depth precision, but never contract below the
+        // content-configured caster distance. Content can raise this bound for
+        // unusually tall or distant casters without forcing every inner clip
+        // to inherit the coarsest clip's potentially enormous depth range.
         const float nearDistance = std::max(
-            std::max(clipNearScale * clipScale, clampedClipVerticalExtent * 0.001f),
+            std::max(clipNearScale * clipScale, clampedShadowDistanceLowerBound * 0.001f),
             0.01f);
         const float farDistance = std::max(
-            std::max(clipFarScale * clipScale, clampedClipVerticalExtent),
+            std::max(clipFarScale * clipScale, clampedShadowDistanceLowerBound),
             nearDistance + 1.0f);
         const XMMATRIX lightOrtho = XMMatrixOrthographicOffCenterRH(
             -clipScale,

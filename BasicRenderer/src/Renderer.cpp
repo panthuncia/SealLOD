@@ -1850,10 +1850,10 @@ void Renderer::SetSettings() {
 
     uint8_t numDirectionalCascades = static_cast<uint8_t>(CLodVirtualShadowDefaultClipmapCount);
 	float maxShadowDistance = 100.0f;
-    float directionalShadowVerticalExtent = maxShadowDistance;
+    float directionalShadowDistanceLowerBound = maxShadowDistance;
 	settingsManager.registerSetting<uint8_t>("numDirectionalLightCascades", numDirectionalCascades);
     settingsManager.registerSetting<float>("maxShadowDistance", maxShadowDistance);
-    settingsManager.registerSetting<float>("directionalShadowVerticalExtent", directionalShadowVerticalExtent);
+    settingsManager.registerSetting<float>("directionalShadowDistanceLowerBound", directionalShadowDistanceLowerBound);
     // Populated by scene-domain providers such as TerrainManager. Zero retains
     // the camera-derived clip ladder for scenes without explicit extents.
     settingsManager.registerSetting<float>("directionalShadowSceneExtent", 0.0f);
