@@ -2784,7 +2784,11 @@ void Renderer::Update(float elapsedSeconds) {
 
     const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {
         const auto stageStart = std::chrono::steady_clock::now();
-        stageFn();
+        try {
+            stageFn();
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string("Renderer::Update stage '") + stageName + "' failed: " + error.what());
+        }
         const auto stageEnd = std::chrono::steady_clock::now();
         RecordFrameTaskStage(stageName, br::telemetry::CpuTaskDomain::MainThread, stageStart, stageEnd);
     };

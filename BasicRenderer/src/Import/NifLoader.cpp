@@ -531,6 +531,15 @@ ObjectReyesConfig LoadObjectReyesConfig()
     return config;
 }
 
+const ObjectReyesConfig& GetObjectReyesConfig()
+{
+    // Renderer configuration is process-lifetime state. Parsing and copying this
+    // document for every parallel NIF cache probe adds avoidable filesystem, JSON,
+    // and container work to scene startup.
+    static const ObjectReyesConfig config = LoadObjectReyesConfig();
+    return config;
+}
+
 bool ObjectReyesConfigMayAffectCachedPayload(const ObjectReyesConfig& config, const std::string& normalizedNifCacheKey)
 {
     if (!config.loaded) {
@@ -2453,7 +2462,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
         }
         return std::nullopt;
     }
-    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const ObjectReyesConfig& objectReyesConfig = GetObjectReyesConfig();
     const bool objectReyesRequiresCurrentPayload =
         ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
     const bool objectReyesRequiresRuntimeAtlas =
@@ -2582,7 +2591,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         }
     }
 
-    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const ObjectReyesConfig& objectReyesConfig = GetObjectReyesConfig();
     const bool objectReyesRequiresCurrentPayload =
         ObjectReyesConfigMayAffectCachedPayload(objectReyesConfig, normalizedCacheKey);
     const bool objectReyesRequiresRuntimeAtlas =
@@ -2860,7 +2869,7 @@ bool FinalizeObjectReyesPayloadCache(
 		if (failureReason) *failureReason = "staging payload contains no Object Reyes atlas recipe meshes";
 		return false;
 	}
-	const ObjectReyesConfig config = LoadObjectReyesConfig();
+	const ObjectReyesConfig& config = GetObjectReyesConfig();
 	for (const auto& mesh : payload->meshes) {
 		if (mesh) mesh->SetObjectReyesAtlasBakeData(nullptr);
 	}
@@ -2942,7 +2951,7 @@ std::shared_ptr<Scene> LoadModelWithCacheKey(std::string filePath, std::string c
         }
     }
 
-    const ObjectReyesConfig objectReyesConfig = LoadObjectReyesConfig();
+    const ObjectReyesConfig& objectReyesConfig = GetObjectReyesConfig();
     const std::vector<std::string> textureSearchRoots =
         MergeTextureSearchRoots(package->textureSearchRoots, settings.additionalTextureSearchRoots);
     const std::string effectiveContentHash = package->contentHash + "_object_reyes_" +

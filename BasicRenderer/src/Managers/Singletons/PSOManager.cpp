@@ -2941,6 +2941,9 @@ void PSOManager::CompileShader(
 }
 
 void PSOManager::LoadSource(const std::filesystem::path& path, PSOManager::SourceData& sd) {
+    if (!std::filesystem::exists(path)) {
+        throw std::runtime_error("Shader source file not found: " + path.string());
+    }
         bool emitSpirv = false;
     UINT32 codePage = CP_UTF8;
     ThrowIfFailed(pUtils->LoadFile(

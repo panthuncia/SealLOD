@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <codecvt>
+#include <cstdio>
 #include <cstdlib>
 #include <future>
 #include <functional>
@@ -39,9 +40,10 @@ using namespace DirectX;
 
 void ThrowIfFailed(HRESULT hr) {
     if (FAILED(hr)) {
-        // Print the error code for debugging purposes
-        std::cerr << "HRESULT failed with error code: " << std::hex << hr << std::endl;
-        throw std::runtime_error("HRESULT failed");
+        char message[64]{};
+        std::snprintf(message, sizeof(message), "HRESULT failed: 0x%08lX", static_cast<unsigned long>(hr));
+        std::cerr << message << std::endl;
+        throw std::runtime_error(message);
     }
 }
 
