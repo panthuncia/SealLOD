@@ -320,7 +320,8 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
     uint arrayLayer,
     uint2 baseResolution,
     float2 uvMin,
-    float2 uvMax)
+    float2 uvMax,
+    uint hierarchyMask)
 {
     const float2 clampedUvMin = saturate(uvMin);
     const float2 clampedUvMax = saturate(uvMax);
@@ -352,7 +353,7 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
             }
 
             const int2 sampleTexel = clamp(quadCornerTexel + int2(x, y), int2(0, 0), texelBounds);
-            if (queryTexture.Load(int4(sampleTexel, arrayLayer, sampledMipLevel)) != 0u)
+            if ((queryTexture.Load(int4(sampleTexel, arrayLayer, sampledMipLevel)) & hierarchyMask) != 0u)
             {
                 return true;
             }
@@ -439,7 +440,8 @@ bool ReyesPatchTouchesShadowDirtyPages(
         arrayLayer,
         baseResolution,
         uvMin,
-        uvMax);
+        uvMax,
+        kCLodVirtualShadowHierarchyStaticMask);
 }
 
 bool ReyesPatchTouchesOnlyShadowDirtyPages(
@@ -472,13 +474,25 @@ bool ReyesPatchTouchesOnlyShadowDirtyPages(
     }
 
     Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_REYES_SPLIT_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
-    if (!CLodVirtualShadowDirtyHierarchyAnyHit(dirtyHierarchy, arrayLayer, baseResolution, uvMin, uvMax))
+    if (!CLodVirtualShadowDirtyHierarchyAnyHit(
+            dirtyHierarchy,
+            arrayLayer,
+            baseResolution,
+            uvMin,
+            uvMax,
+            kCLodVirtualShadowHierarchyStaticMask))
     {
         return false;
     }
 
     Texture2DArray<uint> nonRasterableHierarchy = ResourceDescriptorHeap[CLOD_REYES_SPLIT_SHADOW_NON_RASTERABLE_HIERARCHY_DESCRIPTOR_INDEX];
-    return !CLodVirtualShadowDirtyHierarchyAnyHit(nonRasterableHierarchy, arrayLayer, baseResolution, uvMin, uvMax);
+    return !CLodVirtualShadowDirtyHierarchyAnyHit(
+        nonRasterableHierarchy,
+        arrayLayer,
+        baseResolution,
+        uvMin,
+        uvMax,
+        1u);
 }
 
 bool ReyesPatchShouldCull(

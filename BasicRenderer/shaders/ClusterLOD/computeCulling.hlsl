@@ -272,6 +272,19 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         perMeshBuffer[instanceData.perMeshBufferIndex];
     const bool objectIsSkinned =
         (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // Static and dynamic page activity occupy separate bits in the same
+    // hierarchy. Rigid draws target admitted dirty pages; skinned draws target
+    // allocated pages visited this frame.
+    if (CLodWorkGraphShadowDirtyPageCullingEnabled() &&
+        !CLodVirtualShadowViewHasActivePages(
+            CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX,
+            objectIsSkinned))
+    {
+        WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
+        return;
+    }
+#endif
     // Voxel-root classification only feeds debug telemetry. Avoid fetching the
     // first group for every object when telemetry is disabled.
     const bool voxelRootCandidate =
@@ -329,12 +342,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     // conservative, so a miss here guarantees that no descendant can touch
     // an admitted dirty page.
     const float3 worldCenter = mul(float4(objectSpaceCenter, 1.0f), objectModelMatrix).xyz;
-    if (!objectIsSkinned &&
-        CLodWorkGraphShadowDirtyPageCullingEnabled() &&
-        !CLodVirtualShadowBoundsTouchDirtyPages(
+    if (CLodWorkGraphShadowDirtyPageCullingEnabled() &&
+        !CLodVirtualShadowBoundsTouchActivePages(
             worldCenter,
             worldRadius,
-            CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX))
+            CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX,
+            objectIsSkinned))
     {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
         return;
@@ -538,7 +551,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
     dirtyPageCullingEnabled =
-        !isSkinned && CLodWorkGraphShadowDirtyPageCullingEnabled() && !objectInvalidatedThisFrame;
+        CLodWorkGraphShadowDirtyPageCullingEnabled() &&
+        (isSkinned || !objectInvalidatedThisFrame);
 #endif
 
     if (nodeCulled) {
@@ -614,7 +628,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         if (dirtyPageCullingEnabled) {
             const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
-            nodeTouchesDirtyPages = CLodVirtualShadowBoundsTouchDirtyPages(nodeCullCenterWorld, nodeRadiusWorld, rec.viewId);
+            nodeTouchesDirtyPages = CLodVirtualShadowBoundsTouchActivePages(
+                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, isSkinned);
         }
 #endif
 
@@ -782,7 +797,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     if (dirtyPageCullingEnabled) {
         const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
-        if (!CLodVirtualShadowBoundsTouchDirtyPages(nodeCullCenterWorld, nodeRadiusWorld, rec.viewId)) {
+        if (!CLodVirtualShadowBoundsTouchActivePages(
+                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, isSkinned)) {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
             return;
         }
@@ -881,7 +897,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
             if (dirtyPageCullingEnabled) {
                 const float3 childCullCenterWorld = mul(float4(childCullCenterOS, 1.0f), objectModelMatrix).xyz;
-                if (!CLodVirtualShadowBoundsTouchDirtyPages(childCullCenterWorld, childRadiusWorld, rec.viewId)) {
+                if (!CLodVirtualShadowBoundsTouchActivePages(
+                        childCullCenterWorld, childRadiusWorld, rec.viewId, isSkinned)) {
                     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
                     continue;
                 }

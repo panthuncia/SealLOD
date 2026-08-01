@@ -818,6 +818,7 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
     uint2 baseResolution,
     float2 uvMin,
     float2 uvMax,
+    uint hierarchyMask,
     out uint sampledMipLevel)
 {
     const float2 clampedUvMin = saturate(uvMin);
@@ -826,7 +827,10 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
     const float2 minTexel = clamp(baseResolutionF * clampedUvMin, 0.0f.xx, baseResolutionF - 1.0f.xx);
     const float2 maxTexel = clamp(baseResolutionF * clampedUvMax, 0.0f.xx, baseResolutionF - 1.0f.xx);
     const float pixelWidth = max(maxTexel.x - minTexel.x, maxTexel.y - minTexel.y);
-    const uint sampleWidth = 2u;
+    // Select a mip where the conservative query rectangle occupies at most
+    // 2x2 hierarchy texels. This preserves the OR hierarchy's no-false-negative
+    // property while reducing worst-case texture loads from nine to four.
+    const uint sampleWidth = 1u;
     const uint maxMipLevel = firstbithigh(max(baseResolution.x, baseResolution.y));
 
     sampledMipLevel = min(
@@ -851,7 +855,7 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
             }
 
             const int2 sampleTexel = clamp(quadCornerTexel + int2(x, y), int2(0, 0), texelBounds);
-            if (queryTexture.Load(int4(sampleTexel, arrayLayer, sampledMipLevel)) != 0u)
+            if ((queryTexture.Load(int4(sampleTexel, arrayLayer, sampledMipLevel)) & hierarchyMask) != 0u)
             {
                 return true;
             }
@@ -861,7 +865,7 @@ bool CLodVirtualShadowDirtyHierarchyAnyHit(
     return false;
 }
 
-bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
+bool CLodVirtualShadowViewHasActivePages(uint viewId, bool dynamicLayer)
 {
     uint clipmapIndex = 0u;
     CLodVirtualShadowClipmapInfo clipmapInfo;
@@ -869,16 +873,27 @@ bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
     {
         return true;
     }
-
     Texture2DArray<uint> dirtyHierarchy =
         ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
     const uint hierarchyTopMip =
         firstbithigh(max(clipmapInfo.pageTableResolution, 1u));
-    return dirtyHierarchy.Load(
-        int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) != 0u;
+    const uint hierarchyMask = dynamicLayer
+        ? kCLodVirtualShadowHierarchyDynamicMask
+        : kCLodVirtualShadowHierarchyStaticMask;
+    return (dirtyHierarchy.Load(
+        int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) & hierarchyMask) != 0u;
 }
 
-bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorld, uint viewId)
+bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
+{
+    return CLodVirtualShadowViewHasActivePages(viewId, false);
+}
+
+bool CLodVirtualShadowBoundsTouchActivePages(
+    float3 worldCenter,
+    float radiusWorld,
+    uint viewId,
+    bool dynamicLayer)
 {
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES, 1);
 
@@ -893,7 +908,10 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
     Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
     const uint hierarchyTopMip =
         firstbithigh(max(clipmapInfo.pageTableResolution, 1u));
-    if (dirtyHierarchy.Load(int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) == 0u)
+    const uint hierarchyMask = dynamicLayer
+        ? kCLodVirtualShadowHierarchyDynamicMask
+        : kCLodVirtualShadowHierarchyStaticMask;
+    if ((dirtyHierarchy.Load(int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) & hierarchyMask) == 0u)
     {
         return false;
     }
@@ -921,6 +939,7 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
             uint2(clipmapInfo.pageTableResolution, clipmapInfo.pageTableResolution),
             uvMin,
             uvMax,
+            hierarchyMask,
             sampledMipLevel)
         : false;
 
@@ -938,6 +957,11 @@ bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorl
     }
 
     return touchesDirtyPages;
+}
+
+bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorld, uint viewId)
+{
+    return CLodVirtualShadowBoundsTouchActivePages(worldCenter, radiusWorld, viewId, false);
 }
 
 bool CLodVirtualShadowMeshletTouchesDirtyPages(float3 worldCenter, float radiusWorld, uint viewId)
@@ -1065,6 +1089,48 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
         }
     }
     return activeBlockCount;
+}
+
+bool CLodVirtualShadowMeshletTouchesActiveBlock(
+    uint shadowClipmapIndex,
+    uint2 minBlockCoord,
+    uint2 blockCount,
+    bool dynamicLayer,
+    bool staticLayerAlreadyTestedByDirtyHierarchy)
+{
+#ifndef CLOD_VSM_SW_ACTIVE_BLOCK_CULL_MODE
+// 0: disabled; 1: scan both active-block layers; 2: reuse the static dirty
+// hierarchy result and scan only dynamic/visited blocks when possible.
+#define CLOD_VSM_SW_ACTIVE_BLOCK_CULL_MODE 2
+#endif
+
+#if CLOD_VSM_SW_ACTIVE_BLOCK_CULL_MODE == 0
+    return true;
+#elif CLOD_VSM_SW_ACTIVE_BLOCK_CULL_MODE == 2
+    if (!dynamicLayer && staticLayerAlreadyTestedByDirtyHierarchy)
+    {
+        return true;
+    }
+#endif
+
+    StructuredBuffer<uint> activeBlockMetadata =
+        ResourceDescriptorHeap[
+            dynamicLayer
+                ? CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX
+                : CLOD_WG_VIRTUAL_SHADOW_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX];
+    const uint totalBlockCount = blockCount.x * blockCount.y;
+    [loop]
+    for (uint blockLinearIndex = 0u; blockLinearIndex < totalBlockCount; ++blockLinearIndex)
+    {
+        const uint2 blockCoord =
+            uint2(blockLinearIndex % blockCount.x, blockLinearIndex / blockCount.x) + minBlockCoord;
+        if (activeBlockMetadata[
+                CLodVirtualShadowBlockLinearIndex(blockCoord, shadowClipmapIndex)] != 0xFFFFFFFFu)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
@@ -4075,16 +4141,24 @@ void ClusterCullBody(
                 }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-                if (survives && !skinnedMesh &&
-                    !objectInvalidatedThisFrame)
+#ifndef CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL
+#define CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL 1
+#endif
+                if (survives &&
+                    (!skinnedMesh || CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL != 0) &&
+                    (skinnedMesh || !objectInvalidatedThisFrame))
                 {
-                    bool touchesDirtyPages = true;
+                    bool touchesActivePages = true;
                     if (CLodWorkGraphShadowDirtyPageCullingEnabled())
                     {
-                        touchesDirtyPages = CLodVirtualShadowMeshletTouchesDirtyPages(meshletCenterWorld, meshletRadiusWorld, b.viewId);
+                        touchesActivePages = CLodVirtualShadowBoundsTouchActivePages(
+                            meshletCenterWorld,
+                            meshletRadiusWorld,
+                            b.viewId,
+                            skinnedMesh);
                     }
 
-                    if (!touchesDirtyPages)
+                    if (!touchesActivePages)
                     {
                         survives = false;
                         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
@@ -4484,7 +4558,35 @@ void ClusterCullBody(
         }
 
         const bool isHW = contributes && !isSW && !isPageJob && !outputReyes;
-        const bool outputSW = contributes && isSW;
+        bool outputSW = contributes && isSW;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        if (outputSW)
+        {
+            uint2 swMinPageCoord = uint2(0u, 0u);
+            uint2 swMaxPageCoord = uint2(0u, 0u);
+            uint2 swMinBlockCoord = uint2(0u, 0u);
+            uint2 swBlockCount = uint2(0u, 0u);
+            outputSW =
+                shadowClipmapIndex != CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX &&
+                CLodVirtualShadowComputeMeshletBlockCoverage(
+                    meshletCenterWorld,
+                    meshletRadiusWorld,
+                    shadowClipmapIndex,
+                    shadowClipmapInfo,
+                    swMinPageCoord,
+                    swMaxPageCoord,
+                    swMinBlockCoord,
+                    swBlockCount) &&
+                CLodVirtualShadowMeshletTouchesActiveBlock(
+                    shadowClipmapIndex,
+                    swMinBlockCoord,
+                    swBlockCount,
+                    skinnedMesh,
+                    !skinnedMesh &&
+                        !objectInvalidatedThisFrame &&
+                        CLodWorkGraphShadowDirtyPageCullingEnabled());
+        }
+#endif
         const bool outputPageJob = contributes && isPageJob;
 
         if (isHW)       WGTelemetryAdd(WG_COUNTER_CLASSIFY_ROUTED_HW, 1);

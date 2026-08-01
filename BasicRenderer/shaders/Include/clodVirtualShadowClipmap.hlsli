@@ -298,6 +298,13 @@ bool CLodVirtualShadowPageEntryIsDynamicActive(uint pageEntry)
     return (pageEntry & requiredMask) == requiredMask;
 }
 
+// The page hierarchy carries both raster domains in one R32_UINT texture.
+// Keeping the domains as independent bits lets rigid/static and animated
+// casters share the hierarchy build and traversal machinery without making
+// every rigid caster visit every cached page each frame.
+static const uint kCLodVirtualShadowHierarchyStaticMask = 1u;
+static const uint kCLodVirtualShadowHierarchyDynamicMask = 2u;
+
 bool CLodVirtualShadowPageEntryCanRasterLayer(
     uint pageEntry,
     bool dynamicLayer)

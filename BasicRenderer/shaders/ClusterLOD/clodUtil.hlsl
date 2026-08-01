@@ -3280,7 +3280,11 @@ void CLodVirtualShadowBuildDirtyHierarchyCSMain(uint3 dispatchThreadId : SV_Disp
         const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[dispatchThreadId.z];
         const uint2 wrappedCoords = CLodVirtualShadowWrappedPageCoords(dispatchThreadId.xy, clipmapInfo);
         const uint srcValue = sourceTexture.Load(int4(wrappedCoords, dispatchThreadId.z, 0));
-        dirtyValue = CLodVirtualShadowPageEntryCanRaster(srcValue) ? 1u : 0u;
+        dirtyValue =
+            (CLodVirtualShadowPageEntryCanRaster(srcValue)
+                ? kCLodVirtualShadowHierarchyStaticMask : 0u) |
+            (CLodVirtualShadowPageEntryIsDynamicActive(srcValue)
+                ? kCLodVirtualShadowHierarchyDynamicMask : 0u);
     }
     else
     {
@@ -3295,7 +3299,7 @@ void CLodVirtualShadowBuildDirtyHierarchyCSMain(uint3 dispatchThreadId : SV_Disp
                 const uint srcX = min(srcBase.x + offsetX, CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION - 1u);
                 const uint srcY = min(srcBase.y + offsetY, CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION - 1u);
                 const uint srcValue = sourceTexture[uint3(srcX, srcY, dispatchThreadId.z)];
-                dirtyValue = max(dirtyValue, srcValue != 0u ? 1u : 0u);
+                dirtyValue |= srcValue;
             }
         }
     }

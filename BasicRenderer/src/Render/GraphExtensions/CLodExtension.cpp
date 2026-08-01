@@ -2064,7 +2064,14 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
         std::shared_ptr<Buffer> swRasterHistogramBuffer = swHistogramBuffer;
         std::shared_ptr<Buffer> swRasterIndirectArgsBuffer = swIndirectArgsBuffer;
 
-        if (traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow) {
+        // Compute SW raster already rejects non-admitted virtual-shadow pages
+        // through the page table in VirtualShadowOutput. Expanding every
+        // cluster into one record per active 4x4-page block duplicates both
+        // this bookkeeping and the downstream triangle raster work without
+        // tightening the page admission budget.
+        constexpr bool useComputeSwVirtualShadowBlockExpansion = false;
+        if (useComputeSwVirtualShadowBlockExpansion &&
+            traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow) {
             const std::shared_ptr<Buffer> blockHistogramBuffer =
                 isPhase1 ? m_rasterBucketsHistogramBufferPhase2Sw : m_rasterBucketsHistogramBufferSw;
             const std::shared_ptr<Buffer> blockWriteCursorBuffer =
