@@ -1427,7 +1427,8 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 
 	if (!meshesToPrepare.empty()) {
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
-		size_t preparedContainerCount = 0;
+		std::vector<std::pair<Mesh*, PreparedCLodContainer>> preparedContainers;
+		preparedContainers.reserve(meshesToPrepare.size());
 		for (const auto& mesh : meshesToPrepare) {
 			const auto& pageDiskLocators = mesh->GetCLodPageDiskLocators();
 			if (pageDiskLocators.empty() ||
@@ -1461,28 +1462,32 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 				continue;
 			}
 
-			{
-				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PublishMappedContainer");
-				std::lock_guard preparedLock(m_preparedCLodContainersMutex);
-				for (auto it = m_preparedCLodContainers.begin(); it != m_preparedCLodContainers.end();) {
-					if (it->second.mesh.expired()) {
-						it = m_preparedCLodContainers.erase(it);
-					} else {
-						++it;
-					}
-				}
-				m_preparedCLodContainers[mesh.get()] = PreparedCLodContainer{
+			preparedContainers.emplace_back(
+				mesh.get(),
+				PreparedCLodContainer{
 					.mesh = mesh,
 					.resolvedPath = std::move(resolvedPath),
 					.lease = std::move(lease),
 					.pageCount = static_cast<uint32_t>(pageDiskLocators.size()),
-				};
+				});
+		}
+		{
+			ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PublishMappedContainers");
+			std::lock_guard preparedLock(m_preparedCLodContainersMutex);
+			for (auto it = m_preparedCLodContainers.begin(); it != m_preparedCLodContainers.end();) {
+				if (it->second.mesh.expired()) {
+					it = m_preparedCLodContainers.erase(it);
+				} else {
+					++it;
+				}
 			}
-			++preparedContainerCount;
+			for (auto& [mesh, container] : preparedContainers) {
+				m_preparedCLodContainers.insert_or_assign(mesh, std::move(container));
+			}
 		}
 		TracyPlot(
 			"MeshManager.StaticTemplate.PreparedMappedContainers",
-			static_cast<int64_t>(preparedContainerCount));
+			static_cast<int64_t>(preparedContainers.size()));
 	}
 
 	if (meshRowsToAdd != 0) {

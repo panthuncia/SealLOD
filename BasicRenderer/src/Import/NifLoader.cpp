@@ -13,6 +13,7 @@
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <span>
 #include <sstream>
 #include <string>
@@ -30,6 +31,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Tracy.h>
 
 #include "Import/BRNiflyClient.h"
 #include "Import/CLodCache.h"
@@ -773,8 +775,8 @@ enum class CachedSkeletonStorage : std::uint8_t
 };
 
 struct AssetCacheIndex {
-    std::mutex mutex;
-    bool manifestLoaded{ false };
+    std::shared_mutex mutex;
+    std::once_flag manifestOnce;
     std::unordered_map<std::string, std::vector<fs::path>> byPathHash;
 };
 
@@ -983,11 +985,6 @@ void StoreAssetManifest(const std::unordered_map<std::string, std::vector<fs::pa
 
 void LoadAssetManifestLocked(AssetCacheIndex& index)
 {
-    if (index.manifestLoaded) {
-        return;
-    }
-    index.manifestLoaded = true;
-
     std::unordered_map<std::string, std::vector<fs::path>> loaded;
     const fs::path manifestPath = AssetManifestPath();
     std::ifstream manifest(manifestPath, std::ios::binary);
@@ -1016,12 +1013,17 @@ void LoadAssetManifestLocked(AssetCacheIndex& index)
     index.byPathHash = std::move(loaded);
 }
 
+void EnsureAssetManifestLoaded(AssetCacheIndex& index)
+{
+    std::call_once(index.manifestOnce, [&index]() { LoadAssetManifestLocked(index); });
+}
+
 std::vector<fs::path> FindCachedAssets(const std::string& pathHash)
 {
     auto& index = GetAssetCacheIndex();
+    EnsureAssetManifestLoaded(index);
     {
-        std::lock_guard<std::mutex> lock(index.mutex);
-        LoadAssetManifestLocked(index);
+        std::shared_lock lock(index.mutex);
         auto it = index.byPathHash.find(pathHash);
         if (it != index.byPathHash.end()) {
             return it->second;
@@ -1037,9 +1039,8 @@ void RegisterCachedAsset(const std::string& pathHash, const fs::path& cachePath)
     }
 
     auto& index = GetAssetCacheIndex();
-
-    std::lock_guard<std::mutex> lock(index.mutex);
-    LoadAssetManifestLocked(index);
+    EnsureAssetManifestLoaded(index);
+    std::unique_lock lock(index.mutex);
     auto& paths = index.byPathHash[pathHash];
     if (std::find(paths.begin(), paths.end(), cachePath) == paths.end()) {
         paths.push_back(cachePath);
@@ -1183,36 +1184,56 @@ class BinaryReader
 public:
     explicit BinaryReader(const fs::path& path)
     {
-        std::error_code ec;
-        const auto size = fs::file_size(path, ec);
-        if (ec || size > 512ull * 1024ull * 1024ull) {
+        BT_ZONE_SCOPE("NifLoader::BinaryReader::OpenMappedFile");
+        file = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+            nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
             return;
         }
-
-        std::ifstream in(path, std::ios::binary);
-        if (!in) {
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file, std::addressof(fileSize)) ||
+            fileSize.QuadPart < 0 ||
+            static_cast<std::uint64_t>(fileSize.QuadPart) > 512ull * 1024ull * 1024ull) {
             return;
         }
-
-        bytes.resize(static_cast<std::size_t>(size));
-        if (!bytes.empty()) {
-            in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-            valid = static_cast<bool>(in);
-        }
-        else {
+        size = static_cast<std::size_t>(fileSize.QuadPart);
+        if (size == 0) {
             valid = true;
+            return;
         }
+        mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!mapping) {
+            return;
+        }
+        bytes = static_cast<const std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+        valid = bytes != nullptr;
     }
+
+    ~BinaryReader()
+    {
+        if (bytes) UnmapViewOfFile(bytes);
+        if (mapping) CloseHandle(mapping);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    }
+
+    BinaryReader(const BinaryReader&) = delete;
+    BinaryReader& operator=(const BinaryReader&) = delete;
 
     explicit operator bool() const { return valid; }
 
     template <class T>
     bool Pod(T& value)
     {
-        if (offset > bytes.size() || bytes.size() - offset < sizeof(T)) {
+        if (offset > size || size - offset < sizeof(T)) {
             return false;
         }
-        std::memcpy(std::addressof(value), bytes.data() + offset, sizeof(T));
+        std::memcpy(std::addressof(value), bytes + offset, sizeof(T));
         offset += sizeof(T);
         return true;
     }
@@ -1222,10 +1243,10 @@ public:
         if (size == 0) {
             return true;
         }
-        if (offset > bytes.size() || bytes.size() - offset < size) {
+        if (offset > this->size || this->size - offset < size) {
             return false;
         }
-        std::memcpy(data, bytes.data() + offset, static_cast<std::size_t>(size));
+        std::memcpy(data, bytes + offset, static_cast<std::size_t>(size));
         offset += static_cast<std::size_t>(size);
         return true;
     }
@@ -1262,7 +1283,10 @@ public:
     }
 
 private:
-    std::vector<std::uint8_t> bytes;
+    HANDLE file{ INVALID_HANDLE_VALUE };
+    HANDLE mapping{ nullptr };
+    const std::uint8_t* bytes{ nullptr };
+    std::size_t size{ 0 };
     std::size_t offset{ 0 };
     bool valid{ false };
 };
@@ -2213,7 +2237,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     bool loadMaterialTextures,
     std::string* loadedContentHash = nullptr)
 {
-    ZoneScopedN("NifLoader::TryLoadPayloadCache");
+    BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache");
     const auto cachePathText = cachePath.string();
     ZoneText(cachePathText.data(), cachePathText.size());
     BinaryReader reader(cachePath);
@@ -2254,13 +2278,13 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
     payload.meshMaterialHashes.reserve(static_cast<std::size_t>(meshCount));
     TracyPlot("SARP.Import.NifMeta.Read.MeshCount", static_cast<int64_t>(meshCount));
     for (std::uint64_t meshIndex = 0; meshIndex < meshCount; ++meshIndex) {
-        ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh");
+        BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache::Mesh");
         MaterialDescription desc{};
         ClusterLODPrebuiltData prebuilt{};
         std::shared_ptr<const Mesh::ObjectReyesAtlasBakeData> atlasBakeData;
         std::uint64_t materialHash = 0;
         {
-            ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
+            BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache::Mesh::ReadMaterialAndPrebuilt");
             if (!ReadMaterialDescription(reader, desc, textureSearchRoots, loadMaterialTextures) ||
                 !reader.Pod(materialHash) ||
                 !ReadPrebuilt(reader, prebuilt) ||
@@ -2279,14 +2303,17 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
                 expectedBuildConfigHash);
             return std::nullopt;
         }
-		if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight &&
-			!PrebuiltContainsObjectReyesAtlasUvSet(prebuilt, desc.heightMap.uvSetIndex)) {
-			spdlog::warn(
-				"nif_asset_payload_cache: rejecting Object Reyes mesh {} for '{}' because its CLod pages do not contain required atlas UV set {}",
-				meshIndex,
-				normalizedCacheKey,
-				desc.heightMap.uvSetIndex);
-			return std::nullopt;
+		if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
+			const std::string uvIdentityMarker =
+				"#object_reyes_atlas_uv=" + std::to_string(desc.heightMap.uvSetIndex);
+			if (prebuilt.cacheSource.sourceIdentifier.find(uvIdentityMarker) == std::string::npos) {
+				spdlog::warn(
+					"nif_asset_payload_cache: rejecting Object Reyes mesh {} for '{}' because its validated CLod identity does not contain atlas UV set {}",
+					meshIndex,
+					normalizedCacheKey,
+					desc.heightMap.uvSetIndex);
+				return std::nullopt;
+			}
 		}
         if (prebuilt.nodeSkinningInfos.size() != prebuilt.nodes.size() ||
             prebuilt.nodeBoneLimit < 1u || prebuilt.nodeBoneLimit > CLOD_NODE_BONE_LIMIT_HARD_MAX) {
@@ -2309,7 +2336,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         }
         std::shared_ptr<Mesh> mesh;
         {
-            ZoneScopedN("NifLoader::TryLoadPayloadCache::Mesh::CreateMesh");
+            BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache::Mesh::CreateMesh");
             auto material = Material::CreateShared(desc);
             if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::AtlasBakedHeight) {
                 const auto materialData = material->GetData();
@@ -2419,7 +2446,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
         return std::nullopt;
     }
     {
-        ZoneScopedN("NifLoader::TryLoadPayloadCache::Parts");
+        BT_ZONE_SCOPE("NifLoader::TryLoadPayloadCache::Parts");
         TracyPlot("SARP.Import.NifMeta.Read.PartCount", static_cast<int64_t>(partCount));
         payload.parts.reserve(static_cast<std::size_t>(partCount));
         for (std::uint64_t partIndex = 0; partIndex < partCount; ++partIndex) {
@@ -2452,7 +2479,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadPayloadCache(
 
 std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const USDLoader::ImportSettings& settings, LoadTimingStats* stats)
 {
-    ZoneScopedN("NifLoader::TryLoadCachedImportedAsset");
+    BT_ZONE_SCOPE("NifLoader::TryLoadCachedImportedAsset");
     ZoneText(cacheKey.data(), cacheKey.size());
     const auto probeBegin = std::chrono::steady_clock::now();
     const std::string normalizedCacheKey = NormalizeNifCacheKey(cacheKey);
@@ -2471,7 +2498,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     const std::string pathHash = Hex64(Fnv1a64(normalizedCacheKey));
     std::vector<fs::path> candidates;
     {
-        ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::FindCachedAssets");
+        BT_ZONE_SCOPE("NifLoader::TryLoadCachedImportedAsset::FindCachedAssets");
         candidates = FindCachedAssets(pathHash);
     }
     TracyPlot("SARP.Import.NifMeta.CandidateCount", static_cast<int64_t>(candidates.size()));
@@ -2484,7 +2511,7 @@ std::optional<USDLoader::ImportedAssetPayload> TryLoadCachedImportedAsset(std::s
     }
 
     for (const auto& cachePath : candidates) {
-        ZoneScopedN("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
+        BT_ZONE_SCOPE("NifLoader::TryLoadCachedImportedAsset::ProbeCandidate");
         const std::string fileContentKey = ExtractContentHashFromFileName(cachePath);
 
         std::string loadedContentHash;

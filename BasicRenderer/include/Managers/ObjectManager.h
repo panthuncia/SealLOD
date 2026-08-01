@@ -64,9 +64,13 @@ public:
 		std::uint32_t meshTemplateIndex = 0;
 		std::uint32_t clodOffsetIndex = 0;
 		std::vector<DrawWorkloadKey> workloadKeys;
+		std::span<const DrawWorkloadKey> mappedWorkloadKeys;
 		std::uint32_t skinnedAssemblyTypeSlot = 0xFFFFFFFFu;
 		BoundingSphere skinnedAssemblyBounds{};
 		float skinnedBoundsScale = 1.0f;
+		[[nodiscard]] std::span<const DrawWorkloadKey> WorkloadKeys() const {
+			return mappedWorkloadKeys.empty() ? std::span<const DrawWorkloadKey>{ workloadKeys } : mappedWorkloadKeys;
+		}
 	};
 
 	struct PreparedStaticGroupInfo {
@@ -76,6 +80,35 @@ public:
 		std::vector<DirectX::XMFLOAT4X4> normalMatrices;
 		std::vector<PreparedStaticMeshTemplateRef> meshTemplates;
 		std::vector<std::vector<DrawWorkloadKey>> workloadKeysByMeshTemplate;
+		// Recipe-backed groups keep immutable transform rows in their mapped pack.
+		// Runtime bindings remain owning because their indices are renderer-assigned.
+		std::span<const PerObjectCB> mappedPerObjectCBs;
+		std::span<const DirectX::XMFLOAT4X4> mappedNormalMatrices;
+		std::span<const PreparedStaticMeshTemplateRef> mappedMeshTemplates;
+		std::shared_ptr<const void> mappedRecipeOwner;
+		std::shared_ptr<const void> mappedTemplateOwner;
+
+		[[nodiscard]] std::span<const PerObjectCB> PerObjectRows() const {
+			return mappedPerObjectCBs.empty() ? std::span<const PerObjectCB>{ perObjectCBs } : mappedPerObjectCBs;
+		}
+		[[nodiscard]] std::span<const DirectX::XMFLOAT4X4> NormalRows() const {
+			return mappedNormalMatrices.empty() ? std::span<const DirectX::XMFLOAT4X4>{ normalMatrices } : mappedNormalMatrices;
+		}
+		[[nodiscard]] std::span<const PreparedStaticMeshTemplateRef> MeshTemplates() const {
+			return mappedMeshTemplates.empty() ? std::span<const PreparedStaticMeshTemplateRef>{ meshTemplates } : mappedMeshTemplates;
+		}
+		[[nodiscard]] bool IsRecipeView() const { return !mappedPerObjectCBs.empty(); }
+	};
+
+	struct StaticRecipeTemplateBinding {
+		PreparedStaticMeshTemplateRef rendererTemplate;
+	};
+
+	struct StaticRecipeView {
+		std::vector<PreparedStaticGroupInfo> groups;
+		std::uint64_t transformRows = 0;
+		std::uint64_t drawRecords = 0;
+		std::uint64_t mappedBytes = 0;
 	};
 
 	struct PreparedStaticGroupsBulkPlan {
@@ -278,6 +311,8 @@ public:
 			BufferKind kind = BufferKind::PerObject;
 		};
 
+		std::array<BufferRetireRange, 4> inlineBufferRanges;
+		std::uint8_t inlineBufferRangeCount = 0;
 		std::vector<BufferRetireRange> bufferRanges;
 		std::vector<Components::ObjectDrawInfo::ActiveDrawSetRemovalBucket> activeDrawSetRemovals;
 		std::vector<std::uint32_t> drawRecordIndices;
@@ -296,6 +331,7 @@ public:
 		std::vector<DirectX::XMFLOAT4X4> normalRows;
 		std::vector<InstanceDrawRecordCB> drawRecordRows;
 		std::vector<Components::ObjectDrawInfo> drawInfos;
+		std::vector<std::uint32_t> drawInfoIndicesByGroup;
 		std::vector<StaticObjectRemovalPayload> removalPayloads;
 		std::vector<PendingSkinnedAssemblyPlacement> skinnedAssemblyPlacements;
 		std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> activeDrawSetInserts;
@@ -355,6 +391,7 @@ public:
 	static StaticImportPacket BuildStaticImportPacket(StaticImportPacketPlan plan);
 	static StaticImportBuildBatch PrepareStaticImportBuildBatch(const std::vector<StaticGroupBuildInfo>& groups);
 	static void FinalizeStaticImportBuildBatch(StaticImportBuildBatch& build);
+	static StaticImportBuildBatch FinalizeStaticRecipeBuild(StaticRecipeView view);
 	void PrepareStaticGroupCommitResourcesAsync(const PreparedStaticGroupsBulkPlan& plan);
 	void RequestStaticImportPacketResources(const StaticImportPacketPlan& plan);
 	void RequestStaticImportTransactionResources(const StaticImportBuildBatch& build);
