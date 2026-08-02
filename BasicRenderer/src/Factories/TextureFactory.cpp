@@ -1189,6 +1189,7 @@ void TextureFactory::MipmappingPass::EnqueueJob(const std::shared_ptr<PixelBuffe
 
 void TextureFactory::MipmappingPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
+    m_declaredResourcesChanged = false;
     if (m_pending.empty()) return;
 
     builder->WithShaderResource(m_pMipConstants);
@@ -1385,6 +1386,7 @@ PipelineState& TextureFactory::BC7CompressionPass::GetOrCreatePipeline()
 void TextureFactory::BC7CompressionPass::DeclareResourceUsages(ComputePassBuilder* builder)
 {
     std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
@@ -1513,6 +1515,7 @@ void TextureFactory::BC7CompressionCopyPass::Update(const UpdateExecutionContext
 void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBuilder* builder)
 {
     std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
@@ -1533,6 +1536,9 @@ void TextureFactory::BC7CompressionCopyPass::DeclareResourceUsages(RenderPassBui
 void TextureFactory::BC7CompressionCopyPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
     std::scoped_lock lock(m_pendingMutex);
+    if (m_pending.empty()) {
+        return;
+    }
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
     waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
@@ -1599,6 +1605,7 @@ void TextureFactory::BC7CompressionReadbackPass::Update(const UpdateExecutionCon
 void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassBuilder* builder)
 {
     std::scoped_lock lock(m_pendingMutex);
+    m_declaredResourcesChanged.store(false, std::memory_order_release);
     if (m_pending.empty()) {
         return;
     }
@@ -1619,6 +1626,9 @@ void TextureFactory::BC7CompressionReadbackPass::DeclareResourceUsages(CopyPassB
 void TextureFactory::BC7CompressionReadbackPass::RecordImmediateCommands(ImmediateExecutionContext& context)
 {
     std::scoped_lock lock(m_pendingMutex);
+    if (m_pending.empty()) {
+        return;
+    }
     if (!m_readbackService) {
         for (const auto& job : m_pending) {
             if (!job || !job->handle) {

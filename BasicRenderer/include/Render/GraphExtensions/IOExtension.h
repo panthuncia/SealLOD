@@ -88,27 +88,7 @@ public:
 	}
 
 	void GatherFramePasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& outPasses) override {
-		// Some systems enqueue uploads during GatherFramePasses() itself
-		// (for example CLod streaming disk-IO completions materializing
-		// geometry/chunk-table updates). The structural Builtin::Uploads pass
-		// has already recorded by then, so without a second upload pass those
-		// updates would slip to the next frame. Re-run the upload pass early in
-		// the frame pass stage so newly queued uploads are visible this frame.
-		if (auto* uploadService = rg.GetUploadService()) {
-			if (auto upload = uploadService->GetUploadPass()) {
-				auto lateUploadsInsertPoint = RenderGraph::ExternalInsertPoint::After("Builtin::Uploads");
-				lateUploadsInsertPoint.AlsoBefore("ClearVisibilityBufferPass");
-				// Texture processing jobs may be submitted while frame passes are
-				// gathered, after the structural upload pass has already captured
-				// its work. Ensure those uploads complete before either mip
-				// generation or BC7 compression consumes the new texture.
-				lateUploadsInsertPoint.AlsoBefore("Builtin::Mipmapping");
-				lateUploadsInsertPoint.AlsoBefore("Builtin::BC7Compression");
-				outPasses.push_back(
-					RenderGraph::ExternalPassDesc::Render("Builtin::LateUploads", upload)
-						.At(std::move(lateUploadsInsertPoint)));
-			}
-		}
+		(void)rg;
 
 		if (m_materialManager) {
 			if (auto readback = m_materialManager->CreateTextureStreamingFeedbackReadbackPass()) {

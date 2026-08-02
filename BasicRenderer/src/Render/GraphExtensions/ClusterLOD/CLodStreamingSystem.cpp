@@ -208,13 +208,9 @@ namespace {
     class CLodStructuralStreamingUploadPass final : public CopyPass, public IDynamicDeclaredResources, public IHasImmediateModeCommands {
     public:
         using ConsumeUploadsFn = std::function<std::vector<StreamingUploadDescriptor>()>;
-        using MakePoolResolverFn = std::function<std::unique_ptr<IResourceResolver>()>;
 
-        CLodStructuralStreamingUploadPass(
-            ConsumeUploadsFn consumeUploads,
-            MakePoolResolverFn makePoolResolver)
-            : m_consumeUploads(std::move(consumeUploads))
-            , m_makePoolResolver(std::move(makePoolResolver)) {}
+        explicit CLodStructuralStreamingUploadPass(ConsumeUploadsFn consumeUploads)
+            : m_consumeUploads(std::move(consumeUploads)) {}
 
         bool DeclaredResourcesChanged() const override {
             ZoneScopedN("CLodStructuralStreamingUploadPass::DeclaredResourcesChanged::SnapshotOnly");
@@ -226,9 +222,6 @@ namespace {
 
             StreamingUploadInputs nextInputs{};
             nextInputs.uploads = m_uploadSnapshot;
-            if (!nextInputs.uploads.empty() && m_makePoolResolver) {
-                nextInputs.poolResolver = m_makePoolResolver();
-            }
 
             auto nextKey = MakeStreamingUploadSnapshotKey(nextInputs.uploads);
             const bool changed = !m_initialized || nextKey != m_snapshotKey;
@@ -237,6 +230,9 @@ namespace {
             m_inputs = std::move(nextInputs);
             return changed;
         }
+
+        bool RequiresPassRebindAfterDeclarationRefresh() const noexcept override { return false; }
+        bool DeclarationsProvidedByImmediateCommands() const noexcept override { return true; }
 
         void DeclareResourceUsages(CopyPassBuilder* builder) override {
             builder->PreferQueue(QueueKind::Copy);
@@ -263,7 +259,6 @@ namespace {
 
     private:
         ConsumeUploadsFn m_consumeUploads;
-        MakePoolResolverFn m_makePoolResolver;
         mutable std::vector<StreamingUploadDescriptor> m_uploadSnapshot;
         mutable StreamingUploadInputs m_inputs;
         mutable std::vector<CLodStreamingUploadSnapshotKey> m_snapshotKey;
@@ -285,11 +280,9 @@ namespace {
 
         CLodStructuralAsyncUploadPass(
             TryAcquireSnapshotFn tryAcquireSnapshot,
-            SubmitSnapshotFn submitSnapshot,
-            std::unique_ptr<IResourceResolver> poolResolver)
+            SubmitSnapshotFn submitSnapshot)
             : m_tryAcquireSnapshot(std::move(tryAcquireSnapshot))
-            , m_submitSnapshot(std::move(submitSnapshot))
-            , m_poolResolver(std::move(poolResolver)) {}
+            , m_submitSnapshot(std::move(submitSnapshot)) {}
 
         bool DeclaredResourcesChanged() const override {
             ZoneScopedN("CLodStructuralAsyncUploadPass::DeclaredResourcesChanged::SnapshotOnly");
@@ -322,16 +315,11 @@ namespace {
             return changed;
         }
 
+        bool RequiresPassRebindAfterDeclarationRefresh() const noexcept override { return false; }
+        bool DeclarationsProvidedByImmediateCommands() const noexcept override { return true; }
+
         void DeclareResourceUsages(CopyPassBuilder* builder) override {
             ZoneScopedN("CLodStructuralAsyncUploadPass::DeclareResourceUsages");
-            for (auto& destination : m_snapshot.destinations) {
-                if (destination) {
-                    builder->WithCopyDest(destination);
-                }
-            }
-            if (m_poolResolver) {
-                builder->WithCopyDest(*m_poolResolver);
-            }
             builder->PreferQueue(QueueKind::Graphics);
         }
 
@@ -367,7 +355,6 @@ namespace {
     private:
         TryAcquireSnapshotFn m_tryAcquireSnapshot;
         SubmitSnapshotFn m_submitSnapshot;
-        std::unique_ptr<IResourceResolver> m_poolResolver;
         mutable CLodAsyncUploadSnapshot m_snapshot;
         mutable std::vector<uint64_t> m_declaredDestinationIds;
         mutable bool m_armed = false;
@@ -452,43 +439,10 @@ namespace {
             return changed;
         }
 
+        bool RequiresPassRebindAfterDeclarationRefresh() const noexcept override { return false; }
+        bool DeclarationsProvidedByImmediateCommands() const noexcept override { return true; }
+
         void DeclareResourceUsages(CopyPassBuilder* builder) override {
-            if (m_armed) {
-                builder->WithCopySource(
-                    m_snapshot.inputs.counterSource,
-                    m_snapshot.inputs.requestsSource,
-                    m_snapshot.inputs.usedGroupsCounterSource,
-                    m_snapshot.inputs.usedGroupsBufferSource);
-                if (m_snapshot.inputs.sourceGroupMismatchCounterSource) {
-                    builder->WithCopySource(m_snapshot.inputs.sourceGroupMismatchCounterSource);
-                }
-                if (m_snapshot.inputs.sourceGroupMismatchDetailsSource) {
-                    builder->WithCopySource(m_snapshot.inputs.sourceGroupMismatchDetailsSource);
-                }
-                if (m_snapshot.inputs.virtualShadowDependencyCountSource) {
-                    builder->WithCopySource(m_snapshot.inputs.virtualShadowDependencyCountSource);
-                }
-                if (m_snapshot.inputs.virtualShadowDependenciesSource) {
-                    builder->WithCopySource(m_snapshot.inputs.virtualShadowDependenciesSource);
-                }
-                builder->WithCopyDest(
-                    m_snapshot.counterStaging,
-                    m_snapshot.requestsStaging,
-                    m_snapshot.usedGroupsCounterStaging,
-                    m_snapshot.usedGroupsBufferStaging);
-                if (m_snapshot.sourceGroupMismatchCounterStaging) {
-                    builder->WithCopyDest(m_snapshot.sourceGroupMismatchCounterStaging);
-                }
-                if (m_snapshot.sourceGroupMismatchDetailsStaging) {
-                    builder->WithCopyDest(m_snapshot.sourceGroupMismatchDetailsStaging);
-                }
-                if (m_snapshot.virtualShadowDependencyCountStaging) {
-                    builder->WithCopyDest(m_snapshot.virtualShadowDependencyCountStaging);
-                }
-                if (m_snapshot.virtualShadowDependenciesStaging) {
-                    builder->WithCopyDest(m_snapshot.virtualShadowDependenciesStaging);
-                }
-            }
             builder->PreferQueue(QueueKind::Graphics);
         }
 
@@ -1669,23 +1623,6 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
 
-    auto makePoolResolver = [this]() -> std::unique_ptr<IResourceResolver> {
-        MeshManager* mm = m_getMeshManager ? m_getMeshManager() : nullptr;
-        if (!mm) {
-            return nullptr;
-        }
-        PagePool* pool = mm->GetCLodPagePool();
-        if (!pool) {
-            return nullptr;
-        }
-
-        auto slabGroup = pool->GetSlabResourceGroup();
-        if (auto pt = pool->GetPageTableBuffer()) {
-            slabGroup->AddResource(pt);
-        }
-        return std::make_unique<ResourceGroupResolver>(slabGroup);
-    };
-
     auto streamingUploadInsertPoint =
         RenderGraph::ExternalInsertPoint::After("EvaluateMaterialGroupsPass");
     streamingUploadInsertPoint.AlsoBefore("GTAOFilterPass");
@@ -1697,8 +1634,7 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
             std::make_shared<CLodStructuralStreamingUploadPass>(
                 []() {
                     return rg::runtime::ConsumeStreamingUploadsDispatch();
-                },
-                makePoolResolver))
+                }))
             .At(std::move(streamingUploadInsertPoint))
             .PreferQueue(QueueKind::Copy));
 
@@ -1755,8 +1691,7 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
                     result.externalSignalsAfterCompletion.push_back({snapshot.completionTimeline, completionValue});
                     RequestStreamingFrameWork();
                     return result;
-                },
-                makePoolResolver()))
+                }))
             .At(std::move(asyncUploadInsertPoint))
             .PreferQueue(QueueKind::Copy)
             .PinToQueue(m_uploadQueueSlot));
