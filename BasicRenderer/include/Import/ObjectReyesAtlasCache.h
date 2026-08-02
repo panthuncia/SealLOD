@@ -7,7 +7,7 @@
 
 namespace br::import {
 
-inline constexpr std::uint32_t kObjectReyesAtlasCacheSchemaVersion = 9u;
+inline constexpr std::uint32_t kObjectReyesAtlasCacheSchemaVersion = 11u;
 
 struct ObjectReyesAtlasCacheIdentity
 {
@@ -34,6 +34,9 @@ struct ObjectReyesAtlasMeshBinding
 	std::uint32_t height{ 0 };
 	float displacementMin{ 0.0f };
 	float displacementMax{ 0.0f };
+	float objectSurfaceTexelDensity{ 1.0f };
+	bool objectSurfaceUseTriplanarProjection{ false };
+	bool objectSurfaceUseTripleTapStochastic{ false };
 	std::string storageFormat;
 	std::string sourceMaterialName;
 	std::uint32_t sourceMaterialIndex{ UINT32_MAX };
@@ -44,6 +47,7 @@ struct ObjectReyesAtlasVariantManifest
 	std::uint32_t schemaVersion{ kObjectReyesAtlasCacheSchemaVersion };
 	ObjectReyesAtlasCacheIdentity identity;
 	std::uint64_t textureOverrideHash{ 0 };
+	bool authoritativeDisabled{ false };
 	std::vector<ObjectReyesAtlasMeshBinding> meshes;
 };
 

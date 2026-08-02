@@ -838,8 +838,12 @@ void ObjectManager::AssignStaticImportTransactionGenerations(std::span<Materiali
 		transaction.reservation.visibilityDirtyStart = std::numeric_limits<std::size_t>::max();
 		transaction.reservation.visibilityDirtyEnd = 0;
 
-		for (const auto& drawInfo : transaction.drawInfos) {
-			for (const auto drawRecordIndex : drawInfo.instanceDrawRecordIndices) {
+		// Removal payloads are the canonical per-group draw-record ownership for
+		// both legacy imports and recipe views. Recipe transactions intentionally
+		// omit ObjectDrawInfo, so deriving activation from drawInfos leaves every
+		// recipe entry at generation zero and makes it invisible to culling.
+		for (const auto& payload : transaction.removalPayloads) {
+			for (const auto drawRecordIndex : payload.drawRecordIndices) {
 				activate(transaction, drawRecordIndex);
 			}
 		}
@@ -853,7 +857,17 @@ void ObjectManager::AssignStaticImportTransactionGenerations(std::span<Materiali
 		}
 	}
 
+	std::size_t zeroGenerationEntries = 0;
+	for (const auto* transactionPtr : transactions) {
+		if (!transactionPtr) continue;
+		for (const auto& [_, entries] : transactionPtr->activeDrawSetInserts) {
+			zeroGenerationEntries += static_cast<std::size_t>(std::ranges::count(entries, 0u,
+				&SortedUnsignedIntBuffer::ActiveDrawSetEntry::generation));
+		}
+	}
 	TracyPlot("ObjectManager.StaticImportTransaction.PublishActivatedDrawRecords", static_cast<int64_t>(activatedDrawRecords));
+	BT_PLOT("ObjectManager.StaticImportTransaction.PublishActivatedDrawRecords", static_cast<int64_t>(activatedDrawRecords));
+	BT_PLOT("ObjectManager.StaticImportTransaction.ZeroGenerationEntries", static_cast<int64_t>(zeroGenerationEntries));
 }
 
 void ObjectManager::TombstoneDrawRecord(std::uint32_t drawRecordIndex) {
