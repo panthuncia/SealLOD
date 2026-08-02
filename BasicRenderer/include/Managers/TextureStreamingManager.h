@@ -23,6 +23,7 @@
 class TextureFactory;
 class CopyPass;
 class Buffer;
+class MaterialTextureTransferService;
 
 namespace rg::runtime {
 class IReadbackService;
@@ -67,12 +68,15 @@ struct MaterialTextureStreamingStats {
 	uint64_t activeMaterialResourceBytes = 0;
 	uint32_t externallyManagedActiveResourceCount = 0;
 	uint64_t externallyManagedActiveResourceBytes = 0;
+	uint32_t graphManagedParticipatingActiveResourceCount = 0;
+	uint64_t graphManagedParticipatingActiveResourceBytes = 0;
 	uint32_t alphaTestedTextureCount = 0;
 	uint32_t alphaTestedMipCapViolationCount = 0;
 	uint32_t idleCoarseningDisabledTextureCount = 0;
 	uint32_t residencyConstrainedTextureCount = 0;
 	uint32_t residencyConstraintViolationCount = 0;
 	std::vector<uint64_t> publishedResourceIDs = {};
+	std::vector<uint64_t> participatingPublishedResourceIDs = {};
 	std::vector<MaterialTextureStreamingRecord> largestResidentTextures = {};
 };
 
@@ -97,6 +101,11 @@ public:
 	void EnqueueFrameTick(uint64_t frameIndex);
 	void EnqueueTextureUploadAdvance(const std::shared_ptr<TextureAsset>& texture, const char* reason = "external");
 	std::size_t DrainPendingBindingChanges();
+	void RetirePatchedBindingResources();
+	bool RequestExternalMaterialTextureReadback(
+		const std::shared_ptr<PixelBuffer>& image,
+		std::wstring outputFile,
+		std::function<void()> callback);
 
 	uint64_t RegisterTextureBinding(
 		const std::shared_ptr<TextureAsset>& texture,
@@ -198,6 +207,7 @@ private:
 	std::unordered_map<uint32_t, std::map<uint32_t, uint32_t>> m_maximumResidentTopMipBindingCountsByStreamingTextureID;
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
+	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
 	std::thread m_workerThread;
 	std::mutex m_workerCommandMutex;
 	std::condition_variable m_workerCV;
@@ -220,6 +230,7 @@ private:
 	uint32_t m_readbackSlotCursor = 0;
 	std::mutex m_pendingBindingChangeMutex;
 	std::vector<PendingBindingChange> m_pendingBindingChanges;
+	std::vector<std::shared_ptr<PixelBuffer>> m_imagesPendingOwnerPatchRetirement;
 	std::mutex m_liveBindingMutex;
 	std::unordered_map<uint64_t, MainThreadBindingOwner> m_liveBindingsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_liveBindingIDsByStreamingTextureID;

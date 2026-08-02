@@ -2,6 +2,7 @@
 
 #include "../generated/BuiltinResources.h"
 #include "Factories/TextureFactory.h"
+#include "Managers/MaterialTextureTransferService.h"
 #include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Managers/Singletons/DescriptorHeapManager.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -161,6 +162,9 @@ void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_
 		return;
 	}
 	m_textureFactory = &textureFactory;
+	m_materialTextureTransfers = std::make_unique<MaterialTextureTransferService>();
+	m_materialTextureTransfers->Initialize();
+	textureFactory.SetMaterialTextureTransferService(m_materialTextureTransfers.get());
 	auto device = DeviceManager::GetInstance().GetDevice();
 	if (device.CreateTimeline(m_readbackFencePtr, 0, "MaterialTextureStreamingReadbackFence") == rhi::Result::Ok && m_readbackFencePtr) {
 		m_readbackFence = m_readbackFencePtr.Get();
@@ -180,6 +184,9 @@ void TextureStreamingManager::Shutdown()
 	if (m_workerThread.joinable()) {
 		m_workerThread.join();
 	}
+	if (m_textureFactory) m_textureFactory->SetMaterialTextureTransferService(nullptr);
+	if (m_materialTextureTransfers) m_materialTextureTransfers->Shutdown();
+	m_materialTextureTransfers.reset();
 	m_textureFactory = nullptr;
 	{
 		std::lock_guard lock(m_readbackSlotMutex);
@@ -962,6 +969,9 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 	if (!change.newImage) {
 		return;
 	}
+	if (m_materialTextureTransfers) {
+		m_materialTextureTransfers->EnsureShaderReady(change.newImage);
+	}
 	if (MaterialTextureStreamingTransitionLoggingEnabled()) {
 		const auto pending = texture.GetPendingDebugInfo();
 		spdlog::info(
@@ -999,6 +1009,7 @@ void TextureStreamingManager::QueueBindingChanged(TextureAsset& texture, std::sh
 
 std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 {
+	if (m_materialTextureTransfers) m_materialTextureTransfers->Pump();
 	std::vector<PendingBindingChange> changes;
 	{
 		std::lock_guard lock(m_pendingBindingChangeMutex);
@@ -1025,7 +1036,19 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		previous.metadata = change.metadata;
 	}
 	std::size_t adopted = 0;
+	std::vector<PendingBindingChange> waitingForGpu;
 	for (auto& change : coalesced) {
+		if (m_materialTextureTransfers && change.newImage &&
+			!m_materialTextureTransfers->IsShaderReady(change.newImage)) {
+			if (!m_materialTextureTransfers->HasFailed(change.newImage)) {
+				waitingForGpu.push_back(std::move(change));
+			}
+			else if (change.texture) {
+				(void)change.texture->RejectPreparedImage(change.bindingRevision, change.newImage);
+				EnqueueTextureUploadAdvance(change.texture, "external_transfer_failed");
+			}
+			continue;
+		}
 		const auto adoptionStart = std::chrono::steady_clock::now();
 		std::shared_ptr<PixelBuffer> replacedPublishedImage;
 		const uint32_t workerObservedOldSrv = TextureSrvIndex(change.previousImage);
@@ -1082,11 +1105,11 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		};
 		if (replacedPublishedImage && replacedPublishedImage != change.newImage &&
 			!isCurrentImage(replacedPublishedImage)) {
-			DescriptorHeapManager::GetInstance().RetireResource(std::move(replacedPublishedImage));
+			m_imagesPendingOwnerPatchRetirement.push_back(std::move(replacedPublishedImage));
 		}
 		if (change.previousImage && change.previousImage != change.newImage &&
 			!workerObservedActualPublishedImage && !isCurrentImage(change.previousImage)) {
-			DescriptorHeapManager::GetInstance().RetireResource(std::move(change.previousImage));
+			m_imagesPendingOwnerPatchRetirement.push_back(std::move(change.previousImage));
 		}
 		for (auto& image : change.supersededImages) {
 			if (image && image != change.newImage && !isCurrentImage(image)) {
@@ -1118,10 +1141,38 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		}
 		++adopted;
 	}
+	if (!waitingForGpu.empty()) {
+		std::lock_guard lock(m_pendingBindingChangeMutex);
+		for (auto& change : waitingForGpu) m_pendingBindingChanges.push_back(std::move(change));
+	}
 	const std::size_t refreshed = RefreshDirtyLiveBindings();
 	TracyPlot("TextureStreaming.MainThreadAdoptions", static_cast<int64_t>(adopted));
 	TracyPlot("TextureStreaming.MainThreadBindingRefreshes", static_cast<int64_t>(refreshed));
 	return adopted;
+}
+
+void TextureStreamingManager::RetirePatchedBindingResources()
+{
+	ZoneScopedN("TextureStreamingManager::RetirePatchedBindingResources");
+	for (auto& image : m_imagesPendingOwnerPatchRetirement) {
+		if (image) DescriptorHeapManager::GetInstance().RetireResource(std::move(image));
+	}
+	TracyPlot("TextureStreaming.OwnerPatchedRetirements",
+		static_cast<int64_t>(m_imagesPendingOwnerPatchRetirement.size()));
+	m_imagesPendingOwnerPatchRetirement.clear();
+}
+
+bool TextureStreamingManager::RequestExternalMaterialTextureReadback(
+	const std::shared_ptr<PixelBuffer>& image,
+	std::wstring outputFile,
+	std::function<void()> callback)
+{
+	if (!m_materialTextureTransfers || !image ||
+		image->GetGraphOwnership() != Resource::GraphOwnership::ExternalImmutableShaderResource) {
+		return false;
+	}
+	m_materialTextureTransfers->RequestReadback(image, std::move(outputFile), std::move(callback));
+	return true;
 }
 
 void TextureStreamingManager::FlushDirtyTextureMetadata(const std::shared_ptr<TextureAsset>& texture)
@@ -1440,9 +1491,9 @@ MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
 {
 	std::lock_guard statsLock(m_statsMutex);
 	auto stats = m_publishedStats;
-	std::unordered_set<uint64_t> publishedIDs(
-		stats.publishedResourceIDs.begin(),
-		stats.publishedResourceIDs.end());
+	const std::unordered_set<uint64_t> participatingIDs(
+		stats.participatingPublishedResourceIDs.begin(),
+		stats.participatingPublishedResourceIDs.end());
 	std::unordered_set<uint64_t> seenActiveIDs;
 	for (const auto& resource : activeTextureResources) {
 		auto image = std::dynamic_pointer_cast<PixelBuffer>(resource);
@@ -1452,9 +1503,21 @@ MaterialTextureStreamingStats TextureStreamingManager::GetTextureStreamingStats(
 		const uint64_t bytes = ComputeTextureResidentBytes(image->GetDescription());
 		stats.activeMaterialResourceCount++;
 		stats.activeMaterialResourceBytes += bytes;
-		if (!publishedIDs.contains(image->GetGlobalResourceID())) {
+		if (image->GetGraphOwnership() == Resource::GraphOwnership::ExternalImmutableShaderResource) {
 			stats.externallyManagedActiveResourceCount++;
 			stats.externallyManagedActiveResourceBytes += bytes;
+		}
+		else if (participatingIDs.contains(image->GetGlobalResourceID())) {
+			stats.graphManagedParticipatingActiveResourceCount++;
+			stats.graphManagedParticipatingActiveResourceBytes += bytes;
+			static std::mutex diagnosticMutex;
+			static std::unordered_set<uint64_t> reported;
+			std::lock_guard diagnosticLock(diagnosticMutex);
+			if (reported.insert(image->GetGlobalResourceID()).second) {
+				spdlog::warn(
+					"Participating material binding still references graph-managed image id={} name='{}'",
+					image->GetGlobalResourceID(), image->GetName());
+			}
 		}
 	}
 	return stats;
@@ -1477,6 +1540,9 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 			continue;
 		}
 		stats.publishedResourceIDs.push_back(imageResourceID);
+		if (texture->Meta().processing.isParticipatingMaterialTexture) {
+			stats.participatingPublishedResourceIDs.push_back(imageResourceID);
+		}
 		if (auto preparedImage = texture->PreparedImagePtr();
 			preparedImage &&
 			preparedImage->GetGlobalResourceID() != imageResourceID &&

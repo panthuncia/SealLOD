@@ -21,6 +21,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
 #include "Managers/Singletons/DeviceManager.h"
+#include "Managers/MaterialTextureTransferService.h"
 #include "Utilities/Utilities.h"
 
 #define A_CPU
@@ -1759,4 +1760,42 @@ PassReturn TextureFactory::BC7CompressionReadbackPass::Execute(PassExecutionCont
 
 void TextureFactory::BC7CompressionReadbackPass::Cleanup()
 {
+}
+
+std::shared_ptr<PixelBuffer> TextureFactory::CreateMaterialResidentPixelBuffer(
+	TextureDescription desc,
+	TextureInitialData initialData,
+	std::string_view debugName,
+	uint32_t maxMipLevels) const
+{
+	if (!m_materialTextureTransferService) {
+		throw std::runtime_error("material texture transfer service is not initialized");
+	}
+	if (initialData.Empty() || desc.imageDimensions.empty() || desc.channels == 0) {
+		throw std::runtime_error("CreateMaterialResidentPixelBuffer received incomplete texture data");
+	}
+
+	const uint32_t slices = (desc.isCubemap ? 6u : 1u) * (std::max)(1u, desc.arraySize);
+	const uint32_t sourceMipLevels = GetTextureMipLevelCount(desc);
+	if (desc.generateMipMaps && !rhi::helpers::IsBlockCompressed(desc.format) &&
+		slices == 1u && sourceMipLevels == 1u && initialData.subresources.size() == 1u) {
+		uint32_t mipLevels = CalcMipCount(desc.imageDimensions[0].width, desc.imageDimensions[0].height);
+		if (maxMipLevels != 0u) mipLevels = (std::min)(mipLevels, maxMipLevels);
+		initialData.subresources = BuildMipChain2D(
+			initialData.subresources.front(),
+			desc.imageDimensions[0].width,
+			desc.imageDimensions[0].height,
+			desc.channels,
+			mipLevels,
+			rhi::helpers::IsSRGB(desc.format));
+		ResizeDescriptionMipChain(desc, mipLevels);
+	}
+	desc.generateMipMaps = false;
+	desc.hasUAV = false;
+	desc.hasNonShaderVisibleUAV = false;
+	desc.initialLayout = rhi::ResourceLayout::Common;
+	auto image = PixelBuffer::CreateShared(desc);
+	if (!debugName.empty()) image->SetName(std::string(debugName));
+	m_materialTextureTransferService->EnqueueUpload(image, desc, std::move(initialData));
+	return image;
 }

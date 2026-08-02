@@ -1051,7 +1051,7 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 	}
 
 	auto bytes = std::make_shared<std::vector<uint8_t>>(std::begin(rgba), std::end(rgba));
-	auto placeholder = factory.CreateAlwaysResidentPixelBuffer(
+	auto placeholder = factory.CreateMaterialResidentPixelBuffer(
 		desc,
 		TextureFactory::TextureInitialData::FromBytes({ bytes }));
 	if (placeholder) {
@@ -1060,13 +1060,26 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 	return placeholder;
 }
 
+constexpr size_t kTextureSemanticCount = static_cast<size_t>(TextureSemantic::OpenPBRScalar) + 1u;
+constexpr size_t kPlaceholderVariantCount = kTextureSemanticCount * 2u;
+
+std::mutex& ProcessingPlaceholderCacheMutex()
+{
+	static std::mutex mutex;
+	return mutex;
+}
+
+std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount>& ProcessingPlaceholderCache()
+{
+	static std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount> placeholders{};
+	return placeholders;
+}
+
 std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
 	const TextureFactory& factory,
 	const TextureProcessingSettings& settings)
 {
 	ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture");
-	constexpr size_t kTextureSemanticCount = static_cast<size_t>(TextureSemantic::OpenPBRScalar) + 1u;
-	constexpr size_t kPlaceholderVariantCount = kTextureSemanticCount * 2u;
 	const size_t semanticIndex = static_cast<size_t>(settings.semantic);
 	const size_t cacheIndex = semanticIndex * 2u + (settings.preferSRGB ? 1u : 0u);
 
@@ -1076,11 +1089,8 @@ std::shared_ptr<PixelBuffer> GetSharedProcessingPlaceholderTexture(
 		return CreatePlaceholderTexture(factory, settings);
 	}
 
-	static std::mutex cacheMutex;
-	static std::array<std::shared_ptr<PixelBuffer>, kPlaceholderVariantCount> placeholders{};
-
-	std::lock_guard<std::mutex> lock(cacheMutex);
-	auto& placeholder = placeholders[cacheIndex];
+	std::lock_guard<std::mutex> lock(ProcessingPlaceholderCacheMutex());
+	auto& placeholder = ProcessingPlaceholderCache()[cacheIndex];
 	if (placeholder && placeholder->HasValidBackingResource()) {
 		ZoneScopedN("TextureAsset::GetSharedProcessingPlaceholderTexture::CacheHit");
 		TracyPlot("SARP.Texture.ProcessingPlaceholder.CacheHit", static_cast<int64_t>(1));
@@ -1807,6 +1817,12 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 }
 }
 
+void ReleaseSharedProcessingPlaceholderTextures()
+{
+	std::lock_guard<std::mutex> lock(ProcessingPlaceholderCacheMutex());
+	for (auto& placeholder : ProcessingPlaceholderCache()) placeholder.reset();
+}
+
 std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromConditionedCacheFilePath(
 	const std::string& path,
 	const std::string& reason)
@@ -2366,6 +2382,25 @@ bool TextureAsset::PublishPreparedImage(
 	return true;
 }
 
+bool TextureAsset::RejectPreparedImage(
+	uint64_t bindingRevision,
+	const std::shared_ptr<PixelBuffer>& image)
+{
+	std::scoped_lock lock(m_uploadAdvanceMutex);
+	if (m_streamingState.bindingRevision != bindingRevision || m_image != image) {
+		return false;
+	}
+	// The last published image remains valid.  Discard only the failed prepared
+	// revision so EnsureUploaded can reopen the source and create a replacement.
+	m_image.reset();
+	m_hasUploadedFinalImage = false;
+	m_hasUploadedPlaceholder = false;
+	m_directStorageReloadHandle.reset();
+	m_reloadHandle.reset();
+	BumpBindingRevision();
+	return true;
+}
+
 DirectStorageAsyncRequestHandle TextureAsset::QueueInitialDirectStorageUploadIfNeeded() {
 	if (m_hasUploadedFinalImage) {
 		return {};
@@ -2719,13 +2754,22 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 		{
 			ZoneScopedN("TextureAsset::EnsureUploaded::UploadSourceDataThroughFactory::CreateAlwaysResidentPixelBuffer");
 			TracyPlot("SARP.Texture.MainThreadUpload.Subresources", static_cast<int64_t>(shapedSourceData->subresources.size()));
-			m_image = factory.CreateAlwaysResidentPixelBuffer(
-				shapedSourceData->desc,
-				TextureFactory::TextureInitialData::FromBytes(shapedSourceData->subresources),
-				m_name,
-				ShouldPreserveAlphaCoverage(m_meta, shapedSourceData->desc),
-				false,
-				m_meta.processing.maxMipLevels);
+			if (m_meta.processing.isParticipatingMaterialTexture) {
+				m_image = factory.CreateMaterialResidentPixelBuffer(
+					shapedSourceData->desc,
+					TextureFactory::TextureInitialData::FromBytes(shapedSourceData->subresources),
+					m_name,
+					m_meta.processing.maxMipLevels);
+			}
+			else {
+				m_image = factory.CreateAlwaysResidentPixelBuffer(
+					shapedSourceData->desc,
+					TextureFactory::TextureInitialData::FromBytes(shapedSourceData->subresources),
+					m_name,
+					ShouldPreserveAlphaCoverage(m_meta, shapedSourceData->desc),
+					false,
+					m_meta.processing.maxMipLevels);
+			}
 			if (!m_meta.processing.isParticipatingMaterialTexture) m_publishedImage = m_image;
 		}
 		if (!m_image || !m_image->HasValidBackingResource()) {
@@ -3152,7 +3196,8 @@ TextureUploadAdvanceResult TextureAsset::EnsureUploaded(const TextureFactory& fa
 					isParticipatingMaterialTexture &&
 					!conditionedCachePath.empty();
 
-				if (!preferStreamedProcessingResult && uploadedImage && uploadedImage->HasValidBackingResource()) {
+				if (!isParticipatingMaterialTexture && !preferStreamedProcessingResult &&
+					uploadedImage && uploadedImage->HasValidBackingResource()) {
 					ZoneScopedN("TextureAsset::EnsureUploaded::PollProcessingHandle::AdoptUploadedImageResult");
 					m_desc = uploadedImage->GetDescription();
 					m_meta.isProcessingCacheArtifact = loadedFromCache;

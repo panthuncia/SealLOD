@@ -1815,10 +1815,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             std::pair{ 1.0, "B" };
         return std::format("{:.2f} {}", value / divisor, suffix);
     };
-    const std::optional<MaterialTextureStreamingStats> materialTextureStreamingStats =
-        context.materialManager
-        ? std::optional<MaterialTextureStreamingStats>(context.materialManager->GetMaterialTextureStreamingStats())
-        : std::nullopt;
+    std::optional<MaterialTextureStreamingStats> materialTextureStreamingStats;
+    if (showMaterialTextureStreaming && context.materialManager) {
+        materialTextureStreamingStats.emplace(context.materialManager->GetMaterialTextureStreamingStats());
+    }
 
     const float fps = ImGui::GetIO().Framerate;
     const float msPerFrame = fps > 0.0f ? (1000.0f / fps) : 0.0f;
@@ -2734,8 +2734,10 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
     }
 
     {
-		ImGui::Begin("Scene Graph", nullptr);
-		DisplaySceneGraph();
+		const bool sceneGraphVisible = ImGui::Begin("Scene Graph", nullptr);
+		if (sceneGraphVisible) {
+			DisplaySceneGraph();
+		}
 		ImGui::End();
 
 		DisplaySelectedNode();

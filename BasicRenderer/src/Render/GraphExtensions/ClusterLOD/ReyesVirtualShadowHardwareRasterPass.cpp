@@ -74,7 +74,6 @@ void ReyesVirtualShadowHardwareRasterPass::DeclareResourceUsages(RenderPassBuild
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CameraBuffer,
             Builtin::Shadows::CLodDirectionalPageViewInfo,

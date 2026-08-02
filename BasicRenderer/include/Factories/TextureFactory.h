@@ -16,6 +16,7 @@ class Sampler;
 class BufferView;
 class Buffer;
 struct TextureProcessingJobHandle;
+class MaterialTextureTransferService;
 
 namespace rg::runtime {
     class IReadbackService;
@@ -49,6 +50,17 @@ public:
         bool forceSrgbMipEncoding = false,
         uint32_t maxMipLevels = 0u) const;
 
+	// Creates a final material residency image whose upload and immutable SRV
+	// transition are owned outside the render graph.
+	std::shared_ptr<PixelBuffer> CreateMaterialResidentPixelBuffer(
+		TextureDescription desc,
+		TextureInitialData initialData,
+		std::string_view debugName = {},
+		uint32_t maxMipLevels = 0u) const;
+	void SetMaterialTextureTransferService(MaterialTextureTransferService* service) {
+		m_materialTextureTransferService = service;
+	}
+
     std::shared_ptr<ComputePass> GetMipmappingPass() const { return m_mipmappingPass; }
     std::shared_ptr<ComputePass> GetBC7CompressionPass() const { return m_bc7CompressionPass; }
     std::shared_ptr<RenderPass> GetBC7CompressionCopyPass() const { return m_bc7CompressionCopyPass; }
@@ -60,6 +72,7 @@ public:
         std::string_view debugName = {}) const;
 
 private:
+	MaterialTextureTransferService* m_materialTextureTransferService = nullptr;
 
     struct BC7CompressionSubresource {
         rhi::CopyableFootprint footprint{};

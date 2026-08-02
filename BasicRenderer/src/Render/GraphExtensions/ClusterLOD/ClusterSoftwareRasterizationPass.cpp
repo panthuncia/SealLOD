@@ -62,7 +62,6 @@ void ClusterSoftwareRasterizationPass::DeclareResourceUsages(ComputePassBuilder*
     builder->WithShaderResource(
             Builtin::PerMeshBuffer,
             Builtin::PerMaterialDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,

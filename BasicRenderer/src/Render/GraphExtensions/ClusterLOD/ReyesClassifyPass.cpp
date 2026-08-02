@@ -70,7 +70,6 @@ void ReyesClassifyPass::DeclareResourceUsages(ComputePassBuilder* builder)
             Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,

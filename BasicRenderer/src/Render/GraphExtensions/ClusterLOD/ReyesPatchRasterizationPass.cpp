@@ -91,7 +91,6 @@ void ReyesPatchRasterizationPass::DeclareResourceUsages(ComputePassBuilder* buil
             Builtin::CLod::AssemblyBoneRemapIndices,
             "Builtin::PerMaterialEvalDataBuffer",
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
             Builtin::Terrain::StochasticLayers,

@@ -9,7 +9,6 @@
 #include "Managers/TextureStreamingManager.h"
 #include "Interfaces/IResourceProvider.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
-#include "Resources/ResourceGroup.h"
 #include "Render/IndirectCommand.h"
 #include "Render/MaterialCompileFlagsSlotRegistry.h"
 #include "Render/RasterBucketFlags.h"
@@ -83,22 +82,22 @@ public:
 		spdlog::error("Bucket index out of range!");
 		return MaterialRasterFlags::MaterialRasterFlagsNone;
 	}
+	bool RequestExternalMaterialTextureReadback(
+		const std::shared_ptr<PixelBuffer>& image,
+		std::wstring outputFile,
+		std::function<void()> callback);
 private:
 	MaterialManager();
 	void UpdateMaterialTextureUsage(const Material& material, int delta);
 	void RefreshMaterialTextureUsage(const Material& material);
-	void UpdateTrackedMaterialTextureRefs(const std::vector<std::shared_ptr<Resource>>& textures, int delta);
 	void TrackMaterialTextureAssets(const Material& material, int delta);
 	bool MaterialTextureAssetBindingsChanged(const Material& material) const;
 	void FlushDirtyMaterial(Material& material, TextureFactory* textureFactory = nullptr);
 	void EnsureMaterialBufferCapacity(unsigned int requiredSlots);
 	void EnsureCompileFlagsBufferCapacity(unsigned int requiredSlots);
 	std::vector<std::shared_ptr<Resource>> CollectActiveMaterialTextureResources() const;
-
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<Resource>, ResourceIdentifier::Hasher> m_resources;
 	std::unordered_map<ResourceIdentifier, std::shared_ptr<IResourceResolver>, ResourceIdentifier::Hasher> m_resolvers;
-	std::shared_ptr<ResourceGroup> m_activeMaterialTextureGroup;
-	std::unordered_map<uint64_t, uint32_t> m_materialTextureUsageCounts;
 	std::unordered_map<uint32_t, std::vector<std::shared_ptr<Resource>>> m_trackedMaterialTextures;
 	std::unordered_map<uint32_t, Material*> m_activeMaterialsByID;
 	std::unordered_map<uint32_t, std::vector<uint64_t>> m_materialTextureStreamingBindingIDs;

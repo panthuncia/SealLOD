@@ -109,7 +109,6 @@ void ReyesVirtualShadowRasterizationPass::DeclareResourceUsages(ComputePassBuild
             Builtin::CLod::AssemblyBoneRemaps,
             Builtin::CLod::AssemblyBoneRemapIndices,
             Builtin::PerMaterialOpenPBRDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
             Builtin::Terrain::StochasticLayers,

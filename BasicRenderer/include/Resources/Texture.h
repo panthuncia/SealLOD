@@ -108,7 +108,8 @@ struct TextureSourceData {
 
 std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromConditionedCacheFilePath(
     const std::string& path,
-    const std::string& reason = {});
+	const std::string& reason = {});
+void ReleaseSharedProcessingPlaceholderTextures();
 std::shared_ptr<TextureSourceData> LoadTextureSourceDataFromDDSFilePath(
     const std::string& path,
     bool preferSRGB,
@@ -310,6 +311,7 @@ public:
         uint64_t bindingRevision,
         const std::shared_ptr<PixelBuffer>& image,
         std::shared_ptr<PixelBuffer>* replacedPublishedImage = nullptr);
+    bool RejectPreparedImage(uint64_t bindingRevision, const std::shared_ptr<PixelBuffer>& image);
 
     Sampler& SamplerState() const { return *m_sampler; }
 	void SetSampler(std::shared_ptr<Sampler> sampler) {

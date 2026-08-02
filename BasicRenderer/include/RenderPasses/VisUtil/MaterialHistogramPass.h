@@ -44,8 +44,7 @@ public:
                               Builtin::PerMeshInstanceBuffer,
                               Builtin::InstanceDrawRecordBuffer,
                               Builtin::PerMeshBuffer,
-                                                            Builtin::PerMaterialDataBuffer,
-                                                            Builtin::Material::TextureGroup)
+                              Builtin::PerMaterialDataBuffer)
          .WithUnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer");
 		b->WithConstantBuffer(Builtin::PerFrameBuffer);
     }

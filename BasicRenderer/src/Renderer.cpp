@@ -752,6 +752,11 @@ void Renderer::Initialize(
 	m_pMaterialManager = MaterialManager::CreateUnique();
     m_pMaterialManager->SetRequestTextureReadbackFn(
         [this](std::shared_ptr<PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
+            if (m_pMaterialManager &&
+                m_pMaterialManager->RequestExternalMaterialTextureReadback(
+                    texture, outputFile, callback)) {
+                return;
+            }
             if (!m_pReadbackManager) {
                 return;
             }
@@ -882,6 +887,8 @@ Renderer::SamplingReadinessSnapshot Renderer::GetSamplingReadinessSnapshot() con
         snapshot.activeMaterialTextureResourceBytes = textureStats.activeMaterialResourceBytes;
         snapshot.externallyManagedActiveTextureResourceCount = textureStats.externallyManagedActiveResourceCount;
         snapshot.externallyManagedActiveTextureResourceBytes = textureStats.externallyManagedActiveResourceBytes;
+		snapshot.graphManagedParticipatingActiveTextureResourceCount = textureStats.graphManagedParticipatingActiveResourceCount;
+		snapshot.graphManagedParticipatingActiveTextureResourceBytes = textureStats.graphManagedParticipatingActiveResourceBytes;
         snapshot.alphaTestedMaterialTextureCount = textureStats.alphaTestedTextureCount;
         snapshot.alphaTestedMaterialTextureMipCapViolationCount = textureStats.alphaTestedMipCapViolationCount;
         snapshot.materialTexturePublishedResourceIDs = textureStats.publishedResourceIDs;
@@ -1396,12 +1403,6 @@ void Renderer::RunRenderResourceSyncStage() {
         });
     }
 
-    auto* materialManager = m_managerInterface.GetMaterialManager();
-    if (materialManager) {
-        ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingMaterialUpdates");
-        const uint64_t nextFrameIndex = m_totalFramesRendered + 1u;
-        materialManager->ProcessPendingMaterialUpdates(nextFrameIndex);
-    }
     if (auto* terrainManager = m_managerInterface.GetTerrainManager()) {
         ZoneScopedN("Renderer::Update::RenderResourceSync::ProcessPendingTerrainUpdates");
         terrainManager->ProcessPendingUpdates();
@@ -2929,6 +2930,16 @@ void Renderer::Update(float elapsedSeconds) {
 			}
 		}
         });
+
+	// Final material bindings are published only after the reusable frame slot is
+	// known idle. The transfer service pumps its own graphics work here, before
+	// material-buffer uploads are captured by CompileFrame.
+	if (m_pMaterialManager) {
+		runCapturedStage("MaterialTexturePublication", [&]() {
+			ZoneScopedN("Renderer::Update::MaterialTexturePublication");
+			m_pMaterialManager->ProcessPendingMaterialUpdates(m_totalFramesRendered + 1u);
+		});
+	}
 
     if (m_dynamicBackbuffer && m_swapChainReady && m_frameIndex < m_backbufferResources.size()) {
         m_dynamicBackbuffer->SetResource(m_backbufferResources[m_frameIndex]);
@@ -4627,6 +4638,7 @@ void Renderer::Cleanup() {
     m_context = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
+	ReleaseSharedProcessingPlaceholderTextures();
     m_dynamicBackbuffer.reset();
     m_backbufferResources.clear();
     renderTargets.clear();

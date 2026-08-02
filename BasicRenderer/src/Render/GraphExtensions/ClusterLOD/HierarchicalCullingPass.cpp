@@ -373,7 +373,6 @@ void HierarchicalCullingPass::DeclareResourceUsages(ComputePassBuilder* builder)
             m_visibleClustersCounterBuffer,
             m_occlusionReplayStateBuffer,
             Builtin::PerMaterialDataBuffer,
-            Builtin::Material::TextureGroup,
             Builtin::Material::TextureStreamingMetadataBuffer,
             m_workGraphComputePageJobDescriptorResourceId.c_str())
     		.WithUnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer)

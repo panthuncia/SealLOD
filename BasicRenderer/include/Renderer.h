@@ -105,6 +105,8 @@ public:
         uint64_t activeMaterialTextureResourceBytes = 0;
         uint32_t externallyManagedActiveTextureResourceCount = 0;
         uint64_t externallyManagedActiveTextureResourceBytes = 0;
+		uint32_t graphManagedParticipatingActiveTextureResourceCount = 0;
+		uint64_t graphManagedParticipatingActiveTextureResourceBytes = 0;
         uint32_t alphaTestedMaterialTextureCount = 0;
         uint32_t alphaTestedMaterialTextureMipCapViolationCount = 0;
         std::vector<uint64_t> materialTexturePublishedResourceIDs;

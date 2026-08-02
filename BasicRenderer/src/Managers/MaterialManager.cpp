@@ -363,7 +363,6 @@ namespace {
 // TODO: Use LazyDynamicStructuredBuffer and active indices buffer like draw calls? Would reduce number of no-op indirect arguments
 MaterialManager::MaterialManager() {
 	auto& rm = ResourceManager::GetInstance();
-	m_activeMaterialTextureGroup = std::make_shared<ResourceGroup>("ActiveMaterialTextures");
 
 	// Primary material data buffer. Normally streamed scenes should reserve enough
 	// slots to avoid reallocating GPU backing resources while frames are executing.
@@ -408,7 +407,6 @@ MaterialManager::MaterialManager() {
 	m_resources[Builtin::PerMaterialDataBuffer] = m_perMaterialDataBuffer;
 	m_resources["Builtin::PerMaterialEvalDataBuffer"] = m_perMaterialEvalDataBuffer;
 	m_resources[Builtin::PerMaterialOpenPBRDataBuffer] = m_perMaterialOpenPBRDataBuffer;
-	m_resolvers[Builtin::Material::TextureGroup] = std::make_shared<ResourceGroupResolver>(m_activeMaterialTextureGroup);
 
 	// Reserve built-in material bins up front so render-graph material evaluation buffers are
 	// fully sized before passes/materialization/upload steps touch them.
@@ -507,6 +505,9 @@ void MaterialManager::ProcessPendingMaterialUpdates(uint64_t frameIndex) {
 			FlushDirtyMaterial(*materialIt->second, nullptr);
 			++dirtyMaterialsFlushed;
 		}
+	}
+	if (m_textureStreamingManager) {
+		m_textureStreamingManager->RetirePatchedBindingResources();
 	}
 	const auto dirtyMaterialEnd = std::chrono::steady_clock::now();
 
@@ -880,8 +881,7 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 	const uint32_t materialId = material.GetMaterialID();
 	if (delta > 0) {
 		auto textures = CollectMaterialTextureResources(material);
-		m_trackedMaterialTextures[materialId] = textures;
-		UpdateTrackedMaterialTextureRefs(textures, delta);
+		m_trackedMaterialTextures[materialId] = std::move(textures);
 		return;
 	}
 
@@ -890,7 +890,6 @@ void MaterialManager::UpdateMaterialTextureUsage(const Material& material, int d
 		return;
 	}
 
-	UpdateTrackedMaterialTextureRefs(trackedIt->second, delta);
 	m_trackedMaterialTextures.erase(trackedIt);
 }
 
@@ -984,74 +983,7 @@ void MaterialManager::RefreshMaterialTextureUsage(const Material& material) {
 
 	auto currentTextures = CollectMaterialTextureResources(material);
 	auto& trackedTextures = m_trackedMaterialTextures[material.GetMaterialID()];
-
-	std::unordered_set<uint64_t> currentIds;
-	currentIds.reserve(currentTextures.size());
-	for (const auto& texture : currentTextures) {
-		if (texture) {
-			currentIds.insert(texture->GetGlobalResourceID());
-		}
-	}
-
-	std::unordered_set<uint64_t> trackedIds;
-	trackedIds.reserve(trackedTextures.size());
-	for (const auto& texture : trackedTextures) {
-		if (texture) {
-			trackedIds.insert(texture->GetGlobalResourceID());
-		}
-	}
-
-	std::vector<std::shared_ptr<Resource>> removedTextures;
-	for (const auto& texture : trackedTextures) {
-		if (texture && !currentIds.contains(texture->GetGlobalResourceID())) {
-			removedTextures.push_back(texture);
-		}
-	}
-
-	std::vector<std::shared_ptr<Resource>> addedTextures;
-	for (const auto& texture : currentTextures) {
-		if (texture && !trackedIds.contains(texture->GetGlobalResourceID())) {
-			addedTextures.push_back(texture);
-		}
-	}
-
-	UpdateTrackedMaterialTextureRefs(removedTextures, -1);
-	UpdateTrackedMaterialTextureRefs(addedTextures, 1);
 	trackedTextures = std::move(currentTextures);
-}
-
-void MaterialManager::UpdateTrackedMaterialTextureRefs(const std::vector<std::shared_ptr<Resource>>& textures, int delta) {
-	if (delta == 0) {
-		return;
-	}
-
-	for (const auto& texture : textures) {
-		if (!texture) {
-			continue;
-		}
-
-		const uint64_t resourceId = texture->GetGlobalResourceID();
-		if (delta > 0) {
-			auto& usageCount = m_materialTextureUsageCounts[resourceId];
-			usageCount += static_cast<uint32_t>(delta);
-			m_activeMaterialTextureGroup->AddResource(texture);
-			continue;
-		}
-
-		auto usageIt = m_materialTextureUsageCounts.find(resourceId);
-		if (usageIt == m_materialTextureUsageCounts.end()) {
-			continue;
-		}
-
-		const uint32_t releaseCount = static_cast<uint32_t>(-delta);
-		if (usageIt->second <= releaseCount) {
-			m_materialTextureUsageCounts.erase(usageIt);
-			m_activeMaterialTextureGroup->RemoveResource(texture.get());
-			continue;
-		}
-
-		usageIt->second -= releaseCount;
-	}
 }
 
 std::vector<std::shared_ptr<Resource>> MaterialManager::CollectActiveMaterialTextureResources() const {
@@ -1266,6 +1198,16 @@ void MaterialManager::EnsureCompileFlagsBufferCapacity(unsigned int requiredSlot
 
 bool MaterialManager::TryGetCompileFlagsSlot(MaterialCompileFlags flags, unsigned int& slot) const {
 	return m_compileFlagsRegistry.TryGet(flags, slot);
+}
+
+bool MaterialManager::RequestExternalMaterialTextureReadback(
+	const std::shared_ptr<PixelBuffer>& image,
+	std::wstring outputFile,
+	std::function<void()> callback)
+{
+	return m_textureStreamingManager &&
+		m_textureStreamingManager->RequestExternalMaterialTextureReadback(
+			image, std::move(outputFile), std::move(callback));
 }
 
 void MaterialManager::CommitGpuVisibleSnapshot() {

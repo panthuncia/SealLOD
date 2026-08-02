@@ -106,7 +106,6 @@ public:
             Builtin::SkeletonResources::SkinningInstanceInfo,
             Builtin::PerMaterialDataBuffer,
             "Builtin::PerMaterialEvalDataBuffer",
-            Builtin::Material::TextureGroup,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
             Builtin::Terrain::StochasticLayers,
