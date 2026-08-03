@@ -1822,7 +1822,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         }
                         if (request->document.contains("sw_raster_threshold")) {
                             settings.getSettingSetter<uint32_t>(
-                                CLodSoftwareRasterDiameterThresholdSettingName)(
+                                CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
                                 std::min(
                                     request->document.at("sw_raster_threshold").get<uint32_t>(),
                                     0xFFFFu));
@@ -1854,7 +1854,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["block_soft_cap"] = settings.getSettingGetter<uint32_t>(
                         CLodPageJobMaxPagesPerClusterSettingName)();
                     response["sw_raster_threshold"] = settings.getSettingGetter<uint32_t>(
-                        CLodSoftwareRasterDiameterThresholdSettingName)();
+                        CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
                     response["page_job_force_all"] = settings.getSettingGetter<bool>(
                         CLodPageJobForceAllSettingName)();
                     const CLodVSMRasterMode rasterMode = settings.getSettingGetter<CLodVSMRasterMode>(

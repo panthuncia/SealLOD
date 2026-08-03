@@ -34,6 +34,7 @@ inline constexpr const char* CLodVSMRasterModeSettingName = "clodVsmRasterMode";
 inline constexpr const char* CLodReyesShadowCoarseTargetPagesPerTriangleSettingName = "clodReyesShadowCoarseTargetPagesPerTriangle";
 inline constexpr const char* CLodPageJobDiameterThresholdSettingName = "clodPageJobDiameterThreshold";
 inline constexpr const char* CLodSoftwareRasterDiameterThresholdSettingName = "clodSoftwareRasterDiameterThreshold";
+inline constexpr const char* CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName = "clodVirtualShadowSoftwareRasterDiameterThreshold";
 inline constexpr const char* CLodPageJobSparseRatioSettingName = "clodPageJobSparseRatio";
 inline constexpr const char* CLodPageJobMaxPagesPerClusterSettingName = "clodPageJobMaxPagesPerCluster";
 inline constexpr const char* CLodPageJobRecordCapacitySettingName = "clodPageJobRecordCapacity";
