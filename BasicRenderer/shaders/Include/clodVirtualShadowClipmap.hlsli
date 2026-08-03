@@ -583,12 +583,12 @@ float CLodVirtualShadowContinuousClipmapLevel(
     const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
     const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
     const float distanceFromCamera = length(positionWS - cameraPositionWS);
-    // Clip selection ultimately addresses an integer level. Preserve its
-    // existing bias semantics while retaining the fractional distance term for
-    // smoothly varying trace/filter parameters between transitions.
+    // The configured bias is baked into clip0TexelWorldSize. Keeping the same
+    // full (fractional) term here cancels that physical scale for clip ownership
+    // while the selected clip's texel/page footprint changes continuously.
     const float clipLevel =
         log2(max(distanceFromCamera / baseScale, 1.0f)) +
-        floor(directionalLodBias);
+        directionalLodBias;
     return clamp(
         clipLevel,
         0.0f,
