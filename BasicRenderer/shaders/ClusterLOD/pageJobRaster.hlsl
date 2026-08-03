@@ -278,9 +278,7 @@ void WG_PageJobExpand(
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[
             ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const bool dynamicLayer =
-        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
-            VERTEX_SKINNED) != 0u;
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
 
     const uint pageRangeWidth = maxPageCoord.x - minPageCoord.x + 1u;
 
@@ -445,9 +443,7 @@ void WG_PageJobRasterPage(
     GroupMemoryBarrierWithGroupSync();
 
     // Rasterize all triangles clipped to this single page.
-    const bool dynamicLayer =
-        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
-            VERTEX_SKINNED) != 0u;
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
     RWTexture2D<uint> physicalPages =
         ResourceDescriptorHeap[
             dynamicLayer

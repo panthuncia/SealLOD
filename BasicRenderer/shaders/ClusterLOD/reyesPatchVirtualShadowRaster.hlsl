@@ -444,8 +444,7 @@ void ReyesPatchVirtualShadowRasterCS(uint3 dispatchThreadId : SV_DispatchThreadI
         + -dot(float4(sourcePosition2, 1.0f), modelViewZ)) / 3.0f,
         max(camera.zNear, 1.0e-3f));
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    const bool dynamicLayer =
-        (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
         dynamicLayer
             ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX

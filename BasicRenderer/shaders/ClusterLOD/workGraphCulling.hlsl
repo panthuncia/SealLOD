@@ -1059,6 +1059,10 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
         minLocalPageCoord,
         maxLocalPageCoord,
         false);
+    if (dynamicLayer)
+    {
+        vsmPayload = CLodVisibleClusterMarkDynamicShadowPayload(vsmPayload);
+    }
     return true;
 }
 
@@ -1216,6 +1220,35 @@ bool CLodVirtualShadowInstanceInvalidatedThisFrame(uint instanceIndex)
     return false;
 }
 #endif
+
+void CLodStoreVisibleClusterForShadowLayer(
+    globallycoherent RWByteAddressBuffer visibleClusters,
+    uint clusterIndex,
+    uint viewId,
+    uint instanceIndex,
+    uint localMeshletIndex,
+    uint visibleGroupId,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint shadowClipmapIndex,
+    bool dynamicLayer)
+{
+    uint payload = CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex);
+    if (dynamicLayer)
+    {
+        payload = CLodVisibleClusterMarkDynamicShadowPayload(payload);
+    }
+    CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
+        visibleClusters,
+        clusterIndex,
+        viewId,
+        instanceIndex,
+        localMeshletIndex,
+        visibleGroupId,
+        pageSlabDescriptorIndex,
+        pageSlabByteOffset,
+        payload);
+}
 
 bool CLodTrySetBit(RWByteAddressBuffer bits, uint key)
 {
@@ -4045,6 +4078,11 @@ void ClusterCullBody(
         const bool skinnedMesh =
             (meshVertexFlags & VERTEX_SKINNED) != 0u;
 #endif
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        const bool dynamicShadowLayer = skinnedMesh || objectInvalidatedThisFrame;
+#else
+        const bool dynamicShadowLayer = skinnedMesh;
+#endif
 
         if (active) {
             const uint localMeshlet = UnpackClusterFirstIndex(b.clusterIndexAndCount) + m;
@@ -4309,7 +4347,7 @@ void ClusterCullBody(
                 hwMaxPageCoord,
                 hwMinBlockCoord,
                 hwBlockCount,
-                skinnedMesh);
+                dynamicShadowLayer);
         }
 #endif
         const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4372,12 +4410,12 @@ void ClusterCullBody(
                         hwMaxPageCoord,
                         hwMinBlockCoord,
                         hwBlockCount,
-                        skinnedMesh);
+                        dynamicShadowLayer);
                 }
                 else
 #endif
                 {
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         hwGlobalBase + hwPrefix,
                         b.viewId,
@@ -4386,7 +4424,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                 }
             }
@@ -4422,7 +4461,7 @@ void ClusterCullBody(
                     hwMaxPageCoord,
                     hwMinBlockCoord,
                     hwBlockCount,
-                    skinnedMesh);
+                    dynamicShadowLayer);
             }
 #endif
             const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4485,12 +4524,12 @@ void ClusterCullBody(
                             hwMaxPageCoord,
                             hwMinBlockCoord,
                             hwBlockCount,
-                            skinnedMesh);
+                            dynamicShadowLayer);
                     }
                     else
 #endif
                     {
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             hwGlobalBase + hwPrefix,
                             b.viewId,
@@ -4499,7 +4538,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                     }
                 }
@@ -4581,9 +4621,8 @@ void ClusterCullBody(
                     shadowClipmapIndex,
                     swMinBlockCoord,
                     swBlockCount,
-                    skinnedMesh,
-                    !skinnedMesh &&
-                        !objectInvalidatedThisFrame &&
+                    dynamicShadowLayer,
+                    !dynamicShadowLayer &&
                         CLodWorkGraphShadowDirtyPageCullingEnabled());
         }
 #endif
@@ -4621,7 +4660,7 @@ void ClusterCullBody(
                     hwMaxPageCoord,
                     hwMinBlockCoord,
                     hwBlockCount,
-                    skinnedMesh);
+                    dynamicShadowLayer);
             }
 #endif
             const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4684,12 +4723,12 @@ void ClusterCullBody(
                             hwMaxPageCoord,
                             hwMinBlockCoord,
                             hwBlockCount,
-                            skinnedMesh);
+                            dynamicShadowLayer);
                     }
                     else
 #endif
                     {
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             hwGlobalBase + hwPrefix,
                             b.viewId,
@@ -4698,7 +4737,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                     }
                 }
@@ -4741,7 +4781,7 @@ void ClusterCullBody(
 
                 if (outputReyes && (reyesRank < reyesAvail)) {
                     const uint reyesIndex = visibleClusterCapacity - 1u - (swWriteBase + reyesBase + reyesRank);
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         reyesIndex,
                         b.viewId,
@@ -4750,7 +4790,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[reyesIndex] = b.assemblyTransformIndex;
                     gs_reyesSeedBatchIndices[reyesPending + reyesRank] = reyesIndex;
                 }
@@ -4795,7 +4836,7 @@ void ClusterCullBody(
                 if (outputSW && (swRank < swAvail)) {
                     // Write visible cluster top-down from the end of the buffer.
                     const uint swIndex = visibleClusterCapacity - 1 - (swWriteBase + swBase + swRank);
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         swIndex,
                         b.viewId,
@@ -4804,7 +4845,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[swIndex] = b.assemblyTransformIndex;
 
                     // Accumulate index into batch buffer.
@@ -4857,7 +4899,7 @@ void ClusterCullBody(
                         RWStructuredBuffer<uint> pageJobVisibleClusterTransformIndices =
                             ResourceDescriptorHeap[descriptorPair.z];
                         const uint pjIndex = pjBase + pjRank;
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             pageJobVisibleClusters,
                             pjIndex,
                             b.viewId,
@@ -4866,7 +4908,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         pageJobVisibleClusterTransformIndices[pjIndex] = b.assemblyTransformIndex;
                     }
                 } else
@@ -4894,7 +4937,7 @@ void ClusterCullBody(
 
                     if (outputPageJob && (pjRank < pjAvail)) {
                         const uint pjIndex = visibleClusterCapacity - 1 - (swWriteBase + pjBase + pjRank);
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             pjIndex,
                             b.viewId,
@@ -4903,7 +4946,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[pjIndex] = b.assemblyTransformIndex;
 
 #if CLOD_WG_ENABLE_SW_NODE_OUTPUT && !CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED

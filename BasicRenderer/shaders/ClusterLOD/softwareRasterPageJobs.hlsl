@@ -389,17 +389,13 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapLayer];
+    const uint physicalAtlasPagesWide = max(clipmapInfo.physicalAtlasPagesWide, 1u);
     const uint pagePixelMinX = pageX * kCLodVirtualShadowPhysicalPageSize;
     const uint pagePixelMinY = pageY * kCLodVirtualShadowPhysicalPageSize;
     const uint atlasBaseX =
         (physicalPageIndex % physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize;
     const uint atlasBaseY =
         (physicalPageIndex / physicalAtlasPagesWide) * kCLodVirtualShadowPhysicalPageSize;
-#if defined(PSO_SKINNED)
-    const bool dynamicLayer = true;
-#else
-    const bool dynamicLayer = false;
-#endif
     const bool doubleSided =
         ((rec.wrappedCoordsLayerAndFlags >> 19u) &
             kCLodSoftwareRasterPageJobDoubleSidedFlag) != 0u;
@@ -409,6 +405,7 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
     const uint assemblyTransformIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex];
 
     const uint viewID = CLodVisibleClusterViewID(packedCluster);
@@ -513,12 +510,9 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     GroupMemoryBarrierWithGroupSync();
 
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
-#if defined(PSO_SKINNED)
-        CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
-#else
-        CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX
-#endif
-    ];
+        dynamicLayer
+            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
+            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     ByteAddressBuffer slab = ResourceDescriptorHeap[pageSlabDescriptorIndex];
     const uint pagePixelMaxX = pagePixelMinX + kCLodVirtualShadowPhysicalPageSize - 1u;
@@ -698,13 +692,14 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
         }
         if (gs_pageRasterAnyWrite != 0u)
         {
-#if !defined(PSO_SKINNED)
-            uint ignored = 0u;
-            InterlockedOr(
-                pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
-                kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-                ignored);
-#endif
+            if (!dynamicLayer)
+            {
+                uint ignored = 0u;
+                InterlockedOr(
+                    pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
+                    kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+                    ignored);
+            }
             if (telemetryEnabled)
                 InterlockedAdd(statsBuffer[0].pageJobRasterPageWriteCount, 1u);
         }

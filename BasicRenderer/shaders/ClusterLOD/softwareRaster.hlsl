@@ -176,6 +176,7 @@ groupshared uint gs_skinningInstanceSlot;
 groupshared uint gs_materialDataIndex;
 groupshared uint gs_alphaTestEnabled;
 groupshared uint gs_vertexFlags;
+groupshared uint gs_dynamicShadowLayer;
 groupshared uint gs_activeBoneRemapIndexBase;
 groupshared uint gs_activeBoneRemapIndexCount;
 groupshared uint gs_singleRemappedJoint;
@@ -248,12 +249,7 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX];
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-    const bool dynamicLayer =
-#if CLOD_WG_RIGID_SW_RASTER
-        false;
-#else
-        (gs_vertexFlags & VERTEX_SKINNED) != 0u;
-#endif
+    const bool dynamicLayer = gs_dynamicShadowLayer != 0u;
     if (!CLodVirtualShadowPageEntryCanRasterLayer(
             pageEntry, dynamicLayer))
     {
@@ -464,6 +460,8 @@ void SWRasterCluster(
 
     if (GI == 0u)
     {
+        gs_dynamicShadowLayer =
+            CLodVisibleClusterUsesDynamicShadowLayer(packedCluster) ? 1u : 0u;
         const CLodPageHeader pageHeader = LoadPageHeader(pageSlabDescriptorIndex, pageSlabByteOffset);
         const CLodMeshletDescriptor meshletDescriptor = LoadMeshletDescriptor(
             pageSlabDescriptorIndex,
