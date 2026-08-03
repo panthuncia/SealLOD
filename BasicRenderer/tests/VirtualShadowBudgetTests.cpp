@@ -406,6 +406,36 @@ void RunDirectionalClipFitCases()
         throw std::runtime_error("scene-fitted VSM outer clip does not cover the scene extent");
     }
 
+    constexpr float fractionalResolutionScale = 1.25f;
+    const auto fractionallyScaled = setupDirectionalClipmaps(
+        clipCount,
+        DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, -0.9f, -0.5f, 0.0f)),
+        DirectX::XMVectorZero(),
+        DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f),
+        DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f),
+        0.1f,
+        DirectX::XMConvertToRadians(70.0f),
+        16.0f / 9.0f,
+        cameraFarPlanes,
+        100.0f,
+        sceneExtent,
+        fractionalResolutionScale);
+    if (std::abs(
+            fractionallyScaled.front().size -
+            fitted.front().size * fractionalResolutionScale) > 0.001f) {
+        throw std::runtime_error(
+            "fractional VSM resolution scale snapped to an integer clip level");
+    }
+    if (std::abs(
+            fractionallyScaled.front().size /
+                static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis) -
+            fitted.front().size /
+                static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis) *
+                fractionalResolutionScale) > 0.0001f) {
+        throw std::runtime_error(
+            "fractional VSM resolution scale did not produce a fractional page size");
+    }
+
     const auto cameraFitted = setupDirectionalClipmaps(
         clipCount,
         DirectX::XMVector3Normalize(DirectX::XMVectorSet(-0.1f, -0.9f, -0.5f, 0.0f)),
