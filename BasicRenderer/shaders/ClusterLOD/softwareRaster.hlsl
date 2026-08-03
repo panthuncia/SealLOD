@@ -274,13 +274,13 @@ bool SWRasterWriteVirtualShadow(uint2 pixel, uint viewID, float linearDepth)
         physicalPages[atlasPixel],
         CLodVirtualShadowEncodeDepth(pageSpaceLinearDepth, clipmapInfo));
     uint ignored = 0u;
-    if (!dynamicLayer)
-    {
-        InterlockedOr(
-            pageTable[pageCoords],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-            ignored);
-    }
+    InterlockedOr(
+        pageTable[pageCoords],
+        dynamicLayer
+            ? kCLodVirtualShadowDynamicContentMask
+            : kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask,
+        ignored);
     return true;
 }
 #endif

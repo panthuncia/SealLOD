@@ -218,12 +218,15 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     {
         pageLeaderLane = 96u + firstbitlow(pageMatchMask.w);
     }
-    if (!dynamicLayer && WaveGetLaneIndex() == pageLeaderLane)
+    if (WaveGetLaneIndex() == pageLeaderLane)
     {
         uint ignored = 0u;
         InterlockedOr(
             pageTable[pageCoords],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            dynamicLayer
+                ? kCLodVirtualShadowDynamicContentMask
+                : kCLodVirtualShadowContentValidMask |
+                    kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);

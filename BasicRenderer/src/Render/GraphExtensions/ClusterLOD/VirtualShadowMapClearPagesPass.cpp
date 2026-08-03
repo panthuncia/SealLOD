@@ -87,6 +87,11 @@ PassReturn VirtualShadowMapClearPagesPass::Execute(PassExecutionContext& executi
         m_clipmapInfoBuffer->GetSRVInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] =
         m_pageViewInfoBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+    rootConstants[CLOD_VIRTUAL_SHADOW_CLEAR_DYNAMIC_CONTENT_FILTER_ENABLED] =
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodDirectionalVirtualShadowDynamicContentFilterSettingName)()
+            ? 1u
+            : 0u;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

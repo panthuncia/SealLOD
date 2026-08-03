@@ -544,11 +544,14 @@ void WG_PageJobRasterPage(
 
     // Only static writes establish persistent cache validity. No barrier is
     // needed because every contributing thread writes the same idempotent OR.
-    if (anyPixelWritten && !dynamicLayer) {
+    if (anyPixelWritten) {
         uint ignored = 0u;
         InterlockedOr(
             pageTableUAV[uint3(wrappedPageCoords, clipmapLayer)],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            dynamicLayer
+                ? kCLodVirtualShadowDynamicContentMask
+                : kCLodVirtualShadowContentValidMask |
+                    kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
 }

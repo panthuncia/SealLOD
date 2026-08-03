@@ -113,6 +113,7 @@ inline constexpr const char* CLodDirectionalVirtualShadowPredictiveLodInvalidati
 inline constexpr const char* CLodDirectionalVirtualShadowPageRenderBudgetSettingName = "clodDirectionalVirtualShadowPageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName = "clodDirectionalVirtualShadowUpgradePageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
+inline constexpr const char* CLodDirectionalVirtualShadowDynamicContentFilterSettingName = "clodDirectionalVirtualShadowDynamicContentFilter";
 
 struct CLodVirtualShadowBudgetAdmission
 {
@@ -544,7 +545,8 @@ inline constexpr uint32_t CLodVirtualShadowPageContentValidMask = 0x20000000u;
 inline constexpr uint32_t CLodVirtualShadowPageVisitedMask = 0x10000000u;
 inline constexpr uint32_t CLodVirtualShadowPageRerenderedThisFrameMask = 0x08000000u;
 inline constexpr uint32_t CLodVirtualShadowPageAdmittedThisFrameMask = 0x04000000u;
-inline constexpr uint32_t CLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
+inline constexpr uint32_t CLodVirtualShadowDynamicContentMask = 0x01000000u;
+inline constexpr uint32_t CLodVirtualShadowPhysicalPageIndexMask = 0x00FFFFFFu;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
 inline constexpr uint32_t CLodVirtualShadowInvalidationFlagUsePreviousBounds = 0x1u;

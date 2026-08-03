@@ -1155,12 +1155,20 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
             const uint ownerEntry = pageTable[uint3(ownerCoords, dynamicMeta.w)];
             gCLodVirtualShadowShouldClearDynamicPage =
                 CLodVirtualShadowPageEntryIsDynamicActive(ownerEntry) &&
-                (ownerEntry & kCLodVirtualShadowPhysicalPageIndexMask) == physicalPageIndex
+                (ownerEntry & kCLodVirtualShadowPhysicalPageIndexMask) == physicalPageIndex &&
+                (CLOD_VIRTUAL_SHADOW_CLEAR_DYNAMIC_CONTENT_FILTER_ENABLED == 0u ||
+                    gCLodVirtualShadowShouldClearPage != 0u ||
+                    (ownerEntry & kCLodVirtualShadowDynamicContentMask) != 0u)
                     ? 1u
                     : 0u;
             if (gCLodVirtualShadowShouldClearDynamicPage != 0u)
             {
                 InterlockedAdd(statsBuffer[0].dynamicPageClearCount, 1u);
+                uint ignoredDynamicContent = 0u;
+                InterlockedAnd(
+                    pageTable[uint3(ownerCoords, dynamicMeta.w)],
+                    ~kCLodVirtualShadowDynamicContentMask,
+                    ignoredDynamicContent);
                 // Initialize every clean active page with its persistent static
                 // contents before skinned raster. Dirty pages are cleared below
                 // and picked up by the post-raster compose after static validity

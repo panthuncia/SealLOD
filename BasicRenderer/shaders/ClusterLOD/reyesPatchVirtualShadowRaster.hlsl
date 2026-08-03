@@ -66,14 +66,14 @@ void ReyesTryWriteVirtualShadowTexel(
         physicalPages[atlasPixel],
         CLodVirtualShadowEncodeDepth(pageSpaceDepth, clipmapInfo));
 
-    if (!dynamicLayer)
-    {
-        uint ignored = 0u;
-        InterlockedOr(
-            pageTable[pageCoords],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-            ignored);
-    }
+    uint ignored = 0u;
+    InterlockedOr(
+        pageTable[pageCoords],
+        dynamicLayer
+            ? kCLodVirtualShadowDynamicContentMask
+            : kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask,
+        ignored);
 }
 
 void ReyesRasterizeProjectedVirtualShadowMicroTriangle(

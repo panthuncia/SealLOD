@@ -692,14 +692,14 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
         }
         if (gs_pageRasterAnyWrite != 0u)
         {
-            if (!dynamicLayer)
-            {
-                uint ignored = 0u;
-                InterlockedOr(
-                    pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
-                    kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-                    ignored);
-            }
+            uint ignored = 0u;
+            InterlockedOr(
+                pageTable[uint3(uint2(wrappedPageX, wrappedPageY), clipmapLayer)],
+                dynamicLayer
+                    ? kCLodVirtualShadowDynamicContentMask
+                    : kCLodVirtualShadowContentValidMask |
+                        kCLodVirtualShadowRerenderedThisFrameMask,
+                ignored);
             if (telemetryEnabled)
                 InterlockedAdd(statsBuffer[0].pageJobRasterPageWriteCount, 1u);
         }

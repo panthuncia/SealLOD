@@ -2079,6 +2079,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
         false);
+    settingsManager.registerSetting<bool>(
+        CLodDirectionalVirtualShadowDynamicContentFilterSettingName,
+        false);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
