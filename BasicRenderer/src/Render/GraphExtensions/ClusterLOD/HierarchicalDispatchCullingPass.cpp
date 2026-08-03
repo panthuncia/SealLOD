@@ -35,6 +35,10 @@
 
 namespace {
 
+static_assert(
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS != CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT,
+    "Object-cull caster classification must not overwrite forced traversal depth");
+
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeTraverseThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeClusterThreadsPerGroup = 32u;
@@ -1136,6 +1140,9 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
                 record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
                 record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
+                record.shadowCasterClass = UsesVirtualShadowOutput(m_rasterOutputKind)
+                    ? (wl.key.skinnedShadowCaster ? 2u : 1u)
+                    : 0u;
                 record.dispatchGridX = static_cast<uint>((count + kPureComputeObjectCullThreadsPerGroup - 1u) / kPureComputeObjectCullThreadsPerGroup);
                 record.dispatchGridY = 1;
                 record.dispatchGridZ = 1;
@@ -1154,6 +1161,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = record.viewDataIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = record.activeDrawSetIndicesSRVIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = record.drawRecordVisibilityGenerationSRVIndex;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = record.shadowCasterClass;
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,
