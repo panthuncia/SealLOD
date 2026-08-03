@@ -133,6 +133,8 @@ void ForEachMeshDrawWorkload(const Mesh& mesh, const Material& material, F&& cal
     const bool alphaBlend = IsAlphaBlendTechnique(technique);
     const bool alphaTest = IsAlphaTestTechnique(technique);
     const bool clodAlphaBlend = isClodMesh && alphaBlend && !alphaTest;
+    const bool skinned =
+        (mesh.GetPerMeshCBData().vertexFlags & VertexFlags::VERTEX_SKINNED) != 0u;
 
     for (const auto& pass : technique.passes) {
         if (clodAlphaBlend && ShouldSkipSourcePassForCLodAlphaBlend(pass)) {
@@ -146,7 +148,8 @@ void ForEachMeshDrawWorkload(const Mesh& mesh, const Material& material, F&& cal
         callback(DrawWorkloadKey {
             technique.compileFlags,
             pass,
-            clodOnly
+            clodOnly,
+            false
         });
 
         // Keep the legacy shadow path alive while the CLod shadow variant is under construction.
@@ -156,7 +159,8 @@ void ForEachMeshDrawWorkload(const Mesh& mesh, const Material& material, F&& cal
             callback(DrawWorkloadKey {
                 technique.compileFlags,
                 pass,
-                true
+                true,
+                skinned
             });
         }
     }
@@ -165,7 +169,8 @@ void ForEachMeshDrawWorkload(const Mesh& mesh, const Material& material, F&& cal
         callback(DrawWorkloadKey {
             technique.compileFlags,
             Engine::Primary::CLodTransparentPass,
-            true
+            true,
+            false
         });
     }
 }
