@@ -41,6 +41,7 @@ public:
         std::shared_ptr<Buffer> swWriteBaseCounterBuffer = nullptr,
         std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer = nullptr,
         std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer = nullptr,
+        std::shared_ptr<Buffer> shadowInvalidationCountBuffer = nullptr,
         std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
         std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
@@ -120,6 +121,7 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
+    std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;

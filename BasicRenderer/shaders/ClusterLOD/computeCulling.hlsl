@@ -246,6 +246,41 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // Supplemental shadow active sets are homogeneous, so reject empty
+    // view/layer pairs before touching per-instance memory. Rigid workloads
+    // remain eligible for dynamic pages while any transform invalidation is
+    // pending, preserving the static-cache handoff path.
+    bool viewHasCasterPages = true;
+    if (WaveIsFirstLane())
+    {
+        if (CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS == 2u)
+        {
+            viewHasCasterPages = CLodVirtualShadowViewHasActivePages(
+                CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX, true);
+        }
+        else if (CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS == 1u)
+        {
+            viewHasCasterPages = CLodVirtualShadowViewHasActivePages(
+                CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX, false);
+            if (!viewHasCasterPages &&
+                CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX != 0u)
+            {
+                StructuredBuffer<uint> invalidationCount = ResourceDescriptorHeap[
+                    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX];
+                viewHasCasterPages = invalidationCount[0] != 0u &&
+                    CLodVirtualShadowViewHasActivePages(
+                        CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX, true);
+            }
+        }
+    }
+    viewHasCasterPages = WaveReadLaneFirst(viewHasCasterPages);
+    if (!viewHasCasterPages)
+    {
+        return;
+    }
+#endif
+
     StructuredBuffer<uint2> activeDrawSetIndicesBuffer =
         ResourceDescriptorHeap[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX];
     StructuredBuffer<uint> drawRecordVisibilityGenerations =

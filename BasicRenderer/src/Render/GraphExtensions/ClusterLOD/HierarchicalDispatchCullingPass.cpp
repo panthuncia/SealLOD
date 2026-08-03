@@ -36,8 +36,13 @@
 namespace {
 
 static_assert(
-    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS != CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT,
-    "Object-cull caster classification must not overwrite forced traversal depth");
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX,
+    "Object-cull-only constants must not overwrite shared CLod traversal state");
 
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeTraverseThreadsPerGroup = 64u;
@@ -149,6 +154,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> swWriteBaseCounterBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
+    std::shared_ptr<Buffer> shadowInvalidationCountBuffer,
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
@@ -179,6 +185,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowDirtyHierarchyTexture(std::move(shadowDirtyHierarchyTexture))
     , m_shadowPredictiveInvalidationCandidatesBuffer(std::move(shadowPredictiveInvalidationCandidatesBuffer))
     , m_shadowPredictiveInvalidationCandidateCountBuffer(std::move(shadowPredictiveInvalidationCandidateCountBuffer))
+    , m_shadowInvalidationCountBuffer(std::move(shadowInvalidationCountBuffer))
     , m_shadowInvalidatedInstancesBitsetBuffer(std::move(shadowInvalidatedInstancesBitsetBuffer))
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
@@ -557,6 +564,9 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         }
         if (m_shadowInvalidatedInstancesBitsetBuffer) {
             builder->WithShaderResource(m_shadowInvalidatedInstancesBitsetBuffer);
+        }
+        if (m_shadowInvalidationCountBuffer) {
+            builder->WithShaderResource(m_shadowInvalidationCountBuffer);
         }
         if (m_shadowPredictiveInvalidationCandidatesBuffer) {
             builder->WithUnorderedAccess(m_shadowPredictiveInvalidationCandidatesBuffer);
@@ -1162,6 +1172,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = record.activeDrawSetIndicesSRVIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = record.drawRecordVisibilityGenerationSRVIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = record.shadowCasterClass;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX] =
+                m_shadowInvalidationCountBuffer
+                    ? m_shadowInvalidationCountBuffer->GetSRVInfo(0).slot.index
+                    : 0u;
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,

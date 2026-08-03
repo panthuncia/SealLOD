@@ -1764,6 +1764,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     previousSwVisibleClustersCounterBuffer,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidatesBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPredictiveInvalidationCandidateCountBuffer : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowInvalidationCountBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowInvalidatedInstancesBitsetBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowStaticPhysicalPagesTexture : nullptr,
