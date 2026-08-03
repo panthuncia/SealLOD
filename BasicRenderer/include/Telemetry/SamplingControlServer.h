@@ -31,6 +31,11 @@ public:
     const std::wstring& PipeName() const { return m_pipeName; }
 
 private:
+    struct Connection {
+        std::atomic<void*> pipe{ nullptr };
+        std::thread thread;
+    };
+
     void Run();
     void ServeConnection(void* pipe);
     void QueueRequest(const std::string& line, void* pipe);
@@ -39,6 +44,8 @@ private:
     std::atomic<bool> m_running{ false };
     std::atomic<bool> m_stopRequested{ false };
     std::thread m_thread;
+    mutable std::mutex m_connectionsMutex;
+    std::vector<std::unique_ptr<Connection>> m_connections;
     mutable std::mutex m_requestsMutex;
     std::vector<std::shared_ptr<Request>> m_requests;
 };
