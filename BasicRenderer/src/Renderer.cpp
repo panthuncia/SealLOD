@@ -2076,6 +2076,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName,
         ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 500u));
+    settingsManager.registerSetting<bool>(
+        CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
+        false);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);

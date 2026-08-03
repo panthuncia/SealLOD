@@ -571,7 +571,8 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowMarkClipmapDataBuffer,
             extension.m_shadowMarkedBlocksMaskBuffer,
             extension.m_shadowMarkedBlocksListBuffer,
-            extension.m_shadowMarkedBlocksCountBuffer));
+            extension.m_shadowMarkedBlocksCountBuffer,
+            extension.m_shadowReceiverSubpageMaskBuffer));
     shadowMarkPagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowBuildMarkTileDispatchArgsPassName));
     shadowMarkPagesPassDesc.preferredQueueKind = QueueKind::Graphics;
     outPasses.push_back(std::move(shadowMarkPagesPassDesc));
@@ -1614,6 +1615,19 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_shadowMarkedBlocksCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowMarkedBlocksCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Marked Blocks Count Buffer"));
 
+    extension.m_shadowReceiverSubpageMaskBuffer =
+        CreateAliasedUnmaterializedStructuredBuffer(
+            CLodVirtualShadowMaxReceiverPageCount,
+            sizeof(uint32_t),
+            true,
+            false,
+            false,
+            false);
+    extension.m_shadowReceiverSubpageMaskBuffer->SetName(
+        MakeVariantResourceName(
+            traits,
+            "Virtual Shadow Receiver Subpage Mask Buffer"));
+
     extension.m_shadowActiveBlockMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxMarkedBlockCount,
         sizeof(uint32_t),
@@ -1903,6 +1917,7 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_shadowMarkedBlocksMaskBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowMarkedBlocksListBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowMarkedBlocksCountBuffer, "Cluster LOD virtual shadow maps");
+    tagBufferUsage(extension.m_shadowReceiverSubpageMaskBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowActiveBlockMetadataBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowDynamicActiveBlockMetadataBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_shadowBlockClusterCoverageBuffer, "Cluster LOD virtual shadow maps");

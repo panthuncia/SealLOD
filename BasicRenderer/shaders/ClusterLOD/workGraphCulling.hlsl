@@ -969,6 +969,70 @@ bool CLodVirtualShadowMeshletTouchesDirtyPages(float3 worldCenter, float radiusW
     return CLodVirtualShadowBoundsTouchDirtyPages(worldCenter, radiusWorld, viewId);
 }
 
+bool CLodVirtualShadowUvBoundsTouchReceiverOccupancy(
+    float2 uvMin,
+    float2 uvMax,
+    uint shadowClipmapIndex,
+    CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    if ((CLOD_WG_FLAGS & CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK) == 0u ||
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX == 0u)
+    {
+        return true;
+    }
+
+    const uint2 minSubpageCoord =
+        CLodVirtualShadowReceiverSubpageCoordsFromUv(
+            uvMin, clipmapInfo.pageTableResolution);
+    const uint2 maxSubpageCoord =
+        CLodVirtualShadowReceiverSubpageCoordsFromUv(
+            uvMax, clipmapInfo.pageTableResolution);
+    const uint2 minPageCoord =
+        minSubpageCoord / kCLodVirtualShadowReceiverSubpagesPerAxis;
+    const uint2 maxPageCoord =
+        maxSubpageCoord / kCLodVirtualShadowReceiverSubpagesPerAxis;
+    const uint2 pageCount = maxPageCoord - minPageCoord + 1u;
+
+    // Receiver occupancy is a fine meshlet filter. Large bounds must continue
+    // through the existing hierarchy rather than expanding into unbounded
+    // per-page loops, which caused the previous traversal regression.
+    static const uint kMaxReceiverPagesPerMeshletQuery = 4u;
+    if (pageCount.x * pageCount.y > kMaxReceiverPagesPerMeshletQuery)
+    {
+        return true;
+    }
+
+    StructuredBuffer<uint> receiverSubpageMasks =
+        ResourceDescriptorHeap[
+            CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX];
+    [loop]
+    for (uint pageY = minPageCoord.y; pageY <= maxPageCoord.y; ++pageY)
+    {
+        [loop]
+        for (uint pageX = minPageCoord.x; pageX <= maxPageCoord.x; ++pageX)
+        {
+            const uint2 pageCoord = uint2(pageX, pageY);
+            const uint receiverMask = receiverSubpageMasks[
+                CLodVirtualShadowReceiverPageLinearIndex(
+                    pageCoord, shadowClipmapIndex)];
+            if (receiverMask == 0u)
+            {
+                continue;
+            }
+
+            const uint meshletMask = CLodVirtualShadowBlockMaskForPageRect(
+                minSubpageCoord,
+                maxSubpageCoord,
+                pageCoord * kCLodVirtualShadowReceiverSubpagesPerAxis);
+            if ((receiverMask & meshletMask) != 0u)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool CLodVirtualShadowComputeMeshletBlockCoverage(
     float3 worldCenter,
     float radiusWorld,
@@ -1013,7 +1077,9 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
     minBlockCoord = CLodVirtualShadowBlockCoordFromPageCoord(minPageCoord);
     const uint2 maxBlockCoord = CLodVirtualShadowBlockCoordFromPageCoord(maxPageCoord);
     blockCount = maxBlockCoord - minBlockCoord + 1u;
-    return all(blockCount > uint2(0u, 0u));
+    return all(blockCount > uint2(0u, 0u)) &&
+        CLodVirtualShadowUvBoundsTouchReceiverOccupancy(
+            uvMin, uvMax, shadowClipmapIndex, clipmapInfo);
 }
 
 bool CLodVirtualShadowBuildVisibleClusterBlockPayload(

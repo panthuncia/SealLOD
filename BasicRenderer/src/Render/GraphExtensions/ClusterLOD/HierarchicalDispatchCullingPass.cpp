@@ -40,8 +40,14 @@ static_assert(
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
     CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX >
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
     CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
-        CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX,
+        CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX,
     "Object-cull-only constants must not overwrite shared CLod traversal state");
 
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
@@ -159,6 +165,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
     std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<Buffer> shadowReceiverSubpageMaskBuffer,
     std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
     std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
@@ -190,6 +197,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
     , m_shadowActiveBlockMetadataBuffer(std::move(shadowActiveBlockMetadataBuffer))
+    , m_shadowReceiverSubpageMaskBuffer(std::move(shadowReceiverSubpageMaskBuffer))
     , m_shadowDynamicPhysicalPagesTexture(
         std::move(shadowDynamicPhysicalPagesTexture))
     , m_shadowDynamicActiveBlockMetadataBuffer(
@@ -586,6 +594,9 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         if (m_shadowActiveBlockMetadataBuffer) {
             builder->WithShaderResource(m_shadowActiveBlockMetadataBuffer);
         }
+        if (m_shadowReceiverSubpageMaskBuffer) {
+            builder->WithShaderResource(m_shadowReceiverSubpageMaskBuffer);
+        }
         if (m_shadowDynamicActiveBlockMetadataBuffer) {
             builder->WithShaderResource(
                 m_shadowDynamicActiveBlockMetadataBuffer);
@@ -761,6 +772,10 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         m_shadowActiveBlockMetadataBuffer
             ? m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index
             : 0u;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX] =
+        m_shadowReceiverSubpageMaskBuffer
+            ? m_shadowReceiverSubpageMaskBuffer->GetSRVInfo(0).slot.index
+            : 0u;
     sharedRootConstants[
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
         m_shadowDynamicPhysicalPagesTexture
@@ -804,6 +819,11 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     if (UsesVirtualShadowOutput(m_rasterOutputKind) &&
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_VSM_PREDICTIVE_LOD_INVALIDATION;
+    }
+    if (UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName)()) {
+        workGraphFlags |= CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK;
     }
     if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodFrustumCullingSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;

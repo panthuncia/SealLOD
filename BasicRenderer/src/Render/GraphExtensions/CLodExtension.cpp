@@ -1163,6 +1163,7 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_shadowMarkedBlocksMaskBuffer);
     releaseBufferBacking(m_shadowMarkedBlocksListBuffer);
     releaseBufferBacking(m_shadowMarkedBlocksCountBuffer);
+    releaseBufferBacking(m_shadowReceiverSubpageMaskBuffer);
     releaseBufferBacking(m_shadowActiveBlockMetadataBuffer);
     releaseBufferBacking(m_shadowBlockClusterCoverageBuffer);
     releaseBufferBacking(m_shadowFreePhysicalPagesBuffer);
@@ -1769,6 +1770,7 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
                     traits.type == CLodExtensionType::Shadow ? m_shadowPageTableTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowStaticPhysicalPagesTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowActiveBlockMetadataBuffer : nullptr,
+                    traits.type == CLodExtensionType::Shadow ? m_shadowReceiverSubpageMaskBuffer : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowPhysicalPagesTexture : nullptr,
                     traits.type == CLodExtensionType::Shadow ? m_shadowDynamicActiveBlockMetadataBuffer : nullptr))
             : std::static_pointer_cast<ComputePass>(

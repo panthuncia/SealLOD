@@ -583,33 +583,6 @@ uint CLodDirectionalShadowPageViewInfoIndex(uint2 wrappedPageCoords, uint clipma
         wrappedPageCoords.x;
 }
 
-uint CLodVirtualShadowBlockMaskForPageRect(
-    uint2 logicalPageMin,
-    uint2 logicalPageMax,
-    uint2 blockOriginPage)
-{
-    uint activeMask = 0u;
-
-    [unroll]
-    for (uint localPageY = 0u; localPageY < kCLodVirtualShadowBlockPagesPerAxis; ++localPageY)
-    {
-        [unroll]
-        for (uint localPageX = 0u; localPageX < kCLodVirtualShadowBlockPagesPerAxis; ++localPageX)
-        {
-            const uint2 logicalPageCoord = blockOriginPage + uint2(localPageX, localPageY);
-            const bool insideRect =
-                all(logicalPageCoord >= logicalPageMin) &&
-                all(logicalPageCoord <= logicalPageMax);
-            if (insideRect)
-            {
-                activeMask |= 1u << CLodVirtualShadowBlockLocalPageIndex(uint2(localPageX, localPageY));
-            }
-        }
-    }
-
-    return activeMask;
-}
-
 void CLodMarkVirtualShadowWrappedPage(
     uint2 wrappedPageCoords,
     uint clipmapIndex,
@@ -2461,6 +2434,44 @@ void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThrea
 
         const uint2 logicalPageMin = CLodVirtualShadowVirtualPageCoordsFromUv(shadowUvMin, clipmapData);
         const uint2 logicalPageMax = CLodVirtualShadowVirtualPageCoordsFromUv(shadowUvMax, clipmapData);
+
+        if (CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED != 0u)
+        {
+            RWStructuredBuffer<uint> receiverSubpageMasks =
+                ResourceDescriptorHeap[
+                    CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX];
+            const uint2 receiverSubpageMin =
+                CLodVirtualShadowReceiverSubpageCoordsFromUv(
+                    shadowUvMin, clipmapData.pageTableResolution);
+            const uint2 receiverSubpageMax =
+                CLodVirtualShadowReceiverSubpageCoordsFromUv(
+                    shadowUvMax, clipmapData.pageTableResolution);
+
+            [loop]
+            for (uint pageY = logicalPageMin.y; pageY <= logicalPageMax.y; ++pageY)
+            {
+                [loop]
+                for (uint pageX = logicalPageMin.x; pageX <= logicalPageMax.x; ++pageX)
+                {
+                    const uint2 pageCoord = uint2(pageX, pageY);
+                    const uint receiverMask = CLodVirtualShadowBlockMaskForPageRect(
+                        receiverSubpageMin,
+                        receiverSubpageMax,
+                        pageCoord * kCLodVirtualShadowReceiverSubpagesPerAxis);
+                    if (receiverMask != 0u)
+                    {
+                        uint ignoredPreviousMask = 0u;
+                        InterlockedOr(
+                            receiverSubpageMasks[
+                                CLodVirtualShadowReceiverPageLinearIndex(
+                                    pageCoord, clipmapIndex)],
+                            receiverMask,
+                            ignoredPreviousMask);
+                    }
+                }
+            }
+        }
+
         const uint2 logicalBlockMin = CLodVirtualShadowBlockCoordFromPageCoord(logicalPageMin);
         const uint2 logicalBlockMax = CLodVirtualShadowBlockCoordFromPageCoord(logicalPageMax);
 

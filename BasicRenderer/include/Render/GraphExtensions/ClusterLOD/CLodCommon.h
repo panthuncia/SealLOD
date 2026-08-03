@@ -112,6 +112,7 @@ inline constexpr const char* CLodDirectionalVirtualShadowAutoLodBiasScaleSetting
 inline constexpr const char* CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName = "clodDirectionalVirtualShadowPredictiveLodInvalidation";
 inline constexpr const char* CLodDirectionalVirtualShadowPageRenderBudgetSettingName = "clodDirectionalVirtualShadowPageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName = "clodDirectionalVirtualShadowUpgradePageRenderBudget";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
 
 struct CLodVirtualShadowBudgetAdmission
 {
@@ -508,6 +509,11 @@ inline constexpr float CLodVirtualShadowDefaultReceiverTraceUncertaintyScale = 1
 inline constexpr float CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale = 0.5f;
 inline constexpr uint32_t CLodVirtualShadowMarkTileSize = 16u;
 inline constexpr uint32_t CLodVirtualShadowBlockPagesPerAxis = 4u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpagesPerAxis = 4u;
+inline constexpr uint32_t CLodVirtualShadowMaxReceiverPageCount =
+    CLodVirtualShadowMaxPageTableResolution *
+    CLodVirtualShadowMaxPageTableResolution *
+    CLodVirtualShadowMaxSupportedClipmapCount;
 inline constexpr uint32_t CLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (CLodVirtualShadowBlockPagesPerAxis * CLodVirtualShadowBlockPagesPerAxis) / 2u;
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerAxis =

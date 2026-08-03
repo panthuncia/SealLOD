@@ -55,6 +55,11 @@ static const uint kCLodVirtualShadowMovedInstanceBitWordCount =
 static const uint kInvalidShadowCameraIndex = 0xFFFFFFFFu;
 static const uint kCLodVirtualShadowMarkTileSize = 16u;
 static const uint kCLodVirtualShadowBlockPagesPerAxis = 4u;
+static const uint kCLodVirtualShadowReceiverSubpagesPerAxis = 4u;
+static const uint kCLodVirtualShadowMaxReceiverPageCount =
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowClipmapCount;
 static const uint kCLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (kCLodVirtualShadowBlockPagesPerAxis * kCLodVirtualShadowBlockPagesPerAxis) / 2u;
 static const uint kCLodVirtualShadowMaxBlocksPerAxis =
@@ -353,6 +358,52 @@ uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShado
 uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShadowMarkClipmapData clipmapData)
 {
     return CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapData.pageTableResolution);
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(float2 shadowUv, uint pageTableResolution)
+{
+    const uint resolution = max(pageTableResolution, 1u) *
+        kCLodVirtualShadowReceiverSubpagesPerAxis;
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint CLodVirtualShadowReceiverPageLinearIndex(uint2 pageCoord, uint clipmapIndex)
+{
+    return clipmapIndex *
+            (kCLodVirtualShadowMaxPageTableResolution *
+                kCLodVirtualShadowMaxPageTableResolution) +
+        pageCoord.y * kCLodVirtualShadowMaxPageTableResolution +
+        pageCoord.x;
+}
+
+uint CLodVirtualShadowBlockMaskForPageRect(
+    uint2 logicalPageMin,
+    uint2 logicalPageMax,
+    uint2 blockOriginPage)
+{
+    uint activeMask = 0u;
+    [unroll]
+    for (uint localPageY = 0u;
+         localPageY < kCLodVirtualShadowBlockPagesPerAxis;
+         ++localPageY)
+    {
+        [unroll]
+        for (uint localPageX = 0u;
+             localPageX < kCLodVirtualShadowBlockPagesPerAxis;
+             ++localPageX)
+        {
+            const uint2 logicalPageCoord =
+                blockOriginPage + uint2(localPageX, localPageY);
+            if (all(logicalPageCoord >= logicalPageMin) &&
+                all(logicalPageCoord <= logicalPageMax))
+            {
+                activeMask |= 1u <<
+                    (localPageY * kCLodVirtualShadowBlockPagesPerAxis +
+                        localPageX);
+            }
+        }
+    }
+    return activeMask;
 }
 
 uint2 CLodVirtualShadowWrappedPageCoords(
