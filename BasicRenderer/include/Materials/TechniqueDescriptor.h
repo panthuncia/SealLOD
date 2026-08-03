@@ -64,16 +64,11 @@ struct DrawWorkloadKey {
     MaterialCompileFlags compileFlags = MaterialCompileFlags::MaterialCompileNone;
     RenderPhase renderPhase;
     bool clodOnly = false;
-    // Supplemental shadow workloads alone use this discriminator. Primary and
-    // legacy workloads keep the default value and therefore retain their
-    // existing identity and active-set membership.
-    bool skinnedShadowCaster = false;
 
     bool operator==(const DrawWorkloadKey& other) const noexcept {
         return compileFlags == other.compileFlags
             && renderPhase == other.renderPhase
-            && clodOnly == other.clodOnly
-            && skinnedShadowCaster == other.skinnedShadowCaster;
+            && clodOnly == other.clodOnly;
     }
 
     struct Hasher {
@@ -81,7 +76,6 @@ struct DrawWorkloadKey {
             size_t seed = std::hash<uint64_t>()(static_cast<uint64_t>(key.compileFlags));
             seed ^= RenderPhase::Hasher{}(key.renderPhase) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
             seed ^= std::hash<bool>()(key.clodOnly) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-            seed ^= std::hash<bool>()(key.skinnedShadowCaster) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
             return seed;
         }
     };
