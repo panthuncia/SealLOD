@@ -2167,23 +2167,25 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             setCLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees(
                 m_clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees);
         }
-        if (ImGui::SliderFloat(
+        if (ImGui::InputFloat(
                 "Directional VSM SMRT Ray Length Scale",
                 &m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional,
                 0.0f,
-                0.25f,
-                "%.3f")) {
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
             m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional =
                 std::max(m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional, 0.0f);
             setCLodDirectionalVirtualShadowSmrtRayLengthScaleDirectional(
                 m_clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional);
         }
-        if (ImGui::SliderFloat(
-                "Directional VSM SMRT Max Trace Distance",
+        if (ImGui::InputFloat(
+                "Directional VSM SMRT Max Trace Distance (world units)",
                 &m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld,
-                1.0f,
-                2000.0f,
-                "%.1f")) {
+                0.0f,
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
             m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld =
                 std::max(m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld, 1.0f);
             setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld(
@@ -2208,13 +2210,13 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             setCLodDirectionalVirtualShadowReceiverTraceSampleCount(
                 m_clodDirectionalVirtualShadowReceiverTraceSampleCount);
         }
-        if (ImGui::SliderFloat(
-                "VSM Receiver Trace Max Distance",
+        if (ImGui::InputFloat(
+                "VSM Receiver Trace Max Distance (world units)",
                 &m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld,
-                1.0f,
-                4096.0f,
-                "%.1f world units",
-                ImGuiSliderFlags_Logarithmic)) {
+                0.0f,
+                0.0f,
+                "%.9g",
+                ImGuiInputTextFlags_CharsScientific)) {
             m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld =
                 std::max(m_clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld, 1.0f);
             setCLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld(

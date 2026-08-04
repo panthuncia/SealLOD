@@ -1339,12 +1339,12 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     const float2 blueNoiseBase = blueNoiseTex.Load(int3(pixelCoordsInt % blueNoiseSize, 0)).xy;
     const float2 rotation = frac(blueNoiseBase + CLodVirtualShadowSmrtRotation(pixelCoordsInt, perFrameBuffer.frameIndex));
     const float lightDiskTan = tan(coneAngleRadians);
-    const float invSamplesPerRay = 1.0f / max((float)samplesPerRay, 1.0f);
+    const float invSampleIntervals =
+        1.0f / (float)max(samplesPerRay > 1u ? samplesPerRay - 1u : 1u, 1u);
     const float footprintDitherScale = 0.5f;
 
     float visibleRayCount = 0.0f;
     float validRayCount = 0.0f;
-    bool allRaysBlockedSoFar = true;
     [loop]
     for (uint rayIndex = 0u; rayIndex < rayCount; ++rayIndex)
     {
@@ -1376,19 +1376,32 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
 
         bool rayHit = false;
         bool rayHadValidSample = false;
-        bool depthHistoryValid = false;
-        float depthHistory = 0.0f;
-        float depthSlope = 0.0f;
-        float depthHistoryDistance = 0.0f;
-        float prevSampledLinearDepth = 0.0f;
-        uint prevSampledClipmapIndex = 0xFFFFFFFFu;
-        uint prevSampledPhysicalPageIndex = 0xFFFFFFFFu;
-        bool mustResetHistory = false;
+        bool rayHadUnknownSample = false;
+        bool rayObservedFreeSpace = false;
+        bool previousFiniteDepthValid = false;
+        float previousDepthDelta = 0.0f;
+        float previousDepthTolerance = 0.0f;
+        float previousSampleDistance = 0.0f;
         [loop]
         for (uint sampleIndex = 0u; sampleIndex < samplesPerRay; ++sampleIndex)
         {
-            const float t = ((float)sampleIndex + 0.5f + (rayJitter - 0.5f)) * invSamplesPerRay;
-            const float sampleDistance = tNear * exp(saturate(t) * logRatio);
+            // Trace from the lightward endpoint back toward the receiver. A
+            // receiver in hard shadow starts behind the blocker, so marching
+            // receiver-to-light and treating that state as a hit preserves the
+            // hard-shadow silhouette instead of testing whether an angled ray
+            // actually crosses the blocker. Keep both endpoints exact; jitter
+            // only interior strata.
+            float sampleLogAlpha = samplesPerRay > 1u
+                ? 1.0f - (float)sampleIndex * invSampleIntervals
+                : 1.0f;
+            if (sampleIndex > 0u && sampleIndex + 1u < samplesPerRay)
+            {
+                sampleLogAlpha = saturate(
+                    sampleLogAlpha +
+                    (rayJitter - 0.5f) * invSampleIntervals * 0.5f);
+            }
+            const float sampleDistance =
+                tNear * exp(sampleLogAlpha * logRatio);
             const float rayAlpha = saturate(sampleDistance / tFar);
             const float3 samplePosWorldSpace = lerp(fragPosWorldSpace, rayEndWorldSpace, rayAlpha);
             const float2 sampleUv = lerp(rayStartUv, rayEndUv, rayAlpha);
@@ -1410,122 +1423,85 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
                 physicalPages,
                 unusedDebugInfo);
 
-            if (raySample.valid == 0u || raySample.depthAvailable == 0u)
+            if (raySample.valid == 0u)
             {
-                mustResetHistory = true;
+                // An unallocated or otherwise invalid page is unknown, so it
+                // cannot bridge a depth crossing between two known regions.
+                rayHadUnknownSample = true;
+                previousFiniteDepthValid = false;
                 continue;
             }
 
+            // A valid cleared texel is positive evidence that this portion of
+            // the ray is free. It makes the ray eligible for the visibility
+            // estimator even though there is no finite surface to compare.
             rayHadValidSample = true;
-
-            const bool pageChanged =
-                mustResetHistory ||
-                raySample.sampledClipmapIndex != prevSampledClipmapIndex ||
-                raySample.sampledPhysicalPageIndex != prevSampledPhysicalPageIndex;
-
-            prevSampledClipmapIndex = raySample.sampledClipmapIndex;
-            prevSampledPhysicalPageIndex = raySample.sampledPhysicalPageIndex;
-            mustResetHistory = false;
-
-            if (pageChanged)
+            if (raySample.depthAvailable == 0u)
             {
-                depthHistoryValid = false;
-                depthSlope = 0.0f;
+                rayObservedFreeSpace = true;
+                previousFiniteDepthValid = false;
+                continue;
             }
 
             const float closestDepth = raySample.closestDepth;
             const float refDepth = raySample.sampledLinearDepth;
-
-            if (!depthHistoryValid)
-            {
-                // First valid sample in this page-local frame: simple depth test.
-                depthHistory = closestDepth;
-                depthHistoryDistance = sampleDistance;
-                depthHistoryValid = true;
-                prevSampledLinearDepth = refDepth;
-
-                const float depthTolerance = max(
-                    max(
-                        visualFootprintWorld * 0.15f,
-                        cameraFootprintWorld *
-                            perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale),
-                    abs(refDepth) * 1.0e-4f);
-                if (refDepth > closestDepth + depthTolerance)
-                {
-                    rayHit = true;
-                    break;
-                }
-
-                continue;
-            }
-
-            const float stepDist = max(sampleDistance - depthHistoryDistance, 1.0e-4f);
-
-            // Is the shadow map showing a surface far behind the ray?
-            // This happens when the texel shows the ground past the occluder.
-            const float behindTolerance = max(
-                max(
-                    abs(refDepth - prevSampledLinearDepth) * 1.05f,
-                    visualFootprintWorld * 0.1f),
-                cameraFootprintWorld *
-                    perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale);
-            const bool bBehind = (closestDepth - refDepth) > behindTolerance;
-
-            float depthForComparison;
-            if (bBehind)
-            {
-                // Shadow map doesn't show the tracked surface: extrapolate
-                depthForComparison = depthHistory + depthSlope * stepDist;
-            }
-            else
-            {
-                // Shadow map shows a surface near the ray: use it directly
-                depthForComparison = closestDepth;
-                if (abs(closestDepth - depthHistory) > 1.0e-6f)
-                {
-                    depthSlope = clamp(
-                        (closestDepth - depthHistory) / stepDist,
-                        -4.0f, 4.0f);
-                }
-                depthHistory = closestDepth;
-                depthHistoryDistance = sampleDistance;
-            }
-
-            // For receiver-to-light march: hit when ray is behind
-            // the tracked/extrapolated surface
-            const float hitTolerance = max(
+            const float depthDelta = refDepth - closestDepth;
+            const float depthTolerance = max(
                 max(
                     visualFootprintWorld * 0.15f,
                     cameraFootprintWorld *
                         perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale),
                 abs(refDepth) * 1.0e-4f);
-            if (refDepth - depthForComparison > hitTolerance)
+
+            if (depthDelta < -depthTolerance)
             {
-                rayHit = true;
-                break;
+                rayObservedFreeSpace = true;
             }
 
-            prevSampledLinearDepth = refDepth;
+            if (previousFiniteDepthValid &&
+                previousDepthDelta < -previousDepthTolerance &&
+                depthDelta > depthTolerance)
+            {
+                // Moving light-to-receiver, a real intersection changes the
+                // signed separation from in front of a surface to behind it.
+                // Reject large discontinuous jumps: those are normally the
+                // ray entering a blocker silhouette after it has already
+                // passed the blocker's depth, which is a miss rather than a
+                // surface crossing.
+                const float stepDistance = max(
+                    previousSampleDistance - sampleDistance,
+                    1.0e-4f);
+                const float maximumContinuousDeltaChange =
+                    stepDistance * 4.0f +
+                    previousDepthTolerance + depthTolerance;
+                if (abs(depthDelta - previousDepthDelta) <=
+                    maximumContinuousDeltaChange)
+                {
+                    rayHit = true;
+                    break;
+                }
+            }
+
+            previousFiniteDepthValid = true;
+            previousDepthDelta = depthDelta;
+            previousDepthTolerance = depthTolerance;
+            previousSampleDistance = sampleDistance;
         }
 
-        if (rayHadValidSample)
+        // A ray that never reached known free space started behind a surface
+        // even at the configured lightward endpoint. The trace range was too
+        // short to resolve it, so retain conservative occlusion rather than
+        // introducing a large-world light leak. Missing pages remain unknown
+        // and do not contribute a falsely visible sample to the estimator.
+        if (!rayHit && rayHadValidSample && !rayObservedFreeSpace)
+        {
+            rayHit = true;
+        }
+
+        if (rayHadValidSample && (rayHit || !rayHadUnknownSample))
         {
             validRayCount += 1.0f;
             visibleRayCount += rayHit ? 0.0f : 1.0f;
-            if (!rayHit)
-                allRaysBlockedSoFar = false;
-        }
-
-        // Wave early-out: all lanes fully lit after center ray
-        if (rayIndex == 0u && rayHadValidSample && WaveActiveAllTrue(!rayHit))
-        {
-            break;
-        }
-        // Wave early-out: all lanes in full umbra
-        if (rayIndex >= 3u && (rayIndex & 3u) == 3u &&
-            WaveActiveAllTrue(allRaysBlockedSoFar && validRayCount > 0.0f))
-        {
-            break;
         }
     }
 
