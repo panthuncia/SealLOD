@@ -7333,7 +7333,11 @@ namespace USDLoader {
 		// so TREE candidates stay on the ordinary per-mesh CLod payload path where
 		// it can be promoted into a BRSKEL artifact below.
 		std::vector<AssetAssemblyBucketInfo> assemblyBuckets;
-		if (!importSettings.enableNifTreeProceduralWind && !importSettings.prepareObjectReyesAtlasRecipes) {
+		const bool isGrassPrototypePayload =
+			options.sourceIdentifier.find("#sarp-grass-prototype-v2") != std::string::npos;
+		if (!isGrassPrototypePayload &&
+			!importSettings.enableNifTreeProceduralWind &&
+			!importSettings.prepareObjectReyesAtlasRecipes) {
 			assemblyBuckets = DiscoverAssetAssemblyBuckets(
 				stage,
 				assemblySkelCache,
