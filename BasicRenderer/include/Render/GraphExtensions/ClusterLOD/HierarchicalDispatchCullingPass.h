@@ -41,10 +41,12 @@ public:
         std::shared_ptr<Buffer> swWriteBaseCounterBuffer = nullptr,
         std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer = nullptr,
         std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer = nullptr,
+        std::shared_ptr<Buffer> shadowInvalidationCountBuffer = nullptr,
         std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowPageTableTexture = nullptr,
         std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture = nullptr,
         std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer = nullptr,
+        std::shared_ptr<Buffer> shadowReceiverSubpageMaskBuffer = nullptr,
         std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture = nullptr,
         std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer = nullptr);
     ~HierarchicalDispatchCullingPass() override;
@@ -72,6 +74,7 @@ private:
         uint32_t activeDrawSetIndicesSRVIndex;
         uint32_t activeDrawCount;
         uint32_t drawRecordVisibilityGenerationSRVIndex;
+        uint32_t shadowCasterClass;
         uint32_t dispatchGridX;
         uint32_t dispatchGridY;
         uint32_t dispatchGridZ;
@@ -119,12 +122,17 @@ private:
     std::shared_ptr<PixelBuffer> m_shadowDirtyHierarchyTexture;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidatesBuffer;
     std::shared_ptr<Buffer> m_shadowPredictiveInvalidationCandidateCountBuffer;
+    std::shared_ptr<Buffer> m_shadowInvalidationCountBuffer;
     std::shared_ptr<Buffer> m_shadowInvalidatedInstancesBitsetBuffer;
     std::shared_ptr<PixelBuffer> m_shadowPageTableTexture;
     std::shared_ptr<PixelBuffer> m_shadowPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_shadowReceiverSubpageMaskBuffer;
     std::shared_ptr<PixelBuffer> m_shadowDynamicPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindBoundsCacheBuffer;
+    uint32_t m_dynamicWindBoundsCacheEntryCount = 0u;
+    uint32_t m_dynamicWindBoundsCacheGeneration = 1u;
     std::shared_ptr<Buffer> m_pureComputeCurrentNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeNextNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeCurrentLeafFrontierBuffer;

@@ -105,7 +105,9 @@ void WG_PageJobBuild(
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
@@ -278,9 +280,7 @@ void WG_PageJobExpand(
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[
             ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const bool dynamicLayer =
-        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
-            VERTEX_SKINNED) != 0u;
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
 
     const uint pageRangeWidth = maxPageCoord.x - minPageCoord.x + 1u;
 
@@ -381,7 +381,9 @@ void WG_PageJobRasterPage(
     const uint triCount = CLodDescTriangleCount(desc);
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer =
@@ -445,9 +447,7 @@ void WG_PageJobRasterPage(
     GroupMemoryBarrierWithGroupSync();
 
     // Rasterize all triangles clipped to this single page.
-    const bool dynamicLayer =
-        (perMeshBuffer[meshInst.perMeshBufferIndex].vertexFlags &
-            VERTEX_SKINNED) != 0u;
+    const bool dynamicLayer = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster);
     RWTexture2D<uint> physicalPages =
         ResourceDescriptorHeap[
             dynamicLayer
@@ -548,11 +548,14 @@ void WG_PageJobRasterPage(
 
     // Only static writes establish persistent cache validity. No barrier is
     // needed because every contributing thread writes the same idempotent OR.
-    if (anyPixelWritten && !dynamicLayer) {
+    if (anyPixelWritten) {
         uint ignored = 0u;
         InterlockedOr(
             pageTableUAV[uint3(wrappedPageCoords, clipmapLayer)],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            dynamicLayer
+                ? kCLodVirtualShadowDynamicContentMask
+                : kCLodVirtualShadowContentValidMask |
+                    kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
 }

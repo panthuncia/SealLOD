@@ -433,7 +433,7 @@ void ApplyAssemblySkinningToVertex(
         assemblyTransformIndex);
     vertex.position = mul(float4(vertex.position, 1.0f), skinMatrix).xyz;
     vertex.normal = normalize(mul(vertex.normal, (float3x3)skinMatrix));
-    vertex.tangent = normalize(mul(vertex.tangent, (float3x3)skinMatrix));
+    vertex.tangent.xyz = normalize(mul(vertex.tangent.xyz, (float3x3)skinMatrix));
     vertex.skinning = skinning;
 }
 

@@ -275,7 +275,16 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_FORCE_LOD asint(UintRootConstant44)
 #define WT_CAPACITY_TARGET asfloat(UintRootConstant45)
 #define WT_LATE_RESERVE asfloat(UintRootConstant46)
+#define WT_WIND_INNER_RADIUS asfloat(UintRootConstant45)
+#define WT_WIND_OUTER_RADIUS asfloat(UintRootConstant46)
 #define WT_ALLOCATION_RECORDS UintRootConstant47
+// Reset and Finalize do not consume the quality-curve constants. Alias four of
+// those slots for published visibility instead of extending the renderer's
+// fixed 48-dword misc-root-constant ABI.
+#define WT_VISIBLE_SKELETONS UintRootConstant30
+#define WT_VISIBLE_SKELETON_COUNTER UintRootConstant31
+#define WT_VISIBLE_SKELETON_MEMBERSHIP UintRootConstant32
+#define WT_VISIBLE_SKELETON_CAPACITY UintRootConstant33
 
 static const uint WindTransientSlotBase = 65536u;
 static const uint WindTypeFlag = 2u;
@@ -303,6 +312,12 @@ struct WindActiveInstanceGPU {
 	uint instanceTransformIndex, stableSceneId, transformOffsetMatrices, inverseSkinOffsetMatrices;
 	float screenFraction;
 	uint priorityKey;
+	float windWeight;
+	uint pad0;
+};
+struct DynamicWindVisibleSkeletonGPU {
+	uint instanceTransformIndex, transientSkinningSlot, stableSceneId, typeId;
+	uint skeletonLod, priorityKey;
 };
 struct WindIndirectCommandGPU { uint typeId, pad0, pad1; uint3 dispatch; };
 struct WindAllocationRecordGPU {
@@ -330,7 +345,13 @@ void ResetWindTransientCS(uint3 tid : SV_DispatchThreadID)
         if (info.boneCount != 0u) info.flags |= WindHistoryValidFlag;
         info.boneCount = 0u;
         infos[slot] = info;
+		RWStructuredBuffer<uint> membership = ResourceDescriptorHeap[WT_VISIBLE_SKELETON_MEMBERSHIP];
+		membership[tid.x] = 0u;
     }
+	if (tid.x == 0u) {
+		RWStructuredBuffer<uint> visibleCounter = ResourceDescriptorHeap[WT_VISIBLE_SKELETON_COUNTER];
+		visibleCounter[0] = 0u;
+	}
     if (tid.x < WT_TYPE_COUNT) typeCounters[tid.x] = 0u;
     if (tid.x < WT_TYPE_COUNT) {
         RWStructuredBuffer<uint> processedTypeCounts = ResourceDescriptorHeap[WT_ALLOCATION_RECORDS];
@@ -434,6 +455,22 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
 	Camera camera = cameras[WT_CAMERA_INDEX];
 	float3 centerWS = mul(float4(placement.localBoundingSphere.xyz, 1.0f), objectData.model).xyz;
 	float radiusWS = placement.localBoundingSphere.w * placement.boundsScale * WindMaxAxisScale(objectData.model);
+	const float3 cameraWorldPosition = camera.positionWorldSpace.xyz;
+	const float surfaceDistance = max(0.0f, length(centerWS - cameraWorldPosition) - radiusWS);
+	const float innerRadius = max(0.0f, WT_WIND_INNER_RADIUS);
+	const float outerRadius = max(innerRadius, WT_WIND_OUTER_RADIUS);
+	float windWeight = 0.0f;
+	if (outerRadius > 0.0f && surfaceDistance < outerRadius) {
+		windWeight = outerRadius > innerRadius
+			? 1.0f - smoothstep(innerRadius, outerRadius, surfaceDistance)
+			: 1.0f;
+	}
+	if (windWeight <= 0.0f) {
+		InterlockedAdd(counters[8], 1u);
+		return;
+	}
+	RWStructuredBuffer<uint> radiusDiagnostics = ResourceDescriptorHeap[WT_BONES];
+	InterlockedAdd(radiusDiagnostics[windWeight >= 0.999f ? 90u : 91u], 1u);
 	float3 centerVS = mul(float4(centerWS, 1.0f), camera.view).xyz;
 	const float screenFraction = radiusWS * abs(camera.projection._22) /
 		max(abs(centerVS.z), radiusWS + 1.0e-3f);
@@ -531,6 +568,8 @@ void ActivateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
     active.transformOffsetMatrices = 0u;
     active.inverseSkinOffsetMatrices = 0u;
 	active.screenFraction = screenFraction;
+	active.windWeight = windWeight;
+	active.pad0 = 0u;
 	const WindTypeGPU selectedType = types[typeId];
 	float marginalValue = screenFraction * screenFraction;
 	if (lodLevel + 1u < variantCount) {
@@ -792,6 +831,34 @@ void FinalizeWindAllocationsCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 		: active.transformOffsetMatrices;
 	transientInfo.stableSceneId = active.stableSceneId;
 	infos[transientSlot] = transientInfo;
+
+	RWStructuredBuffer<uint> membership = ResourceDescriptorHeap[WT_VISIBLE_SKELETON_MEMBERSHIP];
+	uint previousMembership = 0u;
+	// Early and late allocation phases share this table. Reserve the placement
+	// before allocating a list entry so a placement can be published only once.
+	InterlockedCompareExchange(
+		membership[active.instanceTransformIndex], 0u, 0xFFFFFFFFu, previousMembership);
+	if (previousMembership == 0u) {
+		RWStructuredBuffer<uint> visibleCounter = ResourceDescriptorHeap[WT_VISIBLE_SKELETON_COUNTER];
+		uint visibleIndex = 0u;
+		InterlockedAdd(visibleCounter[0], 1u, visibleIndex);
+		if (visibleIndex < WT_VISIBLE_SKELETON_CAPACITY) {
+		DynamicWindVisibleSkeletonGPU visible;
+		visible.instanceTransformIndex = active.instanceTransformIndex;
+		visible.transientSkinningSlot = transientSlot;
+		visible.stableSceneId = active.stableSceneId;
+		visible.typeId = typeId;
+		visible.skeletonLod = type.lodLevel;
+		visible.priorityKey = active.priorityKey;
+		RWStructuredBuffer<DynamicWindVisibleSkeletonGPU> visibleSkeletons =
+			ResourceDescriptorHeap[WT_VISIBLE_SKELETONS];
+		visibleSkeletons[visibleIndex] = visible;
+		membership[active.instanceTransformIndex] = visibleIndex + 1u;
+		} else {
+			// Overflow is a performance-only event: leave this placement uncached.
+			membership[active.instanceTransformIndex] = 0u;
+		}
+	}
 	}
 }
 
@@ -909,7 +976,7 @@ void SimulateWindInstancesCS(uint3 tid : SV_DispatchThreadID)
                 0.70f * sin(WT_TIME * 0.71f + phase) +
                 0.30f * sin(WT_TIME * 1.93f + phase * 1.37f);
             const float gust = max(0.0f, 1.0f + WT_GUST * (1.0f - saturate(driver.gustAttenuation)) * gustNoise);
-            const float forcing = driver.influence * WT_STRENGTH * response * gust;
+            const float forcing = driver.influence * WT_STRENGTH * response * gust * inst.windWeight;
             maximumForcing = max(maximumForcing, abs(forcing));
 
             float drag = driver.meanBend + driver.parallelAmplitude * WindInstanceHarmonics(driver, inst.stableSceneId, 0u);

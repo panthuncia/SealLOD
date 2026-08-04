@@ -3,6 +3,7 @@
 
 static const uint kCLodVirtualShadowClipmapValidFlag = 0x1u;
 static const uint kCLodVirtualShadowClipmapInvalidateFlag = 0x2u;
+static const uint kCLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
 static const uint kCLodVirtualShadowAllocatedMask = 0x80000000u;
 static const uint kCLodVirtualShadowDirtyMask = 0x40000000u;
 static const uint kCLodVirtualShadowContentValidMask = 0x20000000u;
@@ -10,7 +11,8 @@ static const uint kCLodVirtualShadowVisitedMask = 0x10000000u;
 static const uint kCLodVirtualShadowRerenderedThisFrameMask = 0x08000000u;
 static const uint kCLodVirtualShadowAdmittedThisFrameMask = 0x04000000u;
 static const uint kCLodVirtualShadowUpgradePendingMask = 0x02000000u;
-static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
+static const uint kCLodVirtualShadowDynamicContentMask = 0x01000000u;
+static const uint kCLodVirtualShadowPhysicalPageIndexMask = 0x00FFFFFFu;
 static const uint kCLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
 static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
 static const uint kCLodVirtualShadowPhysicalPageAllocationGenerationMask = 0xFFFFFFFEu;
@@ -55,6 +57,11 @@ static const uint kCLodVirtualShadowMovedInstanceBitWordCount =
 static const uint kInvalidShadowCameraIndex = 0xFFFFFFFFu;
 static const uint kCLodVirtualShadowMarkTileSize = 16u;
 static const uint kCLodVirtualShadowBlockPagesPerAxis = 4u;
+static const uint kCLodVirtualShadowReceiverSubpagesPerAxis = 4u;
+static const uint kCLodVirtualShadowMaxReceiverPageCount =
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowMaxPageTableResolution *
+    kCLodVirtualShadowClipmapCount;
 static const uint kCLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (kCLodVirtualShadowBlockPagesPerAxis * kCLodVirtualShadowBlockPagesPerAxis) / 2u;
 static const uint kCLodVirtualShadowMaxBlocksPerAxis =
@@ -355,6 +362,102 @@ uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShado
     return CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapData.pageTableResolution);
 }
 
+bool CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    return (clipmapInfo.flags & kCLodVirtualShadowClipmapDynamicSkinnedFlag) != 0u;
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(float2 shadowUv, uint pageTableResolution)
+{
+    const uint resolution = max(pageTableResolution, 1u) *
+        kCLodVirtualShadowReceiverSubpagesPerAxis;
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(
+    float2 shadowUv,
+    uint pageTableResolution,
+    uint subpagesPerAxis)
+{
+    const uint resolution = max(pageTableResolution, 1u) * max(subpagesPerAxis, 1u);
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverMaskForPageRect(
+    uint2 globalSubpageMin,
+    uint2 globalSubpageMax,
+    uint2 pageCoord,
+    uint subpagesPerAxis)
+{
+    const uint2 pageOrigin = pageCoord * subpagesPerAxis;
+    if (any(globalSubpageMax < pageOrigin) ||
+        any(globalSubpageMin >= pageOrigin + subpagesPerAxis))
+    {
+        return uint2(0u, 0u);
+    }
+    const uint2 localMin = max(globalSubpageMin, pageOrigin) - pageOrigin;
+    const uint2 localMax = min(globalSubpageMax, pageOrigin + subpagesPerAxis - 1u) - pageOrigin;
+    const uint width = localMax.x - localMin.x + 1u;
+    const uint rowBits = ((1u << width) - 1u) << localMin.x;
+    uint2 result = uint2(0u, 0u);
+    [unroll]
+    for (uint y = 0u; y < 8u; ++y)
+    {
+        if (y < subpagesPerAxis && y >= localMin.y && y <= localMax.y)
+        {
+            const uint bitOffset = y * subpagesPerAxis;
+            if (bitOffset < 32u)
+            {
+                result.x |= rowBits << bitOffset;
+            }
+            else
+            {
+                result.y |= rowBits << (bitOffset - 32u);
+            }
+        }
+    }
+    return result;
+}
+
+uint CLodVirtualShadowReceiverPageLinearIndex(uint2 pageCoord, uint clipmapIndex)
+{
+    return clipmapIndex *
+            (kCLodVirtualShadowMaxPageTableResolution *
+                kCLodVirtualShadowMaxPageTableResolution) +
+        pageCoord.y * kCLodVirtualShadowMaxPageTableResolution +
+        pageCoord.x;
+}
+
+uint CLodVirtualShadowBlockMaskForPageRect(
+    uint2 logicalPageMin,
+    uint2 logicalPageMax,
+    uint2 blockOriginPage)
+{
+    uint activeMask = 0u;
+    [unroll]
+    for (uint localPageY = 0u;
+         localPageY < kCLodVirtualShadowBlockPagesPerAxis;
+         ++localPageY)
+    {
+        [unroll]
+        for (uint localPageX = 0u;
+             localPageX < kCLodVirtualShadowBlockPagesPerAxis;
+             ++localPageX)
+        {
+            const uint2 logicalPageCoord =
+                blockOriginPage + uint2(localPageX, localPageY);
+            if (all(logicalPageCoord >= logicalPageMin) &&
+                all(logicalPageCoord <= logicalPageMax))
+            {
+                activeMask |= 1u <<
+                    (localPageY * kCLodVirtualShadowBlockPagesPerAxis +
+                        localPageX);
+            }
+        }
+    }
+    return activeMask;
+}
+
 uint2 CLodVirtualShadowWrappedPageCoords(
     uint2 virtualPageCoords,
     CLodVirtualShadowClipmapInfo clipmapInfo)
@@ -583,12 +686,12 @@ float CLodVirtualShadowContinuousClipmapLevel(
     const float clip0FrustumScale = 0.5f * max(clip0TexelWorldSize, 1.0e-5f) * (float)kCLodVirtualShadowFixedVirtualResolution;
     const float baseScale = max(clip0FrustumScale * scaleRatio, 1.0e-5f);
     const float distanceFromCamera = length(positionWS - cameraPositionWS);
-    // Clip selection ultimately addresses an integer level. Preserve its
-    // existing bias semantics while retaining the fractional distance term for
-    // smoothly varying trace/filter parameters between transitions.
+    // The configured bias is baked into clip0TexelWorldSize. Keeping the same
+    // full (fractional) term here cancels that physical scale for clip ownership
+    // while the selected clip's texel/page footprint changes continuously.
     const float clipLevel =
         log2(max(distanceFromCamera / baseScale, 1.0f)) +
-        floor(directionalLodBias);
+        directionalLodBias;
     return clamp(
         clipLevel,
         0.0f,

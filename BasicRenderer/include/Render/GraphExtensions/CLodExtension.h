@@ -244,6 +244,7 @@ private:
     std::shared_ptr<Buffer> m_shadowMarkedBlocksMaskBuffer;
     std::shared_ptr<Buffer> m_shadowMarkedBlocksListBuffer;
     std::shared_ptr<Buffer> m_shadowMarkedBlocksCountBuffer;
+    std::shared_ptr<Buffer> m_shadowReceiverSubpageMaskBuffer;
     std::shared_ptr<Buffer> m_shadowActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
     std::shared_ptr<Buffer> m_shadowBlockClusterCoverageBuffer;

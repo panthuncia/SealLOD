@@ -12,6 +12,10 @@
 #define CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX UintRootConstant21
 #define CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX UintRootConstant24
 #define CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX UintRootConstant25
+// Slots 0-32 carry shared CLod traversal state. In particular, slot 26 is
+// CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT and must survive object-cull setup.
+#define CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS UintRootConstant33
+#define CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX UintRootConstant34
 
 #define CLOD_PC_DISPATCH_COUNTER_DESCRIPTOR_INDEX UintRootConstant20
 #define CLOD_PC_DISPATCH_ARGS_DESCRIPTOR_INDEX UintRootConstant21

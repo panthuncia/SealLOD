@@ -1866,6 +1866,10 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
 		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);
+	settingsManager.registerSetting<float>(ProceduralWindInnerRadiusSettingName, 8000.0f);
+	settingsManager.registerSetting<float>(ProceduralWindOuterRadiusSettingName, 10000.0f);
+	settingsManager.registerSetting<float>(CLodSkinnedShadowRadiusSettingName, 10000.0f);
+	settingsManager.registerSetting<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName, -1);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodCapacityTargetSettingName, 0.95f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
@@ -1994,6 +1998,7 @@ void Renderer::SetSettings() {
         CLodReyesShadowCoarseTargetPagesPerTriangleDefault);
     settingsManager.registerSetting<uint32_t>(CLodPageJobDiameterThresholdSettingName, 64u);
     settingsManager.registerSetting<uint32_t>(CLodSoftwareRasterDiameterThresholdSettingName, 16u);
+    settingsManager.registerSetting<uint32_t>(CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName, 32u);
     settingsManager.registerSetting<float>(CLodPageJobSparseRatioSettingName, 0.5f);
     settingsManager.registerSetting<uint32_t>(CLodPageJobMaxPagesPerClusterSettingName, 32u);
     settingsManager.registerSetting<uint32_t>(CLodPageJobRecordCapacitySettingName, CLodPageJobDefaultRecordCapacity);
@@ -2075,6 +2080,19 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName,
         ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 500u));
+    settingsManager.registerSetting<bool>(
+        CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
+        false);
+    settingsManager.registerSetting<uint32_t>(
+        CLodDirectionalVirtualShadowReceiverSubpageModeSettingName,
+        CLodVirtualShadowReceiverSubpageModeOff);
+    settingsManager.registerSetting<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, false);
+    settingsManager.registerSetting<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, 16u);
+    settingsManager.registerSetting<bool>(CLodDynamicWindVertexCacheEnabledSettingName, false);
+    settingsManager.registerSetting<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, 64u);
+    settingsManager.registerSetting<bool>(
+        CLodDirectionalVirtualShadowDynamicContentFilterSettingName,
+        false);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
@@ -2268,6 +2286,21 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodPageJobForceAllSettingName, [this](const bool& newValue) {
         (void)newValue;
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, [this](const bool&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, [this](const uint32_t&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindVertexCacheEnabledSettingName, [this](const bool&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, [this](const uint32_t&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName, [this](const uint32_t&) {
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodVisibleClusterCapacitySettingName, [this](const uint32_t& newValue) {
@@ -3290,6 +3323,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
     m_clodVisibleCounterReadbackPending = true;
     m_clodReplayStateReadbackPending = true;
 
+    uint32_t primaryActiveSetWorkloads = 0u;
+    uint32_t primaryActiveSetMembers = 0u;
     if (auto* objectManager = m_managerInterface.GetObjectManager()) {
         auto activeStats = objectManager->SnapshotActiveDrawSetDebugStats();
         std::uint64_t totalSpan = 0;
@@ -3306,6 +3341,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             totalCpuStale += row.cpuGenerationStale;
             totalCpuOutOfRange += row.cpuGenerationOutOfRange;
         }
+        primaryActiveSetWorkloads = static_cast<uint32_t>(activeStats.size());
+        primaryActiveSetMembers = static_cast<uint32_t>((std::min<std::uint64_t>)(totalLive, UINT32_MAX));
         spdlog::info(
             "SARP CLOD active-set CPU telemetry: frame={} workloads={} span={} live={} tombstone_est={} cpu_match={} cpu_stale={} cpu_oob={}",
             requestedFrame,
@@ -3344,7 +3381,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::RasterizeClustersPass2",
         telemetryResource.get(),
         RangeSpec{},
-        [this, requestedFrame](ReadbackCaptureResult&& result) {
+        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](ReadbackCaptureResult&& result) {
             m_clodTelemetryReadbackPending = false;
 
             constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -3367,6 +3404,23 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                     depthBin * footprintBinCount + footprintBin;
                 return decoded.counters[index];
             };
+
+            const uint32_t traversalLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesLeafNodeRecords);
+            const uint32_t nonresidentLeaves = counter(CLodWorkGraphCounterIndex::SegmentEvaluateNonResidentRefinedChildThreads);
+            PublishCLodTelemetrySnapshot(g_clodPrimaryVisibility, CLodPrimaryVisibilitySnapshot{
+                .frame = requestedFrame,
+                .traversalLeaves = traversalLeaves,
+                .errorRejectedLeaves = counter(CLodWorkGraphCounterIndex::TraverseNodesRejectedByErrorRecords),
+                .residentLeaves = traversalLeaves > nonresidentLeaves ? traversalLeaves - nonresidentLeaves : 0u,
+                .nonresidentLeaves = nonresidentLeaves,
+                .visibleClusterWrites = counter(CLodWorkGraphCounterIndex::ClusterCullVisibleClusterWrites),
+                .rasterInitializationFailures = counter(CLodWorkGraphCounterIndex::RasterMeshShaderInitFailed),
+                .sourceGroupMismatches = counter(CLodWorkGraphCounterIndex::RasterMeshShaderSourceGroupMismatch),
+                .outputTriangles = counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
+                .activeSetWorkloads = primaryActiveSetWorkloads,
+                .activeSetMembers = primaryActiveSetMembers,
+                .depthTileOccupancyAvailable = false,
+            });
 
 			spdlog::info(
 				"SARP CLOD visibility telemetry: frame={} object(in_range={} visible={} total={} rejected_stale_generation={} rejected_frustum={} rejected_occlusion={} replay_rejected_occlusion={} invalid_bounds={}) traverse(internal={} leaf={} culled={} rejected_error={} active_children={} emitted={} child_frustum={} child_lod={}) stream(request_attempts={} range_rejects={} resident_hits={} request_appends={}) cluster(in_range={} visible_writes={} total={} rejected_frustum={} rejected_condition2={} rejected_occlusion={} rejected_out_of_range={} zero_survivor_waves={} nonresident_leaf={} emit_bucket={}) voxel_object(candidates={} frustum_reject={} visible={} traverse={} root_internal={} root_leaf={}) voxel(leaves={} rejected_error={} desc_hits={} desc_misses={} raster_work={} raster_dropped={}) voxel_raster(groups={} rigid={} skinned={} cube_candidates={} skin_bone_groups={} invalid_cluster={} desc_miss={} invalid_payload={} bad_width={} proj_reject={} scissor_reject={} depth_reject={} dda_miss={} vis_writes={} vis_wins={} vis_losses={} projected_px={} queued_px={} queue_overflow={} nonpos_depth={}) raster(groups={} in_range={} init_failed={} source_group_mismatch={} zero_tri_outputs={} out_tris={}) sort(compact_inputs={} voxel_skipped={} reyes_skipped={} compact_tris={})",
@@ -3760,6 +3814,38 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.composedPageCount,
                 stats.admittedPageCount,
                 admittedPagesCleared);
+            constexpr uint64_t physicalPageTexelCount =
+                static_cast<uint64_t>(CLodVirtualShadowPhysicalPageSize) *
+                static_cast<uint64_t>(CLodVirtualShadowPhysicalPageSize);
+            const uint64_t staticQueuedTexels =
+                static_cast<uint64_t>(stats.physicalPageClearCount) * physicalPageTexelCount;
+            const uint64_t dynamicQueuedTexels =
+                static_cast<uint64_t>(stats.dynamicPageClearCount) * physicalPageTexelCount;
+            CLodVirtualShadowPageAttributionSnapshot pageAttribution{
+                .frame = requestedFrame,
+                .pageSize = CLodVirtualShadowPhysicalPageSize,
+                .staticQueuedPages = stats.physicalPageClearCount,
+                .dynamicQueuedPages = stats.dynamicPageClearCount,
+                .composedPages = stats.composedPageCount,
+                .admittedPages = stats.admittedPageCount,
+            };
+            std::copy_n(stats.selectedPixels, pageAttribution.selectedPixels.size(), pageAttribution.selectedPixels.begin());
+            std::copy_n(stats.requestedPages, pageAttribution.requestedPages.size(), pageAttribution.requestedPages.begin());
+            std::copy_n(stats.allocatedPageTableEntries, pageAttribution.allocatedPages.size(), pageAttribution.allocatedPages.begin());
+            std::copy_n(stats.visitedPageTableEntries, pageAttribution.visitedPages.size(), pageAttribution.visitedPages.begin());
+            PublishCLodTelemetrySnapshot(g_clodVsmPageAttribution, pageAttribution);
+            spdlog::info(
+                "CLOD VSM page area frame={}: pageSize={} staticQueued(pages={},texels={}) dynamicQueued(pages={},texels={}) totalQueued(pages={},texels={}) composed(pages={},texels={})",
+                requestedFrame,
+                CLodVirtualShadowPhysicalPageSize,
+                stats.physicalPageClearCount,
+                staticQueuedTexels,
+                stats.dynamicPageClearCount,
+                dynamicQueuedTexels,
+                stats.physicalPageClearCount + stats.dynamicPageClearCount,
+                staticQueuedTexels + dynamicQueuedTexels,
+                stats.composedPageCount,
+                static_cast<uint64_t>(stats.composedPageCount) * physicalPageTexelCount);
             spdlog::info(
                 "CLOD VSM raster expansion frame={}: swBlocks(requested={},committed={},dropped={}) pageJobs(requested={},committed={},dropped={},doubleSided={})",
                 requestedFrame,
@@ -3812,6 +3898,31 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             "CLodShadow::RasterizeClustersPass1",
             workTelemetryResource.get(),
             RangeSpec{},
+            [requestedFrame](ReadbackCaptureResult&& result) {
+                constexpr size_t telemetryBytes =
+                    sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
+                if (result.data.size() < telemetryBytes) {
+                    return;
+                }
+                CLodWorkGraphTelemetryCounters decoded{};
+                std::memcpy(decoded.counters.data(), result.data.data(), telemetryBytes);
+                const auto counter = [&](CLodWorkGraphCounterIndex index) {
+                    return decoded.counters[static_cast<size_t>(index)];
+                };
+                PublishCLodTelemetrySnapshot(g_clodVsmHardwareAttribution, CLodVirtualShadowHardwareAttributionSnapshot{
+                    .frame = requestedFrame,
+                    .invocations = counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
+                    .pageRejected = counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
+                    .writes = counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites),
+                });
+            });
+        readbackService->RequestReadbackCapture(
+            // Compose consumes the completed static and dynamic shadow layers,
+            // so it is the first stable cross-queue attribution point. Reading
+            // at either raster pass can observe only graphics or only compute.
+            "CLodShadow::VirtualShadowComposePagesPass",
+            workTelemetryResource.get(),
+            RangeSpec{},
             [this, requestedFrame](ReadbackCaptureResult&& result) {
                 m_clodVirtualShadowWorkTelemetryReadbackPending = false;
                 constexpr size_t telemetryBytes =
@@ -3828,6 +3939,10 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     decoded.counters.data(),
                     result.data.data(),
                     telemetryBytes);
+                PublishCLodTelemetrySnapshot(g_clodVsmWorkAttribution, CLodVirtualShadowWorkAttributionSnapshot{
+                    .frame = requestedFrame,
+                    .counters = decoded,
+                });
                 const auto counter = [&](CLodWorkGraphCounterIndex index) {
                     return decoded.counters[static_cast<size_t>(index)];
                 };
@@ -3868,6 +3983,29 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectReyesDisplacement),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectBelowThreshold),
                     counter(CLodWorkGraphCounterIndex::ClassifyPJRejectDisabled));
+                spdlog::info(
+                    "CLOD VSM pixel attribution frame={}: hw(invocations={},pageRejected={},writes={}) sw(available=false)",
+                    requestedFrame,
+                    counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+				spdlog::info(
+					"CLOD VSM DynamicWind cache frame={}: bounds(hit={},miss={},insert={},race={},probeFail={},ineligible={}) clusters(eligible={},unique={},duplicate={}) vertices(requested={},skinned={},fallback={},cachedRaster={},inlineRaster={})",
+					requestedFrame,
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheHits),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheMisses),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheInsertions),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheRaces),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheProbeFailures),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheIneligible),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheUniqueClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheDuplicateClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheRequestedVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheSkinnedVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheFallbackVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheCachedRasterVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices));
             });
     }
 }
@@ -4917,16 +5055,20 @@ void Renderer::RegisterPipelineExtensions() {
                         .streamingSystem = clodStreamingSystem }),
                 extensionId);
         });
-    for (const auto& entry : m_pipelineRecipe.Techniques()) {
-        entry.technique->RegisterExtensions(extensionContext);
-    }
-
+    // Recipe extensions may register resources consumed by technique extensions
+    // (ProceduralWind visibility is consumed by CLod shadow traversal). Register
+    // producers first; structural insertion constraints are resolved only after
+    // every extension has been gathered, so this does not require their target
+    // passes to have been materialized yet.
     for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
         auto extension = factory();
         if (!extension) {
             throw std::runtime_error("Pipeline extension factory returned null: " + id);
         }
         currentRenderGraph->RegisterExtension(std::move(extension), id);
+    }
+    for (const auto& entry : m_pipelineRecipe.Techniques()) {
+        entry.technique->RegisterExtensions(extensionContext);
     }
 }
 

@@ -19,7 +19,8 @@ public:
         std::shared_ptr<Buffer> markClipmapDataBuffer,
         std::shared_ptr<Buffer> markedBlocksMaskBuffer,
         std::shared_ptr<Buffer> markedBlocksListBuffer,
-        std::shared_ptr<Buffer> markedBlocksCountBuffer);
+        std::shared_ptr<Buffer> markedBlocksCountBuffer,
+        std::shared_ptr<Buffer> receiverSubpageMaskBuffer);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
     void Setup() override;
@@ -30,6 +31,7 @@ public:
 private:
     PipelineState m_pso;
     PipelineState m_clearPso;
+    PipelineState m_clearUint2Pso;
     rhi::CommandSignaturePtr m_commandSignature;
     std::shared_ptr<Buffer> m_tileWorkBuffer;
     std::shared_ptr<Buffer> m_tileCountBuffer;
@@ -38,5 +40,7 @@ private:
     std::shared_ptr<Buffer> m_markedBlocksMaskBuffer;
     std::shared_ptr<Buffer> m_markedBlocksListBuffer;
     std::shared_ptr<Buffer> m_markedBlocksCountBuffer;
+    std::shared_ptr<Buffer> m_receiverSubpageMaskBuffer;
     uint32_t m_activeClipmapCount = 0u;
+    uint32_t m_receiverSubpageMode = 0u;
 };

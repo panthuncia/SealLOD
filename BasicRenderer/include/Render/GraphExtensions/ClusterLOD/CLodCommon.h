@@ -34,6 +34,7 @@ inline constexpr const char* CLodVSMRasterModeSettingName = "clodVsmRasterMode";
 inline constexpr const char* CLodReyesShadowCoarseTargetPagesPerTriangleSettingName = "clodReyesShadowCoarseTargetPagesPerTriangle";
 inline constexpr const char* CLodPageJobDiameterThresholdSettingName = "clodPageJobDiameterThreshold";
 inline constexpr const char* CLodSoftwareRasterDiameterThresholdSettingName = "clodSoftwareRasterDiameterThreshold";
+inline constexpr const char* CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName = "clodVirtualShadowSoftwareRasterDiameterThreshold";
 inline constexpr const char* CLodPageJobSparseRatioSettingName = "clodPageJobSparseRatio";
 inline constexpr const char* CLodPageJobMaxPagesPerClusterSettingName = "clodPageJobMaxPagesPerCluster";
 inline constexpr const char* CLodPageJobRecordCapacitySettingName = "clodPageJobRecordCapacity";
@@ -111,6 +112,16 @@ inline constexpr const char* CLodDirectionalVirtualShadowAutoLodBiasScaleSetting
 inline constexpr const char* CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName = "clodDirectionalVirtualShadowPredictiveLodInvalidation";
 inline constexpr const char* CLodDirectionalVirtualShadowPageRenderBudgetSettingName = "clodDirectionalVirtualShadowPageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName = "clodDirectionalVirtualShadowUpgradePageRenderBudget";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageModeSettingName = "clodDirectionalVirtualShadowReceiverSubpageMode";
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageModeOff = 0u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageMode4x4 = 4u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageMode8x8 = 8u;
+inline constexpr const char* CLodDynamicWindBoundsCacheEnabledSettingName = "clodDynamicWindBoundsCacheEnabled";
+inline constexpr const char* CLodDynamicWindBoundsCacheMiBSettingName = "clodDynamicWindBoundsCacheMiB";
+inline constexpr const char* CLodDynamicWindVertexCacheEnabledSettingName = "clodDynamicWindVertexCacheEnabled";
+inline constexpr const char* CLodDynamicWindVertexCacheMiBSettingName = "clodDynamicWindVertexCacheMiB";
+inline constexpr const char* CLodDirectionalVirtualShadowDynamicContentFilterSettingName = "clodDirectionalVirtualShadowDynamicContentFilter";
 
 struct CLodVirtualShadowBudgetAdmission
 {
@@ -507,6 +518,11 @@ inline constexpr float CLodVirtualShadowDefaultReceiverTraceUncertaintyScale = 1
 inline constexpr float CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale = 0.5f;
 inline constexpr uint32_t CLodVirtualShadowMarkTileSize = 16u;
 inline constexpr uint32_t CLodVirtualShadowBlockPagesPerAxis = 4u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpagesPerAxis = 4u;
+inline constexpr uint32_t CLodVirtualShadowMaxReceiverPageCount =
+    CLodVirtualShadowMaxPageTableResolution *
+    CLodVirtualShadowMaxPageTableResolution *
+    CLodVirtualShadowMaxSupportedClipmapCount;
 inline constexpr uint32_t CLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (CLodVirtualShadowBlockPagesPerAxis * CLodVirtualShadowBlockPagesPerAxis) / 2u;
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerAxis =
@@ -529,15 +545,22 @@ inline constexpr uint32_t CLodVirtualShadowFallbackDependencyHashCapacity = 1u <
 // subsequently became available. The VSM setup pass consumes this as a
 // one-shot conservative recovery.
 inline std::atomic<bool> g_clodVirtualShadowFeedbackRecoveryRequested{false};
+inline std::atomic<uint32_t> g_clodSkinnedShadowEffectiveDynamicClipmapCount{0u};
+inline std::atomic<uint32_t> g_clodSkinnedShadowActiveClipmapCount{0u};
+inline std::atomic<uint32_t> g_clodSkinnedShadowDynamicClipmapMask{0u};
+inline std::atomic<uint64_t> g_clodSkinnedShadowClassificationGeneration{0u};
+inline std::atomic<uint64_t> g_clodSkinnedShadowOneShotInvalidationCount{0u};
 inline constexpr uint32_t CLodVirtualShadowClipmapValidFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowClipmapInvalidateFlag = 0x2u;
+inline constexpr uint32_t CLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
 inline constexpr uint32_t CLodVirtualShadowPageAllocatedMask = 0x80000000u;
 inline constexpr uint32_t CLodVirtualShadowPageDirtyMask = 0x40000000u;
 inline constexpr uint32_t CLodVirtualShadowPageContentValidMask = 0x20000000u;
 inline constexpr uint32_t CLodVirtualShadowPageVisitedMask = 0x10000000u;
 inline constexpr uint32_t CLodVirtualShadowPageRerenderedThisFrameMask = 0x08000000u;
 inline constexpr uint32_t CLodVirtualShadowPageAdmittedThisFrameMask = 0x04000000u;
-inline constexpr uint32_t CLodVirtualShadowPhysicalPageIndexMask = 0x01FFFFFFu;
+inline constexpr uint32_t CLodVirtualShadowDynamicContentMask = 0x01000000u;
+inline constexpr uint32_t CLodVirtualShadowPhysicalPageIndexMask = 0x00FFFFFFu;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageResidentFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageAllocationGenerationShift = 1u;
 inline constexpr uint32_t CLodVirtualShadowInvalidationFlagUsePreviousBounds = 0x1u;
@@ -935,7 +958,7 @@ struct CLodVirtualShadowInvalidationInput
 {
     uint32_t perMeshInstanceBufferIndex = 0u;
     uint32_t flags = 0u;
-    uint32_t pad0 = 0u;
+    uint32_t clipmapMask = 0xFFFFFFFFu;
     uint32_t pad1 = 0u;
 };
 

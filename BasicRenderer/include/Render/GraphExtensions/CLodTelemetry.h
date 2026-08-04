@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 enum class CLodWorkGraphCounterIndex : uint32_t {
     ObjectCullThreads = 0,
@@ -240,15 +241,126 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     NodeBoundsExplicitBoneCount3To4,
     NodeBoundsExplicitBoneCount5To8,
     NodeBoundsExplicitBoneCount9Plus,
+    DynamicWindBoundsCacheHits,
+    DynamicWindBoundsCacheMisses,
+    DynamicWindBoundsCacheInsertions,
+    DynamicWindBoundsCacheRaces,
+    DynamicWindBoundsCacheProbeFailures,
+    // mesh.hlsl has historically published these two hardware-raster counters
+    // at ABI slots 264 and 266.  Keep them explicit so newly appended telemetry
+    // cannot silently alias the mesh path again.
+    RasterMeshShaderSkinnedGroups,
+    DynamicWindBoundsCacheIneligible,
+    RasterMeshShaderSkinnedOutputTriangles,
+    DynamicWindSkinCacheEligibleClusters,
+    DynamicWindSkinCacheUniqueClusters,
+    DynamicWindSkinCacheDuplicateClusters,
+    DynamicWindSkinCacheRequestedVertices,
+    DynamicWindSkinCacheSkinnedVertices,
+    DynamicWindSkinCacheFallbackVertices,
+    DynamicWindSkinCacheCachedRasterVertices,
+    DynamicWindSkinCacheInlineRasterVertices,
+    ReceiverSubpageMeshletTests,
+    ReceiverSubpageMeshletRejects,
+    DynamicWindSkinCachePositionBytesUsed,
+    DynamicWindSkinCacheMetadataBytesUsed,
+
     Count
 };
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =
     static_cast<uint32_t>(CLodWorkGraphCounterIndex::Count);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 264u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 266u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 267u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 274u);
 
 struct CLodWorkGraphTelemetryCounters {
     std::array<uint32_t, CLodWorkGraphCounterCount> counters{};
 };
+
+inline constexpr uint32_t CLodVsmAttributionClipmapCapacity = 22u;
+
+struct CLodVirtualShadowPageAttributionSnapshot {
+    uint64_t frame = 0u;
+    uint32_t pageSize = 0u;
+    uint32_t staticQueuedPages = 0u;
+    uint32_t dynamicQueuedPages = 0u;
+    uint32_t composedPages = 0u;
+    uint32_t admittedPages = 0u;
+    std::array<uint32_t, CLodVsmAttributionClipmapCapacity> selectedPixels{};
+    std::array<uint32_t, CLodVsmAttributionClipmapCapacity> requestedPages{};
+    std::array<uint32_t, CLodVsmAttributionClipmapCapacity> allocatedPages{};
+    std::array<uint32_t, CLodVsmAttributionClipmapCapacity> visitedPages{};
+};
+
+struct CLodVirtualShadowWorkAttributionSnapshot {
+    uint64_t frame = 0u;
+    CLodWorkGraphTelemetryCounters counters{};
+};
+
+struct CLodVirtualShadowHardwareAttributionSnapshot {
+    uint64_t frame = 0u;
+    uint32_t invocations = 0u;
+    uint32_t pageRejected = 0u;
+    uint32_t writes = 0u;
+};
+
+struct CLodPrimaryVisibilitySnapshot {
+    uint64_t frame = 0u;
+    uint32_t traversalLeaves = 0u;
+    uint32_t errorRejectedLeaves = 0u;
+    uint32_t residentLeaves = 0u;
+    uint32_t nonresidentLeaves = 0u;
+    uint32_t visibleClusterWrites = 0u;
+    uint32_t rasterInitializationFailures = 0u;
+    uint32_t sourceGroupMismatches = 0u;
+    uint32_t outputTriangles = 0u;
+    uint32_t activeSetWorkloads = 0u;
+    uint32_t activeSetMembers = 0u;
+    // Populated once the depth occupancy readback is introduced. Keeping it
+    // explicit prevents an absent grid from being mistaken for an empty one.
+    bool depthTileOccupancyAvailable = false;
+};
+
+struct DynamicWindVisibilitySnapshot {
+    uint32_t phase1Accepted = 0u;
+    uint32_t phase2Accepted = 0u;
+    uint32_t deferred = 0u;
+    uint32_t capacityRejects = 0u;
+    uint32_t bucketOverflow = 0u;
+    uint32_t deferredOverflow = 0u;
+};
+
+template <class Snapshot>
+struct CLodTelemetryPublishedSnapshot {
+    mutable std::mutex mutex;
+    std::atomic<uint64_t> sequence{ 0u };
+    Snapshot value{};
+};
+
+inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowPageAttributionSnapshot> g_clodVsmPageAttribution;
+inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowWorkAttributionSnapshot> g_clodVsmWorkAttribution;
+inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowHardwareAttributionSnapshot> g_clodVsmHardwareAttribution;
+inline CLodTelemetryPublishedSnapshot<CLodPrimaryVisibilitySnapshot> g_clodPrimaryVisibility;
+inline CLodTelemetryPublishedSnapshot<DynamicWindVisibilitySnapshot> g_dynamicWindVisibility;
+
+template <class Snapshot>
+inline void PublishCLodTelemetrySnapshot(CLodTelemetryPublishedSnapshot<Snapshot>& destination, const Snapshot& snapshot) {
+    std::lock_guard lock(destination.mutex);
+    destination.value = snapshot;
+    destination.sequence.fetch_add(1u, std::memory_order_release);
+}
+
+template <class Snapshot>
+inline bool ReadCLodTelemetrySnapshot(const CLodTelemetryPublishedSnapshot<Snapshot>& source, Snapshot& snapshot) {
+    if (source.sequence.load(std::memory_order_acquire) == 0u) {
+        return false;
+    }
+    std::lock_guard lock(source.mutex);
+    snapshot = source.value;
+    return true;
+}
 
 inline constexpr uint32_t CLodSourceGroupMismatchDetailCapacity = 1024u;
 

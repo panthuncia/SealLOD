@@ -370,10 +370,13 @@ bool VoxelRasterWriteVirtualShadow(
             pageSpaceLinearDepth,
             clipmapInfo));
     uint ignored = 0u;
-    if (PSO_SKINNED == 0)
-    {
-        InterlockedOr(pageTable[pageCoords], kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask, ignored);
-    }
+    InterlockedOr(
+        pageTable[pageCoords],
+        PSO_SKINNED != 0
+            ? kCLodVirtualShadowDynamicContentMask
+            : kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask,
+        ignored);
     return true;
 }
 #endif

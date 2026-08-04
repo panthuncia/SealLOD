@@ -671,7 +671,9 @@ PassReturn HierarchicalCullingPass::Execute(PassExecutionContext& executionConte
     }
     const uint32_t swRasterThreshold = std::min(
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(
-            CLodSoftwareRasterDiameterThresholdSettingName)(),
+            UsesVirtualShadowOutput(m_rasterOutputKind)
+                ? CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName
+                : CLodSoftwareRasterDiameterThresholdSettingName)(),
         0xFFFFu);
     workGraphFlags |= (swRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT);
     if (!m_isFirstPass) {

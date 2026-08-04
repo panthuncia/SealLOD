@@ -61,7 +61,7 @@ void ControlServer::Start(std::wstring pipeName)
 
 void ControlServer::Stop()
 {
-    if (!m_running.load(std::memory_order_acquire)) {
+    if (!m_running.load(std::memory_order_acquire) && !m_thread.joinable()) {
         return;
     }
     m_stopRequested.store(true, std::memory_order_release);
@@ -79,6 +79,23 @@ void ControlServer::Stop()
     if (m_thread.joinable()) {
         m_thread.join();
     }
+    {
+        std::scoped_lock lock(m_connectionsMutex);
+        for (auto& connection : m_connections) {
+            HANDLE pipe = static_cast<HANDLE>(connection->pipe.exchange(nullptr, std::memory_order_acq_rel));
+            if (pipe != nullptr && pipe != INVALID_HANDLE_VALUE) {
+                CancelIoEx(pipe, nullptr);
+                DisconnectNamedPipe(pipe);
+                CloseHandle(pipe);
+            }
+        }
+    }
+    for (auto& connection : m_connections) {
+        if (connection->thread.joinable()) {
+            connection->thread.join();
+        }
+    }
+    m_connections.clear();
     m_running.store(false, std::memory_order_release);
 }
 
@@ -102,7 +119,7 @@ void ControlServer::Run()
             m_pipeName.c_str(),
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,
+            PIPE_UNLIMITED_INSTANCES,
             64 * 1024,
             64 * 1024,
             0,
@@ -114,7 +131,24 @@ void ControlServer::Run()
             ? TRUE
             : GetLastError() == ERROR_PIPE_CONNECTED;
         if (connected && !m_stopRequested.load(std::memory_order_acquire)) {
-            ServeConnection(pipe);
+            auto connection = std::make_unique<Connection>();
+            connection->pipe.store(pipe, std::memory_order_release);
+            Connection* connectionPtr = connection.get();
+            connection->thread = std::thread([this, connectionPtr] {
+                HANDLE connectionPipe = static_cast<HANDLE>(connectionPtr->pipe.load(std::memory_order_acquire));
+                if (connectionPipe != nullptr) {
+                    ServeConnection(connectionPipe);
+                }
+                connectionPipe = static_cast<HANDLE>(connectionPtr->pipe.exchange(nullptr, std::memory_order_acq_rel));
+                if (connectionPipe != nullptr && connectionPipe != INVALID_HANDLE_VALUE) {
+                    FlushFileBuffers(connectionPipe);
+                    DisconnectNamedPipe(connectionPipe);
+                    CloseHandle(connectionPipe);
+                }
+            });
+            std::scoped_lock lock(m_connectionsMutex);
+            m_connections.push_back(std::move(connection));
+            continue;
         }
         FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);

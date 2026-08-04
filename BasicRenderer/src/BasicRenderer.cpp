@@ -35,6 +35,7 @@
 #include "Materials/MaterialFlags.h"
 #include "Render/PSOFlags.h"
 #include "Render/OutputTypes.h"
+#include "Render/RendererSettings.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/GraphExtensions/ClusterLOD/HierarchicalCullingPass.h"
@@ -1800,6 +1801,36 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     }
                     auto& settings = SettingsManager::GetInstance();
                     if (command == "clod.vsm_perf.set") {
+						const float requestedWindInner = request->document.value(
+							"dynamic_wind_inner_radius",
+							settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
+						const float requestedWindOuter = request->document.value(
+							"dynamic_wind_outer_radius",
+							settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
+						if (requestedWindInner < 0.0f || requestedWindOuter < requestedWindInner) {
+							throw std::runtime_error("DynamicWind radii require 0 <= inner <= outer");
+						}
+						settings.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(requestedWindInner);
+						settings.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(requestedWindOuter);
+						if (request->document.contains("skinned_shadow_radius")) {
+							const float radius = request->document.at("skinned_shadow_radius").get<float>();
+							if (radius < 0.0f) throw std::runtime_error("skinned_shadow_radius must be non-negative");
+							settings.getSettingSetter<float>(CLodSkinnedShadowRadiusSettingName)(radius);
+						}
+						if (request->document.contains("skinned_shadow_dynamic_clipmap_count_override")) {
+							int32_t requestedOverride = request->document.at(
+								"skinned_shadow_dynamic_clipmap_count_override").get<int32_t>();
+							if (requestedOverride < -1) {
+								throw std::runtime_error("skinned shadow clipmap override must be -1 or non-negative");
+							}
+							const uint32_t activeClipmapCount =
+								g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
+							if (requestedOverride >= 0 && activeClipmapCount != 0u) {
+								requestedOverride = std::min(requestedOverride, static_cast<int32_t>(activeClipmapCount));
+							}
+							settings.getSettingSetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)(
+								requestedOverride);
+						}
                         if (request->document.contains("page_budget")) {
                             settings.getSettingSetter<uint32_t>(
                                 CLodDirectionalVirtualShadowPageRenderBudgetSettingName)(
@@ -1822,7 +1853,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         }
                         if (request->document.contains("sw_raster_threshold")) {
                             settings.getSettingSetter<uint32_t>(
-                                CLodSoftwareRasterDiameterThresholdSettingName)(
+                                CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
                                 std::min(
                                     request->document.at("sw_raster_threshold").get<uint32_t>(),
                                     0xFFFFu));
@@ -1831,6 +1862,22 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                             settings.getSettingSetter<bool>(
                                 CLodPageJobForceAllSettingName)(
                                 request->document.at("page_job_force_all").get<bool>());
+                        }
+                        if (request->document.contains("dynamic_wind_bounds_cache_enabled")) {
+                            settings.getSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
+                                request->document.at("dynamic_wind_bounds_cache_enabled").get<bool>());
+                        }
+                        if (request->document.contains("dynamic_wind_bounds_cache_mib")) {
+                            settings.getSettingSetter<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName)(
+                                std::min(request->document.at("dynamic_wind_bounds_cache_mib").get<uint32_t>(), 256u));
+                        }
+                        if (request->document.contains("dynamic_wind_vertex_cache_enabled")) {
+                            settings.getSettingSetter<bool>(CLodDynamicWindVertexCacheEnabledSettingName)(
+                                request->document.at("dynamic_wind_vertex_cache_enabled").get<bool>());
+                        }
+                        if (request->document.contains("dynamic_wind_vertex_cache_mib")) {
+                            settings.getSettingSetter<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName)(
+                                std::min(request->document.at("dynamic_wind_vertex_cache_mib").get<uint32_t>(), 512u));
                         }
                         if (request->document.contains("raster_mode")) {
                             const std::string mode = request->document.at("raster_mode").get<std::string>();
@@ -1854,9 +1901,37 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["block_soft_cap"] = settings.getSettingGetter<uint32_t>(
                         CLodPageJobMaxPagesPerClusterSettingName)();
                     response["sw_raster_threshold"] = settings.getSettingGetter<uint32_t>(
-                        CLodSoftwareRasterDiameterThresholdSettingName)();
+                        CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
                     response["page_job_force_all"] = settings.getSettingGetter<bool>(
                         CLodPageJobForceAllSettingName)();
+					response["dynamic_wind_inner_radius"] = settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+					response["dynamic_wind_outer_radius"] = settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+					response["skinned_shadow_radius"] = settings.getSettingGetter<float>(CLodSkinnedShadowRadiusSettingName)();
+					response["skinned_shadow_dynamic_clipmap_count_override"] =
+						settings.getSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
+					response["skinned_shadow_effective_dynamic_clipmap_count"] =
+						g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);
+					response["skinned_shadow_clipmap_classification"] = nlohmann::json::array();
+					const uint32_t activeShadowClipmapCount =
+						g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
+					const uint32_t dynamicShadowClipmapMask =
+						g_clodSkinnedShadowDynamicClipmapMask.load(std::memory_order_relaxed);
+					for (uint32_t clipmapIndex = 0u; clipmapIndex < activeShadowClipmapCount; ++clipmapIndex) {
+						response["skinned_shadow_clipmap_classification"].push_back(
+							(dynamicShadowClipmapMask & (1u << clipmapIndex)) != 0u ? "dynamic" : "static");
+					}
+					response["skinned_shadow_classification_generation"] =
+						g_clodSkinnedShadowClassificationGeneration.load(std::memory_order_relaxed);
+					response["skinned_shadow_one_shot_invalidations"] =
+						g_clodSkinnedShadowOneShotInvalidationCount.load(std::memory_order_relaxed);
+                    response["dynamic_wind_bounds_cache_enabled"] = settings.getSettingGetter<bool>(
+                        CLodDynamicWindBoundsCacheEnabledSettingName)();
+                    response["dynamic_wind_bounds_cache_mib"] = settings.getSettingGetter<uint32_t>(
+                        CLodDynamicWindBoundsCacheMiBSettingName)();
+                    response["dynamic_wind_vertex_cache_enabled"] = settings.getSettingGetter<bool>(
+                        CLodDynamicWindVertexCacheEnabledSettingName)();
+                    response["dynamic_wind_vertex_cache_mib"] = settings.getSettingGetter<uint32_t>(
+                        CLodDynamicWindVertexCacheMiBSettingName)();
                     const CLodVSMRasterMode rasterMode = settings.getSettingGetter<CLodVSMRasterMode>(
                         CLodVSMRasterModeSettingName)();
                     response["raster_mode"] =

@@ -393,6 +393,14 @@ static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_2 = 255u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_3_TO_4 = 256u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_5_TO_8 = 257u;
 static const uint WG_COUNTER_NODE_BOUNDS_EXPLICIT_BONE_COUNT_9_PLUS = 258u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_HITS = 259u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_MISSES = 260u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_INSERTIONS = 261u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_RACES = 262u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_PROBE_FAILURES = 263u;
+static const uint WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_INELIGIBLE = 265u;
+static const uint WG_COUNTER_RECEIVER_SUBPAGE_MESHLET_TESTS = 275u;
+static const uint WG_COUNTER_RECEIVER_SUBPAGE_MESHLET_REJECTS = 276u;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_LAUNCHES = 18;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_RECORDS = 19;
 static const uint WG_COUNTER_TRAVERSE_COALESCED_INPUT_COUNT_1 = 20;
@@ -969,6 +977,99 @@ bool CLodVirtualShadowMeshletTouchesDirtyPages(float3 worldCenter, float radiusW
     return CLodVirtualShadowBoundsTouchDirtyPages(worldCenter, radiusWorld, viewId);
 }
 
+bool CLodVirtualShadowViewUsesDynamicSkinnedCasters(uint viewId)
+{
+    uint clipmapIndex = 0u;
+    CLodVirtualShadowClipmapInfo clipmapInfo;
+    if (!CLodVirtualShadowFindClipmapForView(viewId, clipmapIndex, clipmapInfo))
+    {
+        // Missing descriptors must remain conservative.
+        return true;
+    }
+    return CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(clipmapInfo);
+}
+
+bool CLodVirtualShadowUvBoundsTouchReceiverOccupancy(
+    float2 uvMin,
+    float2 uvMax,
+    uint shadowClipmapIndex,
+    CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    if ((CLOD_WG_FLAGS & CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK) == 0u ||
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX == 0u ||
+        (CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE != 4u &&
+            CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE != 8u))
+    {
+        return true;
+    }
+
+    const uint receiverSubpagesPerAxis = CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE;
+    WGTelemetryAdd(WG_COUNTER_RECEIVER_SUBPAGE_MESHLET_TESTS, 1u);
+    const uint2 minSubpageCoord =
+        CLodVirtualShadowReceiverSubpageCoordsFromUv(
+            uvMin, clipmapInfo.pageTableResolution, receiverSubpagesPerAxis);
+    const uint2 maxSubpageCoord =
+        CLodVirtualShadowReceiverSubpageCoordsFromUv(
+            uvMax, clipmapInfo.pageTableResolution, receiverSubpagesPerAxis);
+    const uint2 minPageCoord =
+        minSubpageCoord / receiverSubpagesPerAxis;
+    const uint2 maxPageCoord =
+        maxSubpageCoord / receiverSubpagesPerAxis;
+    const uint2 pageCount = maxPageCoord - minPageCoord + 1u;
+
+    // Receiver occupancy is a fine meshlet filter. Large bounds must continue
+    // through the existing hierarchy rather than expanding into unbounded
+    // per-page loops, which caused the previous traversal regression.
+    static const uint kMaxReceiverPagesPerMeshletQuery = 4u;
+    if (pageCount.x * pageCount.y > kMaxReceiverPagesPerMeshletQuery)
+    {
+        return true;
+    }
+
+    [loop]
+    for (uint pageY = minPageCoord.y; pageY <= maxPageCoord.y; ++pageY)
+    {
+        [loop]
+        for (uint pageX = minPageCoord.x; pageX <= maxPageCoord.x; ++pageX)
+        {
+            const uint2 pageCoord = uint2(pageX, pageY);
+            const uint maskIndex = CLodVirtualShadowReceiverPageLinearIndex(
+                pageCoord, shadowClipmapIndex);
+            uint2 receiverMask = uint2(0u, 0u);
+            if (receiverSubpagesPerAxis == 8u)
+            {
+                StructuredBuffer<uint2> receiverSubpageMasks =
+                    ResourceDescriptorHeap[
+                        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX];
+                receiverMask = receiverSubpageMasks[maskIndex];
+            }
+            else
+            {
+                StructuredBuffer<uint> receiverSubpageMasks =
+                    ResourceDescriptorHeap[
+                        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX];
+                receiverMask.x = receiverSubpageMasks[maskIndex];
+            }
+            if (!any(receiverMask != 0u))
+            {
+                continue;
+            }
+
+            const uint2 meshletMask = CLodVirtualShadowReceiverMaskForPageRect(
+                minSubpageCoord,
+                maxSubpageCoord,
+                pageCoord,
+                receiverSubpagesPerAxis);
+            if (any((receiverMask & meshletMask) != 0u))
+            {
+                return true;
+            }
+        }
+    }
+    WGTelemetryAdd(WG_COUNTER_RECEIVER_SUBPAGE_MESHLET_REJECTS, 1u);
+    return false;
+}
+
 bool CLodVirtualShadowComputeMeshletBlockCoverage(
     float3 worldCenter,
     float radiusWorld,
@@ -1013,7 +1114,9 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
     minBlockCoord = CLodVirtualShadowBlockCoordFromPageCoord(minPageCoord);
     const uint2 maxBlockCoord = CLodVirtualShadowBlockCoordFromPageCoord(maxPageCoord);
     blockCount = maxBlockCoord - minBlockCoord + 1u;
-    return all(blockCount > uint2(0u, 0u));
+    return all(blockCount > uint2(0u, 0u)) &&
+        CLodVirtualShadowUvBoundsTouchReceiverOccupancy(
+            uvMin, uvMax, shadowClipmapIndex, clipmapInfo);
 }
 
 bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
@@ -1059,6 +1162,10 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
         minLocalPageCoord,
         maxLocalPageCoord,
         false);
+    if (dynamicLayer)
+    {
+        vsmPayload = CLodVisibleClusterMarkDynamicShadowPayload(vsmPayload);
+    }
     return true;
 }
 
@@ -1217,6 +1324,35 @@ bool CLodVirtualShadowInstanceInvalidatedThisFrame(uint instanceIndex)
 }
 #endif
 
+void CLodStoreVisibleClusterForShadowLayer(
+    globallycoherent RWByteAddressBuffer visibleClusters,
+    uint clusterIndex,
+    uint viewId,
+    uint instanceIndex,
+    uint localMeshletIndex,
+    uint visibleGroupId,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint shadowClipmapIndex,
+    bool dynamicLayer)
+{
+    uint payload = CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex);
+    if (dynamicLayer)
+    {
+        payload = CLodVisibleClusterMarkDynamicShadowPayload(payload);
+    }
+    CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
+        visibleClusters,
+        clusterIndex,
+        viewId,
+        instanceIndex,
+        localMeshletIndex,
+        visibleGroupId,
+        pageSlabDescriptorIndex,
+        pageSlabByteOffset,
+        payload);
+}
+
 bool CLodTrySetBit(RWByteAddressBuffer bits, uint key)
 {
     uint oldPacked = 0;
@@ -1328,6 +1464,141 @@ void CLodTelemetryNodeCullClassification(uint classification)
         WGTelemetryAdd(WG_COUNTER_NODE_BOUNDS_INVALID_FALLBACKS, 1u);
 }
 
+static const uint CLOD_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_STRIDE = 48u;
+static const uint CLOD_DYNAMIC_WIND_BOUNDS_CACHE_MAX_PROBES = 8u;
+
+uint CLodDynamicWindBoundsCacheHash(
+    uint drawRecordIndex,
+    uint assemblyTransformIndex,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint localMeshletIndex,
+    uint skinningInstanceSlot)
+{
+    uint hash = 0x811C9DC5u;
+    hash = (hash ^ drawRecordIndex) * 0x01000193u;
+    hash = (hash ^ assemblyTransformIndex) * 0x01000193u;
+    hash = (hash ^ pageSlabDescriptorIndex) * 0x01000193u;
+    hash = (hash ^ pageSlabByteOffset) * 0x01000193u;
+    hash = (hash ^ localMeshletIndex) * 0x01000193u;
+    hash = (hash ^ skinningInstanceSlot) * 0x01000193u;
+    hash ^= hash >> 16u;
+    hash *= 0x7FEB352Du;
+    hash ^= hash >> 15u;
+    return hash;
+}
+
+bool CLodDynamicWindBoundsCacheKeyMatches(
+    RWByteAddressBuffer cache,
+    uint byteOffset,
+    uint drawRecordIndex,
+    uint assemblyTransformIndex,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint localMeshletIndex,
+    uint skinningInstanceSlot)
+{
+    return cache.Load(byteOffset + 4u) == drawRecordIndex &&
+        cache.Load(byteOffset + 8u) == assemblyTransformIndex &&
+        cache.Load(byteOffset + 12u) == pageSlabDescriptorIndex &&
+        cache.Load(byteOffset + 16u) == pageSlabByteOffset &&
+        cache.Load(byteOffset + 20u) == localMeshletIndex &&
+        cache.Load(byteOffset + 24u) == skinningInstanceSlot;
+}
+
+bool CLodTryLoadDynamicWindMeshletBounds(
+    uint drawRecordIndex,
+    uint assemblyTransformIndex,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint localMeshletIndex,
+    uint skinningInstanceSlot,
+    out BoundingSphere bounds)
+{
+    bounds.sphere = 0.0f.xxxx;
+    const uint entryCount = CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT;
+    if (entryCount == 0u || CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX == 0u)
+        return false;
+    RWByteAddressBuffer cache =
+        ResourceDescriptorHeap[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX];
+    const uint hash = CLodDynamicWindBoundsCacheHash(
+        drawRecordIndex, assemblyTransformIndex, pageSlabDescriptorIndex,
+        pageSlabByteOffset, localMeshletIndex, skinningInstanceSlot);
+    const uint readyState = (CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION << 1u) | 1u;
+    [unroll]
+    for (uint probe = 0u; probe < CLOD_DYNAMIC_WIND_BOUNDS_CACHE_MAX_PROBES; ++probe)
+    {
+        const uint entryIndex = (hash + probe) % entryCount;
+        const uint byteOffset = entryIndex * CLOD_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_STRIDE;
+        if (cache.Load(byteOffset) == readyState &&
+            CLodDynamicWindBoundsCacheKeyMatches(
+                cache, byteOffset, drawRecordIndex, assemblyTransformIndex,
+                pageSlabDescriptorIndex, pageSlabByteOffset, localMeshletIndex,
+                skinningInstanceSlot))
+        {
+            bounds.sphere = asfloat(cache.Load4(byteOffset + 32u));
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CLodTryInsertDynamicWindMeshletBounds(
+    uint drawRecordIndex,
+    uint assemblyTransformIndex,
+    uint pageSlabDescriptorIndex,
+    uint pageSlabByteOffset,
+    uint localMeshletIndex,
+    uint skinningInstanceSlot,
+    BoundingSphere bounds)
+{
+    const uint entryCount = CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT;
+    if (entryCount == 0u || CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX == 0u)
+        return false;
+    RWByteAddressBuffer cache =
+        ResourceDescriptorHeap[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX];
+    const uint hash = CLodDynamicWindBoundsCacheHash(
+        drawRecordIndex, assemblyTransformIndex, pageSlabDescriptorIndex,
+        pageSlabByteOffset, localMeshletIndex, skinningInstanceSlot);
+    const uint writingState = CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION << 1u;
+    const uint readyState = writingState | 1u;
+    [unroll]
+    for (uint probe = 0u; probe < CLOD_DYNAMIC_WIND_BOUNDS_CACHE_MAX_PROBES; ++probe)
+    {
+        const uint entryIndex = (hash + probe) % entryCount;
+        const uint byteOffset = entryIndex * CLOD_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_STRIDE;
+        const uint oldState = cache.Load(byteOffset);
+        if (oldState == readyState &&
+            CLodDynamicWindBoundsCacheKeyMatches(
+                cache, byteOffset, drawRecordIndex, assemblyTransformIndex,
+                pageSlabDescriptorIndex, pageSlabByteOffset, localMeshletIndex,
+                skinningInstanceSlot))
+        {
+            WGTelemetryAdd(WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_RACES, 1u);
+            return true;
+        }
+        if ((oldState >> 1u) == CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION)
+            continue;
+        uint observedState = 0u;
+        cache.InterlockedCompareExchange(byteOffset, oldState, writingState, observedState);
+        if (observedState != oldState)
+            continue;
+        cache.Store(byteOffset + 4u, drawRecordIndex);
+        cache.Store(byteOffset + 8u, assemblyTransformIndex);
+        cache.Store(byteOffset + 12u, pageSlabDescriptorIndex);
+        cache.Store(byteOffset + 16u, pageSlabByteOffset);
+        cache.Store(byteOffset + 20u, localMeshletIndex);
+        cache.Store(byteOffset + 24u, skinningInstanceSlot);
+        cache.Store(byteOffset + 28u, hash);
+        cache.Store4(byteOffset + 32u, asuint(bounds.sphere));
+        DeviceMemoryBarrier();
+        uint replacedState = 0u;
+        cache.InterlockedExchange(byteOffset, readyState, replacedState);
+        return true;
+    }
+    return false;
+}
+
 float ProjectedGeometricError(
     float3 worldCenter,
     float worldRadius,
@@ -1367,9 +1638,16 @@ void CLodAppendVoxelRasterClusterWork(
     }
 
     const PerMeshInstanceBuffer voxelInstanceData = LoadMeshTemplateForDraw(instanceIndex);
-    const uint voxelSkinningInstanceSlot =
-        ResolveAssemblyProceduralWindSkinningSlot(
-            instanceIndex, voxelInstanceData.skinningInstanceSlot, assemblyTransformIndex);
+    bool voxelUsesDynamicSkinnedRaster = true;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    voxelUsesDynamicSkinnedRaster =
+        CLodVirtualShadowViewUsesDynamicSkinnedCasters(viewId) ||
+        CLodVirtualShadowInstanceInvalidatedThisFrame(instanceIndex);
+#endif
+    const uint voxelSkinningInstanceSlot = voxelUsesDynamicSkinnedRaster
+        ? ResolveAssemblyProceduralWindSkinningSlot(
+            instanceIndex, voxelInstanceData.skinningInstanceSlot, assemblyTransformIndex)
+        : 0xFFFFFFFFu;
 
     StructuredBuffer<CLodVoxelRasterQueueDescriptors> queueDescriptorBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID)];
@@ -1432,11 +1710,13 @@ void CLodAppendVoxelRasterClusterWork(
         const uint clusterBoneCount = CLodClusterCullBoneCount(clusterCullHeader);
         const bool clusterHasSkinnedCubes =
             (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_ANIMATED) != 0u;
+        const bool clusterUsesSkinnedCubes =
+            clusterHasSkinnedCubes && voxelUsesDynamicSkinnedRaster;
         const bool clusterBoneOverflow =
             (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_BONE_OVERFLOW) != 0u;
-        bool hasConservativeClusterBounds = !clusterHasSkinnedCubes;
+        bool hasConservativeClusterBounds = !clusterUsesSkinnedCubes;
         BoundingSphere evaluatedClusterBounds = { clusterCullHeader.bounds };
-        if (clusterHasSkinnedCubes && !clusterBoneOverflow && clusterBoneCount != 0u &&
+        if (clusterUsesSkinnedCubes && !clusterBoneOverflow && clusterBoneCount != 0u &&
             IsValidSkinningInstanceSlot(voxelSkinningInstanceSlot))
         {
             CLodMeshletDescriptor boundsDescriptor = (CLodMeshletDescriptor)0;
@@ -1509,7 +1789,7 @@ void CLodAppendVoxelRasterClusterWork(
         }
 
         uint baseSlot = 0u;
-        if (clusterHasSkinnedCubes)
+        if (clusterUsesSkinnedCubes)
         {
             InterlockedAdd(skinnedWorkRecordCounter[0], 1u, baseSlot);
         }
@@ -1519,7 +1799,7 @@ void CLodAppendVoxelRasterClusterWork(
         }
         if (baseSlot >= queueDescriptors.workRecordCapacity)
         {
-            if (clusterHasSkinnedCubes)
+            if (clusterUsesSkinnedCubes)
             {
                 InterlockedMin(skinnedWorkRecordCounter[0], queueDescriptors.workRecordCapacity);
             }
@@ -1534,6 +1814,13 @@ void CLodAppendVoxelRasterClusterWork(
         uint visibleBase = 0u;
         InterlockedAdd(visibleClusterCounter[0], 1u, visibleBase);
         const uint visibleClusterIndex = phase1HWBase + visibleBase;
+        uint voxelVsmPayload = CLodVisibleClusterMarkVoxelPayload(
+            CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(
+                CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX));
+        if (voxelUsesDynamicSkinnedRaster)
+        {
+            voxelVsmPayload = CLodVisibleClusterMarkDynamicShadowPayload(voxelVsmPayload);
+        }
         CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
             visibleClusters,
             visibleClusterIndex,
@@ -1543,7 +1830,7 @@ void CLodAppendVoxelRasterClusterWork(
             localGroupId,
             voxelSegment.pageIndex,
             0u,
-            CLodVisibleClusterMarkVoxelPayload(CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX)));
+            voxelVsmPayload);
         visibleClusterTransformIndices[visibleClusterIndex] = assemblyTransformIndex;
 
         CLodVoxelRasterWorkRecord record;
@@ -1561,7 +1848,7 @@ void CLodAppendVoxelRasterClusterWork(
         record.assemblyBoneRemapBase = clodMeshMetadata.assemblyBoneRemapBase;
         record.assemblyBoneRemapCount = clodMeshMetadata.assemblyBoneRemapCount;
         record.aabbMinAndVoxelWidth = voxelCluster.aabbMinAndVoxelWidth;
-        if (clusterHasSkinnedCubes)
+        if (clusterUsesSkinnedCubes)
         {
             skinnedWorkRecords[baseSlot] = record;
         }
@@ -3866,8 +4153,18 @@ void ClusterCullBody(
     bool isAlphaTestedMaterial = false;
     bool forceLodDecision = false;
     uint skinningInstanceSlot = 0xFFFFFFFFu;
+    const bool dynamicWindBoundsCacheActive =
+        CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT != 0u &&
+        CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX != 0u &&
+        CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX != 0u;
+    bool dynamicWindBoundsCacheEligible = false;
+	bool shadowClipmapAllowsSkinnedDeformation = true;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     bool objectInvalidatedThisFrame = false;
+	if (hasBucket) {
+		shadowClipmapAllowsSkinnedDeformation =
+			CLodVirtualShadowViewUsesDynamicSkinnedCasters(b.viewId);
+	}
 #endif
 
     if (hasBucket && b.pageSlabDescriptorIndex != 0) {
@@ -3931,10 +4228,31 @@ void ClusterCullBody(
         const PerMeshBuffer perMesh = perMeshBuffer[meshBufferIndex];
         meshVertexFlags = perMesh.vertexFlags;
 #if !CLOD_WG_RIGID_ONLY
-        if ((meshVertexFlags & VERTEX_SKINNED) != 0u)
+        if ((meshVertexFlags & VERTEX_SKINNED) != 0u &&
+			shadowClipmapAllowsSkinnedDeformation)
         {
+            const uint sourceSkinningInstanceSlot = instanceData.skinningInstanceSlot;
             skinningInstanceSlot = ResolveAssemblyProceduralWindSkinningSlot(
                 b.instanceIndex, instanceData.skinningInstanceSlot, b.assemblyTransformIndex);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+            if (IsValidSkinningInstanceSlot(sourceSkinningInstanceSlot) &&
+                IsValidSkinningInstanceSlot(skinningInstanceSlot))
+            {
+                const SkinningInstanceGPUInfo sourceSkinningInfo =
+                    LoadSkinningInstanceInfo(sourceSkinningInstanceSlot);
+                const SkinningInstanceGPUInfo resolvedSkinningInfo =
+                    LoadSkinningInstanceInfo(skinningInstanceSlot);
+                if (dynamicWindBoundsCacheActive)
+                {
+                    StructuredBuffer<uint> dynamicWindVisibleMembership =
+                        ResourceDescriptorHeap[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX];
+                    dynamicWindBoundsCacheEligible =
+                        (sourceSkinningInfo.flags & 2u) != 0u &&
+                        resolvedSkinningInfo.boneCount != 0u &&
+                        dynamicWindVisibleMembership[drawRecord.instanceTransformIndex] != 0u;
+                }
+            }
+#endif
         }
 #endif
         StructuredBuffer<MaterialInfo> materialDataBuffer =
@@ -4045,6 +4363,13 @@ void ClusterCullBody(
         const bool skinnedMesh =
             (meshVertexFlags & VERTEX_SKINNED) != 0u;
 #endif
+		const bool deformedSkinnedMesh =
+			skinnedMesh && shadowClipmapAllowsSkinnedDeformation;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        const bool dynamicShadowLayer = deformedSkinnedMesh || objectInvalidatedThisFrame;
+#else
+        const bool dynamicShadowLayer = skinnedMesh;
+#endif
 
         if (active) {
             const uint localMeshlet = UnpackClusterFirstIndex(b.clusterIndexAndCount) + m;
@@ -4054,7 +4379,7 @@ void ClusterCullBody(
 
                 CLodClusterCullHeader clusterCullHeader;
                 CLodMeshletDescriptor desc = (CLodMeshletDescriptor)0;
-                if (skinnedMesh)
+                if (deformedSkinnedMesh)
                 {
                     desc = LoadMeshletDescriptor(
                         pageSlabDesc,
@@ -4072,7 +4397,7 @@ void ClusterCullBody(
                 BoundingSphere meshletBounds;
                 const uint clusterCullFlags = CLodClusterCullFlags(clusterCullHeader);
                 const bool animatedCluster =
-                    skinnedMesh &&
+                    deformedSkinnedMesh &&
                     (clusterCullFlags & CLOD_CLUSTER_CULL_FLAG_ANIMATED) != 0u;
                 if (animatedCluster)
                 {
@@ -4085,14 +4410,58 @@ void ClusterCullBody(
                     }
                     else
                     {
-                        meshletBounds = CLodComputeSkinnedMeshletBounds(
-                            desc,
-                            pageHeader,
-                            pageSlabDesc,
-                            pageSlabOff,
-                            skinningInstanceSlot,
-                            clodMeshMetadata,
-                            b.assemblyTransformIndex);
+                        bool usedBoundsCache = false;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+                        if (dynamicWindBoundsCacheEligible)
+                        {
+                            usedBoundsCache = CLodTryLoadDynamicWindMeshletBounds(
+                                b.instanceIndex,
+                                b.assemblyTransformIndex,
+                                pageSlabDesc,
+                                pageSlabOff,
+                                localMeshletIndex,
+                                skinningInstanceSlot,
+                                meshletBounds);
+                            WGTelemetryAdd(
+                                usedBoundsCache
+                                    ? WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_HITS
+                                    : WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_MISSES,
+                                1u);
+                        }
+                        else if (dynamicWindBoundsCacheActive)
+                        {
+                            WGTelemetryAdd(WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_INELIGIBLE, 1u);
+                        }
+#endif
+                        if (!usedBoundsCache)
+                        {
+                            meshletBounds = CLodComputeSkinnedMeshletBounds(
+                                desc,
+                                pageHeader,
+                                pageSlabDesc,
+                                pageSlabOff,
+                                skinningInstanceSlot,
+                                clodMeshMetadata,
+                                b.assemblyTransformIndex);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+                            if (dynamicWindBoundsCacheEligible)
+                            {
+                                const bool inserted = CLodTryInsertDynamicWindMeshletBounds(
+                                    b.instanceIndex,
+                                    b.assemblyTransformIndex,
+                                    pageSlabDesc,
+                                    pageSlabOff,
+                                    localMeshletIndex,
+                                    skinningInstanceSlot,
+                                    meshletBounds);
+                                WGTelemetryAdd(
+                                    inserted
+                                        ? WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_INSERTIONS
+                                        : WG_COUNTER_DYNAMIC_WIND_BOUNDS_CACHE_PROBE_FAILURES,
+                                    1u);
+                            }
+#endif
+                        }
                         // The helper returns the descriptor sphere only when no remapped
                         // palette entry can be evaluated. Exact float4 equality is valid
                         // here because that fallback copies desc.bounds verbatim.
@@ -4100,11 +4469,10 @@ void ClusterCullBody(
                         meshletBoundsClassification = usedBindFallback
                             ? CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK
                             : CLOD_MESHLET_BOUNDS_SKINNED_LIVE;
-                        WGTelemetryAdd(
-                            usedBindFallback
-                                ? WG_COUNTER_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACKS
-                                : WG_COUNTER_MESHLET_BOUNDS_SKINNED_LIVE_EVALUATIONS,
-                            1u);
+                        if (usedBindFallback)
+                            WGTelemetryAdd(WG_COUNTER_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACKS, 1u);
+                        else if (!usedBoundsCache)
+                            WGTelemetryAdd(WG_COUNTER_MESHLET_BOUNDS_SKINNED_LIVE_EVALUATIONS, 1u);
                     }
                 }
                 else
@@ -4145,8 +4513,8 @@ void ClusterCullBody(
 #define CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL 1
 #endif
                 if (survives &&
-                    (!skinnedMesh || CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL != 0) &&
-                    (skinnedMesh || !objectInvalidatedThisFrame))
+                    (!deformedSkinnedMesh || CLOD_VSM_DYNAMIC_MESHLET_HIERARCHY_CULL != 0) &&
+                    (deformedSkinnedMesh || !objectInvalidatedThisFrame))
                 {
                     bool touchesActivePages = true;
                     if (CLodWorkGraphShadowDirtyPageCullingEnabled())
@@ -4155,7 +4523,7 @@ void ClusterCullBody(
                             meshletCenterWorld,
                             meshletRadiusWorld,
                             b.viewId,
-                            skinnedMesh);
+                            dynamicShadowLayer);
                     }
 
                     if (!touchesActivePages)
@@ -4309,7 +4677,7 @@ void ClusterCullBody(
                 hwMaxPageCoord,
                 hwMinBlockCoord,
                 hwBlockCount,
-                skinnedMesh);
+                dynamicShadowLayer);
         }
 #endif
         const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4372,12 +4740,12 @@ void ClusterCullBody(
                         hwMaxPageCoord,
                         hwMinBlockCoord,
                         hwBlockCount,
-                        skinnedMesh);
+                        dynamicShadowLayer);
                 }
                 else
 #endif
                 {
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         hwGlobalBase + hwPrefix,
                         b.viewId,
@@ -4386,7 +4754,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                 }
             }
@@ -4422,7 +4791,7 @@ void ClusterCullBody(
                     hwMaxPageCoord,
                     hwMinBlockCoord,
                     hwBlockCount,
-                    skinnedMesh);
+                    dynamicShadowLayer);
             }
 #endif
             const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4485,12 +4854,12 @@ void ClusterCullBody(
                             hwMaxPageCoord,
                             hwMinBlockCoord,
                             hwBlockCount,
-                            skinnedMesh);
+                            dynamicShadowLayer);
                     }
                     else
 #endif
                     {
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             hwGlobalBase + hwPrefix,
                             b.viewId,
@@ -4499,7 +4868,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                     }
                 }
@@ -4581,9 +4951,8 @@ void ClusterCullBody(
                     shadowClipmapIndex,
                     swMinBlockCoord,
                     swBlockCount,
-                    skinnedMesh,
-                    !skinnedMesh &&
-                        !objectInvalidatedThisFrame &&
+                    dynamicShadowLayer,
+                    !dynamicShadowLayer &&
                         CLodWorkGraphShadowDirtyPageCullingEnabled());
         }
 #endif
@@ -4621,7 +4990,7 @@ void ClusterCullBody(
                     hwMaxPageCoord,
                     hwMinBlockCoord,
                     hwBlockCount,
-                    skinnedMesh);
+                    dynamicShadowLayer);
             }
 #endif
             const uint4 hwMask = WaveActiveBallot(hwLaneWriteCount != 0u);
@@ -4684,12 +5053,12 @@ void ClusterCullBody(
                             hwMaxPageCoord,
                             hwMinBlockCoord,
                             hwBlockCount,
-                            skinnedMesh);
+                            dynamicShadowLayer);
                     }
                     else
 #endif
                     {
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             hwGlobalBase + hwPrefix,
                             b.viewId,
@@ -4698,7 +5067,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
                     }
                 }
@@ -4741,7 +5111,7 @@ void ClusterCullBody(
 
                 if (outputReyes && (reyesRank < reyesAvail)) {
                     const uint reyesIndex = visibleClusterCapacity - 1u - (swWriteBase + reyesBase + reyesRank);
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         reyesIndex,
                         b.viewId,
@@ -4750,7 +5120,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[reyesIndex] = b.assemblyTransformIndex;
                     gs_reyesSeedBatchIndices[reyesPending + reyesRank] = reyesIndex;
                 }
@@ -4795,7 +5166,7 @@ void ClusterCullBody(
                 if (outputSW && (swRank < swAvail)) {
                     // Write visible cluster top-down from the end of the buffer.
                     const uint swIndex = visibleClusterCapacity - 1 - (swWriteBase + swBase + swRank);
-                    CLodStoreVisibleClusterGloballyCoherent(
+                    CLodStoreVisibleClusterForShadowLayer(
                         visibleClusters,
                         swIndex,
                         b.viewId,
@@ -4804,7 +5175,8 @@ void ClusterCullBody(
                         visibleGroupId,
                         b.pageSlabDescriptorIndex,
                         b.pageSlabByteOffset,
-                        shadowClipmapIndex);
+                        shadowClipmapIndex,
+                        dynamicShadowLayer);
                     visibleClusterTransformIndices[swIndex] = b.assemblyTransformIndex;
 
                     // Accumulate index into batch buffer.
@@ -4857,7 +5229,7 @@ void ClusterCullBody(
                         RWStructuredBuffer<uint> pageJobVisibleClusterTransformIndices =
                             ResourceDescriptorHeap[descriptorPair.z];
                         const uint pjIndex = pjBase + pjRank;
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             pageJobVisibleClusters,
                             pjIndex,
                             b.viewId,
@@ -4866,7 +5238,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         pageJobVisibleClusterTransformIndices[pjIndex] = b.assemblyTransformIndex;
                     }
                 } else
@@ -4894,7 +5267,7 @@ void ClusterCullBody(
 
                     if (outputPageJob && (pjRank < pjAvail)) {
                         const uint pjIndex = visibleClusterCapacity - 1 - (swWriteBase + pjBase + pjRank);
-                        CLodStoreVisibleClusterGloballyCoherent(
+                        CLodStoreVisibleClusterForShadowLayer(
                             visibleClusters,
                             pjIndex,
                             b.viewId,
@@ -4903,7 +5276,8 @@ void ClusterCullBody(
                             visibleGroupId,
                             b.pageSlabDescriptorIndex,
                             b.pageSlabByteOffset,
-                            shadowClipmapIndex);
+                            shadowClipmapIndex,
+                            dynamicShadowLayer);
                         visibleClusterTransformIndices[pjIndex] = b.assemblyTransformIndex;
 
 #if CLOD_WG_ENABLE_SW_NODE_OUTPUT && !CLOD_WG_PAGE_JOB_ALWAYS_DEDICATED

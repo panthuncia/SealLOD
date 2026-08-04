@@ -162,11 +162,8 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     const uint pageEntry = pageTable[pageCoords];
-#if defined(PSO_SKINNED)
-    const bool dynamicLayer = true;
-#else
-    const bool dynamicLayer = false;
-#endif
+    const bool dynamicLayer =
+        CLodVisibleClusterUsesDynamicShadowLayerFromPayload(shadowVsmPayload);
     if (!CLodVirtualShadowPageEntryCanRasterLayer(
             pageEntry, dynamicLayer))
     {
@@ -221,12 +218,15 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
     {
         pageLeaderLane = 96u + firstbitlow(pageMatchMask.w);
     }
-    if (!dynamicLayer && WaveGetLaneIndex() == pageLeaderLane)
+    if (WaveGetLaneIndex() == pageLeaderLane)
     {
         uint ignored = 0u;
         InterlockedOr(
             pageTable[pageCoords],
-            kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
+            dynamicLayer
+                ? kCLodVirtualShadowDynamicContentMask
+                : kCLodVirtualShadowContentValidMask |
+                    kCLodVirtualShadowRerenderedThisFrameMask,
             ignored);
     }
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);

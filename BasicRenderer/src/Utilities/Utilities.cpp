@@ -1572,7 +1572,8 @@ std::vector<Cascade> setupDirectionalClipmaps(
     float aspectRatio,
     const std::vector<float>& clipFarPlanes,
     float shadowDistanceLowerBound,
-    float clipSceneExtent)
+    float clipSceneExtent,
+    float resolutionScale)
 {
     using namespace DirectX;
     std::vector<Cascade> clipmaps;
@@ -1603,9 +1604,15 @@ std::vector<Cascade> setupDirectionalClipmaps(
     // its clip ladder to the terrain domain.  This prevents a very large camera
     // far plane from making every VSM page unnecessarily coarse.
     const float clipLadderScale = std::pow(2.0f, static_cast<float>(std::max(numClipmaps - 1, 0)));
-    const float clipZeroScale = clipSceneExtent > 0.0f
+    const float unscaledClipZeroScale = clipSceneExtent > 0.0f
         ? std::max(clipSceneExtent / clipLadderScale, 1.0e-4f)
         : cameraDerivedClipZeroScale;
+    // Scale the complete physical clip ladder continuously while keeping the
+    // virtual page table fixed. The GPU retains the same LOD bias for clip
+    // ownership, so fractional values alter world texel/page footprint without
+    // snapping ownership to an adjacent integer clip level.
+    const float clipZeroScale = unscaledClipZeroScale *
+        std::max(resolutionScale, 1.0e-4f);
     const float ndcPageSize = 2.0f / static_cast<float>(CLodVirtualShadowFixedVirtualPageCountPerAxis);
     const float clampedShadowDistanceLowerBound = std::max(shadowDistanceLowerBound, 1.0f);
     const float clipHeightOffsetScale = 5.0f;

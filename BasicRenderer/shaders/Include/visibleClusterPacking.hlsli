@@ -35,6 +35,10 @@ static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_OVERFLOW_SHIFT =
     CLOD_PACKED_VISIBLE_CLUSTER_VSM_RECT_MAX_Y_SHIFT + CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_PAGE_BITS;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_HAS_BLOCK_DATA_SHIFT =
     CLOD_PACKED_VISIBLE_CLUSTER_VSM_OVERFLOW_SHIFT + 1u;
+// Bits 29-30 are not used by either the VSM payload or the high page-slab
+// offset nibble. Keep cache-layer routing with the cluster instead of
+// inferring it later from deformation type.
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_DYNAMIC_LAYER_FLAG = 0x20000000u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VOXEL_FLAG = 0x80000000u;
 
 uint4 CLodLoadVisibleClusterPacked(ByteAddressBuffer buffer, uint clusterIndex)
@@ -156,6 +160,22 @@ bool CLodVisibleClusterIsVoxelCube(uint4 packedCluster)
 uint CLodVisibleClusterMarkVoxelPayload(uint vsmPayload)
 {
     return vsmPayload | CLOD_PACKED_VISIBLE_CLUSTER_VOXEL_FLAG;
+}
+
+uint CLodVisibleClusterMarkDynamicShadowPayload(uint vsmPayload)
+{
+    return vsmPayload | CLOD_PACKED_VISIBLE_CLUSTER_VSM_DYNAMIC_LAYER_FLAG;
+}
+
+bool CLodVisibleClusterUsesDynamicShadowLayerFromPayload(uint vsmPayload)
+{
+    return (vsmPayload & CLOD_PACKED_VISIBLE_CLUSTER_VSM_DYNAMIC_LAYER_FLAG) != 0u;
+}
+
+bool CLodVisibleClusterUsesDynamicShadowLayer(uint4 packedCluster)
+{
+    return CLodVisibleClusterUsesDynamicShadowLayerFromPayload(
+        CLodVisibleClusterVsmPayload(packedCluster));
 }
 
 uint CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(uint shadowClipmapIndex)

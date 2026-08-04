@@ -35,6 +35,21 @@
 
 namespace {
 
+static_assert(
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX >
+        CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_ACTIVE_BLOCK_METADATA_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX &&
+    CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX &&
+    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX !=
+        CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX,
+    "Object-cull-only constants must not overwrite shared CLod traversal state");
+
 constexpr uint32_t kPureComputeObjectCullThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeTraverseThreadsPerGroup = 64u;
 constexpr uint32_t kPureComputeClusterThreadsPerGroup = 32u;
@@ -145,10 +160,12 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     std::shared_ptr<Buffer> swWriteBaseCounterBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidatesBuffer,
     std::shared_ptr<Buffer> shadowPredictiveInvalidationCandidateCountBuffer,
+    std::shared_ptr<Buffer> shadowInvalidationCountBuffer,
     std::shared_ptr<Buffer> shadowInvalidatedInstancesBitsetBuffer,
     std::shared_ptr<PixelBuffer> shadowPageTableTexture,
     std::shared_ptr<PixelBuffer> shadowPhysicalPagesTexture,
     std::shared_ptr<Buffer> shadowActiveBlockMetadataBuffer,
+    std::shared_ptr<Buffer> shadowReceiverSubpageMaskBuffer,
     std::shared_ptr<PixelBuffer> shadowDynamicPhysicalPagesTexture,
     std::shared_ptr<Buffer> shadowDynamicActiveBlockMetadataBuffer)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
@@ -175,10 +192,12 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     , m_shadowDirtyHierarchyTexture(std::move(shadowDirtyHierarchyTexture))
     , m_shadowPredictiveInvalidationCandidatesBuffer(std::move(shadowPredictiveInvalidationCandidatesBuffer))
     , m_shadowPredictiveInvalidationCandidateCountBuffer(std::move(shadowPredictiveInvalidationCandidateCountBuffer))
+    , m_shadowInvalidationCountBuffer(std::move(shadowInvalidationCountBuffer))
     , m_shadowInvalidatedInstancesBitsetBuffer(std::move(shadowInvalidatedInstancesBitsetBuffer))
     , m_shadowPageTableTexture(std::move(shadowPageTableTexture))
     , m_shadowPhysicalPagesTexture(std::move(shadowPhysicalPagesTexture))
     , m_shadowActiveBlockMetadataBuffer(std::move(shadowActiveBlockMetadataBuffer))
+    , m_shadowReceiverSubpageMaskBuffer(std::move(shadowReceiverSubpageMaskBuffer))
     , m_shadowDynamicPhysicalPagesTexture(
         std::move(shadowDynamicPhysicalPagesTexture))
     , m_shadowDynamicActiveBlockMetadataBuffer(
@@ -197,6 +216,27 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_renderPhase = std::move(inputs.renderPhase);
     m_clodOnlyWorkloads = inputs.clodOnlyWorkloads;
     m_useShadowCascadeViews = inputs.useShadowCascadeViews;
+
+    if (m_isFirstPass && UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodDynamicWindBoundsCacheEnabledSettingName)()) {
+        constexpr uint64_t entryStride = 48u;
+        const uint64_t budgetMiB = std::min<uint32_t>(
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+                CLodDynamicWindBoundsCacheMiBSettingName)(),
+            256u);
+        const uint64_t budgetBytes = budgetMiB * 1024u * 1024u;
+        m_dynamicWindBoundsCacheEntryCount = static_cast<uint32_t>(budgetBytes / entryStride);
+        if (m_dynamicWindBoundsCacheEntryCount != 0u) {
+            m_dynamicWindBoundsCacheBuffer = CreateAliasedUnmaterializedRawBuffer(
+                static_cast<uint64_t>(m_dynamicWindBoundsCacheEntryCount) * entryStride,
+                true,
+                false,
+                true);
+            m_dynamicWindBoundsCacheBuffer->SetName("CLod DynamicWind Meshlet Bounds Cache");
+            rg::memory::SetResourceUsageHint(*m_dynamicWindBoundsCacheBuffer, "DynamicWind VSM bounds cache");
+        }
+    }
 
     if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
         m_workGraphComputePageJobDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -543,6 +583,13 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
 
+    if (m_dynamicWindBoundsCacheBuffer) {
+        builder->WithUnorderedAccess(m_dynamicWindBoundsCacheBuffer);
+        // This read both enforces SimulateInstancesPhase2 -> shadow traversal
+        // ordering and limits caching to placements accepted by DynamicWind.
+        builder->WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+    }
+
     if (UsesVirtualShadowOutput(m_rasterOutputKind)) {
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
@@ -553,6 +600,9 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         }
         if (m_shadowInvalidatedInstancesBitsetBuffer) {
             builder->WithShaderResource(m_shadowInvalidatedInstancesBitsetBuffer);
+        }
+        if (m_shadowInvalidationCountBuffer) {
+            builder->WithShaderResource(m_shadowInvalidationCountBuffer);
         }
         if (m_shadowPredictiveInvalidationCandidatesBuffer) {
             builder->WithUnorderedAccess(m_shadowPredictiveInvalidationCandidatesBuffer);
@@ -571,6 +621,9 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         }
         if (m_shadowActiveBlockMetadataBuffer) {
             builder->WithShaderResource(m_shadowActiveBlockMetadataBuffer);
+        }
+        if (m_shadowReceiverSubpageMaskBuffer) {
+            builder->WithShaderResource(m_shadowReceiverSubpageMaskBuffer);
         }
         if (m_shadowDynamicActiveBlockMetadataBuffer) {
             builder->WithShaderResource(
@@ -677,6 +730,13 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     const uint32_t phase2RecordsPerGroup = 64u / phase2ExpansionFactor;
 
     uint32_t sharedRootConstants[NumMiscUintRootConstants] = {};
+    if (m_dynamicWindBoundsCacheBuffer) {
+        ++m_dynamicWindBoundsCacheGeneration;
+        if (m_dynamicWindBoundsCacheGeneration == 0u ||
+            m_dynamicWindBoundsCacheGeneration >= 0x7FFFFFFFu) {
+            m_dynamicWindBoundsCacheGeneration = 1u;
+        }
+    }
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -696,6 +756,25 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
             : 0u;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_dynamicWindBoundsCacheBuffer->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = m_dynamicWindBoundsCacheEntryCount;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = m_dynamicWindBoundsCacheGeneration;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_resourceRegistryView
+                ->RequestPtr<GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership")
+                ->GetSRVInfo(0).slot.index
+            : 0u;
+    if (m_dynamicWindBoundsCacheBuffer && m_dynamicWindBoundsCacheGeneration == 1u) {
+        spdlog::info(
+            "CLod DynamicWind bounds cache bindings: entries={} cacheDescriptor={} membershipDescriptor={}",
+            m_dynamicWindBoundsCacheEntryCount,
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX],
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX]);
+    }
     sharedRootConstants[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] =
         m_shadowDirtyHierarchyTexture
             ? m_shadowDirtyHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
@@ -747,6 +826,15 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         m_shadowActiveBlockMetadataBuffer
             ? m_shadowActiveBlockMetadataBuffer->GetSRVInfo(0).slot.index
             : 0u;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_DESCRIPTOR_INDEX] =
+        m_shadowReceiverSubpageMaskBuffer
+            ? m_shadowReceiverSubpageMaskBuffer->GetSRVInfo(0).slot.index
+            : 0u;
+    const uint32_t receiverSubpageMode = m_shadowReceiverSubpageMaskBuffer
+        ? SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)()
+        : CLodVirtualShadowReceiverSubpageModeOff;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE] = receiverSubpageMode;
     sharedRootConstants[
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
         m_shadowDynamicPhysicalPagesTexture
@@ -791,12 +879,18 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_VSM_PREDICTIVE_LOD_INVALIDATION;
     }
+    if (UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
+        workGraphFlags |= CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK;
+    }
     if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodFrustumCullingSettingName)()) {
         workGraphFlags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;
     }
     const uint32_t swRasterThreshold = std::min(
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(
-            CLodSoftwareRasterDiameterThresholdSettingName)(),
+            UsesVirtualShadowOutput(m_rasterOutputKind)
+                ? CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName
+                : CLodSoftwareRasterDiameterThresholdSettingName)(),
         0xFFFFu);
     workGraphFlags |= (swRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT);
     if (!m_isFirstPass) {
@@ -1134,6 +1228,9 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
                 record.activeDrawSetIndicesSRVIndex = activeDrawSetIndices->GetSRVInfo(0).slot.index;
                 record.drawRecordVisibilityGenerationSRVIndex = context.objectManager->GetDrawRecordVisibilityGenerationBuffer()->GetSRVInfo(0).slot.index;
                 record.activeDrawCount = count;
+                record.shadowCasterClass = UsesVirtualShadowOutput(m_rasterOutputKind)
+                    ? (wl.key.skinnedShadowCaster ? 2u : 1u)
+                    : 0u;
                 record.dispatchGridX = static_cast<uint>((count + kPureComputeObjectCullThreadsPerGroup - 1u) / kPureComputeObjectCullThreadsPerGroup);
                 record.dispatchGridY = 1;
                 record.dispatchGridZ = 1;
@@ -1152,6 +1249,11 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX] = record.viewDataIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_ACTIVE_DRAW_SET_SRV_INDEX] = record.activeDrawSetIndicesSRVIndex;
             objectCullRootConstants[CLOD_PC_OBJECT_CULL_VISIBILITY_GENERATION_SRV_INDEX] = record.drawRecordVisibilityGenerationSRVIndex;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS] = record.shadowCasterClass;
+            objectCullRootConstants[CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX] =
+                m_shadowInvalidationCountBuffer
+                    ? m_shadowInvalidationCountBuffer->GetSRVInfo(0).slot.index
+                    : 0u;
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,

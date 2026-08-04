@@ -261,6 +261,9 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 	const float shadowDistanceLowerBound = std::max(
 		SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 		1.0f);
+	const float directionalLodBias =
+		CLodVirtualShadowBuildRuntimeResolutionConfig().directionalLodBias;
+	const float directionalResolutionScale = std::exp2(directionalLodBias);
 	auto cascades = setupDirectionalClipmaps(numCascades, info.dirWorldSpace,
 		DirectX::XMLoadFloat3(&posFloats), 
 		GetForwardFromMatrix(matrix),
@@ -268,7 +271,8 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		camera.zNear, camera.fov, camera.aspect,
 		directionalClipFarPlanes,
 		shadowDistanceLowerBound,
-		std::max(getDirectionalShadowSceneExtent(), 0.0f));
+		std::max(getDirectionalShadowSceneExtent(), 0.0f),
+		directionalResolutionScale);
 
 	// Collect the frustum planes from each cascade.
 	cascadePlanes = Components::FrustumPlanes();
@@ -452,7 +456,10 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 		const float shadowDistanceLowerBound = std::max(
 			SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowDistanceLowerBound")(),
 			1.0f);
-		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, shadowDistanceLowerBound, std::max(getDirectionalShadowSceneExtent(), 0.0f));
+		const float directionalLodBias =
+			CLodVirtualShadowBuildRuntimeResolutionConfig().directionalLodBias;
+		const float directionalResolutionScale = std::exp2(directionalLodBias);
+		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, shadowDistanceLowerBound, std::max(getDirectionalShadowSceneExtent(), 0.0f), directionalResolutionScale);
 		PublishDirectionalShadowDebug(cascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
 		viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);
