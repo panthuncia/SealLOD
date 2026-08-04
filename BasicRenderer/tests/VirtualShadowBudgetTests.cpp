@@ -5,9 +5,91 @@
 #include <vector>
 
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 #include "Utilities/Utilities.h"
 
 namespace {
+class MockCasterProvider final : public IVirtualShadowCasterProvider
+{
+public:
+    explicit MockCasterProvider(std::string id) : m_id(std::move(id)) {}
+    std::string_view GetVirtualShadowCasterProviderId() const noexcept override { return m_id; }
+    void GatherVirtualShadowPreparationPasses(
+        const VirtualShadowCasterBuildContext&, VirtualShadowPassBuilder& builder) override
+    {
+        RenderGraph::ExternalPassDesc pass{};
+        pass.name = m_id + "::Prepare";
+        builder.Add(std::move(pass));
+    }
+    void GatherVirtualShadowRasterPasses(
+        const VirtualShadowCasterBuildContext&, VirtualShadowPassBuilder& builder) override
+    {
+        RenderGraph::ExternalPassDesc pass{};
+        pass.name = m_id + "::Raster";
+        builder.Add(std::move(pass));
+    }
+private:
+    std::string m_id;
+};
+
+void RunCasterExtensionCases()
+{
+    VirtualShadowCasterRegistry empty;
+    if (!empty.Empty() || empty.Size() != 0u) {
+        throw std::runtime_error("virtual-shadow caster registry was not initially empty");
+    }
+
+    MockCasterProvider grass("Grass");
+    MockCasterProvider rocks("Rocks");
+    empty.Register(grass);
+    empty.Register(rocks);
+    bool duplicateRejected = false;
+    try {
+        MockCasterProvider duplicate("Grass");
+        empty.Register(duplicate);
+    }
+    catch (const std::runtime_error&) {
+        duplicateRejected = true;
+    }
+    if (!duplicateRejected || empty.Size() != 2u) {
+        throw std::runtime_error("duplicate virtual-shadow provider ID was accepted");
+    }
+
+    std::vector<RenderGraph::ExternalPassDesc> passes;
+    VirtualShadowCasterBuildContext context{};
+    VirtualShadowPassBuilder builder(passes, "CoreRaster", "FinalizeFallback");
+    empty.GatherRasterPasses(context, builder);
+    if (passes.size() != 2u || builder.LastPassName() != "Rocks::Raster" ||
+        !passes[0].where || passes[0].where->after != std::vector<std::string>{ "CoreRaster" } ||
+        passes[1].where->after != std::vector<std::string>{ "Grass::Raster" } ||
+        passes[1].where->before != std::vector<std::string>{ "FinalizeFallback" }) {
+        throw std::runtime_error("virtual-shadow provider raster ordering was not stable");
+    }
+
+    VirtualShadowInvalidationQueue queue(2u);
+    VirtualShadowInvalidationBounds rigid{};
+    rigid.radius = 10.0f;
+    queue.Enqueue(rigid);
+    auto skinned = rigid;
+    skinned.mobility = VirtualShadowCasterMobility::SkinnedOrDeformable;
+    queue.Enqueue(skinned);
+    if (queue.Enqueue(rigid)) {
+        throw std::runtime_error("virtual-shadow invalidation overflow was not reported");
+    }
+    auto batch = queue.Drain(3u);
+    if (!batch.invalidateAllActiveClipmaps || batch.bounds.size() != 2u ||
+        batch.bounds[0].clipmapMask != 0xFFFFFFFFu ||
+        batch.bounds[1].clipmapMask != 0xFFFFFFF8u || queue.GetOverflowCount() != 1u) {
+        throw std::runtime_error("virtual-shadow bounds invalidation policy failed");
+    }
+
+    if (VirtualShadowCasterUsesDynamicLayer(VirtualShadowCasterMobility::Rigid, 0x4u) ||
+        !VirtualShadowCasterUsesDynamicLayer(VirtualShadowCasterMobility::SkinnedOrDeformable, 0x4u) ||
+        VirtualShadowCasterUsesDynamicLayer(VirtualShadowCasterMobility::SkinnedOrDeformable, 0u)) {
+        throw std::runtime_error("virtual-shadow caster layer classification failed");
+    }
+}
+
 struct Case
 {
     uint32_t totalBudget;
@@ -505,6 +587,7 @@ int main()
         RunExactPageTokenCases();
         RunAbsolutePageTagCases();
         RunDirectionalClipFitCases();
+        RunCasterExtensionCases();
         std::cout << "Virtual shadow budget tests passed.\n";
         return 0;
     }

@@ -78,6 +78,7 @@
 #include "Render/OutputTypes.h"
 #include "Render/GraphExtensions/IOExtension.h"
 #include "Render/GraphExtensions/CLodExtension.h"
+#include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodStreamingSystem.h"
 #include "Render/GraphExtensions/CLodTelemetry.h"
@@ -3682,7 +3683,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         return;
     }
     if (m_clodVirtualShadowTelemetryReadbackPending ||
-        m_clodVirtualShadowWorkTelemetryReadbackPending) {
+        m_clodVirtualShadowWorkTelemetryReadbackPending ||
+        m_virtualShadowCasterTelemetryReadbacksPending != 0u) {
         return;
     }
 
@@ -4006,6 +4008,47 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
 					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheFallbackVertices),
 					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheCachedRasterVertices),
 					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices));
+            });
+    }
+
+    struct CasterTelemetryResource {
+        std::shared_ptr<Resource> resource;
+        std::string providerId;
+        std::string completionPassName;
+    };
+    std::vector<CasterTelemetryResource> casterTelemetryResources;
+    world.query_builder<const Components::Resource, const VirtualShadowCasterTelemetryTag>()
+        .build()
+        .each([&](const Components::Resource& component, const VirtualShadowCasterTelemetryTag& tag) {
+            if (auto resource = component.resource.lock()) {
+                casterTelemetryResources.push_back({
+                    std::move(resource), tag.providerId, tag.completionPassName });
+            }
+        });
+    m_virtualShadowCasterTelemetryReadbacksPending =
+        static_cast<uint32_t>(casterTelemetryResources.size());
+    for (auto& telemetry : casterTelemetryResources) {
+        readbackService->RequestReadbackCapture(
+            telemetry.completionPassName,
+            telemetry.resource.get(),
+            RangeSpec{},
+            [this, requestedFrame, providerId = telemetry.providerId](ReadbackCaptureResult&& result) {
+                if (m_virtualShadowCasterTelemetryReadbacksPending != 0u) {
+                    --m_virtualShadowCasterTelemetryReadbacksPending;
+                }
+                constexpr size_t counterCount = 8u;
+                if (result.data.size() < sizeof(uint32_t) * counterCount) {
+                    spdlog::warn(
+                        "VSM caster telemetry provider={} frame={}: payload too small ({} bytes).",
+                        providerId, requestedFrame, result.data.size());
+                    return;
+                }
+                std::array<uint32_t, counterCount> counters{};
+                std::memcpy(counters.data(), result.data.data(), sizeof(counters));
+                spdlog::info(
+                    "VSM caster telemetry provider={} frame={}: records={} candidates={} activeBlockOverlaps={} staticRecords={} dynamicRecords={} depthWrites={} capacityOverflows={}",
+                    providerId, requestedFrame, counters[0], counters[1], counters[2],
+                    counters[3], counters[4], counters[5], counters[6]);
             });
     }
 }
@@ -5010,11 +5053,12 @@ void Renderer::RegisterPipelineExtensions() {
         "BuiltinReadbackCapture");
 
     auto clodStreamingSystem = std::make_shared<CLodStreamingSystem>();
+    auto virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>();
     br::pipeline::PipelineBuildContext extensionContext(
         *currentRenderGraph,
         m_pipelineRecipe.Bindings(),
         {},
-        [this, clodStreamingSystem](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions& optionsVariant) {
+        [this, clodStreamingSystem, virtualShadowCasters](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions& optionsVariant) {
             CLodExtensionType extensionType{};
             const char* extensionId = nullptr;
             switch (id) {
@@ -5052,7 +5096,8 @@ void Renderer::RegisterPipelineExtensions() {
                         .enableReyes = options.reyes == br::pipeline::ReyesMode::Enabled,
                         .enableVoxelRasterization = voxelRasterizationEnabled,
                         .voxelRasterWorkCapacity = voxelRasterWorkCapacity,
-                        .streamingSystem = clodStreamingSystem }),
+                        .streamingSystem = clodStreamingSystem,
+                        .virtualShadowCasters = virtualShadowCasters }),
                 extensionId);
         });
     // Recipe extensions may register resources consumed by technique extensions
@@ -5064,6 +5109,9 @@ void Renderer::RegisterPipelineExtensions() {
         auto extension = factory();
         if (!extension) {
             throw std::runtime_error("Pipeline extension factory returned null: " + id);
+        }
+        if (auto* casterProvider = dynamic_cast<IVirtualShadowCasterProvider*>(extension.get())) {
+            virtualShadowCasters->Register(*casterProvider);
         }
         currentRenderGraph->RegisterExtension(std::move(extension), id);
     }

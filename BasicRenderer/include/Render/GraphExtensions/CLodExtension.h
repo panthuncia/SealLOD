@@ -15,6 +15,7 @@ class CLodShadowVariant;
 class CLodVisibilityVariant;
 class PixelBuffer;
 class ResourceGroup;
+class VirtualShadowCasterRegistry;
 struct CLodVariantTraits;
 
 struct CLodExtensionOptions {
@@ -22,6 +23,7 @@ struct CLodExtensionOptions {
     bool enableVoxelRasterization = false;
     uint32_t voxelRasterWorkCapacity = 0u;
     std::shared_ptr<CLodStreamingSystem> streamingSystem;
+    std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters;
 };
 
 class CLodExtension final : public RenderGraph::IRenderGraphExtension, public IResourceProvider {

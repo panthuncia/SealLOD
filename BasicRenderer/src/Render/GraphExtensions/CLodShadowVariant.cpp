@@ -11,6 +11,7 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/CLodExtension.h"
 #include "Render/GraphExtensions/CLodExtensionShared.h"
+#include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 #include "Render/GraphExtensions/ClusterLOD/ClusterSoftwareRasterPageJobBuildArgsPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ClusterSoftwareRasterPageJobExpandPass.h"
 #include "Render/GraphExtensions/ClusterLOD/ClusterSoftwareRasterPageJobRasterPass.h"
@@ -80,6 +81,24 @@ enum class ShadowRasterPhase : uint32_t {
 };
 
 } // namespace
+
+VirtualShadowCasterBuildContext CLodShadowVariant::MakeCasterContext(CLodExtension& extension)
+{
+    VirtualShadowCasterBuildContext context{};
+    context.pageTable = extension.m_shadowPageTableTexture;
+    context.staticPhysicalPages = extension.m_shadowStaticPhysicalPagesTexture;
+    context.dynamicPhysicalPages = extension.m_shadowPhysicalPagesTexture;
+    context.clipmapInfo = extension.m_shadowClipmapInfoBuffer;
+    context.compactShadowCameras = extension.m_shadowCompactShadowCameraBuffer;
+    context.staticActiveBlockMetadata = extension.m_shadowActiveBlockMetadataBuffer;
+    context.dynamicActiveBlockMetadata = extension.m_shadowDynamicActiveBlockMetadataBuffer;
+    context.directionalPageViews = extension.m_shadowDirectionalPageViewInfoBuffer;
+    context.statistics = extension.m_shadowStatsBuffer;
+    if (extension.m_options.virtualShadowCasters) {
+        context.invalidationQueue = extension.m_options.virtualShadowCasters->GetInvalidationQueue();
+    }
+    return context;
+}
 
 std::string CLodShadowVariant::AppendPageJobRasterPassesForPhase(
     CLodExtension& extension,
@@ -525,6 +544,17 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
     outPasses.push_back(std::move(shadowFreeWrappedPagesPassDesc));
 
     const std::string shadowInvalidatePagesPassName = MakeVariantPassName(traits, "VirtualShadowInvalidatePagesPass");
+    std::string invalidateAfterPassName = shadowFreeWrappedPagesPassName;
+    if (extension.m_options.virtualShadowCasters && !extension.m_options.virtualShadowCasters->Empty()) {
+        VirtualShadowPassBuilder preparationBuilder(
+            outPasses,
+            shadowFreeWrappedPagesPassName,
+            shadowInvalidatePagesPassName);
+        extension.m_options.virtualShadowCasters->GatherPreparationPasses(
+            MakeCasterContext(extension),
+            preparationBuilder);
+        invalidateAfterPassName = preparationBuilder.LastPassName();
+    }
     auto shadowInvalidatePagesPassDesc = RenderGraph::ExternalPassDesc::Compute(
         shadowInvalidatePagesPassName,
         std::make_shared<VirtualShadowMapInvalidatePagesPass>(
@@ -536,8 +566,11 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowDirtyPageFlagsBuffer,
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
-            extension.m_shadowStatsBuffer));
-    shadowInvalidatePagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(shadowFreeWrappedPagesPassName));
+            extension.m_shadowStatsBuffer,
+            extension.m_options.virtualShadowCasters
+                ? extension.m_options.virtualShadowCasters->GetInvalidationQueue()
+                : nullptr));
+    shadowInvalidatePagesPassDesc.At(RenderGraph::ExternalInsertPoint::After(invalidateAfterPassName));
     outPasses.push_back(std::move(shadowInvalidatePagesPassDesc));
 
     const std::string shadowMarkPagesPassName = MakeVariantPassName(traits, "VirtualShadowMarkPagesPass");
@@ -762,6 +795,25 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
     outPasses.push_back(std::move(shadowNonRasterableHierarchyPassDesc));
 
     return shadowNonRasterableHierarchyPassName;
+}
+
+std::string CLodShadowVariant::AppendCasterRasterPasses(
+    CLodExtension& extension,
+    const CLodVariantTraits& traits,
+    std::vector<RenderGraph::ExternalPassDesc>& outPasses,
+    const std::string& afterPassName)
+{
+    if (traits.type != CLodExtensionType::Shadow || afterPassName.empty() ||
+        !extension.m_options.virtualShadowCasters || extension.m_options.virtualShadowCasters->Empty()) {
+        return afterPassName;
+    }
+
+    VirtualShadowPassBuilder builder(
+        outPasses,
+        afterPassName,
+        MakeVariantPassName(traits, "VirtualShadowFinalizeFallbackPagesPass"));
+    extension.m_options.virtualShadowCasters->GatherRasterPasses(MakeCasterContext(extension), builder);
+    return builder.LastPassName();
 }
 
 void CLodShadowVariant::AppendStructuralTail(

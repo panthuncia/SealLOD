@@ -408,6 +408,7 @@ private:
     uint64_t m_lastCLodVirtualShadowTelemetryRequestFrame = UINT64_MAX;
     bool m_clodVirtualShadowTelemetryReadbackPending = false;
     bool m_clodVirtualShadowWorkTelemetryReadbackPending = false;
+    uint32_t m_virtualShadowCasterTelemetryReadbacksPending = 0u;
     bool m_loggedCLodVirtualShadowTelemetryEnabled = false;
     uint64_t m_lastObjectReyesAtlasTelemetryRequestFrame = UINT64_MAX;
     bool m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;

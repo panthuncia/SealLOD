@@ -2402,6 +2402,11 @@ void CLodExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGr
         appendReplayPhase();
     }
 
+    shadowClearDirtyBitsAfterPassName = CLodShadowVariant::AppendCasterRasterPasses(
+        *this,
+        traits,
+        outPasses,
+        shadowClearDirtyBitsAfterPassName);
     CLodShadowVariant::AppendStructuralTail(*this, traits, outPasses, shadowClearDirtyBitsAfterPassName);
     appendLinearDepthDownsamplePass(2u);
 

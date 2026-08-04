@@ -3,6 +3,7 @@
 #include "include/visibleClusterPacking.hlsli"
 #include "include/structs.hlsli"
 #include "include/clodVirtualShadowDepth.hlsli"
+#include "include/virtualShadowCaster.hlsli"
 #include "include/utilities.hlsli"
 #include "include/waveIntrinsicsHelpers.hlsli"
 #include "PerPassRootConstants/clodRasterizationRootConstants.h"
@@ -157,77 +158,19 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
         }
     }
 
-    const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
-
-    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX];
-    const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
-    const uint pageEntry = pageTable[pageCoords];
     const bool dynamicLayer =
         CLodVisibleClusterUsesDynamicShadowLayerFromPayload(shadowVsmPayload);
-    if (!CLodVirtualShadowPageEntryCanRasterLayer(
-            pageEntry, dynamicLayer))
+    if (!VirtualShadowCasterWriteDepth(
+            shadowUv,
+            input.linearDepth,
+            clipmapInfo,
+            dynamicLayer,
+            CLOD_RASTER_VIRTUAL_SHADOW_PAGE_TABLE_DESCRIPTOR_INDEX,
+            CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX,
+            CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX))
     {
         CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_PAGE_REJECTED, 1u);
         return;
-    }
-
-    const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-    const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
-    const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
-
-    RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
-        dynamicLayer
-            ? CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
-            : CLOD_RASTER_VIRTUAL_SHADOW_PHYSICAL_PAGES_DESCRIPTOR_INDEX];
-    const float pageSpaceLinearDepth = dynamicLayer
-        ? CLodVirtualShadowDepthToCachedPageSpace(
-            input.linearDepth,
-            physicalPageIndex,
-            clipmapInfo.shadowCameraBufferIndex)
-        : input.linearDepth;
-    if (!isfinite(pageSpaceLinearDepth) || pageSpaceLinearDepth <= 0.0f)
-    {
-        return;
-    }
-    const uint newDepthBits = CLodVirtualShadowEncodeDepth(
-        pageSpaceLinearDepth,
-        clipmapInfo);
-    InterlockedMin(physicalPages[atlasPixel], newDepthBits);
-    // Stamp page completion once per unique page in the wave. The old
-    // per-fragment InterlockedOr serialized thousands of lanes on a single
-    // page-table word after every depth atomic.
-    const uint packedPageCoords =
-        (pageCoords.x & 0xFFFu) |
-        ((pageCoords.y & 0xFFFu) << 12u) |
-        ((pageCoords.z & 0xFFu) << 24u);
-    const uint4 pageMatchMask = WaveMatch(packedPageCoords);
-    uint pageLeaderLane = 0u;
-    if (pageMatchMask.x != 0u)
-    {
-        pageLeaderLane = firstbitlow(pageMatchMask.x);
-    }
-    else if (pageMatchMask.y != 0u)
-    {
-        pageLeaderLane = 32u + firstbitlow(pageMatchMask.y);
-    }
-    else if (pageMatchMask.z != 0u)
-    {
-        pageLeaderLane = 64u + firstbitlow(pageMatchMask.z);
-    }
-    else
-    {
-        pageLeaderLane = 96u + firstbitlow(pageMatchMask.w);
-    }
-    if (WaveGetLaneIndex() == pageLeaderLane)
-    {
-        uint ignored = 0u;
-        InterlockedOr(
-            pageTable[pageCoords],
-            dynamicLayer
-                ? kCLodVirtualShadowDynamicContentMask
-                : kCLodVirtualShadowContentValidMask |
-                    kCLodVirtualShadowRerenderedThisFrameMask,
-            ignored);
     }
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_WRITES, 1u);
 }

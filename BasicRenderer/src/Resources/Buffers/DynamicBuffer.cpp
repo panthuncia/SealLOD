@@ -6,7 +6,7 @@
 #include <limits>
 
 #include <spdlog/spdlog.h>
-#include <tracy/Tracy.hpp>
+#include <BasicTelemetry/Tracy.h>
 
 #include "Resources/Buffers/BufferView.h"
 #include "Managers/Singletons/DeviceManager.h"
@@ -209,8 +209,8 @@ bool DynamicBuffer::ExtendTrackedCapacityLocked(size_t newCapacity) {
 }
 
 void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
-    ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytes");
-    ZoneText(m_name.data(), m_name.size());
+    BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytes");
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.RequestBytes", static_cast<int64_t>(size));
     if (size == 0) {
         return;
@@ -218,8 +218,8 @@ void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
 
     std::unique_lock<std::recursive_mutex> lock(m_allocationMutex, std::try_to_lock);
     if (!lock.owns_lock()) {
-        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytes::DeferredAllocationLockBusy");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytes::DeferredAllocationLockBusy");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         RaiseDeferredAsyncReserveBytes(size);
         TracyPlot("DynamicBuffer.RequestAsyncReserveBytes.DeferredLockBusy", int64_t{ 1 });
         return;
@@ -232,8 +232,8 @@ void DynamicBuffer::RequestAsyncReserveBytes(size_t size) {
 }
 
 void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
-    ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked");
-    ZoneText(m_name.data(), m_name.size());
+    BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked");
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.InputBytes", static_cast<int64_t>(size));
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.LogicalCapacityBytes", static_cast<int64_t>(m_capacity));
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.BackingSizeBytes", static_cast<int64_t>(GetBufferSize()));
@@ -243,8 +243,8 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
 
     size_t requestedCapacity = 0;
     {
-        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::ComputeReserveCapacity");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::ComputeReserveCapacity");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         requestedCapacity = ComputeReserveCapacityLocked(size);
     }
     const size_t desiredBackingCapacity = (std::max)(requestedCapacity, m_capacity);
@@ -252,21 +252,21 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.DesiredBackingCapacityBytes", static_cast<int64_t>(desiredBackingCapacity));
     if (desiredBackingCapacity <= static_cast<size_t>(GetBufferSize()) ||
         (m_pendingResizeValid && m_pendingResizeCapacity >= desiredBackingCapacity)) {
-        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::NoResizeNeeded");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::NoResizeNeeded");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NoResizeNeeded", int64_t{ 1 });
         return;
     }
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NoResizeNeeded", int64_t{ 0 });
 
     if (m_pendingResizeValid) {
-        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         m_requestedResizeCapacity = (std::max)(m_requestedResizeCapacity, desiredBackingCapacity);
         TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.CoalescedResizeCapacityBytes", static_cast<int64_t>(m_requestedResizeCapacity));
         {
-            ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest::Submit");
-            ZoneText(m_name.data(), m_name.size());
+            BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::CoalesceAsyncResizeRequest::Submit");
+            BT_ZONE_TEXT(m_name.data(), m_name.size());
             m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
                 .resourceID = GetGlobalResourceID(),
                 .heapType = rhi::HeapType::DeviceLocal,
@@ -292,8 +292,8 @@ void DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
     m_pendingResizeValid = true;
     TracyPlot("DynamicBuffer.RequestAsyncReserveBytesLocked.NewResizeCapacityBytes", static_cast<int64_t>(m_requestedResizeCapacity));
     {
-        ZoneScopedN("DynamicBuffer::RequestAsyncReserveBytesLocked::SubmitAsyncResizeRequest");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::RequestAsyncReserveBytesLocked::SubmitAsyncResizeRequest");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         m_asyncResizeState.Request(AsyncBufferBackingResizeRequest{
             .resourceID = resourceID,
             .heapType = rhi::HeapType::DeviceLocal,
@@ -321,12 +321,12 @@ size_t DynamicBuffer::ConsumeDeferredAsyncReserveBytes() {
 }
 
 bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
-    ZoneScopedN("DynamicBuffer::PublishReadyAsyncResize");
+    BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResize");
     std::lock_guard lock(m_allocationMutex);
     const size_t deferredSize = ConsumeDeferredAsyncReserveBytes();
     if (deferredSize != 0) {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResize::DrainDeferredReserve");
-        ZoneText(m_name.data(), m_name.size());
+        BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResize::DrainDeferredReserve");
+        BT_ZONE_TEXT(m_name.data(), m_name.size());
         TracyPlot("DynamicBuffer.PublishReadyAsyncResize.DrainedDeferredBytes", static_cast<int64_t>(deferredSize));
         RequestAsyncReserveBytesLocked(deferredSize);
     }
@@ -334,7 +334,7 @@ bool DynamicBuffer::PublishReadyAsyncResize(bool wait) {
 }
 
 bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
-    ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked");
+    BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResizeLocked");
     if (!m_pendingResizeValid && !m_asyncResizeState.HasPending()) {
         TracyPlot("DynamicBuffer.Resize.Pending", int64_t{ 0 });
         return false;
@@ -399,11 +399,11 @@ bool DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
     }
 
     {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked::ApplyBacking");
+        BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResizeLocked::ApplyBacking");
         ApplyResizeBackingLocked(std::move(newBacking), newCapacity, previousBackingCapacity);
     }
     if (!logicalCapacityAlreadyExtended) {
-        ZoneScopedN("DynamicBuffer::PublishReadyAsyncResizeLocked::MergeFreeBlock");
+        BT_ZONE_SCOPE("DynamicBuffer::PublishReadyAsyncResizeLocked::MergeFreeBlock");
         size_t newBlockOffset = previousBackingCapacity;
         if (!m_blocksByOffset.empty()) {
             auto lastIt = std::prev(m_blocksByOffset.end());
@@ -827,12 +827,12 @@ void DynamicBuffer::StageWritePages(
 }
 
 std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size, size_t elementSize, size_t fullAllocationSize) {
-    ZoneScopedN("DynamicBuffer::AddData");
-    ZoneValue(static_cast<int64_t>(size));
-    ZoneText(m_name.data(), m_name.size());
+    BT_ZONE_SCOPE("DynamicBuffer::AddData");
+    BT_ZONE_VALUE(static_cast<int64_t>(size));
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     std::unique_lock<std::recursive_mutex> lock(m_allocationMutex, std::defer_lock);
     {
-        ZoneScopedN("DynamicBuffer::AddData::WaitAllocationMutex");
+        BT_ZONE_SCOPE("DynamicBuffer::AddData::WaitAllocationMutex");
         lock.lock();
     }
 	size_t actualSize = size;
@@ -845,7 +845,7 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
     }
     std::unique_ptr<BufferView> view;
     {
-        ZoneScopedN("DynamicBuffer::AddData::AllocateView");
+        BT_ZONE_SCOPE("DynamicBuffer::AddData::AllocateView");
         view = Allocate(actualSize, elementSize);
     }
     if (!view) {
@@ -853,7 +853,7 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
     }
     
 	if (data != nullptr) {
-        ZoneScopedN("DynamicBuffer::AddData::StageWrite");
+        BT_ZONE_SCOPE("DynamicBuffer::AddData::StageWrite");
         StageOrUpload(data, size, view->GetOffset());
 	}
 
@@ -861,16 +861,16 @@ std::unique_ptr<BufferView> DynamicBuffer::AddData(const void* data, size_t size
 }
 
 void DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
-    ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes");
-    ZoneValue(static_cast<int64_t>(additionalBytes));
-    ZoneText(m_name.data(), m_name.size());
+    BT_ZONE_SCOPE("DynamicBuffer::ReserveCpuShadowAdditionalBytes");
+    BT_ZONE_VALUE(static_cast<int64_t>(additionalBytes));
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     if (additionalBytes == 0) {
         return;
     }
 
     std::unique_lock<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex, std::defer_lock);
     {
-        ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes::WaitUploadPolicyMutex");
+        BT_ZONE_SCOPE("DynamicBuffer::ReserveCpuShadowAdditionalBytes::WaitUploadPolicyMutex");
         uploadLock.lock();
     }
     if (additionalBytes > (std::numeric_limits<size_t>::max)() - m_cpuShadowData.size()) {
@@ -878,7 +878,7 @@ void DynamicBuffer::ReserveCpuShadowAdditionalBytes(size_t additionalBytes) {
     }
     const size_t desiredCapacity = m_cpuShadowData.size() + additionalBytes;
     if (m_cpuShadowData.capacity() < desiredCapacity) {
-        ZoneScopedN("DynamicBuffer::ReserveCpuShadowAdditionalBytes::Reserve");
+        BT_ZONE_SCOPE("DynamicBuffer::ReserveCpuShadowAdditionalBytes::Reserve");
         m_cpuShadowData.reserve(desiredCapacity);
     }
 }
@@ -888,16 +888,16 @@ void DynamicBuffer::UpdateView(BufferView* view, const void* data) {
 }
 
 void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) {
-    ZoneScopedN("DynamicBuffer::StageOrUpload");
-    ZoneValue(static_cast<int64_t>(size));
-    ZoneText(m_name.data(), m_name.size());
+    BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload");
+    BT_ZONE_VALUE(static_cast<int64_t>(size));
+    BT_ZONE_TEXT(m_name.data(), m_name.size());
     std::unique_lock<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex, std::defer_lock);
     {
-        ZoneScopedN("DynamicBuffer::StageOrUpload::WaitUploadPolicyMutex");
+        BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::WaitUploadPolicyMutex");
         uploadLock.lock();
     }
     {
-        ZoneScopedN("DynamicBuffer::StageOrUpload::RetainCpuShadow");
+        BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::RetainCpuShadow");
         RetainCpuShadowWrite(data, size, offset);
     }
     if (offset + size > GetBufferSize()) {
@@ -906,7 +906,7 @@ void DynamicBuffer::StageOrUpload(const void* data, size_t size, size_t offset) 
         return;
     }
     {
-        ZoneScopedN("DynamicBuffer::StageOrUpload::StagePolicyWrite");
+        BT_ZONE_SCOPE("DynamicBuffer::StageOrUpload::StagePolicyWrite");
         StageOrUploadLocked(data, size, offset);
     }
 }
@@ -945,8 +945,8 @@ void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t of
 
 void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
     if (m_cpuShadowData.size() < size) {
-        ZoneScopedN("DynamicBuffer::EnsureCpuShadowSize::Grow");
-        ZoneValue(static_cast<int64_t>(size - m_cpuShadowData.size()));
+        BT_ZONE_SCOPE("DynamicBuffer::EnsureCpuShadowSize::Grow");
+        BT_ZONE_VALUE(static_cast<int64_t>(size - m_cpuShadowData.size()));
         m_cpuShadowData.resize(size, std::byte{ 0 });
     }
 }
@@ -958,7 +958,7 @@ void DynamicBuffer::RetainCpuShadowWrite(const void* data, size_t size, size_t o
 
     EnsureCpuShadowSize(offset + size);
     {
-        ZoneScopedN("DynamicBuffer::RetainCpuShadowWrite::Memcpy");
+        BT_ZONE_SCOPE("DynamicBuffer::RetainCpuShadowWrite::Memcpy");
         std::memcpy(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(offset), data, size);
     }
 }
@@ -1106,7 +1106,7 @@ void DynamicBuffer::GrowBuffer(size_t newSize) {
 }
 
 void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> newDataBuffer, size_t newSize, size_t previousCapacity) {
-    ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked");
+    BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked");
     TracyPlot("DynamicBuffer.Resize.ApplyNewSizeBytes", static_cast<int64_t>(newSize));
     TracyPlot("DynamicBuffer.Resize.ApplyPreviousCapacityBytes", static_cast<int64_t>(previousCapacity));
     spdlog::debug(
@@ -1114,7 +1114,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
 		m_name,
 		GetGlobalResourceID());
     {
-        ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::SetBacking");
+        BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::SetBacking");
 	    SetBacking(std::move(newDataBuffer), newSize);
     }
     spdlog::debug(
@@ -1124,18 +1124,18 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
         GetBufferSize(),
         GetBackingGeneration());
     {
-        ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::UploadPolicyAndReplay");
+        BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::UploadPolicyAndReplay");
         std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
         {
-            ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::SyncUploadPolicyState");
+            BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::SyncUploadPolicyState");
             SyncUploadPolicyState();
         }
         {
-            ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::EnsureCpuShadowSize");
+            BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::EnsureCpuShadowSize");
             EnsureCpuShadowSize(newSize);
         }
         {
-            ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::OnBufferResized");
+            BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::OnBufferResized");
             m_uploadPolicyState.OnBufferResized(GetBufferSize());
         }
         const size_t replayBytes = (std::min)(newSize, m_cpuShadowData.size());
@@ -1146,7 +1146,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
             // coalescing mirror, because long-lived sparse buffers can contain
             // bytes written through bulk or external upload paths.
             if (rg::runtime::GetActiveUploadService() != nullptr) {
-                ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::ReplayCpuShadowUploadService");
+                BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::ReplayCpuShadowUploadService");
                 BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
                 spdlog::debug(
                     "DynamicBuffer '{}' id={} GrowBuffer replayed CPU shadow bytes={}",
@@ -1154,7 +1154,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
                     GetGlobalResourceID(),
                     replayBytes);
             } else {
-                ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::ReplayCpuShadowStageOrUpload");
+                BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::ReplayCpuShadowStageOrUpload");
                 StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
                 if (m_uploadPolicyState.HasPendingWork()) {
                     MarkUploadPolicyDirty();
@@ -1166,8 +1166,8 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
     m_capacity = newSize;
 
     {
-        ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::ApplyMetadata");
-        ZoneValue(static_cast<int64_t>(m_metadataBundles.size()));
+        BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::ApplyMetadata");
+        BT_ZONE_VALUE(static_cast<int64_t>(m_metadataBundles.size()));
         for (const auto& bundle : m_metadataBundles) {
             ApplyMetadataToBacking(bundle);
         }
@@ -1178,7 +1178,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
         m_name,
         GetGlobalResourceID());
     {
-        ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::AssignDescriptorSlots");
+        BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::AssignDescriptorSlots");
         AssignDescriptorSlots();
     }
     spdlog::debug(
@@ -1187,7 +1187,7 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
         GetGlobalResourceID());
 
     {
-        ZoneScopedN("DynamicBuffer::ApplyResizeBackingLocked::SetName");
+        BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::SetName");
 	    SetName(m_name);
     }
     spdlog::debug(

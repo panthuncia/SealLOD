@@ -74,6 +74,14 @@ struct CLodVirtualShadowInvalidationInput
     uint pad1;
 };
 
+struct CLodVirtualShadowBoundsInvalidationInput
+{
+    float4 centerRadius;
+    uint clipmapMask;
+    uint providerLabel;
+    uint2 pad;
+};
+
 struct CLodVirtualShadowPredictiveInvalidationCandidate
 {
     float4 worldCenterAndRadius;
@@ -2925,6 +2933,74 @@ void CLodVirtualShadowInvalidatePagesCSMain(uint3 dispatchThreadId : SV_Dispatch
             directionalPageViewInfo,
             statsBuffer);
     }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void CLodVirtualShadowInvalidateBoundsCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+    ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> dirtyFlags = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_DIRTY_FLAGS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint4> pageMetadata = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_METADATA_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<float4> directionalPageViewInfo = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_VIEW_INFO_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer = ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_STATS_DESCRIPTOR_INDEX];
+
+    const uint inputIndex = dispatchThreadId.x;
+    const uint clipmapCount = min(CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_COUNT, kCLodVirtualShadowClipmapCount);
+    if (CLOD_VIRTUAL_SHADOW_INVALIDATE_ALL_ACTIVE_CLIPMAPS != 0u)
+    {
+        const uint pagesPerClip = CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION * CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION;
+        const uint clipmapIndex = inputIndex / pagesPerClip;
+        if (clipmapIndex >= clipmapCount || !CLodVirtualShadowClipmapIsValid(clipmapInfos[clipmapIndex]))
+        {
+            return;
+        }
+        const uint localPageIndex = inputIndex % pagesPerClip;
+        const uint2 pageCoords = uint2(
+            localPageIndex % CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION,
+            localPageIndex / CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION);
+        const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
+        CLodInvalidateVirtualShadowWrappedPage(
+            pageCoords,
+            clipmapInfo.pageTableLayer,
+            clipmapInfo.pageTableResolution,
+            perFrameBuffer.frameIndex,
+            CLodDirectionalShadowPageViewRow(shadowCameras[clipmapIndex]),
+            pageTable,
+            dirtyFlags,
+            pageMetadata,
+            directionalPageViewInfo,
+            statsBuffer,
+            kCLodVirtualShadowInvalidationStatsReasonCurrentBounds);
+        return;
+    }
+
+    if (inputIndex >= CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_COUNT)
+    {
+        return;
+    }
+    StructuredBuffer<CLodVirtualShadowBoundsInvalidationInput> boundsInputs =
+        ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_DESCRIPTOR_INDEX];
+    const CLodVirtualShadowBoundsInvalidationInput input = boundsInputs[inputIndex];
+    CLodInvalidateVirtualShadowSphere(
+        input.centerRadius.xyz,
+        input.centerRadius.w,
+        clipmapCount,
+        input.clipmapMask,
+        perFrameBuffer.frameIndex,
+        kCLodVirtualShadowInvalidationStatsReasonCurrentBounds,
+        shadowCameras,
+        clipmapInfos,
+        pageTable,
+        dirtyFlags,
+        pageMetadata,
+        directionalPageViewInfo,
+        statsBuffer);
 }
 
 [shader("compute")]
