@@ -520,11 +520,59 @@ bool CLodVirtualShadowIsValidCameraDepth(float depth)
         asuint(depth) != 0xFFFFFFFFu;
 }
 
-float CLodVirtualShadowAdaptiveReceiverOffset(
+struct CLodVirtualShadowReceiverOffsetResult
+{
+    float distance;
+    uint escaped;
+    uint valid;
+};
+
+bool CLodVirtualShadowReceiverTraceEscapedAt(
+    float3 sampleWorldSpace,
+    Camera mainCamera,
+    Texture2D<float> cameraLinearDepth,
+    uint2 screenSize,
+    float cameraDepthSafety,
+    out bool sampleValid)
+{
+    sampleValid = false;
+    const float4 sampleClip = mul(
+        float4(sampleWorldSpace, 1.0f),
+        mainCamera.viewProjection);
+    if (sampleClip.w <= 1.0e-6f)
+    {
+        return false;
+    }
+
+    float2 sampleUv = sampleClip.xy / sampleClip.w;
+    sampleUv = sampleUv * 0.5f + 0.5f;
+    sampleUv.y = 1.0f - sampleUv.y;
+    if (any(sampleUv < 0.0f) || any(sampleUv >= 1.0f))
+    {
+        return false;
+    }
+
+    const uint2 samplePixel = min(
+        uint2(sampleUv * float2(screenSize)),
+        screenSize - 1u);
+    const float sceneDepth = cameraLinearDepth.Load(int3(samplePixel, 0));
+    if (!CLodVirtualShadowIsValidCameraDepth(sceneDepth))
+    {
+        return false;
+    }
+
+    const float4 sampleView = mul(
+        float4(sampleWorldSpace, 1.0f),
+        mainCamera.view);
+    const float rayViewDepth = -sampleView.z;
+    sampleValid = true;
+    return rayViewDepth + cameraDepthSafety < sceneDepth;
+}
+
+CLodVirtualShadowReceiverOffsetResult CLodVirtualShadowAdaptiveReceiverOffset(
     float2 pixelCoords,
     float3 receiverWorldSpace,
-    float3 receiverNormal,
-    float3 fragToLight,
+    float3 traceDirection,
     Camera mainCamera,
     Texture2D<float> cameraLinearDepth,
     uint2 screenSize,
@@ -533,26 +581,30 @@ float CLodVirtualShadowAdaptiveReceiverOffset(
     float uncertaintyScale,
     float depthSafetyScale)
 {
+    CLodVirtualShadowReceiverOffsetResult result;
+    result.distance = 0.0f;
+    result.escaped = 0u;
+    result.valid = 0u;
     if (screenSize.x == 0u || screenSize.y == 0u ||
         pixelCoords.x < 0.0f || pixelCoords.y < 0.0f ||
         pixelCoords.x >= (float)screenSize.x ||
         pixelCoords.y >= (float)screenSize.y)
     {
-        return 0.0f;
+        return result;
     }
 
     const float4 receiverView = mul(float4(receiverWorldSpace, 1.0f), mainCamera.view);
     const float receiverViewDepth = -receiverView.z;
     if (receiverViewDepth <= 0.0f)
     {
-        return 0.0f;
+        return result;
     }
 
     const uint2 receiverPixel = min(uint2(pixelCoords), screenSize - 1u);
     const float cameraReceiverDepth = cameraLinearDepth.Load(int3(receiverPixel, 0));
     if (!CLodVirtualShadowIsValidCameraDepth(cameraReceiverDepth))
     {
-        return 0.0f;
+        return result;
     }
 
     // Reject shading layers which are not represented by the primary camera
@@ -564,104 +616,122 @@ float CLodVirtualShadowAdaptiveReceiverOffset(
             screenSize.y);
     const float receiverAgreementTolerance = max(
         worldUnitsPerPixel * 2.0f,
-        receiverViewDepth * 1.0e-3f);
+        receiverViewDepth * 1.0e-5f);
     if (abs(cameraReceiverDepth - receiverViewDepth) > receiverAgreementTolerance)
     {
-        return 0.0f;
+        return result;
     }
 
-    // The uncertainty comes from the camera-depth representation that produced
-    // this receiver. It must not depend on VSM clip texel size, or changing
-    // clips changes the effective receiver position.
-    const float representationUncertainty = max(
+    const float cameraRepresentationUncertainty = max(
         worldUnitsPerPixel * max(uncertaintyScale, 0.0f),
         1.0e-4f);
-    const float receiverDotLight = abs(dot(
-        normalize(receiverNormal),
-        normalize(fragToLight)));
-    const float analyticEscapeDistance =
-        representationUncertainty / max(receiverDotLight, 0.0625f);
-    const float traceLimit = min(
-        max(maxTraceDistanceWorld, 0.0f),
-        clamp(
-            analyticEscapeDistance,
-            representationUncertainty * 1.5f,
-            representationUncertainty * 16.0f));
+    const float traceLimit = max(maxTraceDistanceWorld, 0.0f);
     if (traceLimit <= 1.0e-5f)
     {
-        return 0.0f;
+        return result;
     }
 
     const uint receiverTraceSampleCount =
         clamp(requestedSampleCount, 1u, 32u);
+    // Uncertainty describes the camera-depth representation band; depth safety
+    // is the additional clearance requested by the user. They are independent
+    // pixel-space contributions, so add them instead of taking a max that made
+    // the uncertainty control inert whenever depth safety was larger.
     const float cameraDepthSafety = max(
-        worldUnitsPerPixel * max(depthSafetyScale, 0.0f),
-        representationUncertainty * 0.2f);
-    float lastValidDistance = 0.0f;
+        worldUnitsPerPixel *
+            (max(uncertaintyScale, 0.0f) +
+             max(depthSafetyScale, 0.0f)),
+        1.0e-4f);
+    const float firstTraceDistance = min(
+        traceLimit,
+        max(cameraRepresentationUncertainty * 0.25f, 1.0e-4f));
+    const float traceLogRatio = log(max(
+        traceLimit / max(firstTraceDistance, 1.0e-6f),
+        1.0f));
+    float lastFailedDistance = 0.0f;
+    const float3 normalizedTraceDirection = normalize(traceDirection);
+    bool traceRemainedValid = true;
 
     [loop]
     for (uint sampleIndex = 0u;
          sampleIndex < receiverTraceSampleCount;
          ++sampleIndex)
     {
-        // Quadratic spacing concentrates samples around the uncertain receiver.
-        const float sampleAlpha =
-            ((float)sampleIndex + 1.0f) /
-            (float)receiverTraceSampleCount;
+        // Geometric spacing covers very different world scales while retaining
+        // samples close enough to the receiver to find a tight ray origin.
+        const float sampleAlpha = receiverTraceSampleCount > 1u
+            ? (float)sampleIndex /
+                (float)(receiverTraceSampleCount - 1u)
+            : 1.0f;
         const float sampleDistance =
-            traceLimit * sampleAlpha * sampleAlpha;
+            firstTraceDistance * exp(sampleAlpha * traceLogRatio);
         const float3 sampleWorldSpace =
-            receiverWorldSpace + normalize(fragToLight) * sampleDistance;
-
-        const float4 sampleClip = mul(
-            float4(sampleWorldSpace, 1.0f),
-            mainCamera.viewProjection);
-        if (sampleClip.w <= 1.0e-6f)
+            receiverWorldSpace + normalizedTraceDirection * sampleDistance;
+        bool sampleValid;
+        const bool cameraEscaped = CLodVirtualShadowReceiverTraceEscapedAt(
+            sampleWorldSpace,
+            mainCamera,
+            cameraLinearDepth,
+            screenSize,
+            cameraDepthSafety,
+            sampleValid);
+        if (!sampleValid)
         {
+            traceRemainedValid = false;
             break;
         }
 
-        float2 sampleUv = sampleClip.xy / sampleClip.w;
-        sampleUv = sampleUv * 0.5f + 0.5f;
-        sampleUv.y = 1.0f - sampleUv.y;
-        if (any(sampleUv < 0.0f) || any(sampleUv >= 1.0f))
+        if (!cameraEscaped)
         {
-            break;
+            lastFailedDistance = sampleDistance;
+            continue;
         }
 
-        const uint2 samplePixel = min(
-            uint2(sampleUv * float2(screenSize)),
-            screenSize - 1u);
-        const float sceneDepth = cameraLinearDepth.Load(int3(samplePixel, 0));
-        if (!CLodVirtualShadowIsValidCameraDepth(sceneDepth))
+        float lowerDistance = lastFailedDistance;
+        float upperDistance = sampleDistance;
+        [unroll]
+        for (uint refinementIndex = 0u; refinementIndex < 3u; ++refinementIndex)
         {
-            break;
+            const float candidateDistance =
+                0.5f * (lowerDistance + upperDistance);
+            const float3 candidateWorldSpace =
+                receiverWorldSpace +
+                normalizedTraceDirection * candidateDistance;
+            bool candidateValid;
+            const bool candidateCameraEscaped =
+                CLodVirtualShadowReceiverTraceEscapedAt(
+                    candidateWorldSpace,
+                    mainCamera,
+                    cameraLinearDepth,
+                    screenSize,
+                    cameraDepthSafety,
+                    candidateValid);
+            if (candidateValid && candidateCameraEscaped)
+            {
+                upperDistance = candidateDistance;
+            }
+            else
+            {
+                lowerDistance = candidateDistance;
+            }
         }
 
-        const float4 sampleView = mul(
-            float4(sampleWorldSpace, 1.0f),
-            mainCamera.view);
-        const float rayViewDepth = -sampleView.z;
-        lastValidDistance = sampleDistance;
-
-        // The light ray is safely outside the receiver when it is in front of
-        // the camera-depth surface by more than the local representation error.
-        if (rayViewDepth + cameraDepthSafety < sceneDepth)
-        {
-            return sampleDistance;
-        }
+        result.distance = upperDistance;
+        result.escaped = 1u;
+        result.valid = 1u;
+        return result;
     }
 
-    // If the short trace remained on the camera-depth receiver, bridge the
-    // valid portion only. Off-screen and invalid-depth regions retain the small
-    // baseline SMRT near distance.
-    return lastValidDistance;
+    // Failure remains explicit. A valid sample is not proof that the ray left
+    // the receiver, and using the last sample as an offset can skip real nearby
+    // blockers without fixing the underlying representation error.
+    result.valid = traceRemainedValid ? 1u : 0u;
+    return result;
 }
 #endif
 
 CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProjected(
     float3 samplePosWorldSpace,
-    float3 normal,
     uint preferredClipmapIndex,
     float2 preferredUv,
     float preferredLinearLightDepth,
@@ -779,8 +849,7 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
         cachedPageView[3][3] = 1.0f;
         const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
         const float linearLightDepth =
-            -samplePosCachedPageLightView.z +
-            CLodVirtualShadowReceiverPlaneDepthBias(normal, lightCamera, ditherWorld);
+            -samplePosCachedPageLightView.z;
         if (linearLightDepth <= 0.0f)
             continue;
 
@@ -1231,7 +1300,6 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
             const CLodVirtualShadowLookupResult comparisonLookup =
                 CLodVirtualShadowLookupDirectionalOcclusionProjected(
                     fragPosWorldSpace,
-                    normal,
                     comparisonClipmapIndex,
                     comparisonUv,
                     comparisonLinearDepth,
@@ -1292,46 +1360,23 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         return hardShadow;
     }
 
-    float receiverEscapeDistance = 0.0f;
+    const uint receiverClipmapIndex =
+        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu ?
+        debugInfo.sampledClipmapIndex :
+        debugInfo.preferredClipmapIndex;
+    const CLodVirtualShadowCompactShadowCameraInfo receiverLightCamera =
+        compactShadowCameraBuffer[receiverClipmapIndex];
 #if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
-    if (perFrameBuffer.shadowVirtualReceiverTraceEnabled != 0u)
-    {
-        Texture2D<float> cameraLinearDepth =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(
-                Builtin::PrimaryCamera::LinearDepthMap)];
-        receiverEscapeDistance = CLodVirtualShadowAdaptiveReceiverOffset(
-            pixelCoords,
-            fragPosWorldSpace,
-            normal,
-            normalize(lightToFrag),
-            mainCamera,
-            cameraLinearDepth,
-            uint2(perFrameBuffer.screenResX, perFrameBuffer.screenResY),
-            perFrameBuffer.shadowVirtualReceiverTraceSampleCount,
-            perFrameBuffer.shadowVirtualReceiverTraceMaxDistanceWorld,
-            perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale,
-            perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale);
-    }
+    Texture2D<float> cameraLinearDepth =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(
+            Builtin::PrimaryCamera::LinearDepthMap)];
 #endif
-    const float tNear = max(
-        cameraFootprintWorld * 0.25f,
-        max(receiverEscapeDistance, 1.0e-4f));
-    // The screen trace bridges the uncertain receiver region; it must not
-    // consume the SMRT search range. Preserve the configured shadow-ray span
-    // after the adaptive start offset.
-    const float tFar = tNear + maxTraceDistance;
-    const float logRatio = log(max(tFar / tNear, 1.0f));
 
     const float3 baseFragToLight = normalize(lightToFrag);
     float3 tangent;
     float3 bitangent;
     CLodVirtualShadowBuildOrthonormalBasis(baseFragToLight, tangent, bitangent);
 
-    const uint receiverClipmapIndex =
-        debugInfo.sampledClipmapIndex != 0xFFFFFFFFu ?
-        debugInfo.sampledClipmapIndex :
-        debugInfo.preferredClipmapIndex;
-    const CLodVirtualShadowCompactShadowCameraInfo receiverLightCamera = compactShadowCameraBuffer[receiverClipmapIndex];
     float2 rayStartUv;
     float rayStartLinearDepth;
     CLodVirtualShadowProjectWorldToUvDepth(fragPosWorldSpace, receiverLightCamera, rayStartUv, rayStartLinearDepth);
@@ -1341,8 +1386,6 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     const float lightDiskTan = tan(coneAngleRadians);
     const float invSampleIntervals =
         1.0f / (float)max(samplesPerRay > 1u ? samplesPerRay - 1u : 1u, 1u);
-    const float footprintDitherScale = 0.5f;
-
     float visibleRayCount = 0.0f;
     float validRayCount = 0.0f;
     [loop]
@@ -1359,17 +1402,71 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         const float2 diskSample = diskRadius * float2(cos(diskAngle), sin(diskAngle));
 
         const float rayJitter = frac(rotation.x + (float)rayIndex * 0.618033988749895f);
-        const int2 ditherBnOffset = int2(
-            CLodVirtualShadowR2Sequence(rayCount + rayIndex + 3u) *
-            float2(blueNoiseSize));
-        const float2 rayDitherBn = blueNoiseTex.Load(int3((pixelCoordsInt + ditherBnOffset) % blueNoiseSize, 0)).xy;
-        const float2 rayDitherWorld =
-            footprintDitherScale *
-            (rayDitherBn - 0.5f) *
-            visualFootprintWorld;
-        const float3 rayEndWorldSpace = fragPosWorldSpace + baseFragToLight * tFar +
-            tangent * (diskSample.x * lightDiskTan * tFar) +
-            bitangent * (diskSample.y * lightDiskTan * tFar);
+        const float3 rayDirection = normalize(
+            baseFragToLight +
+            tangent * (diskSample.x * lightDiskTan) +
+            bitangent * (diskSample.y * lightDiskTan));
+        float rayNear = max(cameraFootprintWorld * 0.25f, 1.0e-4f);
+#if defined(CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE)
+        if (perFrameBuffer.shadowVirtualReceiverTraceEnabled != 0u)
+        {
+            const CLodVirtualShadowReceiverOffsetResult receiverOffset =
+                CLodVirtualShadowAdaptiveReceiverOffset(
+                    pixelCoords,
+                    fragPosWorldSpace,
+                    rayDirection,
+                    mainCamera,
+                    cameraLinearDepth,
+                    uint2(
+                        perFrameBuffer.screenResX,
+                        perFrameBuffer.screenResY),
+                    perFrameBuffer.shadowVirtualReceiverTraceSampleCount,
+                    perFrameBuffer.shadowVirtualReceiverTraceMaxDistanceWorld,
+                    perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale,
+                    perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale);
+            if (receiverOffset.escaped != 0u)
+            {
+                // Bound physical ray-origin displacement in screen-space
+                // terms. A grazing screen trace may require an arbitrarily
+                // long world-space distance to exceed the depth margin; using
+                // that full distance skips real blockers and causes peter-pan.
+                const float maximumReceiverOffset =
+                    cameraFootprintWorld * max(
+                        perFrameBuffer.shadowVirtualReceiverTraceUncertaintyScale +
+                            perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale,
+                        0.25f);
+                rayNear = max(
+                    min(receiverOffset.distance, maximumReceiverOffset),
+                    1.0e-4f);
+            }
+            else if (receiverOffset.valid != 0u)
+            {
+                // Failure to exceed a camera-depth safety margin is not proof
+                // of occlusion: the pixel-sized margin grows in world units
+                // with distance. Only a direction below the receiver's
+                // shading horizon is definitively self-occluded. Otherwise
+                // retain the small baseline origin and let VSM evidence decide.
+                if (dot(normalize(normal), rayDirection) <= 0.0f)
+                {
+                    validRayCount += 1.0f;
+                    continue;
+                }
+            }
+            else
+            {
+                // Off-screen or unavailable camera depth is unknown. Keep the
+                // baseline origin rather than converting missing evidence into
+                // either shadow or a large receiver offset.
+            }
+        }
+#endif
+        // Receiver suppression does not consume the configured blocker-search
+        // span. Every ray starts at its own proven-safe point and receives the
+        // full SMRT trace distance beyond it.
+        const float rayFar = rayNear + maxTraceDistance;
+        const float rayLogRatio = log(max(rayFar / rayNear, 1.0f));
+        const float3 rayEndWorldSpace =
+            fragPosWorldSpace + rayDirection * rayFar;
         float2 rayEndUv;
         float rayEndLinearDepth;
         CLodVirtualShadowProjectWorldToUvDepth(rayEndWorldSpace, receiverLightCamera, rayEndUv, rayEndLinearDepth);
@@ -1378,6 +1475,7 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         bool rayHadValidSample = false;
         bool rayHadUnknownSample = false;
         bool rayObservedFreeSpace = false;
+        bool rayEndpointBehindSurface = false;
         bool previousFiniteDepthValid = false;
         float previousDepthDelta = 0.0f;
         float previousDepthTolerance = 0.0f;
@@ -1401,20 +1499,19 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
                     (rayJitter - 0.5f) * invSampleIntervals * 0.5f);
             }
             const float sampleDistance =
-                tNear * exp(sampleLogAlpha * logRatio);
-            const float rayAlpha = saturate(sampleDistance / tFar);
+                rayNear * exp(sampleLogAlpha * rayLogRatio);
+            const float rayAlpha = saturate(sampleDistance / rayFar);
             const float3 samplePosWorldSpace = lerp(fragPosWorldSpace, rayEndWorldSpace, rayAlpha);
             const float2 sampleUv = lerp(rayStartUv, rayEndUv, rayAlpha);
             const float sampleLinearDepth = lerp(rayStartLinearDepth, rayEndLinearDepth, rayAlpha);
             CLodVirtualShadowDebugInfo unusedDebugInfo;
             const CLodVirtualShadowLookupResult raySample = CLodVirtualShadowLookupDirectionalOcclusionProjected(
                 samplePosWorldSpace,
-                normal,
                 receiverClipmapIndex,
                 sampleUv,
                 sampleLinearDepth,
                 visualFootprintWorld,
-                rayDitherWorld,
+                float2(0.0f, 0.0f),
                 activeClipmapCount,
                 clipmapInfos,
                 compactShadowCameraBuffer,
@@ -1446,12 +1543,19 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
             const float closestDepth = raySample.closestDepth;
             const float refDepth = raySample.sampledLinearDepth;
             const float depthDelta = refDepth - closestDepth;
+            // Use the continuous receiver footprint rather than the actual
+            // fallback clip texel. The latter doubles at clip boundaries and
+            // may jump several levels on fallback. Depth tolerance must also
+            // remain independent of trace length; coupling it to tFar caused
+            // longer traces to widen the dead zone and miss nearby blockers.
             const float depthTolerance = max(
-                max(
-                    visualFootprintWorld * 0.15f,
-                    cameraFootprintWorld *
-                        perFrameBuffer.shadowVirtualReceiverTraceDepthSafetyScale),
+                visualFootprintWorld * 0.15f,
                 abs(refDepth) * 1.0e-4f);
+
+            if (sampleIndex == 0u && depthDelta > depthTolerance)
+            {
+                rayEndpointBehindSurface = true;
+            }
 
             if (depthDelta < -depthTolerance)
             {
@@ -1472,8 +1576,7 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
                     previousSampleDistance - sampleDistance,
                     1.0e-4f);
                 const float maximumContinuousDeltaChange =
-                    stepDistance * 4.0f +
-                    previousDepthTolerance + depthTolerance;
+                    stepDistance * 4.0f;
                 if (abs(depthDelta - previousDepthDelta) <=
                     maximumContinuousDeltaChange)
                 {
@@ -1488,12 +1591,10 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
             previousSampleDistance = sampleDistance;
         }
 
-        // A ray that never reached known free space started behind a surface
-        // even at the configured lightward endpoint. The trace range was too
-        // short to resolve it, so retain conservative occlusion rather than
-        // introducing a large-world light leak. Missing pages remain unknown
-        // and do not contribute a falsely visible sample to the estimator.
-        if (!rayHit && rayHadValidSample && !rayObservedFreeSpace)
+        // Retain conservative occlusion only when the exact lightward endpoint
+        // is definitively behind a finite surface. Samples which merely remain
+        // inside the tolerance band are unresolved, not proof of a blocker.
+        if (!rayHit && rayEndpointBehindSurface && !rayObservedFreeSpace)
         {
             rayHit = true;
         }

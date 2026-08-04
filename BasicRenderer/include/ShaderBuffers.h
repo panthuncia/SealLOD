@@ -94,13 +94,13 @@ struct PerFrameCB {
     unsigned int frameIndex; // 0 to 63
     unsigned int shadowVirtualSmrtDirectionalCountsPacked = 0u;
     float shadowVirtualSmrtMaxRayAngleFromLightDegrees = 0.0f;
-    float shadowVirtualSmrtRayLengthScaleDirectional = 0.0f;
-    float shadowVirtualSmrtMaxTraceDistanceWorld = 0.0f;
+    float shadowVirtualSmrtRayLengthScaleDirectional = 1.0f;
+    float shadowVirtualSmrtMaxTraceDistanceWorld = 1500.0f;
     unsigned int shadowVirtualReceiverTraceEnabled = 1u;
     unsigned int shadowVirtualReceiverTraceSampleCount = 8u;
     float shadowVirtualReceiverTraceMaxDistanceWorld = 256.0f;
     float shadowVirtualReceiverTraceUncertaintyScale = 1.5f;
-    float shadowVirtualReceiverTraceDepthSafetyScale = 0.5f;
+    float shadowVirtualReceiverTraceDepthSafetyScale = 4.0f;
     unsigned int shadowVirtualReceiverTracePad0 = 0u;
     unsigned int shadowVirtualReceiverTracePad1 = 0u;
     unsigned int terrainStochasticSamplingEnabled = 1u;

@@ -2237,7 +2237,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 "VSM Trace Depth Safety",
                 &m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale,
                 0.0f,
-                4.0f,
+                16.0f,
                 "%.2f pixels")) {
             m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale =
                 std::max(m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale, 0.0f);
@@ -2245,7 +2245,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
                 m_clodDirectionalVirtualShadowReceiverTraceDepthSafetyScale);
         }
         ImGui::TextDisabled(
-            "Receiver trace uses primary-camera depth and is independent of VSM clip texel size.");
+            "Receiver escape is tested independently for every randomized SMRT ray.");
         const CLodVirtualShadowResolutionConfig virtualShadowConfig =
             CLodVirtualShadowBuildRuntimeResolutionConfig();
         const float budgetDirectionalLodBias = m_clodDirectionalVirtualShadowAutoLodBias
