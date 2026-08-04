@@ -46,7 +46,6 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
         .with<Components::Active>()
         .with<Components::RenderTransformUpdated>()
         .without<Components::SkipShadowPass>()
-        .without<Components::Skinned>()
         .build();
 }
 
@@ -90,6 +89,17 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
     };
 
     m_transformChangedQuery.each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
+        const bool skinned = entity.has<Components::Skinned>();
+        const uint32_t dynamicSkinnedClipmapCount =
+            g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);
+        const uint32_t clipmapMask = skinned
+            ? (dynamicSkinnedClipmapCount >= 32u
+                ? 0u
+                : (0xFFFFFFFFu << dynamicSkinnedClipmapCount))
+            : 0xFFFFFFFFu;
+        if (clipmapMask == 0u) {
+            return;
+        }
         uint32_t flags = 0u;
         flags |= CLodVirtualShadowInvalidationFlagUsePreviousBounds;
         flags |= CLodVirtualShadowInvalidationFlagUseCurrentBounds;
@@ -102,6 +112,7 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
             CLodVirtualShadowInvalidationInput input{};
             input.perMeshInstanceBufferIndex = drawRecordIndex;
             input.flags = flags;
+            input.clipmapMask = clipmapMask;
             inputs.push_back(input);
             markInvalidatedInstance(drawRecordIndex);
         }

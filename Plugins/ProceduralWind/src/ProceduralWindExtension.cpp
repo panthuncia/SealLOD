@@ -14,6 +14,7 @@
 #include "Render/OutputTypes.h"
 #include "Render/RendererSettings.h"
 #include "Render/MemoryIntrospectionAPI.h"
+#include "Render/GraphExtensions/CLodTelemetry.h"
 #include "RenderPasses/Base/RenderPass.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/PixelBuffer.h"
@@ -25,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -155,6 +157,17 @@ struct WindActiveInstanceGPU {
     std::uint32_t inverseSkinOffsetMatrices = 0u;
 	float screenFraction = 0.0f;
 	std::uint32_t priorityKey = 0u;
+	float windWeight = 1.0f;
+	std::uint32_t pad0 = 0u;
+};
+
+struct DynamicWindVisibleSkeletonGPU {
+	std::uint32_t instanceTransformIndex = 0u;
+	std::uint32_t transientSkinningSlot = 0xFFFFFFFFu;
+	std::uint32_t stableSceneId = 0u;
+	std::uint32_t typeId = 0u;
+	std::uint32_t skeletonLod = 0u;
+	std::uint32_t priorityKey = 0u;
 };
 
 struct WindIndirectCommand {
@@ -194,6 +207,7 @@ struct WindTransientConstants {
 
 static_assert(sizeof(WindBoneGPU) == 256u);
 static_assert(sizeof(WindTypeGPU) == 80u);
+static_assert(sizeof(WindActiveInstanceGPU) == 32u);
 static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
@@ -214,6 +228,9 @@ struct WindSharedResources {
 		, diagnostics(DynamicStructuredBuffer<std::uint32_t>::CreateShared(112u, "ProceduralWind.Diagnostics", true))
 		, indirectCommands(DynamicStructuredBuffer<WindIndirectCommand>::CreateShared(1u, "ProceduralWind.IndirectCommands", true))
 		, allocationRecords(DynamicStructuredBuffer<WindAllocationRecordGPU>::CreateShared(1u, "ProceduralWind.AllocationRecords", true))
+		, visibleSkeletons(DynamicStructuredBuffer<DynamicWindVisibleSkeletonGPU>::CreateShared(1u, "ProceduralWind.VisibleSkeletons", true))
+		, visibleSkeletonCounter(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.VisibleSkeletonCounter", true))
+		, visibleSkeletonMembership(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.VisibleSkeletonMembership", true))
     {
 		const auto tagResource = [](const auto& resource) {
 			rg::memory::SetResourceUsageHint(*resource, "Procedural wind");
@@ -232,6 +249,9 @@ struct WindSharedResources {
 		tagResource(diagnostics);
 		tagResource(indirectCommands);
 		tagResource(allocationRecords);
+		tagResource(visibleSkeletons);
+		tagResource(visibleSkeletonCounter);
+		tagResource(visibleSkeletonMembership);
 		static std::once_flag resetTelemetry;
 		std::call_once(resetTelemetry, [] {
 			const auto path = WindTelemetryPath();
@@ -248,6 +268,14 @@ struct WindSharedResources {
                 if (result.data.size() < 15u * sizeof(std::uint32_t)) return;
                 std::array<std::uint32_t, 15> c{};
                 std::memcpy(c.data(), result.data.data(), (std::min)(result.data.size(), sizeof(c)));
+				PublishCLodTelemetrySnapshot(g_dynamicWindVisibility, DynamicWindVisibilitySnapshot{
+					.phase1Accepted = c[9],
+					.phase2Accepted = c[13],
+					.deferred = c[10],
+					.capacityRejects = c[2],
+					.bucketOverflow = c[3],
+					.deferredOverflow = c[14],
+				});
 				EmitWindTelemetry(fmt::format(
 					"ProceduralWind GPU telemetry: allocatedBones={} commands={} capacityRejects={} bucketOverflow={} allocatedAssemblies={} livePlacements={} stalePlacements={} frustumRejected={} distanceRejected={} visibleBucketed={} deferred={} deferredWritten={} lateOccluded={} lateAccepted={} deferredOverflow={}.",
 					c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14]));
@@ -288,6 +316,9 @@ struct WindSharedResources {
 					desired.str(), d[56], actual.str(), simulated.str(), animatedInstances.str(), d[57], d[58], d[59], d[60],
 					d[61] & 0xffffu, d[61] >> 16u, d[62], d[63], d[64], d[65], d[67], d[88], d[89],
 					d[66], d[68], d[69], d[70], d[71]));
+				EmitWindTelemetry(fmt::format(
+					"ProceduralWind radius telemetry: fullStrengthPlacements={} fadingPlacements={}.",
+					d[90], d[91]));
             }, QueueKind::Copy);
     }
 
@@ -619,15 +650,19 @@ struct WindSharedResources {
         indirectCommands->EnsureSize(std::max(1u, typeCount));
 		allocationRecords->EnsureSize(std::max(1u, typeCount));
 		activeInstances->EnsureSize((std::max)(1u, boundedBucketCapacity));
+		visibleSkeletons->EnsureSize((std::max)(1u, residentPlacementCount));
+		visibleSkeletonMembership->EnsureSize((std::max)(1u, residentTransformCount));
         activeBoneCount = std::min(requestedBoneCount, boneEntries->ResidentCapacity());
         TracyPlot("ProceduralWind.CandidatePlacements", static_cast<std::int64_t>(residentPlacementCount));
         TracyPlot("ProceduralWind.RegisteredTypes", static_cast<std::int64_t>(registeredTypes));
         if (registeredTypes != lastLoggedRegisteredTypes || residentPlacementCount != lastLoggedPlacementCount) {
 			EmitWindTelemetry(fmt::format(
-				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketEntries={} legacyBucketEntries={} distance=unbounded",
+				"ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketEntries={} legacyBucketEntries={} distance=[{},{}]",
                 registeredTypes, typeCount, activeBoneCount, residentPlacementCount,
 				transientRegion.capacityMatrices, boundedBucketCapacity,
-				static_cast<std::uint64_t>(typeCount) * placementCapacity));
+				static_cast<std::uint64_t>(typeCount) * placementCapacity,
+				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)(),
+				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)()));
             lastLoggedRegisteredTypes = registeredTypes;
             lastLoggedPlacementCount = residentPlacementCount;
         }
@@ -664,6 +699,9 @@ struct WindSharedResources {
     std::shared_ptr<SortedUnsignedIntBuffer> activeSkinnedPlacements;
     std::shared_ptr<DynamicStructuredBuffer<WindIndirectCommand>> indirectCommands;
 	std::shared_ptr<DynamicStructuredBuffer<WindAllocationRecordGPU>> allocationRecords;
+	std::shared_ptr<DynamicStructuredBuffer<DynamicWindVisibleSkeletonGPU>> visibleSkeletons;
+	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> visibleSkeletonCounter;
+	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> visibleSkeletonMembership;
     std::uint64_t fieldRevision = 0u;
     bool fieldReady = false;
     std::uint32_t activeBoneCount = 0u;
@@ -777,6 +815,17 @@ WindTransientConstants MakeTransientConstants(WindSharedResources& resources, Gl
     return c;
 }
 
+void SetVisibleSkeletonConstants(WindTransientConstants& constants, const WindSharedResources& resources)
+{
+	constants.qualityCurveScreen[0] = std::bit_cast<float>(
+		resources.visibleSkeletons->GetUAVShaderVisibleInfo(0).slot.index);
+	constants.qualityCurveScreen[1] = std::bit_cast<float>(
+		resources.visibleSkeletonCounter->GetUAVShaderVisibleInfo(0).slot.index);
+	constants.qualityCurveScreen[2] = std::bit_cast<float>(
+		resources.visibleSkeletonMembership->GetUAVShaderVisibleInfo(0).slot.index);
+	constants.qualityCurveScreen[3] = std::bit_cast<float>(resources.residentPlacementCount);
+}
+
 void SetActivationPhaseAndDepth(
     WindTransientConstants& constants,
     const RenderContext* renderContext,
@@ -817,6 +866,7 @@ public:
             .WithUnorderedAccess(m_resources->typeCounters, m_resources->allocationCounters,
                 m_resources->processedTypeCounts, m_resources->deferredEntries,
                 m_resources->indirectCommands, m_resources->activeInstances, m_resources->diagnostics,
+				m_resources->visibleSkeletonCounter, m_resources->visibleSkeletonMembership,
                 Builtin::SkeletonResources::SkinningInstanceInfo,
                 Builtin::SkeletonResources::BoneTransforms, Builtin::SkeletonResources::InverseSkinMatrices);
     }
@@ -836,6 +886,7 @@ public:
         c.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
         c.placementCount = m_resources->residentTransformCount;
         c.allocationRecords = m_resources->processedTypeCounts->GetUAVShaderVisibleInfo(0).slot.index;
+		SetVisibleSkeletonConstants(c, *m_resources);
         PrepareTransient(context, m_pso, c);
         BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
         context.commandList.Dispatch(((std::max)({ m_resources->residentTransformCount, c.typeCount, 64u }) + 63u) / 64u, 1u, 1u);
@@ -882,6 +933,13 @@ public:
         if (rc && rc->viewManager) {
             if (const auto* view = rc->viewManager->Get(rc->primaryViewID)) c.cameraIndex = view->gpu.cameraBufferIndex;
         }
+		// ActivateInstances does not consume the allocation-budget constants.
+		// Alias those two root slots for the distance fade without extending the
+		// renderer-wide 48-dword root-constant ABI.
+		c.capacityTarget = (std::max)(0.0f,
+			SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
+		c.lateReserve = (std::max)(c.capacityTarget,
+			SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
         SetActivationPhaseAndDepth(c, rc, m_latePhase);
         // As in Reset, source every live descriptor from the current resource
         // objects rather than the cached windTypes control row. Reuse constants
@@ -944,6 +1002,8 @@ public:
 	void DeclareResourceUsages(ComputePassBuilder* builder) override {
 		builder->WithShaderResource(m_resources->windTypes, Builtin::SkeletonResources::InverseBindMatrices)
 			.WithUnorderedAccess(m_resources->allocationRecords, m_resources->activeInstances,
+				m_resources->visibleSkeletons, m_resources->visibleSkeletonCounter,
+				m_resources->visibleSkeletonMembership,
 				Builtin::SkeletonResources::SkinningInstanceInfo,
 				Builtin::SkeletonResources::BoneTransforms,
 				Builtin::SkeletonResources::InverseSkinMatrices,
@@ -960,6 +1020,7 @@ public:
 			m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices));
 		constants.bones = m_resources->diagnostics->GetUAVShaderVisibleInfo(0).slot.index;
 		constants.fieldSlice0 = m_resources->boneRemaps->GetSRVInfo(0).slot.index;
+		SetVisibleSkeletonConstants(constants, *m_resources);
 		PrepareTransient(context, m_pso, constants);
 		BindResourceDescriptorIndices(context.commandList, m_pso.GetResourceDescriptorSlots());
 		context.commandList.Dispatch(
@@ -1119,6 +1180,9 @@ ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindR
 void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vector<RenderGraph::ExternalPassDesc>& out)
 {
     auto resources = std::make_shared<WindSharedResources>(m_runtime, rg.GetReadbackService());
+	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
+	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonCounter", resources->visibleSkeletonCounter);
+	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonMembership", resources->visibleSkeletonMembership);
     auto earlyInsertion = RenderGraph::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));
@@ -1129,6 +1193,7 @@ void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vecto
 
     auto lateInsertion = RenderGraph::ExternalInsertPoint::After("CLodOpaque::LinearDepthDownsamplePass1");
     lateInsertion.AlsoBefore("CLodOpaque::HierarchicalCullingPass2");
+    lateInsertion.AlsoBefore("CLodShadow::HierarchicalCullingPass1");
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ActivateInstancesPhase2", std::make_shared<WindActivatePass>(resources, true)).At(lateInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::BuildSimulationCommandsPhase2", std::make_shared<WindBuildCommandsPass>(resources, true)).At(lateInsertion));
 	out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::FinalizeSimulationAllocationsPhase2", std::make_shared<WindFinalizeAllocationsPass>(resources)).At(lateInsertion));

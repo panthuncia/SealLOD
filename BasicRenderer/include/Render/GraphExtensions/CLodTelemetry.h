@@ -241,12 +241,39 @@ enum class CLodWorkGraphCounterIndex : uint32_t {
     NodeBoundsExplicitBoneCount3To4,
     NodeBoundsExplicitBoneCount5To8,
     NodeBoundsExplicitBoneCount9Plus,
+    DynamicWindBoundsCacheHits,
+    DynamicWindBoundsCacheMisses,
+    DynamicWindBoundsCacheInsertions,
+    DynamicWindBoundsCacheRaces,
+    DynamicWindBoundsCacheProbeFailures,
+    // mesh.hlsl has historically published these two hardware-raster counters
+    // at ABI slots 264 and 266.  Keep them explicit so newly appended telemetry
+    // cannot silently alias the mesh path again.
+    RasterMeshShaderSkinnedGroups,
+    DynamicWindBoundsCacheIneligible,
+    RasterMeshShaderSkinnedOutputTriangles,
+    DynamicWindSkinCacheEligibleClusters,
+    DynamicWindSkinCacheUniqueClusters,
+    DynamicWindSkinCacheDuplicateClusters,
+    DynamicWindSkinCacheRequestedVertices,
+    DynamicWindSkinCacheSkinnedVertices,
+    DynamicWindSkinCacheFallbackVertices,
+    DynamicWindSkinCacheCachedRasterVertices,
+    DynamicWindSkinCacheInlineRasterVertices,
+    ReceiverSubpageMeshletTests,
+    ReceiverSubpageMeshletRejects,
+    DynamicWindSkinCachePositionBytesUsed,
+    DynamicWindSkinCacheMetadataBytesUsed,
 
     Count
 };
 
 inline constexpr uint32_t CLodWorkGraphCounterCount =
     static_cast<uint32_t>(CLodWorkGraphCounterIndex::Count);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedGroups) == 264u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::RasterMeshShaderSkinnedOutputTriangles) == 266u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters) == 267u);
+static_assert(static_cast<uint32_t>(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices) == 274u);
 
 struct CLodWorkGraphTelemetryCounters {
     std::array<uint32_t, CLodWorkGraphCounterCount> counters{};
@@ -296,6 +323,15 @@ struct CLodPrimaryVisibilitySnapshot {
     bool depthTileOccupancyAvailable = false;
 };
 
+struct DynamicWindVisibilitySnapshot {
+    uint32_t phase1Accepted = 0u;
+    uint32_t phase2Accepted = 0u;
+    uint32_t deferred = 0u;
+    uint32_t capacityRejects = 0u;
+    uint32_t bucketOverflow = 0u;
+    uint32_t deferredOverflow = 0u;
+};
+
 template <class Snapshot>
 struct CLodTelemetryPublishedSnapshot {
     mutable std::mutex mutex;
@@ -307,6 +343,7 @@ inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowPageAttributionSnapshot> 
 inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowWorkAttributionSnapshot> g_clodVsmWorkAttribution;
 inline CLodTelemetryPublishedSnapshot<CLodVirtualShadowHardwareAttributionSnapshot> g_clodVsmHardwareAttribution;
 inline CLodTelemetryPublishedSnapshot<CLodPrimaryVisibilitySnapshot> g_clodPrimaryVisibility;
+inline CLodTelemetryPublishedSnapshot<DynamicWindVisibilitySnapshot> g_dynamicWindVisibility;
 
 template <class Snapshot>
 inline void PublishCLodTelemetrySnapshot(CLodTelemetryPublishedSnapshot<Snapshot>& destination, const Snapshot& snapshot) {

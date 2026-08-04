@@ -11,6 +11,7 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/RenderContext.h"
 #include "Render/RendererComponents.h"
+#include "Render/RendererSettings.h"
 #include "Render/Runtime/UploadServiceAccess.h"
 #include "BuiltinResources.h"
 #include "Resources/Buffers/Buffer.h"
@@ -256,6 +257,17 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 static_cast<uint32_t>(lightViewInfo.viewIDs.size()),
                 CLodVirtualShadowMaxSupportedClipmapCount);
             activeClipmapCount = clipmapCount;
+			const float skinnedShadowRadius = (std::max)(0.0f,
+				SettingsManager::GetInstance().getSettingGetter<float>(CLodSkinnedShadowRadiusSettingName)());
+			const int32_t dynamicClipmapOverride =
+				SettingsManager::GetInstance().getSettingGetter<int32_t>(
+					CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
+			const uint32_t clampedOverride = dynamicClipmapOverride < 0
+				? 0u
+				: (std::min)(static_cast<uint32_t>(dynamicClipmapOverride), clipmapCount);
+			bool autoBoundaryFound = skinnedShadowRadius <= 0.0f;
+			uint32_t effectiveDynamicClipmapCount = dynamicClipmapOverride >= 0 ? clampedOverride : 0u;
+			uint32_t reclassifiedClipmapCount = 0u;
 
             for (uint32_t clipmapIndex = 0; clipmapIndex < clipmapCount; ++clipmapIndex) {
                 const View* view = updateContext->viewManager->Get(lightViewInfo.viewIDs[clipmapIndex]);
@@ -266,6 +278,15 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 const float orthoWidth = ExtractOrthographicWidth(view->cameraInfo.unjitteredProjection);
                 const float orthoHeight = ExtractOrthographicHeight(view->cameraInfo.unjitteredProjection);
                 const float virtualShadowResolutionFloat = static_cast<float>(virtualShadowResolution);
+				const bool dynamicSkinnedClipmap = dynamicClipmapOverride >= 0
+					? clipmapIndex < clampedOverride
+					: !autoBoundaryFound;
+				if (dynamicClipmapOverride < 0 && dynamicSkinnedClipmap) {
+					effectiveDynamicClipmapCount = clipmapIndex + 1u;
+					if (0.5f * (std::max)(orthoWidth, orthoHeight) >= skinnedShadowRadius) {
+						autoBoundaryFound = true;
+					}
+				}
 
                 auto& clipmapInfo = clipmapInfos[clipmapIndex];
                 const int64_t pageOffsetX =
@@ -285,7 +306,17 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 clipmapInfo.pageTableLayer = clipmapIndex;
                 clipmapInfo.shadowCameraBufferIndex = view->gpu.cameraBufferIndex;
                 clipmapInfo.clipLevel = clipmapIndex;
-                clipmapInfo.flags = CLodVirtualShadowClipmapValidFlag;
+				const uint32_t previousDynamicFlag = g_previousClipmapInfosValid
+					? g_previousClipmapInfos[clipmapIndex].flags & CLodVirtualShadowClipmapDynamicSkinnedFlag
+					: 0u;
+				const uint32_t currentDynamicFlag = dynamicSkinnedClipmap
+					? CLodVirtualShadowClipmapDynamicSkinnedFlag
+					: 0u;
+				clipmapInfo.flags = CLodVirtualShadowClipmapValidFlag | currentDynamicFlag;
+				if (g_previousClipmapInfosValid && previousDynamicFlag != currentDynamicFlag) {
+					clipmapInfo.flags |= CLodVirtualShadowClipmapInvalidateFlag;
+					++reclassifiedClipmapCount;
+				}
                 clipmapInfo.directionalLodBias = virtualShadowConfig.directionalLodBias;
                 clipmapInfo.virtualResolution = virtualShadowResolution;
                 clipmapInfo.pageTableResolution = virtualShadowPageTableResolution;
@@ -332,6 +363,20 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 g_previousClipmapPageOffsetX[clipmapIndex] = pageOffsetX;
                 g_previousClipmapPageOffsetY[clipmapIndex] = pageOffsetY;
             }
+			g_clodSkinnedShadowEffectiveDynamicClipmapCount.store(
+				effectiveDynamicClipmapCount, std::memory_order_relaxed);
+			g_clodSkinnedShadowActiveClipmapCount.store(
+				clipmapCount, std::memory_order_relaxed);
+			g_clodSkinnedShadowDynamicClipmapMask.store(
+				effectiveDynamicClipmapCount >= 32u
+					? 0xFFFFFFFFu
+					: ((1u << effectiveDynamicClipmapCount) - 1u),
+				std::memory_order_relaxed);
+			if (reclassifiedClipmapCount != 0u) {
+				g_clodSkinnedShadowClassificationGeneration.fetch_add(1u, std::memory_order_relaxed);
+				g_clodSkinnedShadowOneShotInvalidationCount.fetch_add(
+					reclassifiedClipmapCount, std::memory_order_relaxed);
+			}
         });
     }
 

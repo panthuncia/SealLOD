@@ -31,6 +31,7 @@ public:
 private:
     PipelineState m_pso;
     PipelineState m_clearPso;
+    PipelineState m_clearUint2Pso;
     rhi::CommandSignaturePtr m_commandSignature;
     std::shared_ptr<Buffer> m_tileWorkBuffer;
     std::shared_ptr<Buffer> m_tileCountBuffer;
@@ -41,5 +42,5 @@ private:
     std::shared_ptr<Buffer> m_markedBlocksCountBuffer;
     std::shared_ptr<Buffer> m_receiverSubpageMaskBuffer;
     uint32_t m_activeClipmapCount = 0u;
-    bool m_receiverSubpageMaskEnabled = false;
+    uint32_t m_receiverSubpageMode = 0u;
 };

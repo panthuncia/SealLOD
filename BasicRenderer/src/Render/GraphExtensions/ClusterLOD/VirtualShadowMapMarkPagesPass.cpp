@@ -41,6 +41,12 @@ VirtualShadowMapMarkPagesPass::VirtualShadowMapMarkPagesPass(
         L"ClearUintStructuredBufferCSMain",
         {},
         "CLod.VirtualShadow.MarkBlocks.Clear.PSO");
+    m_clearUint2Pso = PSOManager::GetInstance().MakeComputePipeline(
+        PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        L"Shaders/ClusterLOD/clodUtil.hlsl",
+        L"ClearUint2StructuredBufferCSMain",
+        {},
+        "CLod.VirtualShadow.ReceiverMask.ClearUint2.PSO");
 
     rhi::IndirectArg dispatchArgs[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
@@ -65,8 +71,10 @@ void VirtualShadowMapMarkPagesPass::DeclareResourceUsages(ComputePassBuilder* bu
         .WithUnorderedAccess(
             m_markedBlocksMaskBuffer,
             m_markedBlocksListBuffer,
-            m_markedBlocksCountBuffer,
-            m_receiverSubpageMaskBuffer);
+            m_markedBlocksCountBuffer);
+    if (m_receiverSubpageMaskBuffer) {
+        builder->WithUnorderedAccess(m_receiverSubpageMaskBuffer);
+    }
 }
 
 void VirtualShadowMapMarkPagesPass::Setup() {}
@@ -77,9 +85,10 @@ void VirtualShadowMapMarkPagesPass::Update(const UpdateExecutionContext& executi
     m_activeClipmapCount = (std::min)(
         static_cast<uint32_t>(SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades")()),
     CLodVirtualShadowMaxSupportedClipmapCount);
-    m_receiverSubpageMaskEnabled =
-        SettingsManager::GetInstance().getSettingGetter<bool>(
-            CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName)();
+    m_receiverSubpageMode = m_receiverSubpageMaskBuffer
+        ? SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)()
+        : CLodVirtualShadowReceiverSubpageModeOff;
 }
 
 PassReturn VirtualShadowMapMarkPagesPass::Execute(PassExecutionContext& executionContext)
@@ -107,7 +116,13 @@ PassReturn VirtualShadowMapMarkPagesPass::Execute(PassExecutionContext& executio
         clearRootConstants);
     commandList.Dispatch((CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u, 1u, 1u);
 
-    if (m_receiverSubpageMaskEnabled) {
+    if (m_receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
+        const PipelineState& receiverClearPso =
+            m_receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode8x8
+                ? m_clearUint2Pso
+                : m_clearPso;
+        BindResourceDescriptorIndices(commandList, receiverClearPso.GetResourceDescriptorSlots());
+        commandList.BindPipeline(receiverClearPso.GetAPIPipelineState().GetHandle());
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] =
             m_receiverSubpageMaskBuffer->GetUAVShaderVisibleInfo(0).slot.index;
         clearRootConstants[CLOD_CLEAR_UINT_BUFFER_COUNT] =
@@ -123,6 +138,8 @@ PassReturn VirtualShadowMapMarkPagesPass::Execute(PassExecutionContext& executio
             (CLodVirtualShadowMaxReceiverPageCount + 63u) / 64u,
             1u,
             1u);
+        BindResourceDescriptorIndices(commandList, m_clearPso.GetResourceDescriptorSlots());
+        commandList.BindPipeline(m_clearPso.GetAPIPipelineState().GetHandle());
     }
 
     clearRootConstants[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = m_markedBlocksCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -148,7 +165,7 @@ PassReturn VirtualShadowMapMarkPagesPass::Execute(PassExecutionContext& executio
     clearBarriers[1].beforeSync = rhi::ResourceSyncState::ComputeShading;
     clearBarriers[1].afterSync = rhi::ResourceSyncState::ComputeShading;
     uint32_t clearBarrierCount = 2u;
-    if (m_receiverSubpageMaskEnabled) {
+    if (m_receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
         clearBarriers[2].buffer =
             m_receiverSubpageMaskBuffer->GetAPIResource().GetHandle();
         clearBarriers[2].beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
@@ -176,9 +193,11 @@ PassReturn VirtualShadowMapMarkPagesPass::Execute(PassExecutionContext& executio
     rootConstants[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LIST_DESCRIPTOR_INDEX] = m_markedBlocksListBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_COUNT_DESCRIPTOR_INDEX] = m_markedBlocksCountBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     rootConstants[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX] =
-        m_receiverSubpageMaskBuffer->GetUAVShaderVisibleInfo(0).slot.index;
+        m_receiverSubpageMaskBuffer
+            ? m_receiverSubpageMaskBuffer->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
     rootConstants[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED] =
-        m_receiverSubpageMaskEnabled ? 1u : 0u;
+        m_receiverSubpageMode;
 
     commandList.PushConstants(
         rhi::ShaderStage::Compute,

@@ -41,6 +41,12 @@ public:
 
 private:
     rhi::CommandSignaturePtr m_rasterizationCommandSignature;
+    rhi::CommandSignaturePtr m_dynamicWindSkinCacheDispatchCommandSignature;
+    PipelineState m_dynamicWindSkinCacheBuildPipeline;
+    PipelineState m_dynamicWindSkinCacheSkinPipeline;
+    PipelineState m_dynamicWindSkinCacheFinalizePipeline;
+    PipelineState m_dynamicWindSkinCacheResolvePipeline;
+    PipelineState m_dynamicWindSkinCacheClearPipeline;
     std::shared_ptr<Buffer> m_compactedVisibleClustersBuffer;
     std::shared_ptr<Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<Buffer> m_rasterBucketsHistogramBuffer;
@@ -52,9 +58,18 @@ private:
     std::shared_ptr<PixelBuffer> m_virtualShadowDynamicPagesTexture;
     std::shared_ptr<Buffer> m_virtualShadowClipmapInfoBuffer;
     std::shared_ptr<Buffer> m_telemetryBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCacheMappingBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCacheHashBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCachePositionsBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCacheAllocatorBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCacheWorkRecordsBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindSkinCacheIndirectArgsBuffer;
     std::shared_ptr<ResourceGroup> m_slabResourceGroup;
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
     std::vector<std::shared_ptr<PixelBuffer>> m_visibilityBuffers;
     bool m_declaredResourcesChanged = true;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
+    uint32_t m_dynamicWindSkinCacheHashEntryCount = 0u;
+    uint32_t m_dynamicWindSkinCachePositionCapacity = 0u;
+    uint32_t m_dynamicWindSkinCacheGeneration = 1u;
 };

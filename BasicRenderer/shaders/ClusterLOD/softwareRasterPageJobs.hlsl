@@ -91,7 +91,9 @@ void SWPageJobExpandCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_GroupI
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+		? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+		: 0xFFFFFFFFu;
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
@@ -437,7 +439,9 @@ void SWPageJobRasterPageCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Gr
     const int3 minQ = int3(desc.minQx, desc.minQy, desc.minQz);
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = dynamicLayer
+		? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+		: 0xFFFFFFFFu;
     const uint perMeshBufferIndex = meshInst.perMeshBufferIndex;
     const uint skinningInstanceSlot = meshInst.skinningInstanceSlot;
     StructuredBuffer<CullingCameraInfo> cullingCameras =

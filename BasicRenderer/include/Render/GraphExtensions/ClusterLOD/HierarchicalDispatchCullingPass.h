@@ -130,6 +130,9 @@ private:
     std::shared_ptr<Buffer> m_shadowReceiverSubpageMaskBuffer;
     std::shared_ptr<PixelBuffer> m_shadowDynamicPhysicalPagesTexture;
     std::shared_ptr<Buffer> m_shadowDynamicActiveBlockMetadataBuffer;
+    std::shared_ptr<Buffer> m_dynamicWindBoundsCacheBuffer;
+    uint32_t m_dynamicWindBoundsCacheEntryCount = 0u;
+    uint32_t m_dynamicWindBoundsCacheGeneration = 1u;
     std::shared_ptr<Buffer> m_pureComputeCurrentNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeNextNodeFrontierBuffer;
     std::shared_ptr<Buffer> m_pureComputeCurrentLeafFrontierBuffer;

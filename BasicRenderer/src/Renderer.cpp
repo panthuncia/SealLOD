@@ -1866,6 +1866,10 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
 		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);
+	settingsManager.registerSetting<float>(ProceduralWindInnerRadiusSettingName, 8000.0f);
+	settingsManager.registerSetting<float>(ProceduralWindOuterRadiusSettingName, 10000.0f);
+	settingsManager.registerSetting<float>(CLodSkinnedShadowRadiusSettingName, 10000.0f);
+	settingsManager.registerSetting<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName, -1);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodCapacityTargetSettingName, 0.95f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodHysteresisSettingName, 0.15f);
@@ -2079,6 +2083,13 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
         false);
+    settingsManager.registerSetting<uint32_t>(
+        CLodDirectionalVirtualShadowReceiverSubpageModeSettingName,
+        CLodVirtualShadowReceiverSubpageModeOff);
+    settingsManager.registerSetting<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, false);
+    settingsManager.registerSetting<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, 16u);
+    settingsManager.registerSetting<bool>(CLodDynamicWindVertexCacheEnabledSettingName, false);
+    settingsManager.registerSetting<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, 64u);
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowDynamicContentFilterSettingName,
         false);
@@ -2275,6 +2286,21 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodPageJobForceAllSettingName, [this](const bool& newValue) {
         (void)newValue;
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, [this](const bool&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, [this](const uint32_t&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindVertexCacheEnabledSettingName, [this](const bool&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, [this](const uint32_t&) {
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName, [this](const uint32_t&) {
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodVisibleClusterCapacitySettingName, [this](const uint32_t& newValue) {
@@ -3963,6 +3989,23 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+				spdlog::info(
+					"CLOD VSM DynamicWind cache frame={}: bounds(hit={},miss={},insert={},race={},probeFail={},ineligible={}) clusters(eligible={},unique={},duplicate={}) vertices(requested={},skinned={},fallback={},cachedRaster={},inlineRaster={})",
+					requestedFrame,
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheHits),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheMisses),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheInsertions),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheRaces),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheProbeFailures),
+					counter(CLodWorkGraphCounterIndex::DynamicWindBoundsCacheIneligible),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheEligibleClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheUniqueClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheDuplicateClusters),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheRequestedVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheSkinnedVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheFallbackVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheCachedRasterVertices),
+					counter(CLodWorkGraphCounterIndex::DynamicWindSkinCacheInlineRasterVertices));
             });
     }
 }
@@ -5012,16 +5055,20 @@ void Renderer::RegisterPipelineExtensions() {
                         .streamingSystem = clodStreamingSystem }),
                 extensionId);
         });
-    for (const auto& entry : m_pipelineRecipe.Techniques()) {
-        entry.technique->RegisterExtensions(extensionContext);
-    }
-
+    // Recipe extensions may register resources consumed by technique extensions
+    // (ProceduralWind visibility is consumed by CLod shadow traversal). Register
+    // producers first; structural insertion constraints are resolved only after
+    // every extension has been gathered, so this does not require their target
+    // passes to have been materialized yet.
     for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
         auto extension = factory();
         if (!extension) {
             throw std::runtime_error("Pipeline extension factory returned null: " + id);
         }
         currentRenderGraph->RegisterExtension(std::move(extension), id);
+    }
+    for (const auto& entry : m_pipelineRecipe.Techniques()) {
+        entry.technique->RegisterExtensions(extensionContext);
     }
 }
 

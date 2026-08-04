@@ -108,7 +108,9 @@ void VsmLoadClusterScreenCoverage(
 #if defined(PSO_SKINNED)
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     // Keep virtual-shadow deformation on the same transient wind palette as visibility rasterization.
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDraw(instanceID);
     StructuredBuffer<CLodMeshMetadata> metadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];

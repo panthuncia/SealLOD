@@ -113,6 +113,14 @@ inline constexpr const char* CLodDirectionalVirtualShadowPredictiveLodInvalidati
 inline constexpr const char* CLodDirectionalVirtualShadowPageRenderBudgetSettingName = "clodDirectionalVirtualShadowPageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName = "clodDirectionalVirtualShadowUpgradePageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
+inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageModeSettingName = "clodDirectionalVirtualShadowReceiverSubpageMode";
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageModeOff = 0u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageMode4x4 = 4u;
+inline constexpr uint32_t CLodVirtualShadowReceiverSubpageMode8x8 = 8u;
+inline constexpr const char* CLodDynamicWindBoundsCacheEnabledSettingName = "clodDynamicWindBoundsCacheEnabled";
+inline constexpr const char* CLodDynamicWindBoundsCacheMiBSettingName = "clodDynamicWindBoundsCacheMiB";
+inline constexpr const char* CLodDynamicWindVertexCacheEnabledSettingName = "clodDynamicWindVertexCacheEnabled";
+inline constexpr const char* CLodDynamicWindVertexCacheMiBSettingName = "clodDynamicWindVertexCacheMiB";
 inline constexpr const char* CLodDirectionalVirtualShadowDynamicContentFilterSettingName = "clodDirectionalVirtualShadowDynamicContentFilter";
 
 struct CLodVirtualShadowBudgetAdmission
@@ -537,8 +545,14 @@ inline constexpr uint32_t CLodVirtualShadowFallbackDependencyHashCapacity = 1u <
 // subsequently became available. The VSM setup pass consumes this as a
 // one-shot conservative recovery.
 inline std::atomic<bool> g_clodVirtualShadowFeedbackRecoveryRequested{false};
+inline std::atomic<uint32_t> g_clodSkinnedShadowEffectiveDynamicClipmapCount{0u};
+inline std::atomic<uint32_t> g_clodSkinnedShadowActiveClipmapCount{0u};
+inline std::atomic<uint32_t> g_clodSkinnedShadowDynamicClipmapMask{0u};
+inline std::atomic<uint64_t> g_clodSkinnedShadowClassificationGeneration{0u};
+inline std::atomic<uint64_t> g_clodSkinnedShadowOneShotInvalidationCount{0u};
 inline constexpr uint32_t CLodVirtualShadowClipmapValidFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowClipmapInvalidateFlag = 0x2u;
+inline constexpr uint32_t CLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
 inline constexpr uint32_t CLodVirtualShadowPageAllocatedMask = 0x80000000u;
 inline constexpr uint32_t CLodVirtualShadowPageDirtyMask = 0x40000000u;
 inline constexpr uint32_t CLodVirtualShadowPageContentValidMask = 0x20000000u;
@@ -944,7 +958,7 @@ struct CLodVirtualShadowInvalidationInput
 {
     uint32_t perMeshInstanceBufferIndex = 0u;
     uint32_t flags = 0u;
-    uint32_t pad0 = 0u;
+    uint32_t clipmapMask = 0xFFFFFFFFu;
     uint32_t pad1 = 0u;
 };
 

@@ -1615,18 +1615,25 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_shadowMarkedBlocksCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowMarkedBlocksCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Marked Blocks Count Buffer"));
 
-    extension.m_shadowReceiverSubpageMaskBuffer =
-        CreateAliasedUnmaterializedStructuredBuffer(
-            CLodVirtualShadowMaxReceiverPageCount,
-            sizeof(uint32_t),
-            true,
-            false,
-            false,
-            false);
-    extension.m_shadowReceiverSubpageMaskBuffer->SetName(
-        MakeVariantResourceName(
-            traits,
-            "Virtual Shadow Receiver Subpage Mask Buffer"));
+    const uint32_t receiverSubpageMode = SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+        CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)();
+    if (receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode4x4 ||
+        receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode8x8) {
+        extension.m_shadowReceiverSubpageMaskBuffer =
+            CreateAliasedUnmaterializedStructuredBuffer(
+                CLodVirtualShadowMaxReceiverPageCount,
+                receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode8x8
+                    ? sizeof(uint32_t) * 2u
+                    : sizeof(uint32_t),
+                true,
+                false,
+                false,
+                false);
+        extension.m_shadowReceiverSubpageMaskBuffer->SetName(
+            MakeVariantResourceName(
+                traits,
+                "Virtual Shadow Receiver Subpage Mask Buffer"));
+    }
 
     extension.m_shadowActiveBlockMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxMarkedBlockCount,

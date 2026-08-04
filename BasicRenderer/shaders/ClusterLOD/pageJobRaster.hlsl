@@ -105,7 +105,9 @@ void WG_PageJobBuild(
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
     // Wind palettes are draw-transient; the persistent mesh template retains its bind-pose source slot.
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     PerObjectBuffer objData = LoadInstanceTransformForDrawWithAssemblyTransform(instanceID, assemblyTransformIndex);
@@ -379,7 +381,9 @@ void WG_PageJobRasterPage(
     const uint triCount = CLodDescTriangleCount(desc);
 
     PerMeshInstanceBuffer meshInst = LoadMeshTemplateForDraw(instanceID);
-    meshInst.skinningInstanceSlot = ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot);
+    meshInst.skinningInstanceSlot = CLodVisibleClusterUsesDynamicShadowLayer(packedCluster)
+        ? ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot)
+        : 0xFFFFFFFFu;
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     StructuredBuffer<MaterialInfo> materialDataBuffer =

@@ -1285,15 +1285,25 @@ bool InitializeMeshletFromCompactedCluster(uint4 packedCluster, uint assemblyTra
 #if !CLOD_RASTER_MINIMAL_OBJECT_SETUP
     setup.meshInstanceBuffer = LoadMeshTemplateForDraw(drawRecordIndex);
 #endif
+    setup.viewID = CLodVisibleClusterViewID(packedCluster);
+    setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
+    setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);
 #if defined(PSO_SKINNED)
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+	setup.meshInstanceBuffer.skinningInstanceSlot =
+		CLodVisibleClusterUsesDynamicShadowLayerFromPayload(setup.virtualShadowPayload)
+		? ResolveAssemblyProceduralWindSkinningSlot(
+			drawRecordIndex,
+			setup.meshInstanceBuffer.skinningInstanceSlot,
+			assemblyTransformIndex)
+		: 0xFFFFFFFFu;
+#else
     setup.meshInstanceBuffer.skinningInstanceSlot = ResolveAssemblyProceduralWindSkinningSlot(
         drawRecordIndex,
         setup.meshInstanceBuffer.skinningInstanceSlot,
         assemblyTransformIndex);
 #endif
-    setup.viewID = CLodVisibleClusterViewID(packedCluster);
-    setup.shadowClipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
-    setup.virtualShadowPayload = CLodVisibleClusterVsmPayload(packedCluster);
+#endif
 
 #if !CLOD_RASTER_MINIMAL_OBJECT_SETUP
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];

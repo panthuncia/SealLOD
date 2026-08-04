@@ -3,6 +3,7 @@
 
 static const uint kCLodVirtualShadowClipmapValidFlag = 0x1u;
 static const uint kCLodVirtualShadowClipmapInvalidateFlag = 0x2u;
+static const uint kCLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
 static const uint kCLodVirtualShadowAllocatedMask = 0x80000000u;
 static const uint kCLodVirtualShadowDirtyMask = 0x40000000u;
 static const uint kCLodVirtualShadowContentValidMask = 0x20000000u;
@@ -361,11 +362,61 @@ uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShado
     return CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapData.pageTableResolution);
 }
 
+bool CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    return (clipmapInfo.flags & kCLodVirtualShadowClipmapDynamicSkinnedFlag) != 0u;
+}
+
 uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(float2 shadowUv, uint pageTableResolution)
 {
     const uint resolution = max(pageTableResolution, 1u) *
         kCLodVirtualShadowReceiverSubpagesPerAxis;
     return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(
+    float2 shadowUv,
+    uint pageTableResolution,
+    uint subpagesPerAxis)
+{
+    const uint resolution = max(pageTableResolution, 1u) * max(subpagesPerAxis, 1u);
+    return min((uint2)(saturate(shadowUv) * resolution), resolution - 1u);
+}
+
+uint2 CLodVirtualShadowReceiverMaskForPageRect(
+    uint2 globalSubpageMin,
+    uint2 globalSubpageMax,
+    uint2 pageCoord,
+    uint subpagesPerAxis)
+{
+    const uint2 pageOrigin = pageCoord * subpagesPerAxis;
+    if (any(globalSubpageMax < pageOrigin) ||
+        any(globalSubpageMin >= pageOrigin + subpagesPerAxis))
+    {
+        return uint2(0u, 0u);
+    }
+    const uint2 localMin = max(globalSubpageMin, pageOrigin) - pageOrigin;
+    const uint2 localMax = min(globalSubpageMax, pageOrigin + subpagesPerAxis - 1u) - pageOrigin;
+    const uint width = localMax.x - localMin.x + 1u;
+    const uint rowBits = ((1u << width) - 1u) << localMin.x;
+    uint2 result = uint2(0u, 0u);
+    [unroll]
+    for (uint y = 0u; y < 8u; ++y)
+    {
+        if (y < subpagesPerAxis && y >= localMin.y && y <= localMax.y)
+        {
+            const uint bitOffset = y * subpagesPerAxis;
+            if (bitOffset < 32u)
+            {
+                result.x |= rowBits << bitOffset;
+            }
+            else
+            {
+                result.y |= rowBits << (bitOffset - 32u);
+            }
+        }
+    }
+    return result;
 }
 
 uint CLodVirtualShadowReceiverPageLinearIndex(uint2 pageCoord, uint clipmapIndex)

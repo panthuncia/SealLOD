@@ -257,7 +257,18 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         if (CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS == 2u)
         {
             viewHasCasterPages = CLodVirtualShadowViewHasActivePages(
-                CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX, true);
+                CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX,
+                CLodVirtualShadowViewUsesDynamicSkinnedCasters(
+                    CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX));
+            if (!viewHasCasterPages &&
+                CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX != 0u)
+            {
+                StructuredBuffer<uint> invalidationCount = ResourceDescriptorHeap[
+                    CLOD_PC_OBJECT_CULL_INVALIDATION_COUNT_SRV_INDEX];
+                viewHasCasterPages = invalidationCount[0] != 0u &&
+                    CLodVirtualShadowViewHasActivePages(
+                        CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX, true);
+            }
         }
         else if (CLOD_PC_OBJECT_CULL_SHADOW_CASTER_CLASS == 1u)
         {
@@ -308,13 +319,19 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     const bool objectIsSkinned =
         (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+	const bool objectInvalidatedThisFrame =
+		CLodVirtualShadowInstanceInvalidatedThisFrame(drawRecordIndex);
+	const bool objectUsesDynamicShadowLayer =
+		(objectIsSkinned && CLodVirtualShadowViewUsesDynamicSkinnedCasters(
+			CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX)) ||
+		objectInvalidatedThisFrame;
     // Static and dynamic page activity occupy separate bits in the same
     // hierarchy. Rigid draws target admitted dirty pages; skinned draws target
     // allocated pages visited this frame.
     if (CLodWorkGraphShadowDirtyPageCullingEnabled() &&
         !CLodVirtualShadowViewHasActivePages(
             CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX,
-            objectIsSkinned))
+            objectUsesDynamicShadowLayer))
     {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1u);
         return;
@@ -500,6 +517,11 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         const PerMeshBuffer perMesh = perMeshBuffer[instanceData.perMeshBufferIndex];
         isSkinned = (perMesh.vertexFlags & VERTEX_SKINNED) != 0u;
     }
+	bool deformForTraversal = isSkinned;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+	deformForTraversal = isSkinned &&
+		CLodVirtualShadowViewUsesDynamicSkinnedCasters(rec.viewId);
+#endif
     const row_major matrix objectModelMatrix = instanceTransform.model;
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
@@ -521,7 +543,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if !CLOD_PC_LEAF_ONLY
     const bool skinnedAssemblyPortal =
         node.range.isLeaf == CLOD_NODE_INSTANCE_ROOT &&
-        isSkinned &&
+        deformForTraversal &&
         clodMeshMetadata.assemblyInstanceCount != 0u;
 #endif
     const bool assemblyPortalTraversal = rec.assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
@@ -557,7 +579,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float cullUniformScale = objectUniformScale;
     const float lodUniformScale = objectUniformScale;
     BoundingSphere nodeCullBounds = { node.metric.cullCenterAndRadius };
-    const uint nodeCullClassification = isSkinned
+    const uint nodeCullClassification = deformForTraversal
         ? CLodResolveAnimatedNodeCullSphere(
             nodeLocalId, node.metric.cullCenterAndRadius, clodMeshMetadata,
             rec.instanceIndex, instanceData.skinningInstanceSlot,
@@ -587,7 +609,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const bool objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(rec.instanceIndex);
     dirtyPageCullingEnabled =
         CLodWorkGraphShadowDirtyPageCullingEnabled() &&
-        (isSkinned || !objectInvalidatedThisFrame);
+        (deformForTraversal || !objectInvalidatedThisFrame);
 #endif
 
     if (nodeCulled) {
@@ -664,7 +686,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         if (dirtyPageCullingEnabled) {
             const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
             nodeTouchesDirtyPages = CLodVirtualShadowBoundsTouchActivePages(
-                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, isSkinned);
+                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, deformForTraversal);
         }
 #endif
 
@@ -833,7 +855,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     if (dirtyPageCullingEnabled) {
         const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
         if (!CLodVirtualShadowBoundsTouchActivePages(
-                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, isSkinned)) {
+                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, deformForTraversal)) {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
             return;
         }
@@ -841,7 +863,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #endif
 
     bool occlusionCulled = false;
-    if (!isSkinned && CLodWorkGraphOcclusionEnabled() && (!cullCamera.isOrtho || CLOD_VSM_OCCLUSION_CULLING)) {
+    if (!deformForTraversal && CLodWorkGraphOcclusionEnabled() && (!cullCamera.isOrtho || CLOD_VSM_OCCLUSION_CULLING)) {
         StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
             ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
         const uint depthMapDescriptorIndex = viewDepthSRVIndices[cullViewId].linearDepthSRVIndex;
@@ -909,7 +931,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         // emitted frontier record. Defer its frustum test to that thread rather
         // than evaluating every animated child twice. Static bind bounds remain
         // cheap enough to prefilter here.
-        if (!isSkinned) {
+        if (!deformForTraversal) {
             BoundingSphere childCullBounds = { child.metric.cullCenterAndRadius };
             const uint childCullClassification = CLOD_NODE_CULL_STATIC_BIND_POSE;
             CLodTelemetryNodeCullClassification(childCullClassification);
@@ -933,7 +955,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             if (dirtyPageCullingEnabled) {
                 const float3 childCullCenterWorld = mul(float4(childCullCenterOS, 1.0f), objectModelMatrix).xyz;
                 if (!CLodVirtualShadowBoundsTouchActivePages(
-                        childCullCenterWorld, childRadiusWorld, rec.viewId, isSkinned)) {
+                        childCullCenterWorld, childRadiusWorld, rec.viewId, deformForTraversal)) {
                     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
                     continue;
                 }
@@ -959,7 +981,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         childRecord.instanceIndex = rec.instanceIndex;
         childRecord.viewId = rec.viewId;
         childRecord.nodeIdPacked =
-            PackTraverseNodeId(childNodeId, sourceTag, 1u, isSkinned ? 0u : 1u);
+            PackTraverseNodeId(childNodeId, sourceTag, 1u, deformForTraversal ? 0u : 1u);
         childRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
         if (childIsLeaf) {
             nextLeafFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);

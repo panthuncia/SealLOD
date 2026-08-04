@@ -217,6 +217,27 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
     m_clodOnlyWorkloads = inputs.clodOnlyWorkloads;
     m_useShadowCascadeViews = inputs.useShadowCascadeViews;
 
+    if (m_isFirstPass && UsesVirtualShadowOutput(m_rasterOutputKind) &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(
+            CLodDynamicWindBoundsCacheEnabledSettingName)()) {
+        constexpr uint64_t entryStride = 48u;
+        const uint64_t budgetMiB = std::min<uint32_t>(
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+                CLodDynamicWindBoundsCacheMiBSettingName)(),
+            256u);
+        const uint64_t budgetBytes = budgetMiB * 1024u * 1024u;
+        m_dynamicWindBoundsCacheEntryCount = static_cast<uint32_t>(budgetBytes / entryStride);
+        if (m_dynamicWindBoundsCacheEntryCount != 0u) {
+            m_dynamicWindBoundsCacheBuffer = CreateAliasedUnmaterializedRawBuffer(
+                static_cast<uint64_t>(m_dynamicWindBoundsCacheEntryCount) * entryStride,
+                true,
+                false,
+                true);
+            m_dynamicWindBoundsCacheBuffer->SetName("CLod DynamicWind Meshlet Bounds Cache");
+            rg::memory::SetResourceUsageHint(*m_dynamicWindBoundsCacheBuffer, "DynamicWind VSM bounds cache");
+        }
+    }
+
     if (m_pageJobVisibleClustersBuffer && m_pageJobVisibleClusterTransformIndicesBuffer && m_pageJobVisibleClustersCounterBuffer) {
         m_workGraphComputePageJobDescriptorsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
             1u,
@@ -562,6 +583,13 @@ void HierarchicalDispatchCullingPass::DeclareResourceUsages(ComputePassBuilder* 
         builder->WithShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
 
+    if (m_dynamicWindBoundsCacheBuffer) {
+        builder->WithUnorderedAccess(m_dynamicWindBoundsCacheBuffer);
+        // This read both enforces SimulateInstancesPhase2 -> shadow traversal
+        // ordering and limits caching to placements accepted by DynamicWind.
+        builder->WithShaderResource("Builtin::DynamicWind::VisibleSkeletonMembership");
+    }
+
     if (UsesVirtualShadowOutput(m_rasterOutputKind)) {
         builder->WithShaderResource(
             Builtin::Shadows::CLodClipmapInfo,
@@ -702,6 +730,13 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
     const uint32_t phase2RecordsPerGroup = 64u / phase2ExpansionFactor;
 
     uint32_t sharedRootConstants[NumMiscUintRootConstants] = {};
+    if (m_dynamicWindBoundsCacheBuffer) {
+        ++m_dynamicWindBoundsCacheGeneration;
+        if (m_dynamicWindBoundsCacheGeneration == 0u ||
+            m_dynamicWindBoundsCacheGeneration >= 0x7FFFFFFFu) {
+            m_dynamicWindBoundsCacheGeneration = 1u;
+        }
+    }
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX] = m_visibleClustersBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] = m_visibleClusterTransformIndicesBuffer->GetUAVShaderVisibleInfo(0).slot.index;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX] = m_visibleClustersCounterBuffer->GetUAVShaderVisibleInfo(0).slot.index;
@@ -721,6 +756,25 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
             ? m_viewDepthSrvIndicesBuffer->GetSRVInfo(0).slot.index
             : 0u;
     sharedRootConstants[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = static_cast<uint32_t>(m_maxVisibleClusters);
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_dynamicWindBoundsCacheBuffer->GetUAVShaderVisibleInfo(0).slot.index
+            : 0u;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_ENTRY_COUNT] = m_dynamicWindBoundsCacheEntryCount;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION] = m_dynamicWindBoundsCacheGeneration;
+    sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX] =
+        m_dynamicWindBoundsCacheBuffer
+            ? m_resourceRegistryView
+                ->RequestPtr<GloballyIndexedResource>("Builtin::DynamicWind::VisibleSkeletonMembership")
+                ->GetSRVInfo(0).slot.index
+            : 0u;
+    if (m_dynamicWindBoundsCacheBuffer && m_dynamicWindBoundsCacheGeneration == 1u) {
+        spdlog::info(
+            "CLod DynamicWind bounds cache bindings: entries={} cacheDescriptor={} membershipDescriptor={}",
+            m_dynamicWindBoundsCacheEntryCount,
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX],
+            sharedRootConstants[CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX]);
+    }
     sharedRootConstants[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX] =
         m_shadowDirtyHierarchyTexture
             ? m_shadowDirtyHierarchyTexture->GetSRVInfo(SRVViewType::Texture2DArrayFull, 0).slot.index
@@ -776,6 +830,11 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         m_shadowReceiverSubpageMaskBuffer
             ? m_shadowReceiverSubpageMaskBuffer->GetSRVInfo(0).slot.index
             : 0u;
+    const uint32_t receiverSubpageMode = m_shadowReceiverSubpageMaskBuffer
+        ? SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+            CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)()
+        : CLodVirtualShadowReceiverSubpageModeOff;
+    sharedRootConstants[CLOD_WG_VIRTUAL_SHADOW_RECEIVER_MASK_MODE] = receiverSubpageMode;
     sharedRootConstants[
         CLOD_WG_VIRTUAL_SHADOW_DYNAMIC_PAGES_UAV_DESCRIPTOR_INDEX] =
         m_shadowDynamicPhysicalPagesTexture
@@ -821,8 +880,7 @@ PassReturn HierarchicalDispatchCullingPass::Execute(PassExecutionContext& execut
         workGraphFlags |= CLOD_WG_FLAG_VSM_PREDICTIVE_LOD_INVALIDATION;
     }
     if (UsesVirtualShadowOutput(m_rasterOutputKind) &&
-        SettingsManager::GetInstance().getSettingGetter<bool>(
-            CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName)()) {
+        receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff) {
         workGraphFlags |= CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK;
     }
     if (!SettingsManager::GetInstance().getSettingGetter<bool>(CLodFrustumCullingSettingName)()) {

@@ -70,7 +70,7 @@ struct CLodVirtualShadowInvalidationInput
 {
     uint perMeshInstanceBufferIndex;
     uint flags;
-    uint pad0;
+    uint clipmapMask;
     uint pad1;
 };
 
@@ -576,6 +576,18 @@ float4 CLodDirectionalShadowPageViewRow(CLodVirtualShadowCompactShadowCameraInfo
         shadowCamera.view[3][3]);
 }
 
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ClearUint2StructuredBufferCSMain(uint3 dtid : SV_DispatchThreadID)
+{
+    if (dtid.x >= CLOD_CLEAR_UINT_BUFFER_COUNT)
+    {
+        return;
+    }
+    RWStructuredBuffer<uint2> outBuffer = ResourceDescriptorHeap[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX];
+    outBuffer[dtid.x] = uint2(CLOD_CLEAR_UINT_BUFFER_VALUE, CLOD_CLEAR_UINT_BUFFER_VALUE);
+}
+
 uint CLodDirectionalShadowPageViewInfoIndex(uint2 wrappedPageCoords, uint clipmapIndex, uint pageTableResolution)
 {
     return clipmapIndex * (pageTableResolution * pageTableResolution) +
@@ -863,6 +875,7 @@ void CLodInvalidateVirtualShadowSphere(
     float3 centerWS,
     float radiusWS,
     uint clipmapCount,
+    uint clipmapMask,
     uint frameIndex,
     uint reasonFlags,
     StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras,
@@ -876,6 +889,10 @@ void CLodInvalidateVirtualShadowSphere(
     [loop]
     for (uint clipmapIndex = 0u; clipmapIndex < clipmapCount; ++clipmapIndex)
     {
+        if ((clipmapMask & (1u << clipmapIndex)) == 0u)
+        {
+            continue;
+        }
         const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
         if (!CLodVirtualShadowClipmapIsValid(clipmapInfo))
         {
@@ -1438,7 +1455,9 @@ void CLodVirtualShadowSetupCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const uint existingPageEntry = pageTable[dispatchThreadId];
 
-    if (CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES != 0u)
+    const bool invalidateClipmap =
+        (clipmapInfos[dispatchThreadId.z].flags & kCLodVirtualShadowClipmapInvalidateFlag) != 0u;
+    if (CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES != 0u || invalidateClipmap)
     {
         pageTable[dispatchThreadId] = 0u;
     }
@@ -1574,7 +1593,12 @@ void CLodVirtualShadowSetupCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
     if (linearIndex < CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT)
     {
-        if (CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES != 0u)
+        const uint4 existingMeta = pageMetadata[linearIndex];
+        const bool invalidateOwnerClipmap =
+            (existingMeta.z & kCLodVirtualShadowPhysicalPageResidentFlag) != 0u &&
+            existingMeta.w < CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT &&
+            (clipmapInfos[existingMeta.w].flags & kCLodVirtualShadowClipmapInvalidateFlag) != 0u;
+        if (CLOD_VIRTUAL_SHADOW_SETUP_RESET_RESOURCES != 0u || invalidateOwnerClipmap)
         {
             pageMetadata[linearIndex] = uint4(0u, 0u, 0u, 0u);
         }
@@ -2445,36 +2469,57 @@ void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThrea
 
         if (CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED != 0u)
         {
-            RWStructuredBuffer<uint> receiverSubpageMasks =
-                ResourceDescriptorHeap[
-                    CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX];
-            const uint2 receiverSubpageMin =
+            const uint receiverSubpagesPerAxis =
+                CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED;
+            const uint receiverResolution =
+                clipmapData.pageTableResolution * receiverSubpagesPerAxis;
+            uint2 receiverSubpageMin =
                 CLodVirtualShadowReceiverSubpageCoordsFromUv(
-                    shadowUvMin, clipmapData.pageTableResolution);
-            const uint2 receiverSubpageMax =
+                    shadowUvMin, clipmapData.pageTableResolution, receiverSubpagesPerAxis);
+            uint2 receiverSubpageMax =
                 CLodVirtualShadowReceiverSubpageCoordsFromUv(
-                    shadowUvMax, clipmapData.pageTableResolution);
+                    shadowUvMax, clipmapData.pageTableResolution, receiverSubpagesPerAxis);
+            // One-subcell conservative dilation protects thin receivers and
+            // fractional-page projection boundaries.
+            receiverSubpageMin = uint2(
+                receiverSubpageMin.x > 0u ? receiverSubpageMin.x - 1u : 0u,
+                receiverSubpageMin.y > 0u ? receiverSubpageMin.y - 1u : 0u);
+            receiverSubpageMax = min(receiverSubpageMax + 1u, receiverResolution - 1u);
+            const uint2 receiverPageMin = receiverSubpageMin / receiverSubpagesPerAxis;
+            const uint2 receiverPageMax = receiverSubpageMax / receiverSubpagesPerAxis;
 
             [loop]
-            for (uint pageY = logicalPageMin.y; pageY <= logicalPageMax.y; ++pageY)
+            for (uint pageY = receiverPageMin.y; pageY <= receiverPageMax.y; ++pageY)
             {
                 [loop]
-                for (uint pageX = logicalPageMin.x; pageX <= logicalPageMax.x; ++pageX)
+                for (uint pageX = receiverPageMin.x; pageX <= receiverPageMax.x; ++pageX)
                 {
                     const uint2 pageCoord = uint2(pageX, pageY);
-                    const uint receiverMask = CLodVirtualShadowBlockMaskForPageRect(
+                    const uint2 receiverMask = CLodVirtualShadowReceiverMaskForPageRect(
                         receiverSubpageMin,
                         receiverSubpageMax,
-                        pageCoord * kCLodVirtualShadowReceiverSubpagesPerAxis);
-                    if (receiverMask != 0u)
+                        pageCoord,
+                        receiverSubpagesPerAxis);
+                    if (any(receiverMask != 0u))
                     {
+                        const uint maskIndex = CLodVirtualShadowReceiverPageLinearIndex(
+                            pageCoord, clipmapIndex);
                         uint ignoredPreviousMask = 0u;
-                        InterlockedOr(
-                            receiverSubpageMasks[
-                                CLodVirtualShadowReceiverPageLinearIndex(
-                                    pageCoord, clipmapIndex)],
-                            receiverMask,
-                            ignoredPreviousMask);
+                        if (receiverSubpagesPerAxis == 8u)
+                        {
+                            RWStructuredBuffer<uint2> receiverSubpageMasks =
+                                ResourceDescriptorHeap[
+                                    CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX];
+                            InterlockedOr(receiverSubpageMasks[maskIndex].x, receiverMask.x, ignoredPreviousMask);
+                            InterlockedOr(receiverSubpageMasks[maskIndex].y, receiverMask.y, ignoredPreviousMask);
+                        }
+                        else
+                        {
+                            RWStructuredBuffer<uint> receiverSubpageMasks =
+                                ResourceDescriptorHeap[
+                                    CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX];
+                            InterlockedOr(receiverSubpageMasks[maskIndex], receiverMask.x, ignoredPreviousMask);
+                        }
                     }
                 }
             }
@@ -2849,6 +2894,7 @@ void CLodVirtualShadowInvalidatePagesCSMain(uint3 dispatchThreadId : SV_Dispatch
             currentCenter,
             baseRadius * currentScale,
             clipmapCount,
+            input.clipmapMask,
             perFrameBuffer.frameIndex,
             kCLodVirtualShadowInvalidationStatsReasonCurrentBounds,
             compactShadowCameraBuffer,
@@ -2868,6 +2914,7 @@ void CLodVirtualShadowInvalidatePagesCSMain(uint3 dispatchThreadId : SV_Dispatch
             previousCenter,
             baseRadius * previousScale,
             clipmapCount,
+            input.clipmapMask,
             perFrameBuffer.frameIndex,
             kCLodVirtualShadowInvalidationStatsReasonPreviousBounds,
             compactShadowCameraBuffer,

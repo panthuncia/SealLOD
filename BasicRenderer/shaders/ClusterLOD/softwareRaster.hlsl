@@ -439,6 +439,7 @@ void SWRasterCluster(
     uint unsortedClusterIndex,
     bool hasResolvedSkinningInstanceSlot,
     uint resolvedSkinningInstanceSlot,
+    uint cachedPositionBase,
     uint GI,
     uint subGroup,
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuf)
@@ -494,7 +495,14 @@ void SWRasterCluster(
 #if CLOD_WG_RIGID_SW_RASTER
         gs_skinningInstanceSlot = 0xFFFFFFFFu;
 #else
-        gs_skinningInstanceSlot = (meshData.vertexFlags & VERTEX_SKINNED) != 0u
+		const bool allowSkinnedDeformation =
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+			gs_dynamicShadowLayer != 0u;
+#else
+			true;
+#endif
+        gs_skinningInstanceSlot = allowSkinnedDeformation &&
+			(meshData.vertexFlags & VERTEX_SKINNED) != 0u
             ? (hasResolvedSkinningInstanceSlot
                 ? resolvedSkinningInstanceSlot
                 : ResolveProceduralWindSkinningSlot(instanceID, meshInst.skinningInstanceSlot))
@@ -585,30 +593,57 @@ void SWRasterCluster(
     const uint triCount = gs_page.triangleCountAndRefinedGroup & 0xffffu;
     const uint positionBitstreamBase = pageSlabByteOffset + gs_page.positionBitstreamOffset;
 
+    const bool useCachedPositions = cachedPositionBase != 0xFFFFFFFFu;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && !defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+    if (GI == 0u && CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> cacheTelemetry =
+            ResourceDescriptorHeap[CLOD_RASTER_TELEMETRY_DESCRIPTOR_INDEX];
+        if (useCachedPositions)
+        {
+            InterlockedAdd(cacheTelemetry[273u], vertCount);
+        }
+        else if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
+        {
+            InterlockedAdd(cacheTelemetry[274u], vertCount);
+        }
+    }
+#endif
+
     for (uint v = GI; v < vertCount; v += SW_CLUSTER_RASTER_THREADS)
     {
-        float3 localPos = SWDecodeCompressedPosition(
-            v,
-            positionBitstreamBase,
-            gs_page.positionBitOffset,
-            gs_page.compressedPositionQuantExp,
-            pageSlabDescriptorIndex);
-#if defined(PSO_SKINNED)
-        SkinningInfluences skinning = SWDecodePackedSkinning(v, pageSlabByteOffset, pageSlabDescriptorIndex);
-        skinning = SWResolveAssemblySkinningInfluences(skinning);
-        localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
-            gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
-#else
-#if !CLOD_WG_RIGID_SW_RASTER
-        if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
+        float3 localPos;
+        if (useCachedPositions)
         {
+            RWStructuredBuffer<float3> cachedPositions =
+                ResourceDescriptorHeap[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_POSITIONS_DESCRIPTOR_INDEX];
+            localPos = cachedPositions[cachedPositionBase + v];
+        }
+        else
+        {
+            localPos = SWDecodeCompressedPosition(
+                v,
+                positionBitstreamBase,
+                gs_page.positionBitOffset,
+                gs_page.compressedPositionQuantExp,
+                pageSlabDescriptorIndex);
+#if defined(PSO_SKINNED)
             SkinningInfluences skinning = SWDecodePackedSkinning(v, pageSlabByteOffset, pageSlabDescriptorIndex);
             skinning = SWResolveAssemblySkinningInfluences(skinning);
             localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
                 gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
+#else
+#if !CLOD_WG_RIGID_SW_RASTER
+            if ((gs_vertexFlags & VERTEX_SKINNED) != 0u)
+            {
+                SkinningInfluences skinning = SWDecodePackedSkinning(v, pageSlabByteOffset, pageSlabDescriptorIndex);
+                skinning = SWResolveAssemblySkinningInfluences(skinning);
+                localPos = mul(float4(localPos, 1.0f), BuildAssemblyLocalSkinMatrix(
+                    gs_skinningInstanceSlot, skinning, assemblyTransformIndex)).xyz;
+            }
+#endif
+#endif
         }
-#endif
-#endif
 
         float4 localPos4 = float4(localPos, 1.0f);
         float2 clipXY = float2(
@@ -944,6 +979,7 @@ void WG_SWRaster(
         unsortedClusterIndex,
         false,
         0xFFFFFFFFu,
+        0xFFFFFFFFu,
         GI,
         subGroup,
         viewRasterInfoBuf);
@@ -977,6 +1013,15 @@ void SWRasterIndirectCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Group
 
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
     const CLodSoftwareRasterMapping mapping = sortedToUnsortedMapping[sortedClusterIndex];
+    uint cachedPositionBase = 0xFFFFFFFFu;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    if (CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        RWStructuredBuffer<uint> dynamicWindSkinCacheMapping =
+            ResourceDescriptorHeap[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX];
+        cachedPositionBase = dynamicWindSkinCacheMapping[sortedClusterIndex];
+    }
+#endif
     SWRasterCluster(
         packedCluster,
         compactedVisibleClusterTransformIndices[sortedClusterIndex],
@@ -988,6 +1033,7 @@ void SWRasterIndirectCSMain(uint3 dtid : SV_DispatchThreadID, uint GI : SV_Group
         true,
         mapping.skinningInstanceSlot,
 #endif
+        cachedPositionBase,
         GI,
         subGroup,
         viewRasterInfoBuf);
