@@ -2270,6 +2270,21 @@ PipelineState PSOManager::RegisterPipeline(
     return state;
 }
 
+PipelineState PSOManager::RegisterExternalPipeline(
+    PipelineState state,
+    std::string id,
+    std::string displayName,
+    LivePipelineKind kind,
+    std::function<PipelineState()> rebuild)
+{
+    return RegisterPipeline(
+        std::move(state),
+        std::move(id),
+        std::move(displayName),
+        kind,
+        std::move(rebuild));
+}
+
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
     std::vector<DxcDefine> defines = {};
     defines.push_back({ L"CLOD_ENABLE_SOURCE_GROUP_VALIDATION", L"0" });

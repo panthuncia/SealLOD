@@ -1815,7 +1815,11 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
 						if (request->document.contains("skinned_shadow_radius")) {
 							const float radius = request->document.at("skinned_shadow_radius").get<float>();
 							if (radius < 0.0f) throw std::runtime_error("skinned_shadow_radius must be non-negative");
-							settings.getSettingSetter<float>(CLodSkinnedShadowRadiusSettingName)(radius);
+							const float innerRadius = settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+							if (radius < innerRadius) {
+								settings.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(radius);
+							}
+							settings.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(radius);
 						}
 						if (request->document.contains("skinned_shadow_dynamic_clipmap_count_override")) {
 							int32_t requestedOverride = request->document.at(
@@ -1906,7 +1910,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                         CLodPageJobForceAllSettingName)();
 					response["dynamic_wind_inner_radius"] = settings.getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
 					response["dynamic_wind_outer_radius"] = settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
-					response["skinned_shadow_radius"] = settings.getSettingGetter<float>(CLodSkinnedShadowRadiusSettingName)();
+					response["skinned_shadow_radius"] = settings.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
 					response["skinned_shadow_dynamic_clipmap_count_override"] =
 						settings.getSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
 					response["skinned_shadow_effective_dynamic_clipmap_count"] =

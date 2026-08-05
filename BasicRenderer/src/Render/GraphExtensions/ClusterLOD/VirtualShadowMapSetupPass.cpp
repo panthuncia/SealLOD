@@ -260,8 +260,11 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 static_cast<uint32_t>(lightViewInfo.viewIDs.size()),
                 CLodVirtualShadowMaxSupportedClipmapCount);
             activeClipmapCount = clipmapCount;
+			// DynamicWind's world-space effect cutoff is also the distance through
+			// which skinned VSM clipmaps are required. Keep the two workloads on one
+			// quality control instead of allowing shadow skinning beyond wind reach.
 			const float configuredSkinnedShadowRadius = (std::max)(0.0f,
-				SettingsManager::GetInstance().getSettingGetter<float>(CLodSkinnedShadowRadiusSettingName)());
+				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
 			const float casterDynamicShadowRadius = m_virtualShadowCasters
 				? m_virtualShadowCasters->GetRequestedDynamicShadowRadius()
 				: 0.0f;

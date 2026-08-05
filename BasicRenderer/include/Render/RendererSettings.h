@@ -14,7 +14,6 @@ inline constexpr const char* ProceduralWindSkeletonLodQualityCurveSettingName = 
 inline constexpr const char* ProceduralWindSkeletonLodStaticCutoffSettingName = "proceduralWindSkeletonLodStaticCutoff";
 inline constexpr const char* ProceduralWindInnerRadiusSettingName = "proceduralWindInnerRadius";
 inline constexpr const char* ProceduralWindOuterRadiusSettingName = "proceduralWindOuterRadius";
-inline constexpr const char* CLodSkinnedShadowRadiusSettingName = "clodSkinnedShadowRadius";
 inline constexpr const char* CLodSkinnedShadowDynamicClipmapCountOverrideSettingName = "clodSkinnedShadowDynamicClipmapCountOverride";
 inline constexpr const char* ProceduralWindSkeletonLodCapacityTargetSettingName = "proceduralWindSkeletonLodCapacityTarget";
 inline constexpr const char* ProceduralWindSkeletonLodLateReserveSettingName = "proceduralWindSkeletonLodLateReserve";

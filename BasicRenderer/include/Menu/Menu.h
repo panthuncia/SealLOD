@@ -806,6 +806,9 @@ private:
     float m_proceduralWindGrassFlutterFrequency = 1.0f;
     std::function<float()> getProceduralWindGrassFlutterFrequency;
     std::function<void(float)> setProceduralWindGrassFlutterFrequency;
+    float m_proceduralWindEffectDistance = 10000.0f;
+    std::function<void(float)> setProceduralWindEffectDistance;
+    std::function<void(float)> setProceduralWindInnerRadius;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1564,6 +1567,10 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getProceduralWindGrassFlutterFrequency = settingsManager.getSettingGetter<float>(ProceduralWindGrassFlutterFrequencySettingName);
     m_proceduralWindGrassFlutterFrequency = getProceduralWindGrassFlutterFrequency();
     observerSetting(m_proceduralWindGrassFlutterFrequency, ProceduralWindGrassFlutterFrequencySettingName);
+    setProceduralWindEffectDistance = settingsManager.getSettingSetter<float>(ProceduralWindOuterRadiusSettingName);
+    setProceduralWindInnerRadius = settingsManager.getSettingSetter<float>(ProceduralWindInnerRadiusSettingName);
+    m_proceduralWindEffectDistance = settingsManager.getSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+    observerSetting(m_proceduralWindEffectDistance, ProceduralWindOuterRadiusSettingName);
     setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
     getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
     m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
@@ -2435,6 +2442,17 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         }
 
         if (ImGui::CollapsingHeader("Procedural Wind")) {
+            if (ImGui::SliderFloat("Wind Effect Distance", &m_proceduralWindEffectDistance, 0.0f, 65536.0f, "%.0f units")) {
+                m_proceduralWindEffectDistance = std::clamp(m_proceduralWindEffectDistance, 0.0f, 65536.0f);
+                setProceduralWindEffectDistance(m_proceduralWindEffectDistance);
+                const float innerRadius = std::min(
+                    SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindInnerRadiusSettingName)(),
+                    m_proceduralWindEffectDistance);
+                setProceduralWindInnerRadius(innerRadius);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Maximum world-space distance for DynamicWind. VSM skinned cascade count is derived from this distance.");
+            }
             ImGui::SetNextItemWidth(160.0f);
             if (ImGui::InputFloat("Tree Wind Scale", &m_proceduralWindDisplacementScale, 0.1f, 1.0f, "%.2f")) {
                 m_proceduralWindDisplacementScale = std::clamp(m_proceduralWindDisplacementScale, 0.0f, 100.0f);

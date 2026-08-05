@@ -1874,7 +1874,6 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);
 	settingsManager.registerSetting<float>(ProceduralWindInnerRadiusSettingName, 8000.0f);
 	settingsManager.registerSetting<float>(ProceduralWindOuterRadiusSettingName, 10000.0f);
-	settingsManager.registerSetting<float>(CLodSkinnedShadowRadiusSettingName, 10000.0f);
 	settingsManager.registerSetting<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName, -1);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodCapacityTargetSettingName, 0.95f);
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodLateReserveSettingName, 0.10f);

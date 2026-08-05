@@ -232,6 +232,13 @@ public:
         std::vector<DxcDefine> defines = {},
         const char* debugName = nullptr);
 
+    PipelineState RegisterExternalPipeline(
+        PipelineState state,
+        std::string id,
+        std::string displayName,
+        LivePipelineKind kind,
+        std::function<PipelineState()> rebuild);
+
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
     bool RebuildAllPipelines(std::string& error);
