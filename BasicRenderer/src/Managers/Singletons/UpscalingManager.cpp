@@ -459,6 +459,10 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     consts.depthInverted = sl::Boolean::eTrue; // Reverse-Z: near=1, far=0
     consts.cameraMotionIncluded = sl::Boolean::eTrue;
     consts.motionVectors3D = sl::Boolean::eFalse;
+    consts.motionVectorsDilated = SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()
+        ? sl::Boolean::eTrue
+        : sl::Boolean::eFalse;
+    consts.motionVectorsJittered = sl::Boolean::eFalse;
     const bool resetHistory = m_resetUpscalerHistory;
     consts.reset = resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 

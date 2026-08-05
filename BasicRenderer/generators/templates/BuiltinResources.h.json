@@ -119,6 +119,7 @@
     "GBuffer": {
       "Normals": {},
       "MotionVectors": {},
+      "DilatedMotionVectors": {},
       "Albedo": {},
       "Coat": {},
       "Fuzz": {},

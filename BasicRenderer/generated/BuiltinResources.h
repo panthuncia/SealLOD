@@ -57,6 +57,7 @@ struct Builtin {
   struct GBuffer {
     inline static constexpr std::string_view Albedo = "Builtin::GBuffer::Albedo";
     inline static constexpr std::string_view Coat = "Builtin::GBuffer::Coat";
+    inline static constexpr std::string_view DilatedMotionVectors = "Builtin::GBuffer::DilatedMotionVectors";
     inline static constexpr std::string_view Emissive = "Builtin::GBuffer::Emissive";
     inline static constexpr std::string_view Fuzz = "Builtin::GBuffer::Fuzz";
     inline static constexpr std::string_view MetallicRoughness = "Builtin::GBuffer::MetallicRoughness";

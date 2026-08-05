@@ -420,10 +420,13 @@ private:
         std::shared_ptr<PixelBuffer> m_HDRColorTarget = nullptr;
 		std::shared_ptr<PixelBuffer> m_upscaledHDRColorTarget = nullptr;
 		std::shared_ptr<PixelBuffer> m_gbufferMotionVectors = nullptr;
+		std::shared_ptr<PixelBuffer> m_gbufferDilatedMotionVectors = nullptr;
 
 		std::shared_ptr<Resource> ProvideResource(ResourceIdentifier const& key) override { // TODO: don't use ifs
             if (key.ToString() == Builtin::GBuffer::MotionVectors)
 				return m_gbufferMotionVectors;
+            if (key.ToString() == Builtin::GBuffer::DilatedMotionVectors)
+				return m_gbufferDilatedMotionVectors;
             if (key.ToString() == Builtin::Color::HDRColorTarget)
 				return m_HDRColorTarget;
             if (key.ToString() == Builtin::PostProcessing::UpscaledHDR)
@@ -440,6 +443,7 @@ private:
         std::vector<ResourceIdentifier> GetSupportedKeys() override {
 			return {
                 Builtin::GBuffer::MotionVectors,
+                Builtin::GBuffer::DilatedMotionVectors,
                 Builtin::Color::HDRColorTarget,
 				Builtin::PostProcessing::UpscaledHDR,
 			};
@@ -453,6 +457,7 @@ private:
 			m_HDRColorTarget = nullptr;
 			m_upscaledHDRColorTarget = nullptr;
 			m_gbufferMotionVectors = nullptr;
+			m_gbufferDilatedMotionVectors = nullptr;
         }
     };
 	CoreResourceProvider m_coreResourceProvider;

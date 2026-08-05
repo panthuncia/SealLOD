@@ -100,6 +100,7 @@ public:
 	void ProxyDevice();
     void Setup();
 	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, PixelBuffer* pHDRTarget, PixelBuffer* pUpscaledHDRTarget, PixelBuffer* pDepthTexture, PixelBuffer* pMotionVectors);
+    void RequestHistoryReset() { m_resetUpscalerHistory = true; }
 	void Shutdown();
 
     bool InitSL();

@@ -23,11 +23,16 @@ public:
             Mip{ 0, 1 });
         const UpscalingMode upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
         const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
+        const bool useDilatedMotionVectors = upscalingMode == UpscalingMode::DLSS &&
+            SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")();
+        const auto motionVectors = useDilatedMotionVectors
+            ? Builtin::GBuffer::DilatedMotionVectors
+            : Builtin::GBuffer::MotionVectors;
 
         if (upscalingMode == UpscalingMode::FSR3) {
             builder->WithShaderResource(
                 Builtin::Color::HDRColorTarget,
-                Builtin::GBuffer::MotionVectors,
+                motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture)
                 .WithUnorderedAccess(upscaledHDR);
             return;
@@ -55,7 +60,7 @@ public:
         if (backend == rhi::Backend::Vulkan) {
             builder->WithShaderResource(
                 Builtin::Color::HDRColorTarget,
-                Builtin::GBuffer::MotionVectors,
+                motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture)
                 .WithUnorderedAccessClear(upscaledHDR)
                 .WithInternalTransition(upscaledHDR, vulkanStreamlineExitState);
@@ -63,7 +68,7 @@ public:
         else {
             builder->WithLegacyInterop(
                 Builtin::Color::HDRColorTarget,
-                Builtin::GBuffer::MotionVectors,
+                motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture,
                 upscaledHDR)
                 .WithInternalTransition(upscaledHDR, dx12StreamlineExitState);
@@ -72,7 +77,13 @@ public:
 
     void Setup() override {
         m_pHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Color::HDRColorTarget);
-        m_pMotionVectors = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::GBuffer::MotionVectors);
+        const bool useDilatedMotionVectors =
+            UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSS &&
+            SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")();
+        const auto motionVectors = useDilatedMotionVectors
+            ? Builtin::GBuffer::DilatedMotionVectors
+            : Builtin::GBuffer::MotionVectors;
+        m_pMotionVectors = m_resourceRegistryView->RequestPtr<PixelBuffer>(motionVectors);
 		m_pDepthTexture = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
 		m_pUpscaledHDRTarget = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
     }

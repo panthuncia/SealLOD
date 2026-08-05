@@ -49,6 +49,7 @@
 #include "RenderPasses/FidelityFX/Downsample.h"
 #include "RenderPasses/PostProcessing/Tonemapping.h"
 #include "RenderPasses/PostProcessing/Upscaling.h"
+#include "RenderPasses/PostProcessing/DilateMotionVectorsPass.h"
 #include "RenderPasses/PostProcessing/luminanceHistogram.h"
 #include "RenderPasses/PostProcessing/luminanceHistogramAverage.h"
 #include "RenderPasses/ClearVisibilityBufferPass.h"
@@ -515,6 +516,7 @@ void Renderer::Initialize(
         "upscalingMode",
         enableStreamline ? UpscalingMode::DLSS : UpscalingMode::None);
     settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::DLAA);
+    settingsManager.registerSetting<bool>("enableDilatedMotionVectors", true);
     settingsManager.registerSetting<bool>("enableVisibilityRendering", m_visibilityRendering);
     settingsManager.registerSetting<bool>("enableStreamline", enableStreamline);
     settingsManager.registerSetting<bool>("enableDirectStorage", enableDirectStorage);
@@ -2431,6 +2433,12 @@ void Renderer::SetSettings() {
             rebuildRenderGraph = true;
             });
         }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableDilatedMotionVectors", [this](const bool&) {
+        m_preFrameDeferredFunctions.defer([this]() {
+            UpscalingManager::GetInstance().RequestHistoryReset();
+            rebuildRenderGraph = true;
+        });
+        }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<WindowResolutionPreset>(
         WindowResolutionPresetSettingName,
         [this](const WindowResolutionPreset& newValue) {
@@ -2631,10 +2639,15 @@ void Renderer::CreateTextures() {
     ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
     motionVectors.imageDimensions.push_back(motionVectorsDims);
 	motionVectors.allowAlias = true;
-    auto motionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
+	auto motionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
     motionVectorsBuffer->SetName("Motion Vectors");
     rg::memory::SetResourceUsageHint(*motionVectorsBuffer, "GBuffer");
 	m_coreResourceProvider.m_gbufferMotionVectors = motionVectorsBuffer;
+
+    auto dilatedMotionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
+    dilatedMotionVectorsBuffer->SetName("Dilated Motion Vectors");
+    rg::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
+	m_coreResourceProvider.m_gbufferDilatedMotionVectors = dilatedMotionVectorsBuffer;
 }
 
 void Renderer::CreateRTVs() {
@@ -5370,6 +5383,11 @@ void Renderer::CreateRenderGraph() {
                 break;
             }
             case Upscaling:
+                if (UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSS &&
+                    SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()) {
+                    newGraph->BuildComputePass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
+                    newGraph->SetPassTechnique("DilateMotionVectorsPass", "Post Process::Upscaling");
+                }
                 newGraph->BuildRenderPass<UpscalingPass>("UpscalingPass");
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
                 break;

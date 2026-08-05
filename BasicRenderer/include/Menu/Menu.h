@@ -856,6 +856,9 @@ private:
 	UpscalingMode m_currentUpscalingMode = UpscalingMode::None;
 	std::function<UpscalingMode()> getUpscalingMode;
 	std::function<void(UpscalingMode)> setUpscalingMode;
+	bool m_dilatedMotionVectorsEnabled = true;
+	std::function<bool()> getDilatedMotionVectorsEnabled;
+	std::function<void(bool)> setDilatedMotionVectorsEnabled;
 
 	UpscaleQualityMode m_currentUpscalingQualityMode = UpscaleQualityMode::Balanced;
 	std::function<UpscaleQualityMode()> getUpscalingQualityMode;
@@ -1617,6 +1620,11 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setUpscalingMode = settingsManager.getSettingSetter<UpscalingMode>("upscalingMode");
     m_currentUpscalingMode = getUpscalingMode();
 	observerSetting(m_currentUpscalingMode, "upscalingMode");
+
+	getDilatedMotionVectorsEnabled = settingsManager.getSettingGetter<bool>("enableDilatedMotionVectors");
+	setDilatedMotionVectorsEnabled = settingsManager.getSettingSetter<bool>("enableDilatedMotionVectors");
+	m_dilatedMotionVectorsEnabled = getDilatedMotionVectorsEnabled();
+	observerSetting(m_dilatedMotionVectorsEnabled, "enableDilatedMotionVectors");
 
 	getUpscalingQualityMode = settingsManager.getSettingGetter<UpscaleQualityMode>("upscalingQualityMode");
     setUpscalingQualityMode = settingsManager.getSettingSetter<UpscaleQualityMode>("upscalingQualityMode");
@@ -2512,6 +2520,9 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         if (ImGui::CollapsingHeader("Display and Assets")) {
         DrawWindowResolutionCombo();
         DrawUpscalingCombo();
+        if (ImGui::Checkbox("Dilated Motion Vectors", &m_dilatedMotionVectorsEnabled)) {
+            setDilatedMotionVectorsEnabled(m_dilatedMotionVectorsEnabled);
+        }
         DrawUpscalingQualityCombo();
         DrawTonemapTypeDropdown();
 
