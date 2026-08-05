@@ -2,6 +2,7 @@
 #include "include/structs.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/occlusionCulling.hlsli"
+#include "include/dynamicWindShared.hlsli"
 
 #define WIND_BONE_ENTRIES UintRootConstant0
 #define WIND_SCRATCH_FORWARD UintRootConstant1
@@ -62,12 +63,7 @@ struct WindBoneGPU
 
 float WindPhase(uint seed)
 {
-    seed ^= seed >> 16u;
-    seed *= 0x7feb352du;
-    seed ^= seed >> 15u;
-    seed *= 0x846ca68bu;
-    seed ^= seed >> 16u;
-    return (seed & 0x00FFFFFFu) * (6.28318530718f / 16777216.0f);
+	return DynamicWindPhase(seed);
 }
 
 WindMatrix WindInverse(WindMatrix m)
@@ -127,36 +123,27 @@ float WindHarmonics(WindBoneGPU bone, float phaseOffset)
     return value;
 }
 
+// Legacy transient entry points use this local spelling; keep it as a thin
+// alias so every path decodes the public field through the shared helper.
 float4 LoadWindCell(StructuredBuffer<uint> field, uint cellIndex)
 {
-    uint xy = field[cellIndex * 2u];
-    uint za = field[cellIndex * 2u + 1u];
-    return float4(f16tof32(xy & 0xFFFFu), f16tof32(xy >> 16u), f16tof32(za & 0xFFFFu), f16tof32(za >> 16u));
-}
-
-float4 SampleWindSlice(StructuredBuffer<uint> field, float2 position, uint width, uint height)
-{
-    float2 grid = (position - float2(WIND_FIELD_ORIGIN_X, WIND_FIELD_ORIGIN_Y)) / WIND_FIELD_CELL_SIZE - 0.5f;
-    if (any(grid < 0.0f) || grid.x >= width - 1u || grid.y >= height - 1u) return float4(0, 0, 0, -1);
-    uint2 base = (uint2)floor(grid);
-    float2 fraction = frac(grid);
-    float4 a = lerp(LoadWindCell(field, base.y * width + base.x), LoadWindCell(field, base.y * width + base.x + 1u), fraction.x);
-    float4 b = lerp(LoadWindCell(field, (base.y + 1u) * width + base.x), LoadWindCell(field, (base.y + 1u) * width + base.x + 1u), fraction.x);
-    return lerp(a, b, fraction.y);
+	return DynamicWindLoadCell(field, cellIndex);
 }
 
 float3 SampleLevel0Wind(float3 position)
 {
-    float3 fallback = float3(WIND_X, WIND_Y, 0.0f);
-    if (WIND_FIELD_VALID == 0u || WIND_FIELD_CELL_SIZE <= 0.0f) return fallback;
-    uint width = WIND_FIELD_DIMENSIONS & 0xFFFFu;
-    uint height = WIND_FIELD_DIMENSIONS >> 16u;
-    StructuredBuffer<uint> field0 = ResourceDescriptorHeap[WIND_FIELD_SLICE0];
-    StructuredBuffer<uint> field1 = ResourceDescriptorHeap[WIND_FIELD_SLICE1];
-    float4 a = SampleWindSlice(field0, position.xy, width, height);
-    float4 b = SampleWindSlice(field1, position.xy, width, height);
-    if (min(a.w, b.w) < 0.5f) return fallback;
-    return lerp(a.xyz, b.xyz, WIND_FIELD_INTERPOLATION);
+	DynamicWindFrameGPU frame = (DynamicWindFrameGPU)0;
+	frame.fieldSlice0 = WIND_FIELD_SLICE0;
+	frame.fieldSlice1 = WIND_FIELD_SLICE1;
+	frame.fieldDimensions = WIND_FIELD_DIMENSIONS;
+	frame.fieldValid = WIND_FIELD_VALID;
+	frame.fieldCellSize = WIND_FIELD_CELL_SIZE;
+	frame.fieldOriginX = WIND_FIELD_ORIGIN_X;
+	frame.fieldOriginY = WIND_FIELD_ORIGIN_Y;
+	frame.fieldInterpolation = WIND_FIELD_INTERPOLATION;
+	frame.windX = WIND_X;
+	frame.windY = WIND_Y;
+	return DynamicWindSampleLevel0(position.xy, frame);
 }
 
 [numthreads(64, 1, 1)]

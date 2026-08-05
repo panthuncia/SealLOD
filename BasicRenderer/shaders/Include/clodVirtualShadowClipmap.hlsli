@@ -307,6 +307,21 @@ bool CLodVirtualShadowPageEntryIsDynamicActive(uint pageEntry)
     return (pageEntry & requiredMask) == requiredMask;
 }
 
+bool CLodVirtualShadowPageEntryHasSampleableContent(uint pageEntry)
+{
+    // Lookups sample the transient composite atlas, not the persistent static
+    // atlas. A page therefore becomes sampleable only after this frame's mark
+    // pass visited it and the clear pass initialized its transient copy. Static
+    // ContentValid alone is not enough: an unvisited fallback page can retain
+    // arbitrary dynamic texels from an earlier frame or physical-page owner.
+    // Dynamic-only pages remain supported once their current-frame raster sets
+    // DynamicContent.
+    return CLodVirtualShadowPageEntryIsDynamicActive(pageEntry) &&
+        (pageEntry &
+            (kCLodVirtualShadowContentValidMask |
+             kCLodVirtualShadowDynamicContentMask)) != 0u;
+}
+
 // The page hierarchy carries both raster domains in one R32_UINT texture.
 // Keeping the domains as independent bits lets rigid/static and animated
 // casters share the hierarchy build and traversal machinery without making

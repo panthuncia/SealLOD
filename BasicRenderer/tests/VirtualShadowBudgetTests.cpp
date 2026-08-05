@@ -322,8 +322,8 @@ void RunTwoLayerLifecycleCases()
     }
 
     // Static and dynamic layers can be rasterized on frames with different
-    // directional-light view translations. Convert dynamic depth into the
-    // cached page's space before the unsigned depth minimum.
+    // directional-light view translations. Rebase persistent static depth
+    // into the current transient-composite space before the unsigned minimum.
     constexpr float worldAlongLightZ = 37.25f;
     constexpr float currentViewTranslationZ = -10.0f;
     constexpr float cachedViewTranslationZ = -18.0f;
@@ -331,17 +331,25 @@ void RunTwoLayerLifecycleCases()
         -(worldAlongLightZ + currentViewTranslationZ);
     constexpr float expectedCachedDepth =
         -(worldAlongLightZ + cachedViewTranslationZ);
-    constexpr float convertedDepth =
-        currentDepth +
-        currentViewTranslationZ -
-        cachedViewTranslationZ;
-    if (std::abs(convertedDepth - expectedCachedDepth) > 1e-6f) {
+    constexpr float rebasedCurrentDepth =
+        expectedCachedDepth +
+        cachedViewTranslationZ -
+        currentViewTranslationZ;
+    if (std::abs(rebasedCurrentDepth - currentDepth) > 1e-6f) {
         throw std::runtime_error(
-            "two-layer VSM dynamic depth was not translated into cached page space");
+            "two-layer VSM cached static depth was not rebased into current page space");
     }
     if (std::abs(currentDepth - expectedCachedDepth) < 1.0f) {
         throw std::runtime_error(
             "two-layer VSM depth-space test did not exercise an origin mismatch");
+    }
+    constexpr float firstFrameRebasedDepth =
+        currentDepth +
+        currentViewTranslationZ -
+        currentViewTranslationZ;
+    if (std::abs(firstFrameRebasedDepth - currentDepth) > 1e-6f) {
+        throw std::runtime_error(
+            "two-layer VSM changed first-frame depth with matching view origins");
     }
 }
 

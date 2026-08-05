@@ -9,6 +9,7 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "Managers/ViewManager.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
+#include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 #include "Render/RenderContext.h"
 #include "Render/RendererComponents.h"
 #include "Render/RendererSettings.h"
@@ -131,6 +132,7 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
     std::shared_ptr<Buffer> statsBuffer,
     std::shared_ptr<Buffer> runtimeStateBuffer,
     std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+    std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
     bool forceResetResources)
     : m_pageTableTexture(std::move(pageTableTexture))
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
@@ -143,6 +145,7 @@ VirtualShadowMapSetupPass::VirtualShadowMapSetupPass(
     , m_statsBuffer(std::move(statsBuffer))
     , m_runtimeStateBuffer(std::move(runtimeStateBuffer))
     , m_fallbackCandidateCountBuffer(std::move(fallbackCandidateCountBuffer))
+    , m_virtualShadowCasters(std::move(virtualShadowCasters))
     , m_forceResetResources(forceResetResources)
 {
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
@@ -257,8 +260,13 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
                 static_cast<uint32_t>(lightViewInfo.viewIDs.size()),
                 CLodVirtualShadowMaxSupportedClipmapCount);
             activeClipmapCount = clipmapCount;
-			const float skinnedShadowRadius = (std::max)(0.0f,
+			const float configuredSkinnedShadowRadius = (std::max)(0.0f,
 				SettingsManager::GetInstance().getSettingGetter<float>(CLodSkinnedShadowRadiusSettingName)());
+			const float casterDynamicShadowRadius = m_virtualShadowCasters
+				? m_virtualShadowCasters->GetRequestedDynamicShadowRadius()
+				: 0.0f;
+			const float skinnedShadowRadius = (std::max)(
+				configuredSkinnedShadowRadius, casterDynamicShadowRadius);
 			const int32_t dynamicClipmapOverride =
 				SettingsManager::GetInstance().getSettingGetter<int32_t>(
 					CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();

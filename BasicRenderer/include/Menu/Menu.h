@@ -797,6 +797,15 @@ private:
     float m_proceduralWindDisplacementScale = 1.0f;
     std::function<float()> getProceduralWindDisplacementScale;
     std::function<void(float)> setProceduralWindDisplacementScale;
+    float m_proceduralWindGrassDisplacementScale = 1.0f;
+    std::function<float()> getProceduralWindGrassDisplacementScale;
+    std::function<void(float)> setProceduralWindGrassDisplacementScale;
+    float m_proceduralWindGrassOscillationScale = 1.0f;
+    std::function<float()> getProceduralWindGrassOscillationScale;
+    std::function<void(float)> setProceduralWindGrassOscillationScale;
+    float m_proceduralWindGrassFlutterFrequency = 1.0f;
+    std::function<float()> getProceduralWindGrassFlutterFrequency;
+    std::function<void(float)> setProceduralWindGrassFlutterFrequency;
     float m_terrainParallaxHeightScale = 0.03f;
     std::function<float()> getTerrainParallaxHeightScale;
     std::function<void(float)> setTerrainParallaxHeightScale;
@@ -1540,6 +1549,18 @@ inline void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getProceduralWindDisplacementScale = settingsManager.getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName);
     m_proceduralWindDisplacementScale = getProceduralWindDisplacementScale();
     observerSetting(m_proceduralWindDisplacementScale, ProceduralWindDisplacementScaleSettingName);
+    setProceduralWindGrassDisplacementScale = settingsManager.getSettingSetter<float>(ProceduralWindGrassDisplacementScaleSettingName);
+    getProceduralWindGrassDisplacementScale = settingsManager.getSettingGetter<float>(ProceduralWindGrassDisplacementScaleSettingName);
+    m_proceduralWindGrassDisplacementScale = getProceduralWindGrassDisplacementScale();
+    observerSetting(m_proceduralWindGrassDisplacementScale, ProceduralWindGrassDisplacementScaleSettingName);
+    setProceduralWindGrassOscillationScale = settingsManager.getSettingSetter<float>(ProceduralWindGrassOscillationScaleSettingName);
+    getProceduralWindGrassOscillationScale = settingsManager.getSettingGetter<float>(ProceduralWindGrassOscillationScaleSettingName);
+    m_proceduralWindGrassOscillationScale = getProceduralWindGrassOscillationScale();
+    observerSetting(m_proceduralWindGrassOscillationScale, ProceduralWindGrassOscillationScaleSettingName);
+    setProceduralWindGrassFlutterFrequency = settingsManager.getSettingSetter<float>(ProceduralWindGrassFlutterFrequencySettingName);
+    getProceduralWindGrassFlutterFrequency = settingsManager.getSettingGetter<float>(ProceduralWindGrassFlutterFrequencySettingName);
+    m_proceduralWindGrassFlutterFrequency = getProceduralWindGrassFlutterFrequency();
+    observerSetting(m_proceduralWindGrassFlutterFrequency, ProceduralWindGrassFlutterFrequencySettingName);
     setTerrainParallaxMaxSteps = settingsManager.getSettingSetter<uint32_t>("terrainParallaxMaxSteps");
     getTerrainParallaxMaxSteps = settingsManager.getSettingGetter<uint32_t>("terrainParallaxMaxSteps");
     m_terrainParallaxMaxSteps = getTerrainParallaxMaxSteps();
@@ -2407,12 +2428,36 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 
         if (ImGui::CollapsingHeader("Procedural Wind")) {
             ImGui::SetNextItemWidth(160.0f);
-            if (ImGui::InputFloat("Displacement Scale", &m_proceduralWindDisplacementScale, 0.1f, 1.0f, "%.2f")) {
+            if (ImGui::InputFloat("Tree Wind Scale", &m_proceduralWindDisplacementScale, 0.1f, 1.0f, "%.2f")) {
                 m_proceduralWindDisplacementScale = std::clamp(m_proceduralWindDisplacementScale, 0.0f, 100.0f);
                 setProceduralWindDisplacementScale(m_proceduralWindDisplacementScale);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Scales procedural wind bend and torsion before each profile's maximum-angle clamp.");
+                ImGui::SetTooltip("Scales tree bend and torsion before each profile's maximum-angle clamp.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Lean Scale", &m_proceduralWindGrassDisplacementScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassDisplacementScale = std::clamp(m_proceduralWindGrassDisplacementScale, 0.0f, 100.0f);
+                setProceduralWindGrassDisplacementScale(m_proceduralWindGrassDisplacementScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the sustained DynamicWind lean applied to grass cards.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Oscillation Scale", &m_proceduralWindGrassOscillationScale, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassOscillationScale = std::clamp(m_proceduralWindGrassOscillationScale, 0.0f, 100.0f);
+                setProceduralWindGrassOscillationScale(m_proceduralWindGrassOscillationScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the animated flutter amplitude applied to grass cards.");
+            }
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::InputFloat("Grass Flutter Frequency", &m_proceduralWindGrassFlutterFrequency, 0.1f, 1.0f, "%.2f")) {
+                m_proceduralWindGrassFlutterFrequency = std::clamp(m_proceduralWindGrassFlutterFrequency, 0.0f, 100.0f);
+                setProceduralWindGrassFlutterFrequency(m_proceduralWindGrassFlutterFrequency);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Scales the frequency of multi-octave grass flutter noise.");
             }
         }
 

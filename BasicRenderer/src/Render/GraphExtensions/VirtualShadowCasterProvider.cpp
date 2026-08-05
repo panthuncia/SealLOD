@@ -1,6 +1,7 @@
 #include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
@@ -99,6 +100,18 @@ void VirtualShadowCasterRegistry::Register(IVirtualShadowCasterProvider& provide
 
 bool VirtualShadowCasterRegistry::Empty() const noexcept { return m_providers.empty(); }
 size_t VirtualShadowCasterRegistry::Size() const noexcept { return m_providers.size(); }
+
+float VirtualShadowCasterRegistry::GetRequestedDynamicShadowRadius() const
+{
+    float radius = 0.0f;
+    for (const auto* provider : m_providers) {
+        const float requested = provider->GetRequestedDynamicShadowRadius();
+        if (std::isfinite(requested) && requested > radius) {
+            radius = requested;
+        }
+    }
+    return radius;
+}
 
 std::shared_ptr<VirtualShadowInvalidationQueue> VirtualShadowCasterRegistry::GetInvalidationQueue() const
 {

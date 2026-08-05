@@ -50,8 +50,9 @@ float4 VirtualShadowCasterBuildBlockClipDistances(
         clipPosition.y - ndcMinY * clipPosition.w);
 }
 
-bool VirtualShadowCasterWriteDepth(
-    float2 shadowUv,
+bool VirtualShadowCasterWriteDepthAtVirtualTexel(
+    uint2 virtualPageCoords,
+    uint2 virtualTexelCoords,
     float linearDepth,
     CLodVirtualShadowClipmapInfo clipmapInfo,
     bool dynamicLayer,
@@ -59,7 +60,6 @@ bool VirtualShadowCasterWriteDepth(
     uint staticPagesDescriptor,
     uint dynamicPagesDescriptor)
 {
-    const uint2 virtualPageCoords = CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
     const uint3 pageCoords = uint3(wrappedPageCoords, clipmapInfo.pageTableLayer);
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[pageTableDescriptor];
@@ -70,7 +70,6 @@ bool VirtualShadowCasterWriteDepth(
     }
 
     const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-    const uint2 virtualTexelCoords = CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(physicalPageIndex, virtualTexelCoords, clipmapInfo);
     RWTexture2D<uint> physicalPages = ResourceDescriptorHeap[
         dynamicLayer ? dynamicPagesDescriptor : staticPagesDescriptor];
@@ -107,6 +106,26 @@ bool VirtualShadowCasterWriteDepth(
             ignored);
     }
     return true;
+}
+
+bool VirtualShadowCasterWriteDepth(
+    float2 shadowUv,
+    float linearDepth,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    bool dynamicLayer,
+    uint pageTableDescriptor,
+    uint staticPagesDescriptor,
+    uint dynamicPagesDescriptor)
+{
+    return VirtualShadowCasterWriteDepthAtVirtualTexel(
+        CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapInfo),
+        CLodVirtualShadowVirtualTexelCoordsFromUv(shadowUv, clipmapInfo),
+        linearDepth,
+        clipmapInfo,
+        dynamicLayer,
+        pageTableDescriptor,
+        staticPagesDescriptor,
+        dynamicPagesDescriptor);
 }
 
 #endif

@@ -154,6 +154,9 @@ static const uint kCLodVirtualShadowPredictedPageBitsetWordCount =
 groupshared uint gCLodVirtualShadowShouldClearPage;
 groupshared uint gCLodVirtualShadowShouldClearDynamicPage;
 groupshared uint gCLodVirtualShadowInitializeDynamicFromStatic;
+groupshared uint gCLodVirtualShadowDynamicClipmapIndex;
+groupshared float gCLodVirtualShadowCachedViewTranslationZ;
+groupshared float gCLodVirtualShadowCurrentViewTranslationZ;
 groupshared uint gCLodVirtualShadowShouldComposePage;
 groupshared uint gCLodVirtualShadowMarkTileHasGeometry;
 groupshared uint gCLodVirtualShadowMarkTileMinDepthBits;
@@ -1168,6 +1171,9 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
         gCLodVirtualShadowShouldClearPage = (dirtyWord & dirtyBitMask) != 0u ? 1u : 0u;
         gCLodVirtualShadowShouldClearDynamicPage = 0u;
         gCLodVirtualShadowInitializeDynamicFromStatic = 0u;
+        gCLodVirtualShadowDynamicClipmapIndex = 0u;
+        gCLodVirtualShadowCachedViewTranslationZ = 0.0f;
+        gCLodVirtualShadowCurrentViewTranslationZ = 0.0f;
         const uint4 dynamicMeta = pageMetadata[physicalPageIndex];
         if ((dynamicMeta.z & kCLodVirtualShadowPhysicalPageResidentFlag) != 0u &&
             dynamicMeta.w < kCLodVirtualShadowClipmapCount &&
@@ -1180,10 +1186,7 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
             const uint ownerEntry = pageTable[uint3(ownerCoords, dynamicMeta.w)];
             gCLodVirtualShadowShouldClearDynamicPage =
                 CLodVirtualShadowPageEntryIsDynamicActive(ownerEntry) &&
-                (ownerEntry & kCLodVirtualShadowPhysicalPageIndexMask) == physicalPageIndex &&
-                (CLOD_VIRTUAL_SHADOW_CLEAR_DYNAMIC_CONTENT_FILTER_ENABLED == 0u ||
-                    gCLodVirtualShadowShouldClearPage != 0u ||
-                    (ownerEntry & kCLodVirtualShadowDynamicContentMask) != 0u)
+                (ownerEntry & kCLodVirtualShadowPhysicalPageIndexMask) == physicalPageIndex
                     ? 1u
                     : 0u;
             if (gCLodVirtualShadowShouldClearDynamicPage != 0u)
@@ -1205,6 +1208,23 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
                         : 0u;
                 if (gCLodVirtualShadowInitializeDynamicFromStatic != 0u)
                 {
+                    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+                        ResourceDescriptorHeap[
+                            CLOD_VIRTUAL_SHADOW_CLEAR_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+                    StructuredBuffer<Camera> shadowCameras =
+                        ResourceDescriptorHeap[
+                            ResourceDescriptorIndex(Builtin::CameraBuffer)];
+                    RWStructuredBuffer<float4> pageViewInfo =
+                        ResourceDescriptorHeap[
+                            CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_VIEW_INFO_DESCRIPTOR_INDEX];
+                    const CLodVirtualShadowClipmapInfo dynamicClipmapInfo =
+                        clipmapInfos[dynamicMeta.w];
+                    gCLodVirtualShadowDynamicClipmapIndex = dynamicMeta.w;
+                    gCLodVirtualShadowCachedViewTranslationZ =
+                        pageViewInfo[physicalPageIndex].z;
+                    gCLodVirtualShadowCurrentViewTranslationZ =
+                        shadowCameras[
+                            dynamicClipmapInfo.shadowCameraBufferIndex].view[3].z;
                     InterlockedAdd(statsBuffer[0].composedPageCount, 1u);
                 }
             }
@@ -1292,10 +1312,20 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
             }
             if (gCLodVirtualShadowShouldClearDynamicPage != 0u)
             {
-                dynamicPages[atlasPixel] =
-                    gCLodVirtualShadowInitializeDynamicFromStatic != 0u
-                        ? staticPages[atlasPixel]
-                        : kCLodVirtualShadowClearedDepth;
+                uint dynamicDepthBits = kCLodVirtualShadowClearedDepth;
+                if (gCLodVirtualShadowInitializeDynamicFromStatic != 0u)
+                {
+                    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+                        ResourceDescriptorHeap[
+                            CLOD_VIRTUAL_SHADOW_CLEAR_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+                    dynamicDepthBits =
+                        CLodVirtualShadowRebaseCachedDepthToCurrentPageSpace(
+                            staticPages[atlasPixel],
+                            clipmapInfos[gCLodVirtualShadowDynamicClipmapIndex],
+                            gCLodVirtualShadowCachedViewTranslationZ,
+                            gCLodVirtualShadowCurrentViewTranslationZ);
+                }
+                dynamicPages[atlasPixel] = dynamicDepthBits;
             }
         }
     }

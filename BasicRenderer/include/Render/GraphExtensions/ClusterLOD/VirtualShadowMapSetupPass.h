@@ -7,6 +7,7 @@
 
 class Buffer;
 class PixelBuffer;
+class VirtualShadowCasterRegistry;
 
 class VirtualShadowMapSetupPass final : public ComputePass {
 public:
@@ -22,6 +23,7 @@ public:
         std::shared_ptr<Buffer> statsBuffer,
         std::shared_ptr<Buffer> runtimeStateBuffer,
         std::shared_ptr<Buffer> fallbackCandidateCountBuffer,
+        std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters,
         bool forceResetResources);
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override;
@@ -43,6 +45,7 @@ private:
     std::shared_ptr<Buffer> m_statsBuffer;
     std::shared_ptr<Buffer> m_runtimeStateBuffer;
     std::shared_ptr<Buffer> m_fallbackCandidateCountBuffer;
+    std::shared_ptr<VirtualShadowCasterRegistry> m_virtualShadowCasters;
     bool m_forceResetResources = false;
     bool m_resetResources = false;
     bool m_resetReasonForced = false;

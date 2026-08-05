@@ -99,6 +99,10 @@ class IVirtualShadowCasterProvider {
 public:
     virtual ~IVirtualShadowCasterProvider() = default;
     virtual std::string_view GetVirtualShadowCasterProviderId() const noexcept = 0;
+    // Providers with continuously deforming geometry can extend the dynamic
+    // VSM region beyond the renderer's skeletal-animation radius. Returning
+    // zero leaves the global policy unchanged.
+    virtual float GetRequestedDynamicShadowRadius() const { return 0.0f; }
     virtual void OnVirtualShadowCasterRegistered(
         const std::shared_ptr<VirtualShadowInvalidationQueue>& queue) { (void)queue; }
     virtual void GatherVirtualShadowPreparationPasses(
@@ -115,6 +119,7 @@ public:
     void Register(IVirtualShadowCasterProvider& provider);
     bool Empty() const noexcept;
     size_t Size() const noexcept;
+    float GetRequestedDynamicShadowRadius() const;
     std::shared_ptr<VirtualShadowInvalidationQueue> GetInvalidationQueue() const;
     void GatherPreparationPasses(
         const VirtualShadowCasterBuildContext& context,

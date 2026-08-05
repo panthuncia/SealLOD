@@ -1864,6 +1864,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("cameraSpeed", 10);
     settingsManager.registerSetting<bool>("rememberCameraPose", false);
 	settingsManager.registerSetting<float>(ProceduralWindDisplacementScaleSettingName, 0.0f);
+	settingsManager.registerSetting<float>(ProceduralWindGrassDisplacementScaleSettingName, 1.0f);
+	settingsManager.registerSetting<float>(ProceduralWindGrassOscillationScaleSettingName, 1.0f);
+	settingsManager.registerSetting<float>(ProceduralWindGrassFlutterFrequencySettingName, 1.0f);
 	settingsManager.registerSetting<std::vector<float>>(ProceduralWindSkeletonLodQualityCurveSettingName,
 		{ 0.50f, 1.00f, 0.25f, 0.70f, 0.10f, 0.48f, 0.04f, 0.28f, 0.015f, 0.10f, 0.005f, 0.00f });
 	settingsManager.registerSetting<float>(ProceduralWindSkeletonLodStaticCutoffSettingName, 0.0f);

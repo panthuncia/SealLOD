@@ -791,7 +791,7 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
 
         if ((pageEntry & kCLodVirtualShadowAllocatedMask) == 0u)
             continue;
-        if ((pageEntry & kCLodVirtualShadowContentValidMask) == 0u)
+        if (!CLodVirtualShadowPageEntryHasSampleableContent(pageEntry))
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
@@ -842,14 +842,15 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusionProject
                     kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
         }
-        // Depth comparison uses the cached Z origin. Cached X/Y is consumed
-        // below when the current virtual coordinate is translated into the
-        // basis in which this persistent physical page was rasterized.
+        // Cached X/Y is consumed below to locate the persistent page, but the
+        // transient composite depth was rebased to the current view when this
+        // page was initialized.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
-        const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
+        const float4 samplePosCurrentLightView =
+            mul(float4(samplePosWorldSpace, 1.0f), lightCamera.view);
         const float linearLightDepth =
-            -samplePosCachedPageLightView.z;
+            -samplePosCurrentLightView.z;
         if (linearLightDepth <= 0.0f)
             continue;
 
@@ -1082,7 +1083,7 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
 
         if ((pageEntry & kCLodVirtualShadowAllocatedMask) == 0u)
             continue;
-        if ((pageEntry & kCLodVirtualShadowContentValidMask) == 0u)
+        if (!CLodVirtualShadowPageEntryHasSampleableContent(pageEntry))
         {
             if (attempt == 0u)
                 debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
@@ -1133,14 +1134,15 @@ CLodVirtualShadowLookupResult CLodVirtualShadowLookupDirectionalOcclusion(
                     kCLodVirtualShadowDebugFlagCachedPageTagMismatch;
             continue;
         }
-        // Depth comparison uses the cached Z origin. Cached X/Y is consumed
-        // below when the current virtual coordinate is translated into the
-        // basis in which this persistent physical page was rasterized.
+        // Cached X/Y is consumed below to locate the persistent page, but the
+        // transient composite depth was rebased to the current view when this
+        // page was initialized.
         cachedPageView[3][2] = cachedPageViewRow.z;
         cachedPageView[3][3] = 1.0f;
-        const float4 samplePosCachedPageLightView = mul(float4(samplePosWorldSpace, 1.0f), cachedPageView);
+        const float4 samplePosCurrentLightView =
+            mul(float4(samplePosWorldSpace, 1.0f), lightCamera.view);
         const float linearLightDepth =
-            -samplePosCachedPageLightView.z +
+            -samplePosCurrentLightView.z +
             CLodVirtualShadowReceiverPlaneDepthBias(normal, lightCamera, ditherWorld);
         if (linearLightDepth <= 0.0f)
             continue;

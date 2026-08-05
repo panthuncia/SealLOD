@@ -1,4 +1,5 @@
 #include "ProceduralWind/ProceduralWindExtension.h"
+#include "ProceduralWind/DynamicWindGPU.h"
 
 #include "Animation/Skeleton.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -216,6 +217,7 @@ struct WindSharedResources {
 		, readbackService(readbackServiceIn)
         , fieldSlices{ DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice0"),
                        DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice1") }
+		, frameState(DynamicStructuredBuffer<DynamicWindFrameGPU>::CreateShared(1u, "ProceduralWind.FrameState"))
         , boneEntries(DynamicStructuredBuffer<WindBoneGPU>::CreateShared(1u, "ProceduralWind.BoneEntries"))
 		, boneRemaps(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.BoneRemaps"))
 		, baseTypeLookup(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.BaseTypeBySkeletonSlot"))
@@ -237,6 +239,7 @@ struct WindSharedResources {
 		};
 		tagResource(fieldSlices[0]);
 		tagResource(fieldSlices[1]);
+		tagResource(frameState);
 		tagResource(boneEntries);
 		tagResource(boneRemaps);
 		tagResource(baseTypeLookup);
@@ -341,6 +344,38 @@ struct WindSharedResources {
         TracyPlot("ProceduralWind.ResidentDirectionUpper", static_cast<std::int64_t>(pair.bracket.upper));
     }
 
+	void AdvanceAndPublishFrame(float deltaTime)
+	{
+		previousElapsedSeconds = elapsedSeconds;
+		elapsedSeconds += (std::max)(0.0f, deltaTime);
+		state = runtime->SnapshotWindState();
+		displacementScale = std::clamp(
+			SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName)(),
+			0.0f,
+			100.0f);
+		const auto& resident = residentPair;
+		DynamicWindFrameGPU frame{};
+		frame.fieldSlice0 = fieldSlices[0]->GetSRVInfo(0).slot.index;
+		frame.fieldSlice1 = fieldSlices[1]->GetSRVInfo(0).slot.index;
+		frame.fieldDimensions =
+			(resident.metadata.width & 0xffffu) |
+			((resident.metadata.height & 0xffffu) << 16u);
+		frame.fieldValid = fieldReady && resident.valid ? 1u : 0u;
+		frame.fieldCellSize = resident.metadata.cellSize;
+		frame.fieldOriginX = resident.metadata.origin.x;
+		frame.fieldOriginY = resident.metadata.origin.y;
+		frame.fieldInterpolation = resident.bracket.interpolation;
+		frame.currentTime = elapsedSeconds;
+		frame.previousTime = previousElapsedSeconds;
+		frame.deltaTime = (std::max)(0.0f, deltaTime);
+		frame.strength = state.strength;
+		frame.windX = state.directionToWS.x;
+		frame.windY = state.directionToWS.y;
+		frame.gustStrength = state.gustStrength;
+		frame.treeDisplacementScale = displacementScale;
+		frameState->ReplaceData({ frame });
+	}
+
     void UpdateTypes(const UpdateExecutionContext& context)
     {
         const auto* update = context.hostData ? context.hostData->Get<UpdateContext>() : nullptr;
@@ -377,12 +412,7 @@ struct WindSharedResources {
 			update->skeletonManager->EnsureTransientWindInstanceSlots(transformCount);
 		}
 		if (!structureChanged) {
-			elapsedSeconds += context.deltaTime;
-			state = runtime->SnapshotWindState();
-			displacementScale = std::clamp(
-				SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName)(),
-				0.0f,
-				100.0f);
+			AdvanceAndPublishFrame(context.deltaTime);
 			RequestTelemetryReadback();
 			TracyPlot("ProceduralWind.SimulatedBones", static_cast<std::int64_t>(activeBoneCount));
 			return;
@@ -670,12 +700,7 @@ struct WindSharedResources {
 			lastLoggedLayoutSummary = layoutSummary.str();
 			EmitWindTelemetry(fmt::format("ProceduralWind skeleton LOD layouts:{}", lastLoggedLayoutSummary));
 		}
-        elapsedSeconds += context.deltaTime;
-        state = runtime->SnapshotWindState();
-		displacementScale = std::clamp(
-			SettingsManager::GetInstance().getSettingGetter<float>(ProceduralWindDisplacementScaleSettingName)(),
-			0.0f,
-			100.0f);
+		AdvanceAndPublishFrame(context.deltaTime);
 		RequestTelemetryReadback();
         TracyPlot("ProceduralWind.SimulatedBones", static_cast<std::int64_t>(activeBoneCount));
     }
@@ -683,6 +708,7 @@ struct WindSharedResources {
     std::shared_ptr<ProceduralWindRuntime> runtime;
 	rg::runtime::IReadbackService* readbackService = nullptr;
     std::array<std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>, 2> fieldSlices;
+	std::shared_ptr<DynamicStructuredBuffer<DynamicWindFrameGPU>> frameState;
     std::shared_ptr<DynamicStructuredBuffer<WindBoneGPU>> boneEntries;
 	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> boneRemaps;
 	std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>> baseTypeLookup;
@@ -720,6 +746,7 @@ struct WindSharedResources {
 	std::string lastLoggedLayoutSummary;
     float nextTelemetrySeconds = 2.0f;
     float elapsedSeconds = 0.0f;
+	float previousElapsedSeconds = 0.0f;
     WindState state{};
     float displacementScale = 1.0f;
     ResidentWindPair residentPair{};
@@ -1183,6 +1210,9 @@ void ProceduralWindExtension::GatherStructuralPasses(RenderGraph& rg, std::vecto
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonCounter", resources->visibleSkeletonCounter);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonMembership", resources->visibleSkeletonMembership);
+	rg.RegisterResource(DynamicWindFieldSlice0ResourceName, resources->fieldSlices[0]);
+	rg.RegisterResource(DynamicWindFieldSlice1ResourceName, resources->fieldSlices[1]);
+	rg.RegisterResource(DynamicWindFrameStateResourceName, resources->frameState);
     auto earlyInsertion = RenderGraph::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::UploadFieldPair", std::make_shared<WindResidencyPass>(resources)).At(earlyInsertion));
     out.push_back(RenderGraph::ExternalPassDesc::Compute("ProceduralWind::ResetTransient", std::make_shared<WindResetPass>(resources)).At(earlyInsertion));

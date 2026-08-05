@@ -35,34 +35,39 @@ float CLodVirtualShadowDecodeDepth(
             clipmapInfo.depthRange;
 }
 
-// Persistent static pages retain the light-view Z origin from the frame in
-// which they were rendered. Dynamic casters are rasterized with the current
-// shadow camera, so their linear depth must be translated into that cached
-// page space before it can be compared with the static depth.
-//
-// For the directional shadow view orientation:
-//   depth = -(dot(worldPosition, viewZ.xyz) + viewZ.w)
-// therefore:
-//   cachedDepth = currentDepth + currentViewZ.w - cachedViewZ.w
+// The transient composite atlas is always expressed in the current shadow
+// camera's linear-depth space. Persistent static depth is rebased into that
+// space when it is copied into the transient atlas, so current-frame dynamic
+// casters require no additional adjustment here.
 float CLodVirtualShadowDepthToCachedPageSpace(
     float currentLinearDepth,
     uint physicalPageIndex,
     uint shadowCameraBufferIndex)
 {
-    StructuredBuffer<Camera> shadowCameras =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(
-            Builtin::CameraBuffer)];
-    StructuredBuffer<float4> directionalPageViewInfo =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(
-            Builtin::Shadows::CLodDirectionalPageViewInfo)];
+    (void)physicalPageIndex;
+    (void)shadowCameraBufferIndex;
+    return currentLinearDepth;
+}
 
-    const float currentViewTranslationZ =
-        shadowCameras[shadowCameraBufferIndex].view[3].z;
-    const float cachedViewTranslationZ =
-        directionalPageViewInfo[physicalPageIndex].z;
-    return currentLinearDepth +
-        currentViewTranslationZ -
-        cachedViewTranslationZ;
+uint CLodVirtualShadowRebaseCachedDepthToCurrentPageSpace(
+    uint cachedDepthBits,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    float cachedViewTranslationZ,
+    float currentViewTranslationZ)
+{
+    if (cachedDepthBits >= kCLodVirtualShadowClearedDepth)
+    {
+        return cachedDepthBits;
+    }
+
+    // depth = -(dot(worldPosition, viewZ.xyz) + viewZ.w), hence the inverse
+    // of the current-to-cached conversion is:
+    //   currentDepth = cachedDepth + cachedViewZ.w - currentViewZ.w
+    const float cachedLinearDepth =
+        CLodVirtualShadowDecodeDepth(cachedDepthBits, clipmapInfo);
+    const float currentLinearDepth = cachedLinearDepth +
+        cachedViewTranslationZ - currentViewTranslationZ;
+    return CLodVirtualShadowEncodeDepth(currentLinearDepth, clipmapInfo);
 }
 
 #endif

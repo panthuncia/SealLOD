@@ -527,6 +527,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowStatsBuffer,
             extension.m_shadowRuntimeStateBuffer,
             extension.m_shadowPredictiveInvalidationCandidateCountBuffer,
+            extension.m_options.virtualShadowCasters,
             extension.m_shadowVirtualResourcesNeedReset));
     shadowSetupPassDesc.At(RenderGraph::ExternalInsertPoint::After("CLod::StreamingBeginFramePass"));
     outPasses.push_back(std::move(shadowSetupPassDesc));

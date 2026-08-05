@@ -7,6 +7,9 @@
 
 inline constexpr const char* WindowResolutionPresetSettingName = "windowResolutionPreset";
 inline constexpr const char* ProceduralWindDisplacementScaleSettingName = "proceduralWindDisplacementScale";
+inline constexpr const char* ProceduralWindGrassDisplacementScaleSettingName = "proceduralWindGrassDisplacementScale";
+inline constexpr const char* ProceduralWindGrassOscillationScaleSettingName = "proceduralWindGrassOscillationScale";
+inline constexpr const char* ProceduralWindGrassFlutterFrequencySettingName = "proceduralWindGrassFlutterFrequency";
 inline constexpr const char* ProceduralWindSkeletonLodQualityCurveSettingName = "proceduralWindSkeletonLodQualityCurve";
 inline constexpr const char* ProceduralWindSkeletonLodStaticCutoffSettingName = "proceduralWindSkeletonLodStaticCutoff";
 inline constexpr const char* ProceduralWindInnerRadiusSettingName = "proceduralWindInnerRadius";
