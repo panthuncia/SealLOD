@@ -562,13 +562,13 @@ VisBufferPSInput BuildVisBufferVertexAttributesForView(
     float3x3 normalMatrix = (float3x3)normalMatrixBuffer[objectBuffer.normalMatrixBufferIndex].value;
     result.positionWorldSpace = worldPosition.xyz;
     result.normalWorldSpace = normalize(mul(vertex.normal, normalMatrix));
+#if !defined(CLOD_FORWARD_VERTEX_COLOR) || CLOD_FORWARD_VERTEX_COLOR
     result.color = vertex.color;
+#endif
     result.materialDataIndex = materialDataIndex;
-    result.visibleClusterIndex = clusterIndex;
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = viewID;
 #endif
-    result.shadowClipmapIndex = shadowClipmapIndex;
 #endif
 #if defined(PSO_ALPHA_TEST)
     result.texcoord = vertex.texcoord;
@@ -808,14 +808,22 @@ VisBufferPSInput GetVisBufferVertexAttributesForViewCLod(
         setup.meshBuffer.materialDataIndex,
         rasterInfo);
 
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     result.uvSet01.xy = vertex.texcoord;
     result.uvSet01.zw = DecodeCompressedUV(meshletLocalVertex, 1u, setup);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
     result.uvSet23.xy = DecodeCompressedUV(meshletLocalVertex, 2u, setup);
     result.uvSet23.zw = DecodeCompressedUV(meshletLocalVertex, 3u, setup);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
     result.uvSet45.xy = DecodeCompressedUV(meshletLocalVertex, 4u, setup);
     result.uvSet45.zw = DecodeCompressedUV(meshletLocalVertex, 5u, setup);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
     result.uvSet67.xy = DecodeCompressedUV(meshletLocalVertex, 6u, setup);
     result.uvSet67.zw = DecodeCompressedUV(meshletLocalVertex, 7u, setup);
+#endif
 
     return result;
 #else

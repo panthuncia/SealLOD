@@ -49,9 +49,6 @@
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "ThirdParty/stb/stb_image.h"
-
 // Activate dedicated GPU on NVIDIA laptops with both integrated and dedicated GPUs
 extern "C" {
     _declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
@@ -1026,6 +1023,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
     spdlog::info("Renderer initialized.");
+    SettingsManager::GetInstance().getSettingSetter<CLodTransparencyMode>(
+        CLodTransparencyModeSettingName)(CLodTransparencyMode::AVBOIT);
+    spdlog::info("CLOD transparency mode: AVBOIT");
     SettingsManager::GetInstance().getSettingSetter<bool>("rememberCameraPose")(
         cameraState.rememberCameraPose);
     if (vsmPageStateTest) {
@@ -1065,8 +1065,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         auto baseScene = std::make_shared<Scene>();
 
-        auto dragonScene = LoadModel("models/dragon.glb");
-        dragonScene->GetRoot().set<Components::Scale>({ 100, 100, 100 });
+        auto dragonScene = LoadModel("models/transparent_dragon.glb");
+        dragonScene->GetRoot().set<Components::Scale>({ 10, 10, 10 });
         dragonScene->GetRoot().set<Components::Position>({ -3, 5, 0 });
 
     //auto carScene = LoadModel("models/porche.glb");
@@ -1093,7 +1093,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     //auto robot = LoadModel("models/robot.usdz");
 
-	auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
+	//auto zorah = LoadModel("models/zorahv2/zorah_main_public.v2.gltf");
 
 	//auto zorah = LoadModel("models/zorah_materials/zorah.usdc");
 
@@ -1218,7 +1218,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	//renderer.GetCurrentScene()->AppendScene(island->Clone());
 
-	renderer.GetCurrentScene()->AppendScene(zorah->Clone());
+	//renderer.GetCurrentScene()->AppendScene(zorah->Clone());
 
     //mountainScene = LoadModel("models/terrain.glb");
  //   mountainScene->GetRoot().set<Components::Scale>({ 50.0, 50.0, 50.0 });
@@ -1227,7 +1227,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	renderer.GetCurrentScene()->AppendScene(dragonScene->Clone());
     
-	renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
+	//renderer.GetCurrentScene()->AppendScene(tigerScene->Clone());
 
 	//renderer.GetCurrentScene()->AppendScene(robot->Clone());
 
@@ -1245,8 +1245,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         renderer.SetEnvironment("sky");
 
-        XMFLOAT3 pos = XMFLOAT3(10.f, 5.f, 0.f);
-        XMFLOAT3 lookAt = XMFLOAT3(11.0f, 5.0f, 0.0f);
+        XMFLOAT3 pos = XMFLOAT3(-3.0f, 5.0f, 1.0f);
+        XMFLOAT3 lookAt = XMFLOAT3(-3.0f, 5.0f, -0.125f);
         XMFLOAT3 up = XMFLOAT3(0.0f, 1.0f, 0.0f);
         float fov = 80.0f * (XM_PI / 180.0f); // Converting degrees to radians
         float aspectRatio;

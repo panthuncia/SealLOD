@@ -146,23 +146,47 @@ bool LoadAVBOITShadingSample(VisBufferPSInput input, uint2 pixel, bool isBackfac
 
     const MaterialInfo materialInfo = materialDataBuffer[input.materialDataIndex];
     const uint materialFlags = materialInfo.materialFlags;
+#if CLOD_FORWARD_UV_SET_COUNT == 0
+    // The raster variant is derived from all bound legacy and OpenPBR texture
+    // inputs. Preserve non-texture material features while making texture-only
+    // branches compile-time impossible for the zero-UV variant.
+    const uint evaluationMaterialFlags = materialFlags & ~(
+        MATERIAL_TEXTURED |
+        MATERIAL_BASE_COLOR_TEXTURE |
+        MATERIAL_NORMAL_MAP |
+        MATERIAL_AO_TEXTURE |
+        MATERIAL_EMISSIVE_TEXTURE |
+        MATERIAL_METALLIC_TEXTURE |
+        MATERIAL_ROUGHNESS_TEXTURE |
+        MATERIAL_PARALLAX |
+        MATERIAL_OPACITY_TEXTURE |
+        MATERIAL_HEIGHT_FROM_BASE_ALPHA |
+        MATERIAL_OBJECT_SPACE_NORMAL_MAP);
+#else
+    const uint evaluationMaterialFlags = materialFlags;
+#endif
     const float3 worldPosition = input.positionWorldSpace;
     const float3 worldNormal = normalize(input.normalWorldSpace);
-    const float3 dpdx = ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX)) != 0u) ? ddx(worldPosition) : 0.0f.xxx;
-    const float3 dpdy = ((materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX)) != 0u) ? ddy(worldPosition) : 0.0f.xxx;
+    const float3 dpdx = ((evaluationMaterialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX)) != 0u) ? ddx(worldPosition) : 0.0f.xxx;
+    const float3 dpdy = ((evaluationMaterialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX)) != 0u) ? ddy(worldPosition) : 0.0f.xxx;
     MaterialUvCache uvCache;
     MaterialUvBindings uvBindings;
-    BuildForwardTransparentMaterialUvData(input, materialInfo, materialFlags, uvCache, uvBindings);
+    BuildForwardTransparentMaterialUvData(input, materialInfo, evaluationMaterialFlags, uvCache, uvBindings);
 
     MaterialInputs materialInputs;
+#if !defined(CLOD_FORWARD_VERTEX_COLOR) || CLOD_FORWARD_VERTEX_COLOR
+    const float3 vertexColor = input.color;
+#else
+    const float3 vertexColor = 1.0f.xxx;
+#endif
     SampleMaterialFromUvCacheRuntime(
         uvCache,
         uvBindings,
         worldNormal,
         worldPosition,
-        input.color,
+        vertexColor,
         materialInfo,
-        materialFlags,
+        evaluationMaterialFlags,
         dpdx,
         dpdy,
         materialInputs);

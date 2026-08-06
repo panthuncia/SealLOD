@@ -1851,6 +1851,25 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     MaterialInfo materialInfo = materialDataBuffer[md.materialDataIndex];
 #endif
+    MaterialEvalInfo reyesMaterialInfo = (MaterialEvalInfo)0;
+#if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
+    reyesMaterialInfo = materialInfo;
+#else
+    reyesMaterialInfo.materialFlags = materialInfo.materialFlags;
+    reyesMaterialInfo.heightMapIndex = materialInfo.heightMapIndex;
+    reyesMaterialInfo.heightSamplerIndex = materialInfo.heightSamplerIndex;
+    reyesMaterialInfo.heightMapScale = materialInfo.heightMapScale;
+    reyesMaterialInfo.geometricDisplacementMin = materialInfo.geometricDisplacementMin;
+    reyesMaterialInfo.geometricDisplacementMax = materialInfo.geometricDisplacementMax;
+    reyesMaterialInfo.geometricDisplacementEnabled = materialInfo.geometricDisplacementEnabled;
+    reyesMaterialInfo.terrainSetIndex = materialInfo.terrainSetIndex;
+    reyesMaterialInfo.heightChannel = materialInfo.heightChannel;
+    reyesMaterialInfo.heightUvSetIndex = materialInfo.heightUvSetIndex;
+    reyesMaterialInfo.heightStreamingTextureID = materialInfo.heightStreamingTextureID;
+    reyesMaterialInfo.reyesUvDensity = materialInfo.reyesUvDensity;
+    reyesMaterialInfo.objectSurfaceTexelDensity = materialInfo.objectSurfaceTexelDensity;
+    reyesMaterialInfo.objectSurfaceSamplingMode = materialInfo.objectSurfaceSamplingMode;
+#endif
     uint materialFlags = materialInfo.materialFlags;
     const float reyesObjectNormalMapBlend = isReyesPatch
         ? saturate(asfloat(VISBUF_REYES_OBJECT_NORMAL_MAP_BLEND_AS_UINT))
@@ -1928,7 +1947,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
                 dUVdx,
                 dUVdy);
             ReyesApplyGeometricDisplacement3(
-                materialInfo,
+                reyesMaterialInfo,
                 patchPos0,
                 patchPos1,
                 patchPos2,

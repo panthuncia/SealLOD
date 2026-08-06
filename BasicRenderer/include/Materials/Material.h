@@ -23,6 +23,30 @@ inline bool HasMaterialTextureBinding(const TextureAndConstant& binding) {
     return binding.texture != nullptr || !binding.sourcePath.empty();
 }
 
+inline uint32_t PickForwardUvSetCount(const MaterialDescription& d) {
+    uint32_t count = 0u;
+    const auto includeBinding = [&count](const TextureAndConstant& binding) {
+        if (HasMaterialTextureBinding(binding)) {
+            count = (std::max)(count, binding.uvSetIndex + 1u);
+        }
+    };
+    includeBinding(d.baseColor);
+    includeBinding(d.normal);
+    includeBinding(d.aoMap);
+    includeBinding(d.heightMap);
+    includeBinding(d.metallic);
+    includeBinding(d.roughness);
+    includeBinding(d.emissive);
+    includeBinding(d.opacity);
+    includeBinding(d.openPBRTextures.coatColor);
+    includeBinding(d.openPBRTextures.coatWeight);
+    includeBinding(d.openPBRTextures.coatRoughness);
+    includeBinding(d.openPBRTextures.fuzzColor);
+    includeBinding(d.openPBRTextures.fuzzWeight);
+    includeBinding(d.openPBRTextures.fuzzRoughness);
+    return (std::min)(count, 8u);
+}
+
 inline TransparencyPick PickTransparency(const MaterialDescription& d) {
     TransparencyPick t{};
     const bool hasOpacityTex = HasMaterialTextureBinding(d.opacity);
@@ -63,6 +87,27 @@ inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& 
 
 inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO: The alpha-test/double-sided logic is wrong here
     TechniqueDescriptor tech{};
+    tech.rasterFlags = WithForwardUvSetCount(tech.rasterFlags, PickForwardUvSetCount(d));
+    tech.rasterFlags = WithForwardGlint(tech.rasterFlags, d.glintEnabled);
+    tech.rasterFlags = WithForwardCoat(tech.rasterFlags,
+        d.openPBR.coatWeight > 0.0f ||
+        HasMaterialTextureBinding(d.openPBRTextures.coatColor) ||
+        HasMaterialTextureBinding(d.openPBRTextures.coatWeight) ||
+        HasMaterialTextureBinding(d.openPBRTextures.coatRoughness));
+    tech.rasterFlags = WithForwardFuzz(tech.rasterFlags,
+        d.openPBR.fuzzWeight > 0.0f ||
+        HasMaterialTextureBinding(d.openPBRTextures.fuzzColor) ||
+        HasMaterialTextureBinding(d.openPBRTextures.fuzzWeight) ||
+        HasMaterialTextureBinding(d.openPBRTextures.fuzzRoughness));
+    const OpenPBRMaterialParameters canonicalOpenPBR = BuildCanonicalOpenPBRMaterial(d);
+    tech.rasterFlags = WithForwardMetal(tech.rasterFlags,
+        canonicalOpenPBR.baseMetalness > 0.0f || HasMaterialTextureBinding(d.metallic));
+    tech.rasterFlags = WithForwardDiffuseRoughness(
+        tech.rasterFlags,
+        canonicalOpenPBR.baseDiffuseRoughness > 0.0f);
+    tech.rasterFlags = WithForwardEmission(
+        tech.rasterFlags,
+        canonicalOpenPBR.emissionLuminance > 0.0f || HasMaterialTextureBinding(d.emissive));
     const auto transparency = PickTransparency(d);
 	tech.passes.insert(Engine::Primary::ShadowMapsPass); // All materials cast shadows
     if (transparency.isTransparent && !transparency.masked) { // OIT transparency

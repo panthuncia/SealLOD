@@ -254,8 +254,7 @@ PipelineRecipe MakeStandardPipeline(
 
 PipelineRecipe MakeBasicRendererDemoPipeline()
 {
-    // Keep alpha opt-in while exercising the independently owned shadow variant.
-    return MakeStandardPipeline(false, ReyesMode::Disabled, false, true, std::nullopt);
+    return MakeStandardPipeline(false, ReyesMode::Disabled, true, true, std::nullopt);
 }
 
 PipelineRecipe MakeSarpPipeline()

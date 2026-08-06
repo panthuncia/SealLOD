@@ -1,0 +1,66 @@
+{
+  "name": "BasicRenderer AVBOIT full-resolution shade metrics",
+  "readiness": {
+    "stable_frames": 30,
+    "settling_frames": 120,
+    "timeout_ms": 300000
+  },
+  "statistics": {
+    "minimum_samples": 30,
+    "maximum_samples": 500,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.01
+  },
+  "output": {
+    "database": "out/avboit_shade_nvperf.sqlite",
+    "last_run_summary": "out/avboit_shade_nvperf.md"
+  },
+  "metrics": [
+    { "id": "gpu_time", "name": "gpu__time_duration", "output_name": "GPU duration", "unit": "ns", "type": "counter", "rollup": "sum", "submetric": "none", "relative_half_width": 0.01 },
+    { "id": "instructions", "name": "smsp__inst_executed", "output_name": "Instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_tex", "name": "smsp__inst_executed_pipe_tex", "output_name": "TEX instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "pipe_fma", "name": "smsp__inst_executed_pipe_fma", "output_name": "FMA-pipe instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_alu", "name": "smsp__inst_executed_pipe_alu", "output_name": "ALU-pipe instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_lsu", "name": "smsp__inst_executed_pipe_lsu", "output_name": "LSU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_adu", "name": "smsp__inst_executed_pipe_adu", "output_name": "ADU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_cbu", "name": "smsp__inst_executed_pipe_cbu", "output_name": "CBU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_uniform", "name": "smsp__inst_executed_pipe_uniform", "output_name": "Uniform-pipe instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "pipe_xu", "name": "smsp__inst_executed_pipe_xu", "output_name": "XU instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false },
+    { "id": "stall_long", "name": "smsp__warp_issue_stalled_long_scoreboard_per_warp_active", "output_name": "Stall long scoreboard", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio", "relative_half_width": 0.02 },
+    { "id": "stall_wait", "name": "smsp__warp_issue_stalled_wait_per_warp_active", "output_name": "Stall wait", "unit": "cycles/warp", "type": "ratio", "rollup": "avg", "submetric": "ratio", "relative_half_width": 0.015 },
+    { "id": "ps_warps", "name": "tpc__warps_launched_shader_ps", "output_name": "Pixel warps", "unit": "warps", "type": "counter", "rollup": "sum", "submetric": "none" },
+    { "id": "ps_registers", "name": "tpc__average_registers_per_thread_shader_ps", "output_name": "PS registers/thread", "unit": "registers", "type": "ratio", "rollup": "avg", "submetric": "ratio" }
+    ,{ "id": "vtg_warps", "name": "tpc__warps_launched_shader_vtg", "output_name": "VTG warps", "unit": "warps", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "vtg_registers", "name": "tpc__average_registers_per_thread_shader_vtg", "output_name": "VTG registers/thread", "unit": "registers", "type": "ratio", "rollup": "avg", "submetric": "ratio", "required": false }
+    ,{ "id": "vpc_input_prims", "name": "vpc__input_prims", "output_name": "VPC input primitives", "unit": "primitives", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "vpc_output_prims", "name": "vpc__output_prims", "output_name": "VPC output primitives", "unit": "primitives", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "vpc_output_attrs", "name": "vpc__output_attrs", "output_name": "VPC output attributes", "unit": "attributes", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "vpc_cycles", "name": "vpc__cycles_active", "output_name": "VPC active cycles", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "raster_cycles", "name": "raster__cycles_active", "output_name": "Raster active cycles", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "prop_cycles", "name": "prop__cycles_active", "output_name": "PROP active cycles", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "crop_cycles", "name": "crop__cycles_active", "output_name": "Color ROP active cycles", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "earlyz_input", "name": "prop__earlyz_input_samples", "output_name": "Early-Z input samples", "unit": "samples", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "earlyz_killed", "name": "prop__earlyz_killed_samples", "output_name": "Early-Z killed samples", "unit": "samples", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "earlyz_output", "name": "prop__earlyz_output_samples", "output_name": "Early-Z output samples", "unit": "samples", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "latez_input", "name": "prop__latez_input_samples", "output_name": "Late-Z input samples", "unit": "samples", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "ipa_instructions", "name": "smsp__thread_inst_executed_pipe_ipa_pred_on", "output_name": "Interpolator thread instructions", "unit": "instructions", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+    ,{ "id": "pixout_cycles", "name": "sm__mio_pq_read_cycles_active_pipe_lsu_op_pixout", "output_name": "Pixel-output MIO cycles", "unit": "cycles", "type": "counter", "rollup": "sum", "submetric": "none", "required": false }
+  ],
+  "passes": [
+    {
+      "id": "avboit_shade",
+      "name": "CLodAlpha::TransparentVBOITShadePass",
+      "queue": "Graphics",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time", "instructions", "pipe_tex", "pipe_fma", "pipe_alu",
+        "pipe_lsu", "pipe_adu", "pipe_cbu", "pipe_uniform", "pipe_xu", "stall_long",
+        "stall_wait", "ps_warps", "ps_registers", "vtg_warps",
+        "vtg_registers", "vpc_input_prims", "vpc_output_prims",
+        "vpc_output_attrs", "vpc_cycles", "raster_cycles", "prop_cycles",
+        "crop_cycles", "earlyz_input", "earlyz_killed", "earlyz_output",
+        "latez_input", "ipa_instructions", "pixout_cycles"
+      ]
+    }
+  ]
+}

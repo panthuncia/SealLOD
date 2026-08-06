@@ -23,22 +23,33 @@ struct VisBufferPSInput
 #endif
     float linearDepth : TEXCOORD0;
 #if defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
+#ifndef CLOD_FORWARD_UV_SET_COUNT
+#define CLOD_FORWARD_UV_SET_COUNT 8
+#endif
     float3 positionWorldSpace : TEXCOORD1;
     float3 normalWorldSpace : TEXCOORD2;
+#if !defined(CLOD_FORWARD_VERTEX_COLOR) || CLOD_FORWARD_VERTEX_COLOR
     float3 color : TEXCOORD3;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     float4 uvSet01 : TEXCOORD4;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
     float4 uvSet23 : TEXCOORD5;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
     float4 uvSet45 : TEXCOORD6;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
     float4 uvSet67 : TEXCOORD7;
+#endif
     nointerpolation uint materialDataIndex : TEXCOORD8;
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD9;
 #endif
-    nointerpolation uint visibleClusterIndex : TEXCOORD10;
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD11;
 #endif
-    nointerpolation uint shadowClipmapIndex : TEXCOORD12;
 #else
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD1;

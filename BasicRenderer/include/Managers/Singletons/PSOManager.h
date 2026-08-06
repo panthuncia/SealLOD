@@ -57,13 +57,14 @@ namespace std {
 
 struct RasterPSOKey {
 	MaterialRasterFlags materialRasterFlags;
+	UINT psoFlags;
 	bool wireframe;
 	bool singleView;
 
-	RasterPSOKey(MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView = false)
-        : materialRasterFlags(materialRasterFlags), wireframe(wireframe), singleView(singleView) {}
+	RasterPSOKey(MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView = false, UINT psoFlags = 0)
+        : materialRasterFlags(materialRasterFlags), psoFlags(psoFlags), wireframe(wireframe), singleView(singleView) {}
     bool operator==(const RasterPSOKey& other) const {
-        return materialRasterFlags == other.materialRasterFlags &&
+        return materialRasterFlags == other.materialRasterFlags && psoFlags == other.psoFlags &&
             wireframe == other.wireframe &&
             singleView == other.singleView;
 	}
@@ -77,6 +78,7 @@ namespace std {
             std::size_t seed = 0;
 
 			boost::hash_combine(seed, key.materialRasterFlags);
+			boost::hash_combine(seed, key.psoFlags);
 			boost::hash_combine(seed, key.wireframe);
 			boost::hash_combine(seed, key.singleView);
 
@@ -206,7 +208,7 @@ public:
     const PipelineState& GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState& GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState& GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const PipelineState& GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState& GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
     const PipelineState& GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     const PipelineState& GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
 
@@ -219,7 +221,7 @@ public:
     const PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState* TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const PipelineState* TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const PipelineState* TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const PipelineState* TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
     const PipelineState* TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     const PipelineState* TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
 
@@ -405,7 +407,7 @@ private:
     PipelineState CreateClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     PipelineState CreateClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     PipelineState CreateClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    PipelineState CreateClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    PipelineState CreateClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
     PipelineState CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
     PipelineState CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
     PipelineState CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);

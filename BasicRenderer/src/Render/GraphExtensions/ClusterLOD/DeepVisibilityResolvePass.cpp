@@ -65,6 +65,11 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
             Builtin::Light::DirectionalLightCascadeBuffer,
             Builtin::Light::ClusterBuffer,
             Builtin::Light::PagesBuffer,
+            Builtin::OpenPBR::FuzzLTC,
+            Builtin::OpenPBR::IdealMetalEnergyComplement,
+            Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
+            Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement,
             Builtin::CLod::Offsets,
             Builtin::CLod::GroupChunks,
             Builtin::CLod::Groups,
@@ -116,6 +121,7 @@ void DeepVisibilityResolvePass::DeclareResourceUsages(ComputePassBuilder* builde
 
 void DeepVisibilityResolvePass::Setup()
 {
+    RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::OpenPBR::OpaqueDielectricEnergyComplement);
     if (m_getShadowsEnabled && m_getShadowsEnabled()) {
         RegisterSRV(SRVViewType::Texture2DArrayFull, Builtin::Shadows::CLodPageTable);
     }

@@ -270,6 +270,14 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
     uint32_t maxViewWidth = 1;
     uint32_t maxViewHeight = 1;
     uint64_t totalViewPixels = 0;
+    const bool lowResolutionAVBOITRaster =
+        m_outputKind == CLodRasterOutputKind::AVBOITOccupancy ||
+        m_outputKind == CLodRasterOutputKind::AVBOIT;
+    const auto rasterDimension = [&](uint32_t dimension) {
+        return lowResolutionAVBOITRaster
+            ? (dimension + CLodAVBOITDefaultDownsampleFactor - 1u) / CLodAVBOITDefaultDownsampleFactor
+            : dimension;
+    };
 
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         maxViewWidth = virtualShadowConfig.virtualResolution;
@@ -309,8 +317,8 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
                 static_cast<uint64_t>(headPointers->GetHeight());
         }
         else {
-            maxViewWidth = std::max(maxViewWidth, viewInfo->gpu.visibilityBuffer->GetWidth());
-            maxViewHeight = std::max(maxViewHeight, viewInfo->gpu.visibilityBuffer->GetHeight());
+            maxViewWidth = std::max(maxViewWidth, rasterDimension(viewInfo->gpu.visibilityBuffer->GetWidth()));
+            maxViewHeight = std::max(maxViewHeight, rasterDimension(viewInfo->gpu.visibilityBuffer->GetHeight()));
         }
     });
 
@@ -363,8 +371,8 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         }
         else {
             info.opaqueVisibilitySRVDescriptorIndex = viewInfo->gpu.visibilityBuffer->GetSRVInfo(0).slot.index;
-            info.scissorMaxX = viewInfo->gpu.visibilityBuffer->GetWidth();
-            info.scissorMaxY = viewInfo->gpu.visibilityBuffer->GetHeight();
+            info.scissorMaxX = rasterDimension(viewInfo->gpu.visibilityBuffer->GetWidth());
+            info.scissorMaxY = rasterDimension(viewInfo->gpu.visibilityBuffer->GetHeight());
             visibilityBuffers.push_back(viewInfo->gpu.visibilityBuffer);
         }
 
@@ -557,7 +565,7 @@ PassReturn ClusterRasterizationPass::Execute(PassExecutionContext& executionCont
                 : (m_outputKind == CLodRasterOutputKind::AVBOIT)
                     ? psoManager.TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
                 : (m_outputKind == CLodRasterOutputKind::AVBOITShading)
-                    ? psoManager.TryGetClusterLODAVBOITShadePSO(flags, m_wireframe)
+                    ? psoManager.TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context.globalPSOFlags)
                 : psoManager.TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
         if (!pso) {
             continue;

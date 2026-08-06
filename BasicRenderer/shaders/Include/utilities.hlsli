@@ -2026,6 +2026,10 @@ void BuildForwardTransparentMaterialUvData(
     cache = (MaterialUvCache)0;
     InitializeMaterialUvBindings(bindings);
 
+#if CLOD_FORWARD_UV_SET_COUNT == 0
+    return;
+#else
+
     uint cacheIndexByUvSet[MATERIAL_MAX_UNIQUE_UV_SETS];
 
     [unroll]
@@ -2034,18 +2038,26 @@ void BuildForwardTransparentMaterialUvData(
         cacheIndexByUvSet[uvSetIndex] = MATERIAL_INVALID_UV_CACHE_INDEX;
     }
 
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     const float4 uvSet01 = input.uvSet01;
-    const float4 uvSet23 = input.uvSet23;
-    const float4 uvSet45 = input.uvSet45;
-    const float4 uvSet67 = input.uvSet67;
     const float4 uvSet01Dx = ddx(uvSet01);
     const float4 uvSet01Dy = ddy(uvSet01);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
+    const float4 uvSet23 = input.uvSet23;
     const float4 uvSet23Dx = ddx(uvSet23);
     const float4 uvSet23Dy = ddy(uvSet23);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
+    const float4 uvSet45 = input.uvSet45;
     const float4 uvSet45Dx = ddx(uvSet45);
     const float4 uvSet45Dy = ddy(uvSet45);
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
+    const float4 uvSet67 = input.uvSet67;
     const float4 uvSet67Dx = ddx(uvSet67);
     const float4 uvSet67Dy = ddy(uvSet67);
+#endif
 
     [unroll]
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
@@ -2057,7 +2069,7 @@ void BuildForwardTransparentMaterialUvData(
         }
 
         const uint uvSetIndex = MaterialSlotUvSetIndex(materialInfo, textureSlot);
-        if (uvSetIndex >= MATERIAL_MAX_UNIQUE_UV_SETS || cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
+        if (uvSetIndex >= CLOD_FORWARD_UV_SET_COUNT || cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             continue;
         }
@@ -2068,6 +2080,7 @@ void BuildForwardTransparentMaterialUvData(
 
         switch (uvSetIndex)
         {
+#if CLOD_FORWARD_UV_SET_COUNT > 0
         case 0u:
             sample.uv = uvSet01.xy;
             sample.dUVdx = uvSet01Dx.xy;
@@ -2078,6 +2091,8 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet01Dx.zw;
             sample.dUVdy = uvSet01Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
         case 2u:
             sample.uv = uvSet23.xy;
             sample.dUVdx = uvSet23Dx.xy;
@@ -2088,6 +2103,8 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet23Dx.zw;
             sample.dUVdy = uvSet23Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
         case 4u:
             sample.uv = uvSet45.xy;
             sample.dUVdx = uvSet45Dx.xy;
@@ -2098,15 +2115,20 @@ void BuildForwardTransparentMaterialUvData(
             sample.dUVdx = uvSet45Dx.zw;
             sample.dUVdy = uvSet45Dy.zw;
             break;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
         case 6u:
             sample.uv = uvSet67.xy;
             sample.dUVdx = uvSet67Dx.xy;
             sample.dUVdy = uvSet67Dy.xy;
             break;
-        default:
+        case 7u:
             sample.uv = uvSet67.zw;
             sample.dUVdx = uvSet67Dx.zw;
             sample.dUVdy = uvSet67Dy.zw;
+            break;
+#endif
+        default:
             break;
         }
 
@@ -2259,28 +2281,37 @@ void BuildForwardTransparentMaterialUvData(
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
+#endif
 }
 
 float2 GetForwardTransparentUvSet(in VisBufferPSInput input, uint uvSetIndex)
 {
     switch (uvSetIndex)
     {
+#if CLOD_FORWARD_UV_SET_COUNT > 0
     case 0u:
         return input.uvSet01.xy;
     case 1u:
         return input.uvSet01.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 2
     case 2u:
         return input.uvSet23.xy;
     case 3u:
         return input.uvSet23.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 4
     case 4u:
         return input.uvSet45.xy;
     case 5u:
         return input.uvSet45.zw;
+#endif
+#if CLOD_FORWARD_UV_SET_COUNT > 6
     case 6u:
         return input.uvSet67.xy;
     case 7u:
         return input.uvSet67.zw;
+#endif
     default:
         return float2(0.0f, 0.0f);
     }

@@ -24,6 +24,26 @@ namespace {
     // Bump this whenever the shader compiler argument set changes in a way that affects
     // the generated shader bytecode container, especially debug payload availability.
     constexpr uint64_t kShaderCompilerArgumentFingerprint = 5u;
+
+    // Live optimization jobs must observe source edits immediately. The ordinary
+    // runtime path still uses the artifact cache; only the worker servicing an
+    // explicit pso.recompile request bypasses cache reads.
+    thread_local bool g_bypassShaderArtifactCacheReads = false;
+
+    class ScopedShaderArtifactCacheReadBypass {
+    public:
+        ScopedShaderArtifactCacheReadBypass()
+            : m_previous(g_bypassShaderArtifactCacheReads) {
+            g_bypassShaderArtifactCacheReads = true;
+        }
+
+        ~ScopedShaderArtifactCacheReadBypass() {
+            g_bypassShaderArtifactCacheReads = m_previous;
+        }
+
+    private:
+        bool m_previous;
+    };
 }
 
 namespace {
@@ -777,17 +797,17 @@ const PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlag
     });
 }
 
-const PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
-    RasterPSOKey key(materialRasterFlags, wireframe);
+const PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
+    RasterPSOKey key(materialRasterFlags, wireframe, false, psoFlags);
     std::scoped_lock lock(m_cacheMutex);
     return GetOrCreatePipelineState(m_clusterLODAVBOITShadePSOCache, key, [&]() {
         return RegisterPipeline(
-            CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe),
+            CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe, psoFlags),
             MakeRasterPSOKeyId("CLod.AVBOITShade", key),
             "CLod.AVBOITShade",
             LivePipelineKind::Mesh,
-            [this, materialRasterFlags, wireframe] {
-                return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe);
+            [this, materialRasterFlags, wireframe, psoFlags] {
+                return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe, psoFlags);
             });
     });
 }
@@ -897,15 +917,15 @@ const PipelineState* PSOManager::TryGetClusterLODAVBOITRasterPSO(MaterialRasterF
         });
 }
 
-const PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
-    RasterPSOKey key(materialRasterFlags, wireframe);
+const PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
+    RasterPSOKey key(materialRasterFlags, wireframe, false, psoFlags);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODAVBOITShadePSOCache,
         &PSOManager::m_pendingClusterLODAVBOITShadePSOs,
         key,
         "PSOManager::CompileClusterLODAVBOITShadePSO",
-        [this, materialRasterFlags, wireframe]() {
-            return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe);
+        [this, materialRasterFlags, wireframe, psoFlags]() {
+            return CreateClusterLODAVBOITShadePSO(materialRasterFlags, wireframe, psoFlags);
         });
 }
 
@@ -1474,6 +1494,7 @@ PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
     separateReyesBatchMacro.Value = L"1";
     separateReyesBatchMacro.Name = L"CLOD_AVBOIT_REYES_SEPARATE_BATCH";
     defines.insert(defines.begin(), separateReyesBatchMacro);
+    defines.push_back(DxcDefine{ L"CLOD_AVBOIT_LOW_RES_RASTER", L"1" });
 
     Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
@@ -1529,6 +1550,7 @@ PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
     defines.insert(defines.begin(), separateReyesBatchMacro);
 
     defines.push_back(DxcDefine{ L"CLOD_AVBOIT_VBOIT_OCCUPANCY_ONLY", L"1" });
+    defines.push_back(DxcDefine{ L"CLOD_AVBOIT_LOW_RES_RASTER", L"1" });
 
     Microsoft::WRL::ComPtr<ID3DBlob> msBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
@@ -1571,8 +1593,10 @@ PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
 }
 
 PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
-    MaterialRasterFlags materialRasterFlags, bool wireframe) {
+    MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
+    auto lightingDefines = GetShaderDefines(psoFlags, MaterialCompileNone);
+    defines.insert(defines.end(), lightingDefines.begin(), lightingDefines.end());
     DxcDefine forwardTransparentMacro;
     forwardTransparentMacro.Value = L"1";
     forwardTransparentMacro.Name = L"CLOD_AVBOIT_FORWARD_TRANSPARENT";
@@ -2288,6 +2312,15 @@ PipelineState PSOManager::RegisterExternalPipeline(
 std::vector<DxcDefine> PSOManager::GetRasterShaderDefines(MaterialRasterFlags rasterFlags) {
     std::vector<DxcDefine> defines = {};
     defines.push_back({ L"CLOD_ENABLE_SOURCE_GROUP_VALIDATION", L"0" });
+    static constexpr const wchar_t* uvCountValues[] = { L"0", L"1", L"2", L"3", L"4", L"5", L"6", L"7", L"8" };
+    defines.push_back({ L"CLOD_FORWARD_UV_SET_COUNT", uvCountValues[GetForwardUvSetCount(rasterFlags)] });
+    defines.push_back({ L"CLOD_FORWARD_VERTEX_COLOR", HasForwardVertexColor(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_GLINT", HasForwardGlint(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_COAT", HasForwardCoat(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_FUZZ", HasForwardFuzz(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_METAL", HasForwardMetal(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_DIFFUSE_ROUGHNESS", HasForwardDiffuseRoughness(rasterFlags) ? L"1" : L"0" });
+    defines.push_back({ L"CLOD_FORWARD_EMISSION", HasForwardEmission(rasterFlags) ? L"1" : L"0" });
     if (rasterFlags & MaterialRasterFlags::MaterialRasterFlagsAlphaTest) {
         DxcDefine macro;
         macro.Value = L"1";
@@ -2655,9 +2688,16 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
+    if (g_bypassShaderArtifactCacheReads) {
+        spdlog::info(
+            "Shader live reload: bypassing library artifact cache identity=0x{:X}",
+            cacheKey.identityHash);
+    }
     for (;;) {
-        if (std::optional<ShaderLibraryBundle> cachedBundle = TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-            return *cachedBundle;
+        if (!g_bypassShaderArtifactCacheReads) {
+            if (std::optional<ShaderLibraryBundle> cachedBundle = TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
+                return *cachedBundle;
+            }
         }
         if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
             break;
@@ -2755,8 +2795,14 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
+    if (g_bypassShaderArtifactCacheReads) {
+        spdlog::info(
+            "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
+            cacheKey.identityHash);
+    }
     for (;;) {
-        if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
+        if (!g_bypassShaderArtifactCacheReads) {
+            if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
             if (logMaterialEvalCache) {
                 spdlog::info(
                     "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
@@ -2765,6 +2811,7 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
                     ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
             }
             return *cachedBundle;
+            }
         }
         if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
             break;
@@ -3539,6 +3586,7 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, RecompileOp
                 }
             }
             try {
+                ScopedShaderArtifactCacheReadBypass bypassCacheReads;
                 PipelineState candidate = supportsDefineOverrides
                     ? BuildComputePipeline(recipe, &options)
                     : rebuild();

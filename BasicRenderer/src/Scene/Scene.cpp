@@ -210,6 +210,9 @@ namespace {
 
 	MaterialRasterFlags ComposeRuntimeRasterFlags(Mesh& mesh, const Material& material) {
 		MaterialRasterFlags rasterFlags = material.Technique().rasterFlags;
+		rasterFlags = WithForwardVertexColor(
+			rasterFlags,
+			(mesh.GetPerMeshCBData().vertexFlags & VERTEX_COLORS) != 0u);
 		if ((mesh.GetPerMeshCBData().vertexFlags & VERTEX_SKINNED) != 0u) {
 			rasterFlags |= MaterialRasterFlagsSkinned;
 		}
