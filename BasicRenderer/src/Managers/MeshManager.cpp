@@ -194,10 +194,10 @@ MeshManager::MeshManager() {
 		PagePool::Config ppConfig;
 		ppConfig.slabSize     = 128 * 1024 * 1024;  // 128 MB
 		ppConfig.pinnedSlabSize = 4 * 1024 * 1024;  // Small per-class pinned growth
-		ppConfig.numStreamingSlabs = 8;             // Shared 1 GiB cap across classes
+		ppConfig.numStreamingSlabs = 16;             // Shared 1 GiB cap across classes
 		// Full-Skyrim telemetry: 1/1/1/2/3 slabs for 16/32/64/128/256 KiB.
 		// This consumes the same eight 128 MiB slabs as the old fixed pool.
-		ppConfig.initialStreamingSlabs = { 1u, 1u, 1u, 2u, 3u };
+		ppConfig.initialStreamingSlabs = { 2u, 2u, 2u, 4u, 6u };
 		ppConfig.debugName    = "CLodPagePool";
 		m_clodPagePool = std::make_unique<PagePool>(ppConfig);
 	}

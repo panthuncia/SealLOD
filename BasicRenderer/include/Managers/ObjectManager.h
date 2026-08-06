@@ -320,6 +320,16 @@ public:
 		std::size_t drawInfoCount = 0;
 	};
 
+	struct StaticObjectResidencyHandle {
+		StaticObjectRemovalPayload destructionPayload;
+		bool visible = true;
+	};
+
+	using StaticVisibilityUpdateResult = std::unordered_map<
+		DrawWorkloadKey,
+		std::uint32_t,
+		DrawWorkloadKey::Hasher>;
+
 	struct MaterializedStaticImportTransaction {
 		struct PendingSkinnedAssemblyPlacement {
 			std::size_t groupIndex = 0;
@@ -427,6 +437,9 @@ public:
 		std::span<const StaticObjectRemovalPayload> payloads,
 		const RemoveObjectsBulkOptions& options);
 	void RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalPayload> payloads);
+	StaticVisibilityUpdateResult SetStaticObjectsVisibleBulk(
+		std::span<StaticObjectResidencyHandle*> handles,
+		bool visible);
 	void UpdatePerObjectBuffer(BufferView*, PerObjectCB& data);
 	void UpdateNormalMatrixBuffer(BufferView* view, void* data);
 	void PublishDeferredRetireCompletedFrame(std::uint64_t completedFrame, std::uint64_t retireDelayFrames);

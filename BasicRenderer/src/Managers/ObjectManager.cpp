@@ -3267,6 +3267,54 @@ void ObjectManager::RemoveStaticObjectsBulk(std::span<const StaticObjectRemovalP
 	RemoveStaticObjectsBulk(payloads, {});
 }
 
+ObjectManager::StaticVisibilityUpdateResult ObjectManager::SetStaticObjectsVisibleBulk(
+	std::span<StaticObjectResidencyHandle*> handles,
+	bool visible)
+{
+	ZoneScopedN("ObjectManager::SetStaticObjectsVisibleBulk");
+	StaticVisibilityUpdateResult spans;
+	std::unordered_map<DrawWorkloadKey, std::vector<SortedUnsignedIntBuffer::ActiveDrawSetEntry>, DrawWorkloadKey::Hasher> inserts;
+	for (auto* handle : handles) {
+		if (!handle || handle->visible == visible) continue;
+		auto& payload = handle->destructionPayload;
+		if (!visible) {
+			TombstoneDrawRecords(payload.drawRecordIndices);
+			for (const auto& bucket : payload.activeDrawSetRemovals) {
+				auto found = m_activeDrawSetIndices.find(bucket.workloadKey);
+				if (found == m_activeDrawSetIndices.end() || !found->second) continue;
+				const auto count = static_cast<std::uint64_t>(bucket.indices.size());
+				const auto currentLive = found->second->LiveSize();
+				found->second->SetLiveSize(currentLive > count ? currentLive - count : 0u);
+				found->second->AddActiveTombstoneEstimate(count);
+				MaybeQueueActiveDrawSetCompaction(bucket.workloadKey, found->second);
+				spans[bucket.workloadKey] = found->second->Size();
+			}
+		} else {
+			std::unordered_map<std::uint32_t, std::uint32_t> generations;
+			generations.reserve(payload.drawRecordIndices.size());
+			for (const auto index : payload.drawRecordIndices) generations[index] = ActivateDrawRecord(index);
+			for (const auto& bucket : payload.activeDrawSetRemovals) {
+				auto& entries = inserts[bucket.workloadKey];
+				entries.reserve(entries.size() + bucket.indices.size());
+				for (const auto index : bucket.indices) {
+					if (const auto found = generations.find(index); found != generations.end()) {
+						entries.push_back({ index, found->second });
+					}
+				}
+			}
+		}
+		handle->visible = visible;
+	}
+	for (auto& [workloadKey, entries] : inserts) {
+		if (entries.empty()) continue;
+		auto buffer = EnsureActiveDrawSetIndices(workloadKey, entries.size());
+		buffer->AppendActiveEntries(entries);
+		buffer->SetLiveSize(buffer->LiveSize() + entries.size());
+		spans[workloadKey] = buffer->Size();
+	}
+	return spans;
+}
+
 void ObjectManager::UpdatePerObjectBuffer(BufferView* view, PerObjectCB& data) {
 	std::lock_guard<std::mutex> lock(m_objectUpdateMutex);
 	m_perObjectBuffers->UpdateView(view, &data);

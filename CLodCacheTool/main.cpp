@@ -82,7 +82,7 @@ static AssetFormat DetectFormat(const fs::path& path) {
         return AssetFormat::USD;
     if (ext == ".gltf" || ext == ".glb")
         return AssetFormat::GlTF;
-    if (ext == ".nif")
+	if (ext == ".nif" || ext == ".bto")
         return AssetFormat::Nif;
     return AssetFormat::Assimp;   // fbx, obj, dae, ...
 }
