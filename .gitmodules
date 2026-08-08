@@ -34,3 +34,6 @@
 [submodule "BasicTelemetry"]
 	path = BasicTelemetry
 	url = git@github.com:panthuncia/BasicTelemetry.git
+[submodule "ORGModuleServices"]
+	path = ORGModuleServices
+	url = git@github.com:panthuncia/ORGModuleServices.git
