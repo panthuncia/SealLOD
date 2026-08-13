@@ -7,6 +7,7 @@
 #include "RenderPasses/PrimaryDepthCopyPass.h"
 #include "RenderPasses/VisUtil/BuildPixelListPass.h"
 #include "RenderPasses/VisUtil/EvaluateMaterialGroupsPass.h"
+#include "RenderPasses/VisUtil/CanonicalSurfaceFinalizePass.h"
 #include "RenderPasses/VisUtil/MaterialHistogramPass.h"
 #include "RenderPasses/VisUtil/MaterialPixelCounterResetPass.h"
 #include "RenderPasses/VisUtil/MaterialBlockScanPass.h"
@@ -1155,6 +1156,49 @@ void BuildBloomPipeline(RenderGraph* graph) {
     // Tonemapping composites mip 1 plus the accumulated mip 2 directly while
     // it already reads the full-resolution HDR source. This avoids another
     // full-resolution HDR read/modify/write pass.
+}
+
+inline void CreateCanonicalSurfaceResources(RenderGraph* graph)
+{
+    const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    const ImageDimensions dimensions{ resolution.x, resolution.y, 0, 0 };
+    const auto createTexture = [&](std::string_view id, const char* name, rhi::Format format) {
+        TextureDescription desc;
+        desc.channels = 4;
+        desc.format = format;
+        desc.hasRTV = true;
+        desc.rtvFormat = format;
+        desc.hasSRV = true;
+        desc.srvFormat = format;
+        desc.hasUAV = true;
+        desc.uavFormat = format;
+        desc.hasNonShaderVisibleUAV = true;
+        desc.allowAlias = true;
+        desc.imageDimensions.push_back(dimensions);
+        auto texture = PixelBuffer::CreateSharedUnmaterialized(desc);
+        texture->SetName(name);
+        rg::memory::SetResourceUsageHint(*texture, "SARP canonical surface contract v1");
+        graph->RegisterResource(id, std::move(texture));
+    };
+
+    createTexture(Builtin::Surface::BaseColorOpacity, "SARP Surface Base Color + Opacity", rhi::Format::R8G8B8A8_UNorm);
+    createTexture(Builtin::Surface::NormalRoughness, "SARP Surface Normal + Roughness", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::SpecularAo, "SARP Surface Specular F0 + AO", rhi::Format::R8G8B8A8_UNorm);
+    createTexture(Builtin::Surface::Emissive, "SARP Surface Emissive", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::Motion, "SARP Surface Motion", rhi::Format::R16G16_Float);
+    createTexture(Builtin::Surface::DeviceDepth, "SARP Surface Device Depth", rhi::Format::R32_Float);
+    createTexture(Builtin::Surface::Identity, "SARP Surface Identity", rhi::Format::R32G32_UInt);
+    createTexture(Builtin::Surface::Payload0, "SARP Surface Payload 0", rhi::Format::R16G16B16A16_Float);
+    createTexture(Builtin::Surface::Payload1, "SARP Surface Payload 1", rhi::Format::R16G16B16A16_Float);
+
+    // SARPSurfaceRecordV1 is deliberately duplicated as a fixed 32-byte stride here;
+    // the renderer library does not depend on SARP's public module headers.
+    auto records = Buffer::CreateUnmaterializedStructuredBuffer(
+        resolution.x * resolution.y, 32u, true, false, false, rhi::HeapType::DeviceLocal);
+    records->SetAllowAlias(true);
+    records->SetName("SARP Surface Records");
+    rg::memory::SetResourceUsageHint(*records, "SARP canonical surface contract v1");
+    graph->RegisterResource(Builtin::Surface::Records, std::move(records));
 }
 
 void BuildSSRPasses(RenderGraph* graph) {

@@ -5349,6 +5349,11 @@ void Renderer::CreateRenderGraph() {
             case MaterialEvaluation:
                 BuildMaterialEvaluationPipeline(newGraph.get(), terrainRvtEnabled);
                 break;
+            case CanonicalSurfaceFinalization:
+                CreateCanonicalSurfaceResources(newGraph.get());
+                newGraph->BuildComputePass<CanonicalSurfaceFinalizePass>("CanonicalSurfaceFinalizePass");
+                newGraph->SetPassTechnique("CanonicalSurfaceFinalizePass", "Geometry Material Producer::Surface Finalization");
+                break;
             case Gtao:
                 RegisterGTAOResources(newGraph.get());
                 BuildGTAOPipeline(newGraph.get(), primaryCameraEntity.try_get<Components::Camera>());

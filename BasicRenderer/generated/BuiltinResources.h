@@ -154,6 +154,18 @@ struct Builtin {
     inline static constexpr std::string_view SkinningInstanceInfo = "Builtin::SkeletonResources::SkinningInstanceInfo";
   };
   inline static constexpr std::string_view SkinnedAssemblyPlacements = "Builtin::SkinnedAssemblyPlacements";
+  struct Surface {
+    inline static constexpr std::string_view BaseColorOpacity = "sarp.surface.base-color-opacity";
+    inline static constexpr std::string_view DeviceDepth = "sarp.surface.device-depth";
+    inline static constexpr std::string_view Emissive = "sarp.surface.emissive";
+    inline static constexpr std::string_view Identity = "sarp.surface.identity";
+    inline static constexpr std::string_view Motion = "sarp.surface.motion";
+    inline static constexpr std::string_view NormalRoughness = "sarp.surface.normal-roughness";
+    inline static constexpr std::string_view Payload0 = "sarp.surface.payload0";
+    inline static constexpr std::string_view Payload1 = "sarp.surface.payload1";
+    inline static constexpr std::string_view Records = "sarp.surface.records";
+    inline static constexpr std::string_view SpecularAo = "sarp.surface.specular-ao";
+  };
   struct Terrain {
     inline static constexpr std::string_view LayerRefs = "Builtin::Terrain::LayerRefs";
     inline static constexpr std::string_view Layers = "Builtin::Terrain::Layers";

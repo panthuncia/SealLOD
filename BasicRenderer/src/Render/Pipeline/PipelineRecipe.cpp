@@ -154,6 +154,9 @@ PipelineValidationResult PipelineRecipe::Validate() const
     if (Contains<MaterialEvaluationTechnique>() && !Contains<GBufferResourcesTechnique>()) {
         result.errors.emplace_back("Material evaluation requires GBuffer resources");
     }
+    if (Contains<CanonicalSurfaceFinalizationTechnique>() && !Contains<MaterialEvaluationTechnique>()) {
+        result.errors.emplace_back("Canonical surface finalization requires material evaluation");
+    }
     if (Contains<GtaoTechnique>() && !Contains<GBufferResourcesTechnique>()) {
         result.errors.emplace_back("GTAO requires GBuffer resources");
     }
@@ -179,6 +182,10 @@ PipelineValidationResult PipelineRecipe::Validate() const
         "CLod visibility must precede GBuffer construction");
     requireBefore(TechniqueId::GBufferResources, TechniqueId::VisibilityMaterialBinning,
         "GBuffer resources must precede visibility material binning");
+    requireBefore(TechniqueId::MaterialEvaluation, TechniqueId::CanonicalSurfaceFinalization,
+        "Material evaluation must precede canonical surface finalization");
+    requireBefore(TechniqueId::CanonicalSurfaceFinalization, TechniqueId::PrimaryLighting,
+        "Canonical surface finalization must precede primary lighting");
     requireBefore(TechniqueId::VisibilityMaterialBinning, TechniqueId::TerrainRvt,
         "Visibility material binning must precede terrain RVT");
     requireBefore(TechniqueId::VisibilityMaterialBinning, TechniqueId::MaterialEvaluation,
@@ -236,6 +243,7 @@ PipelineRecipe MakeStandardPipeline(
         recipe.Add<TerrainRvtTechnique>();
     }
     recipe.Add<MaterialEvaluationTechnique>()
+        .Add<CanonicalSurfaceFinalizationTechnique>()
         .Add<GtaoTechnique>()
         .Add<ClusteredLightingTechnique>()
         .Add<PrimaryLightingTechnique>()
@@ -265,6 +273,21 @@ PipelineRecipe MakeSarpPipeline()
         true,
         true,
         ClusterLodVoxelOptions{ .workRecordCapacity = 1u << 20 });
+}
+
+PipelineRecipe MakeGeometryMaterialProducerPipeline()
+{
+    PipelineRecipe recipe;
+    recipe.Add<FrameResourcesTechnique>()
+        .Add<ClusterLodTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
+        .Add<ClusterLodAlphaTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
+        .Add<ClusterLodShadowTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
+        .Add<GBufferResourcesTechnique>()
+        .Add<VisibilityMaterialBinningTechnique>()
+        .Add<TerrainRvtTechnique>()
+        .Add<MaterialEvaluationTechnique>()
+        .Add<CanonicalSurfaceFinalizationTechnique>();
+    return recipe;
 }
 
 } // namespace br::pipeline

@@ -42,6 +42,8 @@ void TestSarpPreset()
         "SARP recipe must use the bounded default CLod voxel work capacity");
     Require(recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>(), "SARP recipe must include CLod alpha");
     Require(recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "SARP recipe must include CLod shadows");
+    Require(recipe.Contains<br::pipeline::CanonicalSurfaceFinalizationTechnique>(),
+        "SARP recipe must publish canonical surfaces");
 
     recipe.Configure<br::pipeline::ClusterLodVoxelTechnique>({ .workRecordCapacity = 262144u });
     Require(recipe.Options<br::pipeline::ClusterLodVoxelTechnique>().workRecordCapacity == 262144u,
@@ -49,6 +51,24 @@ void TestSarpPreset()
     recipe.Remove<br::pipeline::ClusterLodVoxelTechnique>();
     Require(recipe.Validate().valid && !recipe.Contains<br::pipeline::ClusterLodVoxelTechnique>(),
         "CLod voxel rasterization must be independently removable");
+}
+
+void TestGeometryMaterialProducerPreset()
+{
+    const auto recipe = br::pipeline::MakeGeometryMaterialProducerPipeline();
+    Require(recipe.Validate().valid, "geometry/material producer recipe must validate");
+    Require(recipe.Contains<br::pipeline::TerrainRvtTechnique>(), "producer must include RVT");
+    Require(recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "producer must include VSM caster rendering");
+    Require(recipe.Contains<br::pipeline::MaterialEvaluationTechnique>(), "producer must evaluate materials");
+    Require(recipe.Contains<br::pipeline::CanonicalSurfaceFinalizationTechnique>(), "producer must finalize surfaces");
+    Require(!recipe.Contains<br::pipeline::EnvironmentTechnique>(), "producer must omit environment processing");
+    Require(!recipe.Contains<br::pipeline::GtaoTechnique>(), "producer must omit GTAO");
+    Require(!recipe.Contains<br::pipeline::ClusteredLightingTechnique>(), "producer must omit light clustering");
+    Require(!recipe.Contains<br::pipeline::PrimaryLightingTechnique>(), "producer must omit deferred lighting");
+    Require(!recipe.Contains<br::pipeline::ReflectionsTechnique>(), "producer must omit reflections");
+    Require(!recipe.Contains<br::pipeline::UpscalingTechnique>(), "producer must omit upscaling");
+    Require(!recipe.Contains<br::pipeline::TonemappingTechnique>(), "producer must omit tonemapping");
+    Require(!recipe.Contains<br::pipeline::PresentTechnique>(), "producer must omit presentation");
 }
 
 void TestInvalidRecipes()
@@ -97,6 +117,7 @@ int main()
     try {
         TestDemoPreset();
         TestSarpPreset();
+        TestGeometryMaterialProducerPreset();
         TestInvalidRecipes();
         std::cout << "PipelineRecipeTests passed\n";
         return 0;

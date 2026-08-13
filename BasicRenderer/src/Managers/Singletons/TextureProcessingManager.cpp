@@ -1334,12 +1334,17 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 }
 
 bool ShouldTraceTextureProcessing(std::string_view cachePath, std::string_view sourcePath) {
-	const char* filterValue = std::getenv("SARP_TEXTURE_PROCESSING_TRACE_FILTER");
+	char* filterValue = nullptr;
+	size_t filterValueLength = 0;
+	_dupenv_s(&filterValue, &filterValueLength, "SARP_TEXTURE_PROCESSING_TRACE_FILTER");
 	if (filterValue == nullptr || *filterValue == '\0') {
+		std::free(filterValue);
 		return false;
 	}
 
-	std::string_view filters(filterValue);
+	const std::string ownedFilters(filterValue);
+	std::free(filterValue);
+	std::string_view filters(ownedFilters);
 	while (!filters.empty()) {
 		const size_t separator = filters.find(';');
 		const std::string_view filter = filters.substr(0, separator);

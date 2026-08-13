@@ -1,4 +1,5 @@
 #include "Managers/Singletons/PSOManager.h"
+#include <ORGModuleServices/CompileFlightRegistry.h>
 
 #include <condition_variable>
 #include <fstream>
@@ -185,36 +186,7 @@ struct ShaderCompileFlightKeyHash {
     }
 };
 
-class ShaderCompileFlightRegistry {
-public:
-    bool TryBecomeOwnerOrWait(const ShaderCompileFlightKey& key)
-    {
-        std::unique_lock lock(m_mutex);
-        auto [it, inserted] = m_activeKeys.insert(key);
-        if (inserted) {
-            return true;
-        }
-
-        m_cv.wait(lock, [&]() {
-            return !m_activeKeys.contains(key);
-        });
-        return false;
-    }
-
-    void Complete(const ShaderCompileFlightKey& key)
-    {
-        {
-            std::lock_guard lock(m_mutex);
-            m_activeKeys.erase(key);
-        }
-        m_cv.notify_all();
-    }
-
-private:
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-    std::unordered_set<ShaderCompileFlightKey, ShaderCompileFlightKeyHash> m_activeKeys;
-};
+using ShaderCompileFlightRegistry = org::services::CompileFlightRegistry<ShaderCompileFlightKey, ShaderCompileFlightKeyHash>;
 
 ShaderCompileFlightRegistry& GetShaderCompileFlightRegistry()
 {

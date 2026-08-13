@@ -9,7 +9,7 @@
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
-#if __has_include(<imgui_impl_vulkan.h>) && __has_include(<vulkan/vulkan.h>)
+#if BASICRHI_ENABLE_VULKAN && __has_include(<imgui_impl_vulkan.h>) && __has_include(<vulkan/vulkan.h>)
 #define BASICRENDERER_HAS_IMGUI_VULKAN 1
 #ifndef IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 #define IMGUI_IMPL_VULKAN_NO_PROTOTYPES 1

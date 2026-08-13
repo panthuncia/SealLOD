@@ -130,6 +130,7 @@ if(MSVC)
 endif()
 
 option(BASICRHI_ENABLE_RESHAPE "Enable GPU-Reshape-backed debug instrumentation in BasicRHI" OFF)
+set(BASICRHI_ENABLE_IMGUI ON CACHE BOOL "Build ImGui instrumentation widgets required by BasicRenderer" FORCE)
 option(BASICRENDERER_BUILD_BRNIFLY "Build the GPL-separated BRNifly NIF middleware executable" ON)
 set(BASICRENDERER_VULKAN_INCLUDE_DIR "" CACHE PATH "Preferred Vulkan SDK include directory. Leave empty to auto-detect a Vulkan SDK with VK_EXT_descriptor_heap.")
 
@@ -358,6 +359,10 @@ endif()
 
 add_subdirectory("ThirdParty")
 add_subdirectory("BasicRHI")
+set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
+set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
+set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory("ORGModuleServices")
 if(NOT TARGET BasicTelemetry::Core)
   add_subdirectory("BasicTelemetry")
 endif()

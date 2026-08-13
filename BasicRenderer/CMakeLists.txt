@@ -29,6 +29,7 @@ if(BASICRENDERER_USE_PACKAGE_DEPS)
     find_package(BasicScene CONFIG QUIET)
     find_package(BasicRHI CONFIG QUIET)
     find_package(OpenRenderGraph CONFIG QUIET)
+    find_package(ORGModuleServices CONFIG QUIET)
 endif()
 
 if(TARGET BasicScene AND NOT TARGET BasicScene::BasicScene)
@@ -73,6 +74,11 @@ if(BASICRENDERER_ENABLE_SUBMODULE_FALLBACK)
     if(TARGET OpenRenderGraph AND NOT TARGET OpenRenderGraph::OpenRenderGraph)
         add_library(OpenRenderGraph::OpenRenderGraph ALIAS OpenRenderGraph)
     endif()
+
+    if(NOT TARGET ORGModuleServices::ORGModuleServices AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices/CMakeLists.txt")
+        set(ORG_MODULE_SERVICES_ENABLE_VULKAN ${BASICRHI_ENABLE_VULKAN} CACHE BOOL "" FORCE)
+        add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../ORGModuleServices" "${CMAKE_CURRENT_BINARY_DIR}/_deps/ORGModuleServices")
+    endif()
 endif()
 
 if(NOT TARGET BasicScene::BasicScene)
@@ -85,6 +91,10 @@ endif()
 
 if(NOT TARGET OpenRenderGraph::OpenRenderGraph)
     message(FATAL_ERROR "BasicRenderer requires OpenRenderGraph::OpenRenderGraph. Install OpenRenderGraph package or provide OpenRenderGraph as submodule.")
+endif()
+
+if(NOT TARGET ORGModuleServices::ORGModuleServices)
+    message(FATAL_ERROR "BasicRenderer requires ORGModuleServices::ORGModuleServices. Install it or provide it as a submodule.")
 endif()
 
 if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -1167,6 +1177,7 @@ PRIVATE
     OpenRenderGraph::OpenRenderGraph
     BasicScene::BasicScene
     BasicRHI::BasicRHI
+    ORGModuleServices::ORGModuleServices
     Boost::container_hash
     Boost::interprocess
     TBB::tbb

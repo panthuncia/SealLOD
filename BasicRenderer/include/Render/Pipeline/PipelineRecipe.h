@@ -112,6 +112,7 @@ enum class TechniqueId : uint8_t {
     TerrainRvt,
     TerrainRegionMaterialEvaluation,
     MaterialEvaluation,
+    CanonicalSurfaceFinalization,
     Gtao,
     ClusteredLighting,
     PrimaryLighting,
@@ -181,6 +182,7 @@ BR_DECLARE_PIPELINE_TECHNIQUE(VisibilityMaterialBinningTechnique, VisibilityMate
 BR_DECLARE_PIPELINE_TECHNIQUE(TerrainRvtTechnique, TerrainRvt);
 BR_DECLARE_PIPELINE_TECHNIQUE(TerrainRegionMaterialEvaluationTechnique, TerrainRegionMaterialEvaluation);
 BR_DECLARE_PIPELINE_TECHNIQUE(MaterialEvaluationTechnique, MaterialEvaluation);
+BR_DECLARE_PIPELINE_TECHNIQUE(CanonicalSurfaceFinalizationTechnique, CanonicalSurfaceFinalization);
 BR_DECLARE_PIPELINE_TECHNIQUE(GtaoTechnique, Gtao);
 BR_DECLARE_PIPELINE_TECHNIQUE(ClusteredLightingTechnique, ClusteredLighting);
 BR_DECLARE_PIPELINE_TECHNIQUE(PrimaryLightingTechnique, PrimaryLighting);
@@ -372,5 +374,6 @@ namespace Slots {
 
 PipelineRecipe MakeBasicRendererDemoPipeline();
 PipelineRecipe MakeSarpPipeline();
+PipelineRecipe MakeGeometryMaterialProducerPipeline();
 
 } // namespace br::pipeline
