@@ -566,10 +566,13 @@ struct MaterialInfo {
     float2 reyesUvDensity;
     float objectSurfaceTexelDensity;
     uint objectSurfaceSamplingMode;
-    uint4 padObjectSurface;
+    uint2 sourceMaterialId;
+    uint semanticFamily;
+    uint surfaceFlags;
     float4 glintParameters;
     uint glintEnabled;
-    uint3 padGlint;
+    uint diagnosticReason;
+    uint2 padGlint;
 };
 
 struct MaterialEvalInfo {
@@ -639,10 +642,13 @@ struct MaterialEvalInfo {
     float2 reyesUvDensity;
     float objectSurfaceTexelDensity;
     uint objectSurfaceSamplingMode;
-    uint4 padObjectSurface;
+    uint2 sourceMaterialId;
+    uint semanticFamily;
+    uint surfaceFlags;
     float4 glintParameters;
     uint glintEnabled;
-    uint3 padGlint;
+    uint diagnosticReason;
+    uint2 padGlint;
 };
 
 struct TerrainLayerInfo {
@@ -845,7 +851,8 @@ struct PerObjectBuffer {
     row_major matrix modelInverse;
     uint normalMatrixBufferIndex;
     uint objectFlags;
-    uint pad[2];
+    uint stableSceneIdLo;
+    uint stableSceneIdHi;
 };
 
 struct PerMeshBuffer {
@@ -883,7 +890,8 @@ struct PerInstanceTransformBuffer {
     row_major matrix modelInverse;
     uint normalMatrixBufferIndex;
     uint objectFlags;
-    uint pad[2];
+    uint stableSceneIdLo;
+    uint stableSceneIdHi;
 };
 
 struct InstanceDrawRecordBuffer {
@@ -1067,6 +1075,22 @@ struct MaterialInputs
     float geometricHeightDebug;
     uint glintEnabled;
     float4 glintParameters;
+    uint2 sourceObjectId;
+    uint2 sourceMaterialId;
+    uint materialTableIndex;
+    uint semanticFamily;
+    uint surfaceFlags;
+    uint diagnosticReason;
+};
+
+struct SARPSurfaceRecordV1
+{
+    uint2 sourceObjectId;
+    uint2 sourceMaterialId;
+    uint materialTableIndex;
+    uint semanticFamilyAndPayload;
+    uint flags;
+    uint diagnosticReason;
 };
 
 struct SkinningInstanceGPUInfo

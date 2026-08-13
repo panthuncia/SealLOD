@@ -1,17 +1,22 @@
 #pragma once
 
+#include <stdexcept>
+
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
+#include "Render/ProducerPassServices.h"
 #include "RenderPasses/Base/ComputePass.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 
 class CanonicalSurfaceFinalizePass final : public ComputePass {
 public:
-    CanonicalSurfaceFinalizePass()
+    explicit CanonicalSurfaceFinalizePass(ProducerPassServices& services)
+        : m_services(services)
     {
-        m_pso = PSOManager::GetInstance().MakeComputePipeline(
-            PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
+        if (!m_services.IsValid()) throw std::invalid_argument("CanonicalSurfaceFinalizePass requires producer services");
+        m_pso = m_services.pipelines->MakeComputePipeline(
+            m_services.pipelines->GetComputeRootSignature().GetHandle(),
             L"shaders/Surface/canonicalSurfaceFinalize.hlsl",
             L"CanonicalSurfaceFinalizeCS", {}, "CanonicalSurfaceFinalizeCS");
     }
@@ -65,11 +70,11 @@ public:
 
     PassReturn Execute(PassExecutionContext& executionContext) override
     {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        auto* renderContext = m_services.renderContext;
         auto& commandList = executionContext.commandList;
         commandList.SetDescriptorHeaps(
             renderContext->textureDescriptorHeap.GetHandle(), renderContext->samplerDescriptorHeap.GetHandle());
-        commandList.BindLayout(PSOManager::GetInstance().GetComputeRootSignature().GetHandle());
+        commandList.BindLayout(m_services.pipelines->GetComputeRootSignature().GetHandle());
         commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
 
         uint32_t constants[NumMiscUintRootConstants]{};
@@ -88,6 +93,7 @@ public:
     void Cleanup() override {}
 
 private:
+    ProducerPassServices& m_services;
     PipelineState m_pso;
     GloballyIndexedResource* m_inputs[8]{};
     GloballyIndexedResource* m_outputs[10]{};

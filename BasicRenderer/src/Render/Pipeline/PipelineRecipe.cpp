@@ -262,7 +262,7 @@ PipelineRecipe MakeStandardPipeline(
 
 PipelineRecipe MakeBasicRendererDemoPipeline()
 {
-    return MakeStandardPipeline(false, ReyesMode::Disabled, true, true, std::nullopt);
+    return MakeStandardPipeline(false, ReyesMode::Disabled, false, true, std::nullopt);
 }
 
 PipelineRecipe MakeSarpPipeline()

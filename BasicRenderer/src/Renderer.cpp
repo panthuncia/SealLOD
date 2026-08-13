@@ -2216,34 +2216,42 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPageSize", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtBorderTexels", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesWide", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPoolCount", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtClipPageTableResolution", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxTerrainSets", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxClipLevels", [this](const uint32_t& newValue) {
         (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
         rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableOcclusionCulling", [this](const bool& newValue) {
@@ -4810,6 +4818,11 @@ void Renderer::Cleanup() {
     ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
     currentRenderGraph.reset();
+    // Cleanup tears down the device. Preserve the state container so a module
+    // owner can replay CPU scene metadata, but discard all device-bound state.
+    m_producerPersistentState->InvalidateTerrainRvt();
+    m_producerPersistentState->virtualShadowCasters.reset();
+    m_producerPersistentState->clodStreaming.reset();
     rg::runtime::SetActiveUploadService(nullptr);
     rg::runtime::SetActiveUploadPolicyService(nullptr);
     rg::runtime::SetActiveDescriptorService(nullptr);
@@ -4832,6 +4845,7 @@ void Renderer::Cleanup() {
     m_pTextureFactory.reset();
     m_clodRayTracingSystem.reset();
     m_context = {};
+    m_producerServices = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
 	ReleaseSharedProcessingPlaceholderTextures();
@@ -5067,8 +5081,10 @@ void Renderer::RegisterPipelineExtensions() {
         currentRenderGraph->GetReadbackService()),
         "BuiltinReadbackCapture");
 
-    auto clodStreamingSystem = std::make_shared<CLodStreamingSystem>();
-    auto virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>();
+    if (!m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming = std::make_shared<CLodStreamingSystem>();
+    if (!m_producerPersistentState->virtualShadowCasters) m_producerPersistentState->virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>();
+    auto clodStreamingSystem = m_producerPersistentState->clodStreaming;
+    auto virtualShadowCasters = m_producerPersistentState->virtualShadowCasters;
     br::pipeline::PipelineBuildContext extensionContext(
         *currentRenderGraph,
         m_pipelineRecipe.Bindings(),
@@ -5241,6 +5257,11 @@ void Renderer::CreateRenderGraph() {
     std::shared_ptr<PixelBuffer> depthTexture = depth.depthMap;
 
     const bool terrainRvtEnabled = m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>();
+    m_producerServices.pipelines = &PSOManager::GetInstance();
+    m_producerServices.commandSignatures = &CommandSignatureManager::GetInstance();
+    m_producerServices.settings = &SettingsManager::GetInstance();
+    m_producerServices.ecs = &RendererECSManager::GetInstance();
+    m_producerServices.renderContext = &m_context;
     br::pipeline::PipelineBuildContext buildContext(
         *newGraph,
         m_pipelineRecipe.Bindings(),
@@ -5340,18 +5361,20 @@ void Renderer::CreateRenderGraph() {
                 BuildVisibilityMaterialBinningPipeline(newGraph.get());
                 break;
             case TerrainRvt:
-                RegisterVisUtilResources(newGraph.get(), true, false);
+                RegisterVisUtilResources(
+                    newGraph.get(), true, false,
+                    &m_producerPersistentState->terrainRvtResources);
                 BuildTerrainRvtPipeline(newGraph.get());
                 break;
             case TerrainRegionMaterialEvaluation:
                 BuildTerrainRegionMaterialEvaluationPipeline(newGraph.get());
                 break;
             case MaterialEvaluation:
-                BuildMaterialEvaluationPipeline(newGraph.get(), terrainRvtEnabled);
+                BuildMaterialEvaluationPipeline(newGraph.get(), m_producerServices, terrainRvtEnabled);
                 break;
             case CanonicalSurfaceFinalization:
                 CreateCanonicalSurfaceResources(newGraph.get());
-                newGraph->BuildComputePass<CanonicalSurfaceFinalizePass>("CanonicalSurfaceFinalizePass");
+                newGraph->BuildComputePass<CanonicalSurfaceFinalizePass>("CanonicalSurfaceFinalizePass", m_producerServices);
                 newGraph->SetPassTechnique("CanonicalSurfaceFinalizePass", "Geometry Material Producer::Surface Finalization");
                 break;
             case Gtao:

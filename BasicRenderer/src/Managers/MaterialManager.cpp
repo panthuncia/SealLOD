@@ -310,8 +310,12 @@ namespace {
 		result.reyesUvDensity = base.reyesUvDensity;
 		result.objectSurfaceTexelDensity = base.objectSurfaceTexelDensity;
 		result.objectSurfaceSamplingMode = base.objectSurfaceSamplingMode;
+		result.sourceMaterialId = base.sourceMaterialId;
+		result.semanticFamily = base.semanticFamily;
+		result.surfaceFlags = base.surfaceFlags;
 		result.glintParameters = base.glintParameters;
 		result.glintEnabled = base.glintEnabled;
+		result.diagnosticReason = base.diagnosticReason;
 		return result;
 	}
 

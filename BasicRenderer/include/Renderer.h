@@ -13,6 +13,7 @@
 #include <mutex>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <flecs.h>
@@ -47,9 +48,13 @@
 #include "Render/GraphExtensions/ClusterLOD/CLodRayTracingSystem.h"
 #include "Render/ShaderVariantRequestService.h"
 #include "Render/Pipeline/PipelineRecipe.h"
+#include "Render/ProducerPassServices.h"
+#include "Render/ProducerPersistentState.h"
 
 class DynamicResource;
 class ExternalTextureResource;
+class CLodStreamingSystem;
+class VirtualShadowCasterRegistry;
 
 using namespace Microsoft::WRL;
 
@@ -166,6 +171,10 @@ public:
     RenderGraph* GetRenderGraph() { return currentRenderGraph.get(); }
     const RenderGraph* GetRenderGraph() const { return currentRenderGraph.get(); }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
+    void SetProducerPersistentState(std::shared_ptr<ProducerPersistentState> state) {
+        if (m_isInitialized) throw std::logic_error("producer persistent state must be set before initialization");
+        m_producerPersistentState = state ? std::move(state) : std::make_shared<ProducerPersistentState>();
+    }
     const br::pipeline::PipelineRecipe& GetPipelineRecipe() const { return m_pipelineRecipe; }
     void SetPipelineReplacementDebugBreakHandler(std::function<void()> handler) {
         m_pipelineReplacementDebugBreakHandler = std::move(handler);
@@ -221,6 +230,10 @@ private:
     bool m_shaderReloadRequested = false;
 
     RenderContext m_context;
+    ProducerPassServices m_producerServices;
+    // Persistent producer state survives graph rebuilds and full/producer
+    // recipe switches. It is released only with the renderer/device lifetime.
+    std::shared_ptr<ProducerPersistentState> m_producerPersistentState = std::make_shared<ProducerPersistentState>();
 
 	std::string m_environmentName;
 	std::unique_ptr<Environment> m_currentEnvironment = nullptr;

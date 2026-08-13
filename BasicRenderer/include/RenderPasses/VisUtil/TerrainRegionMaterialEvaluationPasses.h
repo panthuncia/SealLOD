@@ -476,6 +476,8 @@ public:
                 Builtin::GBuffer::Fuzz,
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
+				Builtin::Surface::Identity,
+				Builtin::Surface::Records,
 				Builtin::DebugVisualization,
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtRequestList,

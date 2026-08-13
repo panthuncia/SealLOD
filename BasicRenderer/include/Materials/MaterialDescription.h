@@ -99,6 +99,10 @@ struct OpenPBRMaterialParameters {
 
 struct MaterialDescription {
     MaterialModel materialModel = MaterialModel::LegacyPreviewSurface;
+    std::uint64_t sourceMaterialIdentity = 0;
+    std::uint32_t semanticFamily = 0;
+    std::uint32_t surfaceFlags = 0;
+    std::uint32_t diagnosticReason = 0;
     std::string name;
     DirectX::XMFLOAT4   diffuseColor = { 1,1,1,1 };
     DirectX::XMFLOAT4   emissiveColor = { 0,0,0,1 };

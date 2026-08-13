@@ -2300,6 +2300,12 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         obj.prevModel,
         mul(cam.view, cam.unjitteredProjection),
         mul(cam.prevView, cam.prevUnjitteredProjection));
+    materialInputs.sourceObjectId = uint2(obj.stableSceneIdLo, obj.stableSceneIdHi);
+    materialInputs.sourceMaterialId = materialInfo.sourceMaterialId;
+    materialInputs.materialTableIndex = materialInfo.openPBRMaterialDataIndex;
+    materialInputs.semanticFamily = materialInfo.semanticFamily;
+    materialInputs.surfaceFlags = materialInfo.surfaceFlags;
+    materialInputs.diagnosticReason = materialInfo.diagnosticReason;
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else

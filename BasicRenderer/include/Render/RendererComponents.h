@@ -48,8 +48,8 @@ namespace Components {
             perObjectCB.modelInverseMatrix = DirectX::XMMatrixIdentity();
             perObjectCB.normalMatrixBufferIndex = 0;
             perObjectCB.objectFlags = 0;
-            perObjectCB.pad[0] = 0;
-            perObjectCB.pad[1] = 0;
+            perObjectCB.stableSceneIdLo = 0;
+            perObjectCB.stableSceneIdHi = 0;
         }
         RenderableObject(PerObjectCB cb) : perObjectCB(cb) {}
         PerObjectCB perObjectCB;

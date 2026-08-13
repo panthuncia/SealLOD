@@ -1,4 +1,5 @@
 #pragma once
+#include <unordered_map>
 #include "Scene/Components.h"
 #include "Render/RenderGraph/RenderGraph.h"
 #include "../../generated/BuiltinResources.h"
@@ -186,7 +187,11 @@ void BuildBRDFIntegrationPass(RenderGraph* graph) {
     TagPassTechnique(graph, "BRDF Integration Pass", "Environment Lighting::BRDF Integration");
 }
 
-inline void RegisterVisUtilResources(RenderGraph* graph, bool terrainRvt, bool registerCommonResources = true)
+inline void RegisterVisUtilResources(
+    RenderGraph* graph,
+    bool terrainRvt,
+    bool registerCommonResources = true,
+    std::unordered_map<std::string, std::shared_ptr<Resource>>* persistentTerrainRvtResources = nullptr)
 {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const uint32_t maxPixels = resolution.x * resolution.y;
@@ -359,6 +364,12 @@ inline void RegisterVisUtilResources(RenderGraph* graph, bool terrainRvt, bool r
     }
 
     if (terrainRvt) {
+    if (persistentTerrainRvtResources && !persistentTerrainRvtResources->empty()) {
+        for (const auto& [name, resource] : *persistentTerrainRvtResources) {
+            graph->RegisterResource(name, resource);
+        }
+        return;
+    }
     struct TerrainRvtInfoPOD {
         uint32_t pageSize;
         uint32_t borderTexels;
@@ -713,6 +724,23 @@ inline void RegisterVisUtilResources(RenderGraph* graph, bool terrainRvt, bool r
     createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
     createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R16G16B16A16_Float, 4);
     createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    if (persistentTerrainRvtResources) {
+        const std::string_view persistentNames[] = {
+            Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtPageTable, Builtin::Terrain::RvtPageKeys,
+            Builtin::Terrain::RvtPhysicalPageOwner, Builtin::Terrain::RvtPhysicalPageAtlas,
+            Builtin::Terrain::RvtHeightResidentCache, Builtin::Terrain::RvtRequestMasks,
+            Builtin::Terrain::RvtRequestList, Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtGenerationList, Builtin::Terrain::RvtStats,
+            Builtin::Terrain::RvtGenerateDispatchArgs, Builtin::Terrain::RvtHeightAtlas,
+            Builtin::Terrain::RvtAlbedoAtlas, Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas
+        };
+        for (const auto name : persistentNames) {
+            persistentTerrainRvtResources->insert_or_assign(
+                std::string(name), graph->RequestResourcePtr(name));
+        }
+    }
     }
 }
 
@@ -770,14 +798,15 @@ inline void BuildTerrainRegionMaterialEvaluationPipeline(RenderGraph* graph)
     TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 }
 
-inline void BuildMaterialEvaluationPipeline(RenderGraph* graph, bool terrainRvt)
+inline void BuildMaterialEvaluationPipeline(RenderGraph* graph, ProducerPassServices& services, bool terrainRvt)
 {
-    graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", terrainRvt);
+    graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", services, terrainRvt);
     TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
 }
 
 void BuildGBufferPipeline(
     RenderGraph* graph,
+    ProducerPassServices& services,
     bool visibilityMaterialBinning,
     bool terrainRvt,
     bool terrainRegionMaterialEvaluation,
@@ -874,7 +903,7 @@ void BuildGBufferPipeline(
 
         // Evaluate material groups
         if (materialEvaluation) {
-            graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", terrainRvt);
+            graph->BuildComputePass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", services, terrainRvt);
             TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
         }
 

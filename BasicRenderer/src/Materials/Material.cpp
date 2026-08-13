@@ -255,6 +255,12 @@ MaterialDescription Material::ToCacheDescription() const
     };
 
     MaterialDescription desc{};
+    desc.sourceMaterialIdentity =
+        static_cast<std::uint64_t>(m_materialData.sourceMaterialId.x) |
+        (static_cast<std::uint64_t>(m_materialData.sourceMaterialId.y) << 32u);
+    desc.semanticFamily = m_materialData.semanticFamily;
+    desc.surfaceFlags = m_materialData.surfaceFlags;
+    desc.diagnosticReason = m_diagnosticReason;
     desc.name = m_name;
     desc.diffuseColor = m_baseColorFactor;
     desc.emissiveColor = m_emissiveFactor;

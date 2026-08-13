@@ -31,6 +31,48 @@ namespace {
     // explicit pso.recompile request bypasses cache reads.
     thread_local bool g_bypassShaderArtifactCacheReads = false;
 
+    // BRSL resource arguments must be valid HLSL-like identifiers, but some
+    // renderer-neutral graph resources intentionally use URI-style public
+    // names. Translate those shader-facing aliases before descriptor lookup.
+    // Keep this normalization on cache reads as well: cached artifacts retain
+    // the original BRSL identifiers in their PipelineResources metadata.
+    ResourceIdentifier ResolveRuntimeResourceIdentifier(std::string_view identifier)
+    {
+        struct Alias {
+            std::string_view shaderIdentifier;
+            std::string_view runtimeIdentifier;
+        };
+        static constexpr Alias aliases[] = {
+            { "Builtin::Surface::BaseColorOpacity", "sarp.surface.base-color-opacity" },
+            { "Builtin::Surface::NormalRoughness", "sarp.surface.normal-roughness" },
+            { "Builtin::Surface::SpecularAo", "sarp.surface.specular-ao" },
+            { "Builtin::Surface::Emissive", "sarp.surface.emissive" },
+            { "Builtin::Surface::Motion", "sarp.surface.motion" },
+            { "Builtin::Surface::DeviceDepth", "sarp.surface.device-depth" },
+            { "Builtin::Surface::Identity", "sarp.surface.identity" },
+            { "Builtin::Surface::Payload0", "sarp.surface.payload0" },
+            { "Builtin::Surface::Payload1", "sarp.surface.payload1" },
+            { "Builtin::Surface::Records", "sarp.surface.records" },
+        };
+        for (const Alias& alias : aliases) {
+            if (identifier == alias.shaderIdentifier) {
+                return ResourceIdentifier{ alias.runtimeIdentifier };
+            }
+        }
+        return ResourceIdentifier{ identifier };
+    }
+
+    void NormalizeRuntimeResourceIdentifiers(PipelineResources& resources)
+    {
+        const auto normalize = [](std::vector<ResourceIdentifier>& identifiers) {
+            for (ResourceIdentifier& identifier : identifiers) {
+                identifier = ResolveRuntimeResourceIdentifier(identifier.name);
+            }
+        };
+        normalize(resources.mandatoryResourceDescriptorSlots);
+        normalize(resources.optionalResourceDescriptorSlots);
+    }
+
     class ScopedShaderArtifactCacheReadBypass {
     public:
         ScopedShaderArtifactCacheReadBypass()
@@ -359,6 +401,7 @@ std::optional<ShaderBundle> TryLoadShaderBundleFromCache(
 
     ShaderBundle bundle;
     bundle.resourceDescriptorSlots = cacheData->resourceDescriptorSlots;
+    NormalizeRuntimeResourceIdentifiers(bundle.resourceDescriptorSlots);
     bundle.resourceIDsHash = cacheData->resourceIDsHash;
 
     for (const shadercache::CachedShaderBlob& blob : cacheData->blobs) {
@@ -410,6 +453,7 @@ std::optional<ShaderLibraryBundle> TryLoadShaderLibraryFromCache(
 
     ShaderLibraryBundle bundle;
     bundle.resourceDescriptorSlots = cacheData->resourceDescriptorSlots;
+    NormalizeRuntimeResourceIdentifiers(bundle.resourceDescriptorSlots);
     bundle.resourceIDsHash = cacheData->resourceIDsHash;
     if (!CreateBlobFromBytes(utils, cacheData->blobs.front().bytecode, bundle.libraryBlob)) {
         spdlog::warn("Shader library cache blob reconstruction failed; treating as miss.");
@@ -2704,11 +2748,11 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 
 	std::vector<ResourceIdentifier> mandatoryResourceDescriptors;
     for (const auto& idStr : libPP.mandatoryIDs) {
-		mandatoryResourceDescriptors.push_back(ResourceIdentifier{ idStr });
+		mandatoryResourceDescriptors.push_back(ResolveRuntimeResourceIdentifier(idStr));
     }
 	std::vector<ResourceIdentifier> optionalResourceDescriptors;
     for (const auto& idStr : libPP.optionalIDs) {
-        optionalResourceDescriptors.push_back(ResourceIdentifier{ idStr });
+        optionalResourceDescriptors.push_back(ResolveRuntimeResourceIdentifier(idStr));
 	}
 
     ShaderLibraryBundle bundle;
@@ -2849,12 +2893,12 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     }
 
     for (const std::string& entry : usedMandatoryResourceIDsVec) {
-		bundle.resourceDescriptorSlots.mandatoryResourceDescriptorSlots.push_back(ResourceIdentifier{ entry });
+		bundle.resourceDescriptorSlots.mandatoryResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(entry));
 		replacementMap[entry] = "ResourceDescriptorIndex" + std::to_string(nextIndex++);
     }
 
     for (const std::string& entry : usedOptionalResourceIDsVec) {
-        bundle.resourceDescriptorSlots.optionalResourceDescriptorSlots.push_back(ResourceIdentifier{ entry });
+        bundle.resourceDescriptorSlots.optionalResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(entry));
         replacementMap[entry] = "ResourceDescriptorIndex" + std::to_string(nextIndex++);
     }
 

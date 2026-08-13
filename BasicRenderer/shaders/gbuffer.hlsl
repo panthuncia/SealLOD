@@ -1,6 +1,50 @@
 #include "include/clodResolveCommon.hlsli"
 #include "include/debugPayload.hlsli"
 
+void WriteGBufferColorSample(uint2 pixel, float2 motionVector, MaterialInputs material)
+{
+    RWTexture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
+    RWTexture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
+    RWTexture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
+    RWTexture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Emissive)];
+    RWTexture2D<float4> fuzzTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Fuzz)];
+    RWTexture2D<float4> metallicRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
+    RWTexture2D<float2> motionVectorTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MotionVectors)];
+    RWTexture2D<uint2> surfaceIdentity = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Identity)];
+    RWStructuredBuffer<SARPSurfaceRecordV1> surfaceRecords = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Records)];
+
+    normalsTexture[pixel] = float4(material.normalWS, (float)material.openPBRMaterialDataIndex);
+    albedoTexture[pixel] = float4(material.albedo, material.ambientOcclusion);
+    coatTexture[pixel] = float4(material.coatColor, material.coatWeight);
+    emissiveTexture[pixel].xyz = material.emissive;
+    fuzzTexture[pixel] = float4(material.fuzzColor, material.fuzzRoughness);
+    metallicRoughnessTexture[pixel] = float4(material.metallic, material.roughness, material.coatRoughness, material.fuzzWeight);
+    motionVectorTexture[pixel] = motionVector;
+
+    uint width;
+    uint height;
+    surfaceIdentity.GetDimensions(width, height);
+    const uint recordIndex = pixel.y * width + pixel.x;
+    const uint hasCoat = material.coatWeight > 0.0f ? (1u << 9u) : 0u;
+    const uint hasFuzz = material.fuzzWeight > 0.0f ? (1u << 10u) : 0u;
+    const uint hasGlint = material.glintEnabled != 0u ? (1u << 12u) : 0u;
+    const uint metallicWorkflow = material.metallic > 0.0f ? (1u << 8u) : 0u;
+    const uint flags = material.surfaceFlags | hasCoat | hasFuzz | hasGlint | metallicWorkflow;
+    const uint payloadProfile = hasGlint != 0u ? 3u : ((hasCoat | hasFuzz) != 0u ? 1u : 0u);
+    surfaceIdentity[pixel] = uint2(
+        recordIndex,
+        (material.semanticFamily & 0xffu) | ((payloadProfile & 0xffu) << 8u) | ((flags & 0xffffu) << 16u));
+
+    SARPSurfaceRecordV1 record = (SARPSurfaceRecordV1)0;
+    record.sourceObjectId = material.sourceObjectId;
+    record.sourceMaterialId = material.sourceMaterialId;
+    record.materialTableIndex = material.materialTableIndex;
+    record.semanticFamilyAndPayload = (material.semanticFamily & 0xffffu) | ((payloadProfile & 0xffffu) << 16u);
+    record.flags = flags;
+    record.diagnosticReason = material.diagnosticReason;
+    surfaceRecords[recordIndex] = record;
+}
+
 bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)
 {
     debugColor = 0.0f.xxx;
@@ -152,13 +196,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
         return;
     }
 
-    normalsTexture[pixel] = float4(sample.materialInputs.normalWS, (float)sample.materialInputs.openPBRMaterialDataIndex);
-    albedoTexture[pixel] = float4(sample.materialInputs.albedo, sample.materialInputs.ambientOcclusion);
-    coatTexture[pixel] = float4(sample.materialInputs.coatColor, sample.materialInputs.coatWeight);
-    emissiveTexture[pixel].xyz = sample.materialInputs.emissive;
-    fuzzTexture[pixel] = float4(sample.materialInputs.fuzzColor, sample.materialInputs.fuzzRoughness);
-    metallicRoughnessTexture[pixel] = float4(sample.materialInputs.metallic, sample.materialInputs.roughness, sample.materialInputs.coatRoughness, sample.materialInputs.fuzzWeight);
-    motionVectorTexture[pixel] = sample.motionVector;
+    WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
     return;
 #else
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -172,13 +210,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
             return;
         }
 
-        normalsTexture[pixel] = float4(sample.materialInputs.normalWS, (float)sample.materialInputs.openPBRMaterialDataIndex);
-        albedoTexture[pixel] = float4(sample.materialInputs.albedo, sample.materialInputs.ambientOcclusion);
-        coatTexture[pixel] = float4(sample.materialInputs.coatColor, sample.materialInputs.coatWeight);
-        emissiveTexture[pixel].xyz = sample.materialInputs.emissive;
-        fuzzTexture[pixel] = float4(sample.materialInputs.fuzzColor, sample.materialInputs.fuzzRoughness);
-        metallicRoughnessTexture[pixel] = float4(sample.materialInputs.metallic, sample.materialInputs.roughness, sample.materialInputs.coatRoughness, sample.materialInputs.fuzzWeight);
-        motionVectorTexture[pixel] = sample.motionVector;
+        WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
         return;
     }
 
@@ -188,13 +220,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
         return;
     }
 
-    normalsTexture[pixel] = float4(sample.materialInputs.normalWS, (float)sample.materialInputs.openPBRMaterialDataIndex);
-    albedoTexture[pixel] = float4(sample.materialInputs.albedo, sample.materialInputs.ambientOcclusion);
-    coatTexture[pixel] = float4(sample.materialInputs.coatColor, sample.materialInputs.coatWeight);
-    emissiveTexture[pixel].xyz = sample.materialInputs.emissive;
-    fuzzTexture[pixel] = float4(sample.materialInputs.fuzzColor, sample.materialInputs.fuzzRoughness);
-    metallicRoughnessTexture[pixel] = float4(sample.materialInputs.metallic, sample.materialInputs.roughness, sample.materialInputs.coatRoughness, sample.materialInputs.fuzzWeight);
-    motionVectorTexture[pixel] = sample.motionVector;
+    WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
 
     bool isReyesPatch = false;
     if (outputType == OUTPUT_REYES_GEOMETRY_PATH && vis != 0xFFFFFFFFFFFFFFFF)

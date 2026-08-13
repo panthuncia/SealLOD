@@ -327,6 +327,14 @@ public:
             desc.brniflyModelSpaceNormals
         );
         material->m_materialModel = desc.materialModel;
+        material->m_materialData.sourceMaterialId = {
+            static_cast<std::uint32_t>(desc.sourceMaterialIdentity),
+            static_cast<std::uint32_t>(desc.sourceMaterialIdentity >> 32u)
+        };
+        material->m_materialData.semanticFamily = desc.semanticFamily;
+        material->m_materialData.surfaceFlags = desc.surfaceFlags;
+        material->m_materialData.diagnosticReason = desc.diagnosticReason;
+        material->m_diagnosticReason = desc.diagnosticReason;
         material->m_materialData.glintEnabled = desc.glintEnabled ? 1u : 0u;
         material->m_materialData.glintParameters = desc.glintParameters;
         material->m_geometricDisplacementOptIn = desc.geometricDisplacementOptIn;
@@ -364,6 +372,7 @@ public:
         defaultMaterial.reset();
     }
     uint32_t GetMaterialID() const { return m_materialID; }
+    uint32_t GetDiagnosticReason() const { return m_diagnosticReason; }
     PerMaterialCB const& GetData() const { return m_materialData; }
     bool IsObjectReyesAtlasHeightMaterial() const {
         return m_materialData.objectSurfaceSamplingMode == static_cast<uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
@@ -376,6 +385,7 @@ public:
 private:
 	inline static std::atomic<uint32_t> globalMaterialCount;
 	const uint32_t m_materialID = globalMaterialCount.fetch_add(1, std::memory_order_relaxed);
+    uint32_t m_diagnosticReason = 0;
 
     std::string m_name;
     std::shared_ptr<TextureAsset> m_baseColorTexture;

@@ -23,6 +23,7 @@ public:
 			Builtin::GBuffer::Fuzz,
 			Builtin::GBuffer::MetallicRoughness,
 			Builtin::GBuffer::Normals,
+			Builtin::Surface::Identity,
 			Builtin::DebugVisualization);
 		builder->WithDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
 	}
@@ -35,6 +36,7 @@ public:
 		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Emissive);
 		m_fuzz = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Fuzz);
 		m_normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
+		m_surfaceIdentity = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Identity);
 		m_depthTexture = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::DepthTexture);
 		m_debugVisualization = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::DebugVisualization);
 	}
@@ -58,6 +60,14 @@ public:
 		clearValue.v[0] = 0xFFFFFFFF;
 		clearValue.v[1] = 0xFFFFFFFF;
 
+		commandList.ClearUavUint(clearInfo, clearValue);
+
+		// Canonical surface producers overwrite this sentinel for every shaded
+		// pixel. Clearing it prevents missing producers from exposing stale or
+		// uninitialized record indices to deferred shading.
+		clearInfo.cpuVisible = m_surfaceIdentity->GetUAVNonShaderVisibleInfo(0).slot;
+		clearInfo.shaderVisible = m_surfaceIdentity->GetUAVShaderVisibleInfo(0).slot;
+		clearInfo.resource = m_surfaceIdentity->GetAPIResource();
 		commandList.ClearUavUint(clearInfo, clearValue);
 
 		// Everything else: 0
@@ -124,6 +134,7 @@ private:
 	GloballyIndexedResource* m_emissive;
 	GloballyIndexedResource* m_fuzz;
 	GloballyIndexedResource* m_normals;
+	GloballyIndexedResource* m_surfaceIdentity;
 	GloballyIndexedResource* m_depthTexture;
 	GloballyIndexedResource* m_debugVisualization;
 	std::function<unsigned int()> m_getOutputType;

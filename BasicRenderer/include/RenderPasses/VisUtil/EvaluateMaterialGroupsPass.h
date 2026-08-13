@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <bit>
+#include <stdexcept>
 
 #include <spdlog/spdlog.h>
 
@@ -17,15 +18,17 @@
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 #include "Render/GraphExtensions/ClusterLOD/CLodCommon.h"
 #include "Render/ShaderVariantRequestService.h"
+#include "Render/ProducerPassServices.h"
 #include "Resources/Buffers/PagePool.h"
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
 class EvaluateMaterialGroupsPass : public ComputePass {
 public:
-    explicit EvaluateMaterialGroupsPass(bool terrainRvtEnabled)
-        : m_terrainRvtEnabled(terrainRvtEnabled) {
-        auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
+    EvaluateMaterialGroupsPass(ProducerPassServices& services, bool terrainRvtEnabled)
+        : m_services(services), m_terrainRvtEnabled(terrainRvtEnabled) {
+        if (!m_services.IsValid()) throw std::invalid_argument("EvaluateMaterialGroupsPass requires producer services");
+        auto& ecsWorld = m_services.ecs->GetWorld();
 
         // Global LOD extension visibility buffer tag
         auto visBufferTag = ecsWorld.component<CLodExtensionVisibilityBufferTag>();
@@ -69,7 +72,7 @@ public:
 
         // Retrieve the page pool slab ResourceGroup for render graph tracking.
         try {
-            auto getter = SettingsManager::GetInstance().getSettingGetter<std::function<MeshManager*()>>(CLodStreamingMeshManagerGetterSettingName);
+            auto getter = m_services.settings->getSettingGetter<std::function<MeshManager*()>>(CLodStreamingMeshManagerGetterSettingName);
             if (auto* mm = getter()()) {
                 if (auto* pool = mm->GetCLodPagePool()) {
                     m_slabResourceGroup = pool->GetSlabResourceGroup();
@@ -131,6 +134,8 @@ public:
                 Builtin::GBuffer::Fuzz,
                 Builtin::GBuffer::MetallicRoughness,
                 Builtin::GBuffer::MotionVectors,
+                Builtin::Surface::Identity,
+                Builtin::Surface::Records,
                 Builtin::DebugVisualization,
 				Builtin::Material::TextureStreamingFeedbackBuffer)
     	.WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -270,25 +275,25 @@ public:
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
+        auto* renderContext = m_services.renderContext;
         auto& ctx = *renderContext;
         auto& cl = executionContext.commandList;
-        auto& psoMgr = PSOManager::GetInstance();
+        auto& psoMgr = *m_services.pipelines;
 
         cl.SetDescriptorHeaps(ctx.textureDescriptorHeap.GetHandle(), ctx.samplerDescriptorHeap.GetHandle());
         cl.BindLayout(psoMgr.GetComputeRootSignature().GetHandle());
 
         // Execute one indirect compute per active material slot.
         const auto& active = ctx.materialManager->GetActiveCompileFlags();
-        const auto& sig = CommandSignatureManager::GetInstance().GetMaterialEvaluationCommandSignature();
+        const auto& sig = m_services.commandSignatures->GetMaterialEvaluationCommandSignature();
 
         const uint64_t stride = sizeof(MaterialEvaluationIndirectCommand);
         auto argBuf = m_materialEvalCmds->GetAPIResource();
         RefreshDescriptorIndices();
 
         const bool terrainRegionMaterialEvaluation =
-            SettingsManager::GetInstance().getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
-        const auto outputType = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")();
+            m_services.settings->getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation")();
+        const auto outputType = m_services.settings->getSettingGetter<unsigned int>("outputType")();
 		for (MaterialCompileFlags flags : active) { // TODO: cache on material flag changes
             if (terrainRegionMaterialEvaluation &&
                 (flags & MaterialCompileFlags::MaterialCompileTerrain) != 0) {
@@ -362,6 +367,7 @@ public:
     }
 
 private:
+    ProducerPassServices& m_services;
     void BindMaterialResourceDescriptorIndices(
         rhi::CommandList& commandList,
         const PipelineResources& resources) {

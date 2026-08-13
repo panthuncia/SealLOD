@@ -224,6 +224,13 @@ bool SyncRenderableDerivedStateForBulk(
         dst.set<Components::RenderableObject>(renderable);
     }
 
+    if (const auto* stableId = dst.try_get<Components::StableSceneID>()) {
+        auto renderable = dst.get<Components::RenderableObject>();
+        renderable.perObjectCB.stableSceneIdLo = static_cast<uint32_t>(stableId->value);
+        renderable.perObjectCB.stableSceneIdHi = static_cast<uint32_t>(stableId->value >> 32u);
+        dst.set<Components::RenderableObject>(renderable);
+    }
+
     if (signatureChanged) {
         DestroyRendererObject(dst, objectManager);
         auto renderable = dst.get<Components::RenderableObject>();

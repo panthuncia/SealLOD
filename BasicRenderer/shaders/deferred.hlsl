@@ -87,7 +87,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         mainCamera.viewInverse).xyz;
 
     FragmentInfo fragmentInfo;
-    GetFragmentInfoScreenSpace(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
+    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
     
     LightingOutput lightingOutput = lightFragment(fragmentInfo, mainCamera, perFrameBuffer.activeEnvironmentIndex, ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), true);
     

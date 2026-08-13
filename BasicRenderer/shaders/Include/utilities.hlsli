@@ -3993,6 +3993,86 @@ void GetFragmentInfoScreenSpace(in uint2 pixelCoordinates, in float3 viewWS, in 
     PopulateFragmentInfoFromOpenPBR(surface, ret);
 }
 
+void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS, in float3 fragPosViewSpace, in float3 fragPosWorldSpace, in bool enableGTAO, out FragmentInfo ret) {
+    ret.pixelCoords = pixelCoordinates;
+    ret.fragPosViewSpace = fragPosViewSpace;
+    ret.fragPosWorldSpace = fragPosWorldSpace;
+    ret.selectedMaterialMipLevel = MATERIAL_DEBUG_INVALID_MIP_LEVEL;
+    ret.selectedMaterialMipMaxLevel = 0u;
+    ret.parallaxApplied = 0u;
+    ret.glintEnabled = 0u;
+    ret.glintParameters = float4(1.5f, 0.0f, 0.015f, 2.0f);
+
+    Texture2D<float4> baseColorOpacityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::BaseColorOpacity)];
+    Texture2D<float4> normalRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::NormalRoughness)];
+    Texture2D<float4> specularAoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::SpecularAo)];
+    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Emissive)];
+    Texture2D<float4> payload0Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload0)];
+    Texture2D<float4> payload1Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload1)];
+    Texture2D<uint2> identityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Identity)];
+    StructuredBuffer<SARPSurfaceRecordV1> records = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Records)];
+
+    const float4 baseColorOpacity = baseColorOpacityTexture[pixelCoordinates];
+    const float4 normalRoughness = normalRoughnessTexture[pixelCoordinates];
+    const float4 specularAo = specularAoTexture[pixelCoordinates];
+    const float4 emissive = emissiveTexture[pixelCoordinates];
+    const float4 coat = payload0Texture[pixelCoordinates];
+    const float4 fuzz = payload1Texture[pixelCoordinates];
+    const uint2 identity = identityTexture[pixelCoordinates];
+    uint surfaceRecordCount;
+    uint surfaceRecordStride;
+    records.GetDimensions(surfaceRecordCount, surfaceRecordStride);
+    SARPSurfaceRecordV1 record = (SARPSurfaceRecordV1)0;
+    if (identity.x < surfaceRecordCount) {
+        record = records[identity.x];
+    }
+
+    ret.normalWS = normalize(normalRoughness.xyz);
+    ret.perceptualRoughnessUnclamped = normalRoughness.w;
+    ret.perceptualRoughness = clamp(normalRoughness.w, MIN_PERCEPTUAL_ROUGHNESS, 1.0f);
+    ret.roughness = PerceptualRoughnessToRoughness(ret.perceptualRoughness);
+    ret.roughnessUnclamped = PerceptualRoughnessToRoughness(ret.perceptualRoughnessUnclamped);
+    ret.viewWS = viewWS;
+    ret.NdotV = dot(ret.normalWS, ret.viewWS);
+    ret.normalWS = normalize(ret.normalWS + max(0.0f, -ret.NdotV + MIN_N_DOT_V) * ret.viewWS);
+    ret.NdotV = max(MIN_N_DOT_V, dot(ret.normalWS, ret.viewWS));
+    ret.reflectedWS = reflect(-ret.viewWS, ret.normalWS);
+    ret.alpha = baseColorOpacity.a;
+
+    if (enableGTAO)
+    {
+        Texture2D<uint> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::GTAO::OutputAOTerm)];
+        ret.diffuseAmbientOcclusion = min(specularAo.a, float(aoTexture[pixelCoordinates].x) / 255.0f);
+    }
+    else
+    {
+        ret.diffuseAmbientOcclusion = specularAo.a;
+    }
+
+    OpenPBRSurfaceSample surface = (OpenPBRSurfaceSample)0;
+    surface.openPBRMaterialDataIndex = record.materialTableIndex;
+    surface.baseColor = baseColorOpacity.rgb;
+    surface.baseMetalness = 0.0f;
+    surface.specularRoughness = normalRoughness.w;
+    surface.coatColor = coat.rgb;
+    surface.coatWeight = coat.a;
+    surface.coatRoughness = 0.0f;
+    surface.fuzzColor = fuzz.rgb;
+    surface.fuzzWeight = 0.0f;
+    surface.fuzzRoughness = fuzz.a;
+    surface.opacity = baseColorOpacity.a;
+    surface.emissive = emissive.rgb;
+    PopulateFragmentInfoFromOpenPBR(surface, ret);
+
+    // These values are fully resolved by the producer contract. Keep the rich
+    // OpenPBR coat/fuzz terms above, but do not reconstruct base response from
+    // a metallic parameter in the lighting consumer.
+    ret.diffuseColor = baseColorOpacity.rgb;
+    ret.F0 = specularAo.rgb;
+    ret.dielectricF0 = max(specularAo.r, max(specularAo.g, specularAo.b));
+    ret.materialFlags = record.flags;
+}
+
 void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialInfo, in float3 viewWS, in float2 pixelCoords, in bool enableGTAO, in bool transparent, in bool isFrontFace, in uint materialFlags)
 {
     ret.materialFlags = materialFlags;

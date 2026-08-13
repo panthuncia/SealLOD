@@ -160,7 +160,8 @@ struct PerObjectCB {
     DirectX::XMMATRIX modelInverseMatrix;
     unsigned int normalMatrixBufferIndex;
     unsigned int objectFlags;
-    unsigned int pad[2];
+    unsigned int stableSceneIdLo;
+    unsigned int stableSceneIdHi;
 };
 
 struct PerMeshCB {
@@ -278,10 +279,13 @@ struct PerMaterialCB {
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     float objectSurfaceTexelDensity = 1.0f;
     unsigned int objectSurfaceSamplingMode = 0u;
-    DirectX::XMUINT4 padObjectSurface = {};
+    DirectX::XMUINT2 sourceMaterialId = {};
+    unsigned int semanticFamily = 0u;
+    unsigned int surfaceFlags = 0u;
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     unsigned int glintEnabled = 0u;
-    DirectX::XMUINT3 padGlint = {};
+    unsigned int diagnosticReason = 0u;
+    DirectX::XMUINT2 padGlint = {};
 };
 
 struct PerMaterialEvalCB {
@@ -350,10 +354,13 @@ struct PerMaterialEvalCB {
     DirectX::XMFLOAT2 reyesUvDensity = { 1.0f, 1.0f };
     float objectSurfaceTexelDensity = 1.0f;
     unsigned int objectSurfaceSamplingMode = 0u;
-    DirectX::XMUINT4 padObjectSurface = {};
+    DirectX::XMUINT2 sourceMaterialId = {};
+    unsigned int semanticFamily = 0u;
+    unsigned int surfaceFlags = 0u;
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     unsigned int glintEnabled = 0u;
-    DirectX::XMUINT3 padGlint = {};
+    unsigned int diagnosticReason = 0u;
+    DirectX::XMUINT2 padGlint = {};
 };
 
 static_assert(sizeof(PerMaterialEvalCB) == 320, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
