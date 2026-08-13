@@ -107,12 +107,11 @@ enum class TechniqueId : uint8_t {
     ClusterLodAlpha,
     ClusterLodShadow,
     ClusterLodVoxel,
-    GBufferResources,
+    CanonicalSurfaceResources,
     VisibilityMaterialBinning,
     TerrainRvt,
     TerrainRegionMaterialEvaluation,
     MaterialEvaluation,
-    CanonicalSurfaceFinalization,
     Gtao,
     ClusteredLighting,
     PrimaryLighting,
@@ -177,12 +176,11 @@ struct ClusterLodVoxelTechnique {
     using Options = ClusterLodVoxelOptions;
     inline static constexpr TechniqueId Id = TechniqueId::ClusterLodVoxel;
 };
-BR_DECLARE_PIPELINE_TECHNIQUE(GBufferResourcesTechnique, GBufferResources);
+BR_DECLARE_PIPELINE_TECHNIQUE(CanonicalSurfaceResourcesTechnique, CanonicalSurfaceResources);
 BR_DECLARE_PIPELINE_TECHNIQUE(VisibilityMaterialBinningTechnique, VisibilityMaterialBinning);
 BR_DECLARE_PIPELINE_TECHNIQUE(TerrainRvtTechnique, TerrainRvt);
 BR_DECLARE_PIPELINE_TECHNIQUE(TerrainRegionMaterialEvaluationTechnique, TerrainRegionMaterialEvaluation);
 BR_DECLARE_PIPELINE_TECHNIQUE(MaterialEvaluationTechnique, MaterialEvaluation);
-BR_DECLARE_PIPELINE_TECHNIQUE(CanonicalSurfaceFinalizationTechnique, CanonicalSurfaceFinalization);
 BR_DECLARE_PIPELINE_TECHNIQUE(GtaoTechnique, Gtao);
 BR_DECLARE_PIPELINE_TECHNIQUE(ClusteredLightingTechnique, ClusteredLighting);
 BR_DECLARE_PIPELINE_TECHNIQUE(PrimaryLightingTechnique, PrimaryLighting);

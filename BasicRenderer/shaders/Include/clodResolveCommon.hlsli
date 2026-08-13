@@ -2000,7 +2000,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     }
 
 #if defined(VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE)
-    const bool clodGBufferResolveBackface = ClodBarycentricDerivativesAreBackFacing(bary);
+    const bool clodSurfaceResolveBackface = ClodBarycentricDerivativesAreBackFacing(bary);
 #endif
 
     float3 interpPosX = InterpolateWithDeriv(positionBary, evalPos0.x, evalPos1.x, evalPos2.x);
@@ -2314,7 +2314,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     sample.materialFlags = materialFlags;
     sample.materialInputs = materialInputs;
 #if defined(VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE)
-    if (clodGBufferResolveBackface)
+    if (clodSurfaceResolveBackface)
     {
         sample.normalWSBase = -sample.normalWSBase;
 #if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)

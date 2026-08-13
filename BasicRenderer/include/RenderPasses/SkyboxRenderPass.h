@@ -13,7 +13,7 @@ public:
     void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(Builtin::Environment::CurrentCubemap, Builtin::Environment::InfoBuffer)
             .WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }), Builtin::CameraBuffer)
-            .WithUnorderedAccess(Builtin::Color::HDRColorTarget, Builtin::GBuffer::MotionVectors);
+			.WithUnorderedAccess(Builtin::Color::HDRColorTarget, Builtin::Surface::Motion);
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
     }
 
@@ -39,7 +39,7 @@ public:
         rootConstants[1] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::CameraBuffer)->GetSRVInfo(0).slot.index;
         rootConstants[2] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Environment::InfoBuffer)->GetSRVInfo(0).slot.index;
         rootConstants[3] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Color::HDRColorTarget)->GetUAVShaderVisibleInfo(0).slot.index;
-        rootConstants[4] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MotionVectors)->GetUAVShaderVisibleInfo(0).slot.index;
+		rootConstants[4] = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Motion)->GetUAVShaderVisibleInfo(0).slot.index;
         commandList.PushConstants(rhi::ShaderStage::Compute, 0, MiscUintRootSignatureIndex, 0, NumMiscUintRootConstants, rootConstants);
 
         const uint32_t w = m_pHDRTarget->GetWidth();

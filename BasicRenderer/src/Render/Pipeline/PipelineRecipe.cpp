@@ -151,17 +151,14 @@ PipelineValidationResult PipelineRecipe::Validate() const
         Options<ClusterLodVoxelTechnique>().workRecordCapacity == 0u) {
         result.errors.emplace_back("CLod voxel rasterization work-record capacity must be greater than zero");
     }
-    if (Contains<MaterialEvaluationTechnique>() && !Contains<GBufferResourcesTechnique>()) {
-        result.errors.emplace_back("Material evaluation requires GBuffer resources");
+    if (Contains<MaterialEvaluationTechnique>() && !Contains<CanonicalSurfaceResourcesTechnique>()) {
+        result.errors.emplace_back("Material evaluation requires canonical surface resources");
     }
-    if (Contains<CanonicalSurfaceFinalizationTechnique>() && !Contains<MaterialEvaluationTechnique>()) {
-        result.errors.emplace_back("Canonical surface finalization requires material evaluation");
+    if (Contains<GtaoTechnique>() && !Contains<CanonicalSurfaceResourcesTechnique>()) {
+        result.errors.emplace_back("GTAO requires canonical surface resources");
     }
-    if (Contains<GtaoTechnique>() && !Contains<GBufferResourcesTechnique>()) {
-        result.errors.emplace_back("GTAO requires GBuffer resources");
-    }
-    if (Contains<PrimaryLightingTechnique>() && !Contains<GBufferResourcesTechnique>()) {
-        result.errors.emplace_back("Primary lighting requires GBuffer resources");
+    if (Contains<PrimaryLightingTechnique>() && !Contains<CanonicalSurfaceResourcesTechnique>()) {
+        result.errors.emplace_back("Primary lighting requires canonical surface resources");
     }
     if (Contains<ExposureTechnique>() && !Contains<PrimaryLightingTechnique>()) {
         result.errors.emplace_back("Exposure requires primary lighting output");
@@ -176,24 +173,20 @@ PipelineValidationResult PipelineRecipe::Validate() const
         result.errors.emplace_back("Presentation currently requires tonemapping");
     }
 
-    requireBefore(TechniqueId::FrameResources, TechniqueId::GBufferResources,
-        "Frame resources must precede GBuffer resources");
-    requireBefore(TechniqueId::ClusterLod, TechniqueId::GBufferResources,
-        "CLod visibility must precede GBuffer construction");
-    requireBefore(TechniqueId::GBufferResources, TechniqueId::VisibilityMaterialBinning,
-        "GBuffer resources must precede visibility material binning");
-    requireBefore(TechniqueId::MaterialEvaluation, TechniqueId::CanonicalSurfaceFinalization,
-        "Material evaluation must precede canonical surface finalization");
-    requireBefore(TechniqueId::CanonicalSurfaceFinalization, TechniqueId::PrimaryLighting,
-        "Canonical surface finalization must precede primary lighting");
+    requireBefore(TechniqueId::FrameResources, TechniqueId::CanonicalSurfaceResources,
+        "Frame resources must precede canonical surface resources");
+    requireBefore(TechniqueId::ClusterLod, TechniqueId::CanonicalSurfaceResources,
+        "CLod visibility must precede canonical surface construction");
+    requireBefore(TechniqueId::CanonicalSurfaceResources, TechniqueId::VisibilityMaterialBinning,
+        "Canonical surface resources must precede visibility material binning");
     requireBefore(TechniqueId::VisibilityMaterialBinning, TechniqueId::TerrainRvt,
         "Visibility material binning must precede terrain RVT");
     requireBefore(TechniqueId::VisibilityMaterialBinning, TechniqueId::MaterialEvaluation,
         "Visibility material binning must precede material evaluation");
     requireBefore(TechniqueId::TerrainRvt, TechniqueId::MaterialEvaluation,
         "Terrain RVT must precede material evaluation");
-    requireBefore(TechniqueId::GBufferResources, TechniqueId::PrimaryLighting,
-        "GBuffer resources must precede primary lighting");
+    requireBefore(TechniqueId::CanonicalSurfaceResources, TechniqueId::PrimaryLighting,
+        "Canonical surface resources must precede primary lighting");
     requireBefore(TechniqueId::Environment, TechniqueId::PrimaryLighting,
         "Environment preparation must precede primary lighting");
     requireBefore(TechniqueId::PrimaryLighting, TechniqueId::Exposure,
@@ -237,13 +230,12 @@ PipelineRecipe MakeStandardPipeline(
     if (clodVoxel) {
         recipe.Add<ClusterLodVoxelTechnique>(*clodVoxel);
     }
-    recipe.Add<GBufferResourcesTechnique>()
+    recipe.Add<CanonicalSurfaceResourcesTechnique>()
         .Add<VisibilityMaterialBinningTechnique>();
     if (terrainRvt) {
         recipe.Add<TerrainRvtTechnique>();
     }
     recipe.Add<MaterialEvaluationTechnique>()
-        .Add<CanonicalSurfaceFinalizationTechnique>()
         .Add<GtaoTechnique>()
         .Add<ClusteredLightingTechnique>()
         .Add<PrimaryLightingTechnique>()
@@ -282,11 +274,10 @@ PipelineRecipe MakeGeometryMaterialProducerPipeline()
         .Add<ClusterLodTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
         .Add<ClusterLodAlphaTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
         .Add<ClusterLodShadowTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Enabled })
-        .Add<GBufferResourcesTechnique>()
+        .Add<CanonicalSurfaceResourcesTechnique>()
         .Add<VisibilityMaterialBinningTechnique>()
         .Add<TerrainRvtTechnique>()
-        .Add<MaterialEvaluationTechnique>()
-        .Add<CanonicalSurfaceFinalizationTechnique>();
+        .Add<MaterialEvaluationTechnique>();
     return recipe;
 }
 

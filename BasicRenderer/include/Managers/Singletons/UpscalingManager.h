@@ -130,6 +130,9 @@ private:
     // Setup(). A quality-mode or output-size change must invalidate it on the
     // first evaluation using the replacement render targets.
     bool m_resetUpscalerHistory = true;
+    // Streamline reports memory pressure as a warning result. Avoid turning a
+    // recoverable, persistent condition into one error log entry per frame.
+    bool m_reportedDlssOutOfMemory = false;
 };
 
 inline UpscalingManager& UpscalingManager::GetInstance() {

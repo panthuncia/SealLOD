@@ -54,16 +54,6 @@ struct Builtin {
     inline static constexpr std::string_view WorkingCubemapGroup = "Builtin::Environment::WorkingCubemapGroup";
     inline static constexpr std::string_view WorkingHDRIGroup = "Builtin::Environment::WorkingHDRIGroup";
   };
-  struct GBuffer {
-    inline static constexpr std::string_view Albedo = "Builtin::GBuffer::Albedo";
-    inline static constexpr std::string_view Coat = "Builtin::GBuffer::Coat";
-    inline static constexpr std::string_view DilatedMotionVectors = "Builtin::GBuffer::DilatedMotionVectors";
-    inline static constexpr std::string_view Emissive = "Builtin::GBuffer::Emissive";
-    inline static constexpr std::string_view Fuzz = "Builtin::GBuffer::Fuzz";
-    inline static constexpr std::string_view MetallicRoughness = "Builtin::GBuffer::MetallicRoughness";
-    inline static constexpr std::string_view MotionVectors = "Builtin::GBuffer::MotionVectors";
-    inline static constexpr std::string_view Normals = "Builtin::GBuffer::Normals";
-  };
   struct GTAO {
     inline static constexpr std::string_view OutputAOTerm = "Builtin::GTAO::OutputAOTerm";
     inline static constexpr std::string_view WorkingAOTerm1 = "Builtin::GTAO::WorkingAOTerm1";
@@ -157,6 +147,7 @@ struct Builtin {
   struct Surface {
     inline static constexpr std::string_view BaseColorOpacity = "sarp.surface.base-color-opacity";
     inline static constexpr std::string_view DeviceDepth = "sarp.surface.device-depth";
+    inline static constexpr std::string_view DilatedMotion = "sarp.surface.motion-dilated";
     inline static constexpr std::string_view Emissive = "sarp.surface.emissive";
     inline static constexpr std::string_view Identity = "sarp.surface.identity";
     inline static constexpr std::string_view Motion = "sarp.surface.motion";

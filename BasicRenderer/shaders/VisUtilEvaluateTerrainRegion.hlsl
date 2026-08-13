@@ -3,7 +3,7 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/visUtilCommon.hlsli"
-#include "gbuffer.hlsl"
+#include "canonicalSurface.hlsl"
 
 [shader("compute")]
 [numthreads(MATERIAL_EXECUTION_GROUP_SIZE, 1, 1)]
@@ -35,5 +35,5 @@ void EvaluateTerrainRegionMaterialGroupCS(
     pixel.x = ref.pixelXY & 0xFFFFu;
     pixel.y = ref.pixelXY >> 16;
 
-    EvaluateGBufferOptimized(pixel);
+    EvaluateCanonicalSurfaceOptimized(pixel);
 }

@@ -17,15 +17,15 @@ public:
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override {
         builder->WithShaderResource(
-            Builtin::GBuffer::MotionVectors,
+            Builtin::Surface::Motion,
             Builtin::PrimaryCamera::ProjectedDepthTexture)
-            .WithUnorderedAccess(Builtin::GBuffer::DilatedMotionVectors);
+            .WithUnorderedAccess(Builtin::Surface::DilatedMotion);
     }
 
     void Setup() override {
-        m_source = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::GBuffer::MotionVectors);
+        m_source = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Surface::Motion);
         m_depth = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
-        m_destination = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::GBuffer::DilatedMotionVectors);
+        m_destination = m_resourceRegistryView->RequestPtr<PixelBuffer>(Builtin::Surface::DilatedMotion);
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {

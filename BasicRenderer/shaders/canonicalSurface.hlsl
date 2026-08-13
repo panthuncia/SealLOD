@@ -1,24 +1,33 @@
 #include "include/clodResolveCommon.hlsli"
 #include "include/debugPayload.hlsli"
 
-void WriteGBufferColorSample(uint2 pixel, float2 motionVector, MaterialInputs material)
+void WriteCanonicalSurfaceSample(uint2 pixel, float2 motionVector, MaterialInputs material)
 {
-    RWTexture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
-    RWTexture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
-    RWTexture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
-    RWTexture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Emissive)];
-    RWTexture2D<float4> fuzzTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Fuzz)];
-    RWTexture2D<float4> metallicRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
-    RWTexture2D<float2> motionVectorTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MotionVectors)];
+    RWTexture2D<float4> baseColorOpacity = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::BaseColorOpacity)];
+    RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::NormalRoughness)];
+    RWTexture2D<float4> specularAo = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::SpecularAo)];
+    RWTexture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Emissive)];
+    RWTexture2D<float2> motionVectorTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Motion)];
+    RWTexture2D<float4> payload0Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload0)];
+    RWTexture2D<float4> payload1Texture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Payload1)];
     RWTexture2D<uint2> surfaceIdentity = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Identity)];
     RWStructuredBuffer<SARPSurfaceRecordV1> surfaceRecords = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Records)];
 
-    normalsTexture[pixel] = float4(material.normalWS, (float)material.openPBRMaterialDataIndex);
-    albedoTexture[pixel] = float4(material.albedo, material.ambientOcclusion);
-    coatTexture[pixel] = float4(material.coatColor, material.coatWeight);
-    emissiveTexture[pixel].xyz = material.emissive;
-    fuzzTexture[pixel] = float4(material.fuzzColor, material.fuzzRoughness);
-    metallicRoughnessTexture[pixel] = float4(material.metallic, material.roughness, material.coatRoughness, material.fuzzWeight);
+    const OpenPBRMaterialInfo openPBR = LoadOpenPBRMaterialInfo(material.openPBRMaterialDataIndex);
+    const float baseWeight = saturate(openPBR.baseWeight);
+    const float specularWeight = saturate(openPBR.specularWeight);
+    const float3 specularColor = saturate(openPBR.specularColor);
+    const float3 weightedBaseColor = saturate(material.albedo * baseWeight);
+    const float weightedIor = OpenPBRApplySpecularWeightToIor(openPBR.specularIor, specularWeight);
+    const float3 dielectricF0 = saturate(specularColor * OpenPBRIorToF0(weightedIor));
+    const float3 metalF0 = saturate(weightedBaseColor * specularColor);
+    const float metalness = saturate(material.metallic);
+    baseColorOpacity[pixel] = float4(weightedBaseColor * (1.0f - metalness), saturate(material.opacity));
+    normalRoughness[pixel] = float4(normalize(material.normalWS), saturate(material.roughness));
+    specularAo[pixel] = float4(lerp(dielectricF0, metalF0, metalness), saturate(material.ambientOcclusion));
+    emissiveTexture[pixel] = float4(material.emissive, 0.0f);
+    payload0Texture[pixel] = float4(material.coatColor, material.coatWeight);
+    payload1Texture[pixel] = float4(material.fuzzColor, material.fuzzRoughness);
     motionVectorTexture[pixel] = motionVector;
 
     uint width;
@@ -179,16 +188,8 @@ bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
     return true;
 }
 
-void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
+void EvaluateCanonicalSurfaceOptimized(uint2 pixel, uint64_t vis)
 {
-    RWTexture2D<float4> normalsTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Normals)];
-    RWTexture2D<float4> albedoTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Albedo)];
-    RWTexture2D<float4> coatTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Coat)];
-    RWTexture2D<float4> emissiveTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Emissive)];
-    RWTexture2D<float4> fuzzTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::Fuzz)];
-    RWTexture2D<float4> metallicRoughnessTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MetallicRoughness)];
-    RWTexture2D<float2> motionVectorTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MotionVectors)];
-
 #if defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     ClodGBufferColorSample sample;
     if (!ResolveClodGBufferColorSampleFromVisKey(vis, pixel, sample))
@@ -196,7 +197,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
         return;
     }
 
-    WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
+    WriteCanonicalSurfaceSample(pixel, sample.motionVector, sample.materialInputs);
     return;
 #else
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -210,7 +211,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
             return;
         }
 
-        WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
+        WriteCanonicalSurfaceSample(pixel, sample.motionVector, sample.materialInputs);
         return;
     }
 
@@ -220,7 +221,7 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
         return;
     }
 
-    WriteGBufferColorSample(pixel, sample.motionVector, sample.materialInputs);
+    WriteCanonicalSurfaceSample(pixel, sample.motionVector, sample.materialInputs);
 
     bool isReyesPatch = false;
     if (outputType == OUTPUT_REYES_GEOMETRY_PATH && vis != 0xFFFFFFFFFFFFFFFF)
@@ -443,10 +444,10 @@ void EvaluateGBufferOptimized(uint2 pixel, uint64_t vis)
 #endif
 }
 
-void EvaluateGBufferOptimized(uint2 pixel)
+void EvaluateCanonicalSurfaceOptimized(uint2 pixel)
 {
     Texture2D<uint64_t> visibilityTexture = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
-    EvaluateGBufferOptimized(pixel, visibilityTexture[pixel]);
+    EvaluateCanonicalSurfaceOptimized(pixel, visibilityTexture[pixel]);
 }
 
 [numthreads(8, 8, 1)]
@@ -495,6 +496,11 @@ void PerViewPrimaryDepthCopyCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
         RWTexture2D<float> projectedDepthTexture = ResourceDescriptorHeap[projectedDepthUAVIndex];
         projectedDepthTexture[pixel] = projectedDepth;
+        if (UintRootConstant7 != 0xFFFFFFFFu)
+        {
+            RWTexture2D<float> canonicalDeviceDepth = ResourceDescriptorHeap[UintRootConstant7];
+            canonicalDeviceDepth[pixel] = projectedDepth;
+        }
     }
 }
 

@@ -10,6 +10,7 @@
 #include "Managers/Singletons/RendererECSManager.h"
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/GraphExtensions/CLodExtension.h"
+#include "Render/ProducerPersistentState.h"
 #include "Render/GraphExtensions/CLodExtensionShared.h"
 #include "Render/GraphExtensions/VirtualShadowCasterProvider.h"
 #include "Render/GraphExtensions/ClusterLOD/ClusterSoftwareRasterPageJobBuildArgsPass.h"
@@ -1346,29 +1347,43 @@ std::shared_ptr<Resource> CLodShadowVariant::ProvideResource(CLodExtension& exte
         return extension.m_shadowPageTableTexture;
     }
 
+    if (key.ToString() == "sarp.vsm.directional.page-table") return extension.m_shadowPageTableTexture;
+
     if (key == Builtin::Shadows::CLodPhysicalPages) {
         return extension.m_shadowPhysicalPagesTexture;
     }
+
+    if (key.ToString() == "sarp.vsm.directional.physical-pages") return extension.m_shadowPhysicalPagesTexture;
 
     if (key == Builtin::Shadows::CLodClipmapInfo) {
         return extension.m_shadowClipmapInfoBuffer;
     }
 
+    if (key.ToString() == "sarp.vsm.directional.clipmap-info") return extension.m_shadowClipmapInfoBuffer;
+
     if (key == Builtin::Shadows::CLodCompactMainCamera) {
         return extension.m_shadowCompactMainCameraBuffer;
     }
+
+    if (key.ToString() == "sarp.vsm.directional.main-camera") return extension.m_shadowCompactMainCameraBuffer;
 
     if (key == Builtin::Shadows::CLodCompactShadowCameras) {
         return extension.m_shadowCompactShadowCameraBuffer;
     }
 
+    if (key.ToString() == "sarp.vsm.directional.shadow-cameras") return extension.m_shadowCompactShadowCameraBuffer;
+
     if (key == Builtin::Shadows::CLodDirectionalPageViewInfo) {
         return extension.m_shadowDirectionalPageViewInfoBuffer;
     }
 
+    if (key.ToString() == "sarp.vsm.directional.page-view-info") return extension.m_shadowDirectionalPageViewInfoBuffer;
+
     if (key == Builtin::Shadows::CLodPageMetadata) {
         return extension.m_shadowPageMetadataBuffer;
     }
+
+    if (key.ToString() == "sarp.vsm.directional.page-metadata") return extension.m_shadowPageMetadataBuffer;
 
     if (key == Builtin::Shadows::CLodStats) {
         return extension.m_shadowStatsBuffer;
@@ -1392,6 +1407,13 @@ std::vector<ResourceIdentifier> CLodShadowVariant::GetSupportedKeys(const CLodEx
         Builtin::Shadows::CLodDirectionalPageViewInfo,
         Builtin::Shadows::CLodPageMetadata,
         Builtin::Shadows::CLodStats,
+        ResourceIdentifier{ "sarp.vsm.directional.page-table" },
+        ResourceIdentifier{ "sarp.vsm.directional.physical-pages" },
+        ResourceIdentifier{ "sarp.vsm.directional.clipmap-info" },
+        ResourceIdentifier{ "sarp.vsm.directional.main-camera" },
+        ResourceIdentifier{ "sarp.vsm.directional.shadow-cameras" },
+        ResourceIdentifier{ "sarp.vsm.directional.page-view-info" },
+        ResourceIdentifier{ "sarp.vsm.directional.page-metadata" },
     };
 }
 
@@ -1437,22 +1459,33 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         pageJobRecordCapacity,
         extension.m_shadowConfiguredPageJobMaxPages);
 
-    extension.m_shadowPageTableTexture = PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowPageTableDescription());
+    auto persistent = extension.m_options.persistentState;
+    if (persistent && persistent->directionalVsm.pageTable)
+        extension.m_shadowPageTableTexture = std::dynamic_pointer_cast<PixelBuffer>(persistent->directionalVsm.pageTable);
+    if (!extension.m_shadowPageTableTexture)
+        extension.m_shadowPageTableTexture = PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowPageTableDescription());
     extension.m_shadowPageTableTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Table"));
     extension.m_shadowPageTableTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_shadowPageTableTexture })
         .add<CLodVirtualShadowPageTableTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
-    extension.m_shadowPhysicalPagesTexture = PixelBuffer::CreateSharedUnmaterialized(
-        CreateVirtualShadowPhysicalPagesDescription(
-            extension.m_shadowConfiguredBackingResolution,
-            maxShadowPhysicalPageCount));
+    if (persistent && persistent->directionalVsm.physicalPages)
+        extension.m_shadowPhysicalPagesTexture = std::dynamic_pointer_cast<PixelBuffer>(persistent->directionalVsm.physicalPages);
+    if (!extension.m_shadowPhysicalPagesTexture)
+        extension.m_shadowPhysicalPagesTexture = PixelBuffer::CreateSharedUnmaterialized(
+            CreateVirtualShadowPhysicalPagesDescription(
+                extension.m_shadowConfiguredBackingResolution,
+                maxShadowPhysicalPageCount));
     extension.m_shadowPhysicalPagesTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Physical Pages"));
     extension.m_shadowPhysicalPagesTexture->GetECSEntity()
         .set<Components::Resource>({ extension.m_shadowPhysicalPagesTexture })
         .add<CLodVirtualShadowPhysicalPagesTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
+    if (persistent) {
+        persistent->directionalVsm.pageTable = extension.m_shadowPageTableTexture;
+        persistent->directionalVsm.physicalPages = extension.m_shadowPhysicalPagesTexture;
+    }
 
     extension.m_shadowStaticPhysicalPagesTexture =
         PixelBuffer::CreateSharedUnmaterialized(
@@ -1834,6 +1867,14 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         .set<Components::Resource>({ extension.m_shadowDirectionalPageViewInfoBuffer })
         .add<CLodVirtualShadowDirectionalPageViewInfoTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
+
+    if (persistent) {
+        persistent->directionalVsm.clipmapInfo = extension.m_shadowClipmapInfoBuffer;
+        persistent->directionalVsm.mainCamera = extension.m_shadowCompactMainCameraBuffer;
+        persistent->directionalVsm.shadowCameras = extension.m_shadowCompactShadowCameraBuffer;
+        persistent->directionalVsm.pageViewInfo = extension.m_shadowDirectionalPageViewInfoBuffer;
+        persistent->directionalVsm.pageMetadata = extension.m_shadowPageMetadataBuffer;
+    }
 
     extension.m_shadowRuntimeStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowRuntimeState), true, false, false);
     extension.m_shadowRuntimeStateBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Runtime State Buffer"));

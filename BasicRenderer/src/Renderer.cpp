@@ -2646,11 +2646,6 @@ void Renderer::CreateTextures() {
     ImageDimensions motionVectorsDims = { resolution.x, resolution.y, 0, 0 };
     motionVectors.imageDimensions.push_back(motionVectorsDims);
 	motionVectors.allowAlias = true;
-	auto motionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
-    motionVectorsBuffer->SetName("Motion Vectors");
-    rg::memory::SetResourceUsageHint(*motionVectorsBuffer, "GBuffer");
-	m_coreResourceProvider.m_gbufferMotionVectors = motionVectorsBuffer;
-
     auto dilatedMotionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
     dilatedMotionVectorsBuffer->SetName("Dilated Motion Vectors");
     rg::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
@@ -4821,6 +4816,7 @@ void Renderer::Cleanup() {
     // Cleanup tears down the device. Preserve the state container so a module
     // owner can replay CPU scene metadata, but discard all device-bound state.
     m_producerPersistentState->InvalidateTerrainRvt();
+    m_producerPersistentState->directionalVsm.InvalidateGpuState();
     m_producerPersistentState->virtualShadowCasters.reset();
     m_producerPersistentState->clodStreaming.reset();
     rg::runtime::SetActiveUploadService(nullptr);
@@ -5128,7 +5124,8 @@ void Renderer::RegisterPipelineExtensions() {
                         .enableVoxelRasterization = voxelRasterizationEnabled,
                         .voxelRasterWorkCapacity = voxelRasterWorkCapacity,
                         .streamingSystem = clodStreamingSystem,
-                        .virtualShadowCasters = virtualShadowCasters }),
+                        .virtualShadowCasters = virtualShadowCasters,
+                        .persistentState = m_producerPersistentState }),
                 extensionId);
         });
     // Recipe extensions may register resources consumed by technique extensions
@@ -5335,7 +5332,7 @@ void Renderer::CreateRenderGraph() {
             case ClusterLodShadow:
             case ClusterLodVoxel:
                 break; // These techniques own ordered graph extensions.
-            case GBufferResources: {
+            case CanonicalSurfaceResources: {
                 const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
                 TextureDescription desc;
                 desc.channels = 2;
@@ -5345,14 +5342,14 @@ void Renderer::CreateRenderGraph() {
                 desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
                 auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(desc);
                 visibilityBuffer->SetName("Visibility Buffer");
-                rg::memory::SetResourceUsageHint(*visibilityBuffer, "GBuffer");
+                rg::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
                 m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
-                CreateGBufferResources(newGraph.get());
+                CreateCanonicalSurfaceResources(newGraph.get());
                 CreateDebugVisualizationResources(newGraph.get());
                 if (m_visibilityRendering) {
                     newGraph->BuildRenderPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
-                    newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::GBuffer Construction");
+                    newGraph->SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::Canonical Surface Construction");
                 }
                 break;
             }
@@ -5371,11 +5368,6 @@ void Renderer::CreateRenderGraph() {
                 break;
             case MaterialEvaluation:
                 BuildMaterialEvaluationPipeline(newGraph.get(), m_producerServices, terrainRvtEnabled);
-                break;
-            case CanonicalSurfaceFinalization:
-                CreateCanonicalSurfaceResources(newGraph.get());
-                newGraph->BuildComputePass<CanonicalSurfaceFinalizePass>("CanonicalSurfaceFinalizePass", m_producerServices);
-                newGraph->SetPassTechnique("CanonicalSurfaceFinalizePass", "Geometry Material Producer::Surface Finalization");
                 break;
             case Gtao:
                 RegisterGTAOResources(newGraph.get());

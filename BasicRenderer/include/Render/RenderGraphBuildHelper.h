@@ -8,7 +8,6 @@
 #include "RenderPasses/PrimaryDepthCopyPass.h"
 #include "RenderPasses/VisUtil/BuildPixelListPass.h"
 #include "RenderPasses/VisUtil/EvaluateMaterialGroupsPass.h"
-#include "RenderPasses/VisUtil/CanonicalSurfaceFinalizePass.h"
 #include "RenderPasses/VisUtil/MaterialHistogramPass.h"
 #include "RenderPasses/VisUtil/MaterialPixelCounterResetPass.h"
 #include "RenderPasses/VisUtil/MaterialBlockScanPass.h"
@@ -37,111 +36,6 @@
 
 inline void TagPassTechnique(RenderGraph* graph, std::string_view passName, std::string_view techniquePath) {
     graph->SetPassTechnique(std::string(passName), std::string(techniquePath));
-}
-
-void CreateGBufferResources(RenderGraph* graph) {
-    // GBuffer resources
-	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-
-    TextureDescription normalsWorldSpaceDesc;
-    normalsWorldSpaceDesc.channels = 3;
-    normalsWorldSpaceDesc.format = rhi::Format::R32G32B32A32_Float;
-    normalsWorldSpaceDesc.hasRTV = true;
-	normalsWorldSpaceDesc.rtvFormat = rhi::Format::R32G32B32A32_Float;
-    normalsWorldSpaceDesc.hasSRV = true;
-    normalsWorldSpaceDesc.srvFormat = rhi::Format::R32G32B32A32_Float;
-    normalsWorldSpaceDesc.hasUAV = true;
-	normalsWorldSpaceDesc.hasNonShaderVisibleUAV = true;
-	normalsWorldSpaceDesc.uavFormat = rhi::Format::R32G32B32A32_Float;
-    normalsWorldSpaceDesc.allowAlias = true;
-    ImageDimensions dims = { resolution.x, resolution.y, 0, 0 };
-    normalsWorldSpaceDesc.imageDimensions.push_back(dims);
-    auto normalsWorldSpace = PixelBuffer::CreateSharedUnmaterialized(normalsWorldSpaceDesc);
-    normalsWorldSpace->SetName("Normals World Space");
-    rg::memory::SetResourceUsageHint(*normalsWorldSpace, "Visibility Buffer Resources");
-
-    graph->RegisterResource(Builtin::GBuffer::Normals, normalsWorldSpace);
-
-    std::shared_ptr<PixelBuffer> albedo;
-    std::shared_ptr<PixelBuffer> coat;
-    std::shared_ptr<PixelBuffer> fuzz;
-    std::shared_ptr<PixelBuffer> metallicRoughness;
-    std::shared_ptr<PixelBuffer> emissive;
-
-    TextureDescription albedoDesc;
-    albedoDesc.channels = 4;
-    albedoDesc.hasRTV = true;
-    albedoDesc.format = rhi::Format::R8G8B8A8_UNorm;
-    albedoDesc.hasSRV = true;
-	albedoDesc.hasUAV = true;
-    albedoDesc.hasNonShaderVisibleUAV = true;
-    ImageDimensions albedoDims = { resolution.x, resolution.y, 0, 0 };
-    albedoDesc.imageDimensions.push_back(albedoDims);
-    albedoDesc.allowAlias = true;
-    albedo = PixelBuffer::CreateSharedUnmaterialized(albedoDesc);
-    albedo->SetName("Albedo");
-    rg::memory::SetResourceUsageHint(*albedo, "GBuffer");
-    graph->RegisterResource(Builtin::GBuffer::Albedo, albedo);
-
-    TextureDescription coatDesc;
-    coatDesc.channels = 4;
-    coatDesc.hasRTV = true;
-    coatDesc.format = rhi::Format::R16G16B16A16_Float;
-    coatDesc.hasSRV = true;
-	coatDesc.hasUAV = true;
-    coatDesc.hasNonShaderVisibleUAV = true;
-    ImageDimensions coatDims = { resolution.x, resolution.y, 0, 0 };
-    coatDesc.imageDimensions.push_back(coatDims);
-    coatDesc.allowAlias = true;
-    coat = PixelBuffer::CreateSharedUnmaterialized(coatDesc);
-    coat->SetName("OpenPBR Coat");
-    rg::memory::SetResourceUsageHint(*coat, "GBuffer");
-    graph->RegisterResource(Builtin::GBuffer::Coat, coat);
-
-    TextureDescription fuzzDesc;
-    fuzzDesc.channels = 4;
-    fuzzDesc.hasRTV = true;
-    fuzzDesc.format = rhi::Format::R16G16B16A16_Float;
-    fuzzDesc.hasSRV = true;
-	fuzzDesc.hasUAV = true;
-    fuzzDesc.hasNonShaderVisibleUAV = true;
-    ImageDimensions fuzzDims = { resolution.x, resolution.y, 0, 0 };
-    fuzzDesc.imageDimensions.push_back(fuzzDims);
-    fuzzDesc.allowAlias = true;
-    fuzz = PixelBuffer::CreateSharedUnmaterialized(fuzzDesc);
-    fuzz->SetName("OpenPBR Fuzz");
-    rg::memory::SetResourceUsageHint(*fuzz, "GBuffer");
-    graph->RegisterResource(Builtin::GBuffer::Fuzz, fuzz);
-
-    TextureDescription metallicRoughnessDesc;
-    metallicRoughnessDesc.channels = 4;
-    metallicRoughnessDesc.hasRTV = true;
-    metallicRoughnessDesc.format = rhi::Format::R8G8B8A8_UNorm;
-    metallicRoughnessDesc.hasSRV = true;
-	metallicRoughnessDesc.hasUAV = true;
-	metallicRoughnessDesc.hasNonShaderVisibleUAV = true;
-	metallicRoughnessDesc.allowAlias = true;
-    ImageDimensions metallicRoughnessDims = { resolution.x, resolution.y, 0, 0 };
-    metallicRoughnessDesc.imageDimensions.push_back(metallicRoughnessDims);
-    metallicRoughness = PixelBuffer::CreateSharedUnmaterialized(metallicRoughnessDesc);
-    metallicRoughness->SetName("Metallic Roughness");
-    rg::memory::SetResourceUsageHint(*metallicRoughness, "GBuffer");
-    graph->RegisterResource(Builtin::GBuffer::MetallicRoughness, metallicRoughness);
-
-    TextureDescription emissiveDesc;
-    emissiveDesc.channels = 4;
-    emissiveDesc.hasRTV = true;
-    emissiveDesc.format = rhi::Format::R16G16B16A16_Float;
-    emissiveDesc.hasSRV = true;
-	emissiveDesc.hasUAV = true;
-	emissiveDesc.hasNonShaderVisibleUAV = true;
-	emissiveDesc.allowAlias = true;
-    ImageDimensions emissiveDims = { resolution.x, resolution.y, 0, 0 };
-    emissiveDesc.imageDimensions.push_back(emissiveDims);
-    emissive = PixelBuffer::CreateSharedUnmaterialized(emissiveDesc);
-    emissive->SetName("Emissive");
-    rg::memory::SetResourceUsageHint(*emissive, "GBuffer");
-    graph->RegisterResource(Builtin::GBuffer::Emissive, emissive);
 }
 
 void CreateDebugVisualizationResources(RenderGraph* graph) {
@@ -804,7 +698,7 @@ inline void BuildMaterialEvaluationPipeline(RenderGraph* graph, ProducerPassServ
     TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
 }
 
-void BuildGBufferPipeline(
+void BuildCanonicalSurfacePipeline(
     RenderGraph* graph,
     ProducerPassServices& services,
     bool visibilityMaterialBinning,

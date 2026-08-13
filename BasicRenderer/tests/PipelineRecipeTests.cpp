@@ -42,8 +42,8 @@ void TestSarpPreset()
         "SARP recipe must use the bounded default CLod voxel work capacity");
     Require(recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>(), "SARP recipe must include CLod alpha");
     Require(recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "SARP recipe must include CLod shadows");
-    Require(recipe.Contains<br::pipeline::CanonicalSurfaceFinalizationTechnique>(),
-        "SARP recipe must publish canonical surfaces");
+    Require(recipe.Contains<br::pipeline::CanonicalSurfaceResourcesTechnique>(),
+        "SARP recipe must publish canonical surfaces directly");
 
     recipe.Configure<br::pipeline::ClusterLodVoxelTechnique>({ .workRecordCapacity = 262144u });
     Require(recipe.Options<br::pipeline::ClusterLodVoxelTechnique>().workRecordCapacity == 262144u,
@@ -60,7 +60,7 @@ void TestGeometryMaterialProducerPreset()
     Require(recipe.Contains<br::pipeline::TerrainRvtTechnique>(), "producer must include RVT");
     Require(recipe.Contains<br::pipeline::ClusterLodShadowTechnique>(), "producer must include VSM caster rendering");
     Require(recipe.Contains<br::pipeline::MaterialEvaluationTechnique>(), "producer must evaluate materials");
-    Require(recipe.Contains<br::pipeline::CanonicalSurfaceFinalizationTechnique>(), "producer must finalize surfaces");
+    Require(recipe.Contains<br::pipeline::CanonicalSurfaceResourcesTechnique>(), "producer must publish canonical surfaces");
     Require(!recipe.Contains<br::pipeline::EnvironmentTechnique>(), "producer must omit environment processing");
     Require(!recipe.Contains<br::pipeline::GtaoTechnique>(), "producer must omit GTAO");
     Require(!recipe.Contains<br::pipeline::ClusteredLightingTechnique>(), "producer must omit light clustering");
@@ -102,8 +102,8 @@ void TestInvalidRecipes()
     Require(!incompatibleBinding.Validate().valid, "a binding missing required views must fail validation");
 
     auto invalidOrder = br::pipeline::MakeBasicRendererDemoPipeline();
-    invalidOrder.Remove<br::pipeline::GBufferResourcesTechnique>();
-    invalidOrder.Add<br::pipeline::GBufferResourcesTechnique>();
+    invalidOrder.Remove<br::pipeline::CanonicalSurfaceResourcesTechnique>();
+    invalidOrder.Add<br::pipeline::CanonicalSurfaceResourcesTechnique>();
     Require(!invalidOrder.Validate().valid, "technique dependency order must be validated");
 
     auto invalidVoxel = br::pipeline::MakeBasicRendererDemoPipeline();

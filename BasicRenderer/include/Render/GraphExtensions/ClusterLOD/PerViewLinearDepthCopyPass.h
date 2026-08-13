@@ -16,5 +16,6 @@ public:
 private:
     PipelineState m_pso;
     PixelBuffer* m_pProjectedDepthTexture = nullptr;
+    PixelBuffer* m_pCanonicalDeviceDepth = nullptr;
     bool m_writeProjectedDepth = true;
 };

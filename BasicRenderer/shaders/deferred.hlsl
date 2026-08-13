@@ -60,7 +60,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             hdrTarget[pixel] = float4(skyboxTexture.SampleLevel(g_linearClamp, worldDir, 0.0f).rgb, 1.0f);
 
             RWTexture2D<float2> motionVectors =
-                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::GBuffer::MotionVectors)];
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Motion)];
             motionVectors[pixel] = currentNdc - prevNdc;
         }
         return;

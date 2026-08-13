@@ -17,12 +17,13 @@ public:
 
 	void DeclareResourceUsages(RenderPassBuilder* builder) override {
 		builder->WithUnorderedAccessClear(Builtin::PrimaryCamera::VisibilityTexture,
-			Builtin::GBuffer::Albedo,
-			Builtin::GBuffer::Coat,
-			Builtin::GBuffer::Emissive,
-			Builtin::GBuffer::Fuzz,
-			Builtin::GBuffer::MetallicRoughness,
-			Builtin::GBuffer::Normals,
+			Builtin::Surface::BaseColorOpacity,
+			Builtin::Surface::NormalRoughness,
+			Builtin::Surface::SpecularAo,
+			Builtin::Surface::Emissive,
+			Builtin::Surface::Motion,
+			Builtin::Surface::Payload0,
+			Builtin::Surface::Payload1,
 			Builtin::Surface::Identity,
 			Builtin::DebugVisualization);
 		builder->WithDepthStencilClear(Builtin::PrimaryCamera::DepthTexture);
@@ -30,12 +31,13 @@ public:
 
 	void Setup() override {
 		m_visibilityBuffer = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::VisibilityTexture);
-		m_albedo = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Albedo);
-		m_coat = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Coat);
-		m_metallicRoughness = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::MetallicRoughness);
-		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Emissive);
-		m_fuzz = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Fuzz);
-		m_normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
+		m_baseColorOpacity = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::BaseColorOpacity);
+		m_normalRoughness = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::NormalRoughness);
+		m_specularAo = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::SpecularAo);
+		m_emissive = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Emissive);
+		m_motion = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Motion);
+		m_payload0 = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Payload0);
+		m_payload1 = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Payload1);
 		m_surfaceIdentity = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::Identity);
 		m_depthTexture = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::PrimaryCamera::DepthTexture);
 		m_debugVisualization = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::DebugVisualization);
@@ -97,15 +99,13 @@ public:
 			}
 			};
 
-		const bool diagnosticOutput = m_getOutputType() != OutputType::COLOR;
-		if (diagnosticOutput) {
-			clearResource(m_albedo);
-			clearResource(m_coat);
-			clearResource(m_metallicRoughness);
-			clearResource(m_emissive);
-			clearResource(m_fuzz);
-			clearResource(m_normals);
-		}
+		clearResource(m_baseColorOpacity);
+		clearResource(m_normalRoughness);
+		clearResource(m_specularAo);
+		clearResource(m_emissive);
+		clearResource(m_motion);
+		clearResource(m_payload0);
+		clearResource(m_payload1);
 		clearDepth(m_depthTexture); // same
 
 		// Clear debug visualization texture to sentinel (0xFFFFFFFF)
@@ -128,12 +128,13 @@ public:
 
 private:
 	GloballyIndexedResource* m_visibilityBuffer;
-	GloballyIndexedResource* m_albedo;
-	GloballyIndexedResource* m_coat;
-	GloballyIndexedResource* m_metallicRoughness;
+	GloballyIndexedResource* m_baseColorOpacity;
+	GloballyIndexedResource* m_normalRoughness;
+	GloballyIndexedResource* m_specularAo;
 	GloballyIndexedResource* m_emissive;
-	GloballyIndexedResource* m_fuzz;
-	GloballyIndexedResource* m_normals;
+	GloballyIndexedResource* m_motion;
+	GloballyIndexedResource* m_payload0;
+	GloballyIndexedResource* m_payload1;
 	GloballyIndexedResource* m_surfaceIdentity;
 	GloballyIndexedResource* m_depthTexture;
 	GloballyIndexedResource* m_debugVisualization;

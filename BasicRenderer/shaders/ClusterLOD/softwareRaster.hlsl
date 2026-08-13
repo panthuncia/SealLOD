@@ -49,7 +49,7 @@
 #define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
 #endif
 
-// Bit-packed position decode (mirrors mesh.hlsl / gbuffer.hlsl)
+// Bit-packed position decode (mirrors mesh.hlsl / canonicalSurface.hlsl)
 
 #ifndef CLOD_READ_PACKED_BITS32_DEFINED
 #define CLOD_READ_PACKED_BITS32_DEFINED 1

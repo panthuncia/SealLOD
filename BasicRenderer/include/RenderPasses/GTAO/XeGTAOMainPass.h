@@ -15,7 +15,7 @@ public:
     }
 
     void DeclareResourceUsages(ComputePassBuilder* builder) override {
-        builder->WithShaderResource(Builtin::GBuffer::Normals, Builtin::GTAO::WorkingDepths, Builtin::CameraBuffer)
+        builder->WithShaderResource(Builtin::Surface::NormalRoughness, Builtin::GTAO::WorkingDepths, Builtin::CameraBuffer)
             .WithUnorderedAccess(Builtin::GTAO::WorkingEdges, Builtin::GTAO::WorkingAOTerm1)
             .WithConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder->WithConstantBuffer(Builtin::PerFrameBuffer);
@@ -34,7 +34,7 @@ public:
         auto workingDepths = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingDepths);
         auto workingAOTerm = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingAOTerm1);
         auto workingEdges = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GTAO::WorkingEdges);
-        auto normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::GBuffer::Normals);
+        auto normals = m_resourceRegistryView->RequestPtr<GloballyIndexedResource>(Builtin::Surface::NormalRoughness);
 
 		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
 

@@ -48,7 +48,7 @@ public:
 			.WithShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, Mip{ 0, 1 }))
 			.WithUnorderedAccess(Builtin::Color::HDRColorTarget,
 				Builtin::DebugVisualization,
-				Builtin::GBuffer::MotionVectors);
+				Builtin::Surface::Motion);
 
 			if (getShadowsEnabled()) {
 				builder->WithShaderResource(Builtin::Shadows::CLodClipmapInfo,

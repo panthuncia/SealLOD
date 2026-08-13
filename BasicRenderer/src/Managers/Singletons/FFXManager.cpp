@@ -101,7 +101,7 @@ void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
 	sssrDesc.motionVectorScale = { -0.5f, 0.5f };
     sssrDesc.normalUnPackMul = 1.0f;
 	sssrDesc.normalUnPackAdd = 0.0f;
-	sssrDesc.roughnessChannel = 1; // metallic roughness texture, roughness is in channel 1
+    sssrDesc.roughnessChannel = 3; // canonical normal-roughness stores perceptual roughness in alpha
     sssrDesc.isRoughnessPerceptual = true;
 	sssrDesc.temporalStabilityFactor = 0.7f; // TODO: make everything below configurable
     sssrDesc.iblFactor = 1.0f;
