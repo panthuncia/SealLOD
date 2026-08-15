@@ -5151,6 +5151,7 @@ void Renderer::RegisterPipelineExtensions() {
 }
 
 void Renderer::CreateRenderGraph() {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph");
     if (!IsSceneReadyForFrame()) {
         rebuildRenderGraph = true;
         return;
@@ -5163,7 +5164,10 @@ void Renderer::CreateRenderGraph() {
         return;
     }
 
-    StallPipeline();
+    {
+        BT_ZONE_SCOPE("Renderer::CreateRenderGraph::StallPipeline");
+        StallPipeline();
+    }
 
     // Render-graph queue timelines are recreated below. Descriptor retirement
     // snapshots contain non-owning timeline handles, so consume all pending
@@ -5223,6 +5227,8 @@ void Renderer::CreateRenderGraph() {
         ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), phase);
     };
 
+    {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::ResetForRebuild");
     newGraph->ResetForRebuild();
     // CreateRenderGraph stalls every queue before teardown. ResetForRebuild
     // can retire another wave of resources/descriptors after the pre-reset
@@ -5238,8 +5244,11 @@ void Renderer::CreateRenderGraph() {
     // Otherwise two complete alias-pool generations overlap for the normal
     // frames-in-flight retirement delay and can exhaust VRAM.
     DeletionManager::GetInstance().DrainAll();
+    }
     probeGraphBuildPhase("CreateRenderGraph after ResetForRebuild");
 
+    {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::RegisterProvidersAndExtensions");
     newGraph->RegisterProvider(m_pMeshManager.get());
     newGraph->RegisterProvider(m_pObjectManager.get());
     newGraph->RegisterProvider(m_pViewManager.get());
@@ -5250,6 +5259,7 @@ void Renderer::CreateRenderGraph() {
 	newGraph->RegisterProvider(m_pSkeletonManager.get());
     newGraph->RegisterProvider(&m_coreResourceProvider);
     newGraph->PrepareExtensionsForBuild();
+    }
     probeGraphBuildPhase("CreateRenderGraph after PrepareExtensionsForBuild");
 
     auto& depth = primaryCameraEntity.get<Components::DepthMap>();
@@ -5452,9 +5462,12 @@ void Renderer::CreateRenderGraph() {
             }
         });
 
+    {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::BuildTechniques");
     for (const auto& entry : m_pipelineRecipe.Techniques()) {
         entry.technique->Build(buildContext);
         probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
+    }
     }
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");
@@ -5483,9 +5496,15 @@ void Renderer::CreateRenderGraph() {
 
     //newGraph->SetMinimumAutomaticSchedulingQueues(QueueKind::Compute, 3);
 
+    {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::CompileStructural");
     newGraph->CompileStructural();
+    }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
+    {
+    BT_ZONE_SCOPE("Renderer::CreateRenderGraph::Setup");
     newGraph->Setup();
+    }
     probeGraphBuildPhase("CreateRenderGraph after Setup");
 
 	rebuildRenderGraph = false;
