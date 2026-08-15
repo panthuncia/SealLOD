@@ -1361,6 +1361,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 
 void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<StaticMeshTemplateRequest>& requests) {
 	ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
+	BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync");
 	ZoneValue(static_cast<int64_t>(requests.size()));
 	if (requests.empty()) {
 		return;
@@ -1388,6 +1389,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 
 	{
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::MeasureResources");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::MeasureResources");
 		for (const auto& request : requests) {
 			const auto& mesh = request.mesh;
 			if (!mesh) {
@@ -1427,9 +1429,11 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 
 	if (!meshesToPrepare.empty()) {
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareMappedContainers");
 		std::vector<std::pair<Mesh*, PreparedCLodContainer>> preparedContainers;
 		preparedContainers.reserve(meshesToPrepare.size());
 		for (const auto& mesh : meshesToPrepare) {
+			BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PrepareOneMappedContainer");
 			const auto& pageDiskLocators = mesh->GetCLodPageDiskLocators();
 			if (pageDiskLocators.empty() ||
 				!mesh->HasCLodDiskStreamingSource() ||
@@ -1446,6 +1450,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			std::shared_ptr<const CLodCache::MappedContainerLease> lease;
 			{
 				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
+				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::ResolveContainerPath");
 				resolvedPath = CLodCache::ResolveContainerPath(cacheSource);
 			}
 			if (resolvedPath.empty()) {
@@ -1453,6 +1458,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 			}
 			{
 				ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
+				BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::AcquireMappedContainer");
 				CLodCache::AcquireMappedContainer(
 					resolvedPath,
 					static_cast<uint32_t>(pageDiskLocators.size()),
@@ -1473,6 +1479,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 		}
 		{
 			ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PublishMappedContainers");
+			BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::PublishMappedContainers");
 			std::lock_guard preparedLock(m_preparedCLodContainersMutex);
 			for (auto it = m_preparedCLodContainers.begin(); it != m_preparedCLodContainers.end();) {
 				if (it->second.mesh.expired()) {
@@ -1492,6 +1499,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 
 	if (meshRowsToAdd != 0) {
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestMeshResizes");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestMeshResizes");
 		m_perMeshBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(meshRowsToAdd * sizeof(PerMeshCB), 512ull * 1024ull));
 		m_clusterLODGroups->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodGroupsBytes, 2ull * 1024ull * 1024ull));
 		m_clusterLODSegments->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodSegmentsBytes, 512ull * 1024ull));
@@ -1509,6 +1517,7 @@ void MeshManager::PrepareStaticMeshTemplateResourcesAsync(const std::vector<Stat
 	}
 	if (templateRowsToAdd != 0) {
 		ZoneScopedN("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestTemplateResizes");
+		BASIC_TELEMETRY_SCOPE("MeshManager::PrepareStaticMeshTemplateResourcesAsync::RequestTemplateResizes");
 		m_perMeshInstanceBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(PerMeshInstanceCB), 256ull * 1024ull));
 		m_perMeshInstanceClodOffsets->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(MeshInstanceClodOffsets), 256ull * 1024ull));
 	}

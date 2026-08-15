@@ -138,19 +138,29 @@ std::filesystem::path RemapBuildOutputAssetPath(const std::filesystem::path& can
 
 std::filesystem::path GetCacheRootPath()
 {
-	const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
-	if (envLength > 1) {
-		std::vector<char> envRoot(envLength);
-		if (::GetEnvironmentVariableA("SARP_CACHE_ROOT", envRoot.data(), envLength) != 0 && envRoot.front() != '\0') {
-			return std::filesystem::path(envRoot.data());
+	// Cache root selection is process-wide configuration. Resolving the module
+	// path and querying the environment for every artifact was a substantial
+	// source of contention during parallel scene preparation.
+	static const std::filesystem::path cacheRoot = [] {
+		const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
+		if (envLength > 1) {
+			std::vector<char> envRoot(envLength);
+			if (::GetEnvironmentVariableA("SARP_CACHE_ROOT", envRoot.data(), envLength) != 0 && envRoot.front() != '\0') {
+				return std::filesystem::path(envRoot.data());
+			}
 		}
-	}
 
-	if (auto executableDirectory = GetExecutableDirectory()) {
-		return *executableDirectory / L"cache";
-	}
+		if (auto executableDirectory = GetExecutableDirectory()) {
+			return *executableDirectory / L"cache";
+		}
 
-	return std::filesystem::current_path() / L"cache";
+		return std::filesystem::current_path() / L"cache";
+	}();
+	return cacheRoot;
+}
+
+std::wstring BuildCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
+	return (GetCacheRootPath() / directory / fileName).wstring();
 }
 
 std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
@@ -170,8 +180,7 @@ std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& 
 		}
 	}
 
-	std::filesystem::path filePath = cacheDir / fileName;
-	return filePath.wstring();
+	return (cacheDir / fileName).wstring();
 }
 
 std::string NormalizeCacheSourcePath(const std::string& path) {

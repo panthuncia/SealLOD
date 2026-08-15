@@ -321,6 +321,11 @@ namespace CLodCache {
 			return GetCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
 		}
 
+		std::wstring BuildCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
+		{
+			return BuildCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
+		}
+
 		template<typename T>
 		void WritePod(std::vector<std::byte>& out, const T& value)
 		{
@@ -1190,17 +1195,10 @@ namespace CLodCache {
 			return {};
 		}
 
-		CacheKey key{};
-		key.sourceIdentifier = cacheSource.sourceIdentifier;
-		key.primPath = cacheSource.primPath;
-		key.subsetName = cacheSource.subsetName;
-		if (!key.sourceIdentifier.empty() && !key.primPath.empty() && cacheSource.buildConfigHash != 0) {
-			const CacheLookup lookup = BuildCacheLookup(key, cacheSource.buildConfigHash);
-			if (lookup.containerFileName == cacheSource.containerFileName) {
-				return lookup.containerPath;
-			}
-		}
-		return GetCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
+		// The serialized filename is the authoritative locator. Rebuilding the
+		// metadata and container identities here duplicated hashing/formatting and
+		// entered the write-side directory creation lock for every mesh.
+		return BuildCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
 	}
 
 	bool LoadMeshPagesSelective(std::ifstream& file,
