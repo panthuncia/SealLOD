@@ -151,20 +151,46 @@ namespace CLodCache {
 		static std::unordered_map<
 			std::wstring,
 			std::weak_ptr<const MappedContainerLease>> cache;
+		static std::unordered_map<std::wstring, std::shared_ptr<std::mutex>> pathMutexes;
 		std::unique_lock<std::mutex> lock(cacheMutex, std::defer_lock);
+		std::shared_ptr<std::mutex> pathMutex;
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitCacheMutex");
 			lock.lock();
+			auto& entry = pathMutexes[containerPath];
+			if (!entry) {
+				entry = std::make_shared<std::mutex>();
+			}
+			pathMutex = entry;
 		}
-		if (auto existing = cache[containerPath].lock()) {
+		if (auto it = cache.find(containerPath); it != cache.end()) {
 			ZoneScopedN("CLodCache::AcquireMappedContainer::CacheHit");
-			if (existing->GetPageCount() == expectedPageCount) {
+			if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
 				outLease = std::move(existing);
 				return true;
 			}
-			cache.erase(containerPath);
+			cache.erase(it);
 		}
 		lock.unlock();
+
+		// Only one worker may populate a particular container. Different container
+		// paths still open and map concurrently.
+		std::unique_lock<std::mutex> pathLock(*pathMutex, std::defer_lock);
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitPathMutex");
+			pathLock.lock();
+		}
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::RecheckCache");
+			std::lock_guard cacheLock(cacheMutex);
+			if (auto it = cache.find(containerPath); it != cache.end()) {
+				if (auto existing = it->second.lock(); existing && existing->GetPageCount() == expectedPageCount) {
+					outLease = std::move(existing);
+					return true;
+				}
+				cache.erase(it);
+			}
+		}
 
 		auto impl = std::make_shared<MappedContainerLease::Impl>();
 		{
@@ -187,6 +213,29 @@ namespace CLodCache {
 			return false;
 		}
 		impl->fileSize = static_cast<uint64_t>(fileSize.QuadPart);
+		struct Header {
+			uint32_t magic;
+			uint32_t version;
+			uint32_t reserved;
+			uint32_t pageCount;
+		};
+		Header header{};
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::ReadHeader");
+			DWORD bytesRead = 0;
+			if (!ReadFile(impl->fileHandle, &header, sizeof(header), &bytesRead, nullptr) ||
+				bytesRead != sizeof(header)) {
+				return false;
+			}
+		}
+		{
+			ZoneScopedN("CLodCache::AcquireMappedContainer::ValidateHeader");
+			if (header.magic != 0x444F4C43u ||
+				header.version != 4u ||
+				header.pageCount != expectedPageCount) {
+				return false;
+			}
+		}
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::CreateFileMapping");
 			impl->mappingHandle = CreateFileMappingW(
@@ -201,22 +250,6 @@ namespace CLodCache {
 				MapViewOfFile(impl->mappingHandle, FILE_MAP_READ, 0, 0, 0));
 		}
 		if (impl->data == nullptr) {
-			return false;
-		}
-		struct Header {
-			uint32_t magic;
-			uint32_t version;
-			uint32_t reserved;
-			uint32_t pageCount;
-		};
-		Header header{};
-		{
-			ZoneScopedN("CLodCache::AcquireMappedContainer::ValidateHeader");
-			std::memcpy(&header, impl->data, sizeof(header));
-		}
-		if (header.magic != 0x444F4C43u ||
-			header.version != 4u ||
-			header.pageCount != expectedPageCount) {
 			return false;
 		}
 		impl->pageCount = header.pageCount;
