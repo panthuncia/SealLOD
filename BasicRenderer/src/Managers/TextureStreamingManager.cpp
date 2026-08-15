@@ -1325,6 +1325,11 @@ void TextureStreamingManager::ProcessPendingTextureUpdates(uint64_t frameIndex, 
 		}
 		if (texture->HasPendingUploadWork()) {
 			++uploadAdvanceStillPending;
+			// Async processing/reload/DirectStorage work commonly spans multiple
+			// frames. Keep polling it until the replacement image is adopted;
+			// otherwise a one-frame miss strands the old (often full-resolution)
+			// image indefinitely even though a coarser mip was requested.
+			deferredTextureIDs.push_back(streamingTextureID);
 			const auto pending = texture->GetPendingDebugInfo();
 			if (!pending.hasUsableImage) {
 				++pendingNoUsableImage;

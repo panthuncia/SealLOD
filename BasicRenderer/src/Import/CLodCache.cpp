@@ -21,6 +21,7 @@
 #include <string_view>
 
 #include <boost/container_hash/hash.hpp>
+#include <BasicTelemetry/Telemetry.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -140,6 +141,7 @@ namespace CLodCache {
 		uint32_t expectedPageCount,
 		std::shared_ptr<const MappedContainerLease>& outLease) {
 		ZoneScopedN("CLodCache::AcquireMappedContainer");
+		BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer");
 		ZoneValue(static_cast<int64_t>(expectedPageCount));
 		outLease.reset();
 #ifndef _WIN32
@@ -156,6 +158,7 @@ namespace CLodCache {
 		std::shared_ptr<std::mutex> pathMutex;
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitCacheMutex");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::WaitCacheMutex");
 			lock.lock();
 			auto& entry = pathMutexes[containerPath];
 			if (!entry) {
@@ -178,6 +181,7 @@ namespace CLodCache {
 		std::unique_lock<std::mutex> pathLock(*pathMutex, std::defer_lock);
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::WaitPathMutex");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::WaitPathMutex");
 			pathLock.lock();
 		}
 		{
@@ -195,6 +199,7 @@ namespace CLodCache {
 		auto impl = std::make_shared<MappedContainerLease::Impl>();
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::OpenFile");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::OpenFile");
 			impl->fileHandle = CreateFileW(
 				containerPath.c_str(),
 				GENERIC_READ,
@@ -213,31 +218,9 @@ namespace CLodCache {
 			return false;
 		}
 		impl->fileSize = static_cast<uint64_t>(fileSize.QuadPart);
-		struct Header {
-			uint32_t magic;
-			uint32_t version;
-			uint32_t reserved;
-			uint32_t pageCount;
-		};
-		Header header{};
-		{
-			ZoneScopedN("CLodCache::AcquireMappedContainer::ReadHeader");
-			DWORD bytesRead = 0;
-			if (!ReadFile(impl->fileHandle, &header, sizeof(header), &bytesRead, nullptr) ||
-				bytesRead != sizeof(header)) {
-				return false;
-			}
-		}
-		{
-			ZoneScopedN("CLodCache::AcquireMappedContainer::ValidateHeader");
-			if (header.magic != 0x444F4C43u ||
-				header.version != 4u ||
-				header.pageCount != expectedPageCount) {
-				return false;
-			}
-		}
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::CreateFileMapping");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::CreateFileMapping");
 			impl->mappingHandle = CreateFileMappingW(
 				impl->fileHandle, nullptr, PAGE_READONLY, 0, 0, nullptr);
 		}
@@ -246,13 +229,18 @@ namespace CLodCache {
 		}
 		{
 			ZoneScopedN("CLodCache::AcquireMappedContainer::MapView");
+			BASIC_TELEMETRY_SCOPE("CLodCache::AcquireMappedContainer::MapView");
 			impl->data = static_cast<const std::byte*>(
 				MapViewOfFile(impl->mappingHandle, FILE_MAP_READ, 0, 0, 0));
 		}
 		if (impl->data == nullptr) {
 			return false;
 		}
-		impl->pageCount = header.pageCount;
+		// The companion metadata was schema-validated when the mesh cache was
+		// loaded and owns the page locators/count. Avoid faulting the first page of
+		// every one of thousands of containers merely to re-read those fields.
+		// GetBlob still validates every locator against the mapped file size.
+		impl->pageCount = expectedPageCount;
 		auto lease = std::shared_ptr<const MappedContainerLease>(
 			new MappedContainerLease(std::move(impl)));
 		{
