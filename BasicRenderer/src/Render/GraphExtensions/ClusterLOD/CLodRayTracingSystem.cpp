@@ -47,7 +47,7 @@ uint64_t AlignUp(uint64_t value, uint64_t alignment) noexcept
 void SetBufferNameAndUsage(const std::shared_ptr<Buffer>& buffer, const char* name, std::string_view usage)
 {
     buffer->SetName(name);
-    rg::memory::SetResourceUsageHint(*buffer, std::string(usage));
+    org::memory::SetResourceUsageHint(*buffer, std::string(usage));
 }
 
 } // namespace
@@ -372,7 +372,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
     BUFFER_UPLOAD(
         m_gpuPageSources.data(),
         static_cast<uint32_t>(m_gpuPageSources.size() * sizeof(GpuPageSource)),
-        rg::runtime::UploadTarget::FromShared(m_pageSourceBuffer),
+        org::runtime::UploadTarget::FromShared(m_pageSourceBuffer),
         0);
 
     m_clasAddressBuffer->Materialize();
@@ -461,7 +461,7 @@ void CLodRayTracingSystem::UpdateGpuResources(rhi::Device device, const RayTraci
     BUFFER_UPLOAD(
         &aggregateBlasInfo,
         sizeof(aggregateBlasInfo),
-        rg::runtime::UploadTarget::FromShared(m_blasBuildInfoBuffer),
+        org::runtime::UploadTarget::FromShared(m_blasBuildInfoBuffer),
         0);
 
     m_stats.gpuResourcesReady = true;
@@ -700,7 +700,7 @@ void CLodRayTracingSystem::EnsureRayTracingPipeline(rhi::Device device, const Ra
     BUFFER_UPLOAD(
         shaderTable.data(),
         static_cast<uint32_t>(shaderTable.size()),
-        rg::runtime::UploadTarget::FromShared(m_shaderTableBuffer),
+        org::runtime::UploadTarget::FromShared(m_shaderTableBuffer),
         0);
 
     m_stats.rayPipelineReady = true;

@@ -8,7 +8,7 @@ std::unordered_map<rhi::SamplerDesc, std::shared_ptr<Sampler>, rhi::SamplerDescH
 Sampler::Sampler(rhi::SamplerDesc samplerDesc, bool createDescriptor)
 	: m_index(0), m_hasDescriptorIndex(false), m_samplerDesc(samplerDesc) {
 	if (createDescriptor) {
-		m_index = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
+		m_index = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
 		m_hasDescriptorIndex = true;
 	}
 }
@@ -26,7 +26,7 @@ std::shared_ptr<Sampler> Sampler::CreateCpuOnlySampler(rhi::SamplerDesc samplerD
 }
 
 bool Sampler::CanCreateDescriptorSamplers() {
-	return rg::runtime::GetActiveDescriptorService() != nullptr;
+	return org::runtime::GetActiveDescriptorService() != nullptr;
 }
 
 UINT Sampler::GetDescriptorIndex() const {
@@ -36,7 +36,7 @@ UINT Sampler::GetDescriptorIndex() const {
 
 	std::lock_guard<std::mutex> lock(m_descriptorMutex);
 	if (!m_hasDescriptorIndex.load(std::memory_order_relaxed)) {
-		m_index = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
+		m_index = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(m_samplerDesc);
 		m_hasDescriptorIndex.store(true, std::memory_order_release);
 	}
 	return m_index;

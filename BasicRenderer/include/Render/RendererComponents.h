@@ -11,7 +11,8 @@
 #include "Resources/Buffers/BufferView.h"
 #include "ShaderBuffers.h"
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 namespace Components {
 

@@ -56,7 +56,7 @@ public:
 		// Reset and get the appropriate command list
 		auto& commandList = executionContext.commandList;
 
-		auto counterReset = ResourceManager::GetInstance().GetUAVCounterReset();
+		auto counterReset = ::ResourceManager::GetInstance().GetUAVCounterReset();
 
 		// Opaque buffer
 		for (auto& res : m_nonBlendIndirectCommandBuffers) {

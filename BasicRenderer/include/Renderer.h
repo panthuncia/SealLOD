@@ -52,13 +52,14 @@
 #include "Render/ProducerPersistentState.h"
 
 class DynamicResource;
-class ExternalTextureResource;
+namespace org { class ExternalTextureResource; }
+using org::ExternalTextureResource;
 class CLodStreamingSystem;
 class VirtualShadowCasterRegistry;
 
 using namespace Microsoft::WRL;
 
-namespace rg::runtime {
+namespace org::runtime {
 class IUploadPolicyService;
 }
 
@@ -411,7 +412,7 @@ private:
     std::unordered_set<uint64_t> m_externalRegisteredMeshes;
     std::unordered_set<uint64_t> m_externalRegisteredMeshInstances;
 
-    std::shared_ptr<rg::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
+    std::shared_ptr<org::runtime::IUploadPolicyService> m_uploadPolicyService = nullptr;
     uint64_t m_lastCLodVisibilityTelemetryRequestFrame = UINT64_MAX;
     bool m_clodTelemetryReadbackPending = false;
     bool m_clodVisibleCounterReadbackPending = false;

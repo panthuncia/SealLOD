@@ -23,7 +23,8 @@
 #include "Resources/ResourceIdentifier.h"
 #include "Resources/PixelBuffer.h"
 
-class RenderGraph;
+namespace org { class RenderGraph; }
+using org::RenderGraph;
 
 namespace br::pipeline {
 

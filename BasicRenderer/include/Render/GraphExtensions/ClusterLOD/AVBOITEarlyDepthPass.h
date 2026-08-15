@@ -5,8 +5,10 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "RenderPasses/Base/RenderPass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class AVBOITEarlyDepthPass final : public RenderPass {
 public:

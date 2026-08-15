@@ -8,7 +8,8 @@
 #include "ThirdParty/FFX/ffx_upscale.hpp"
 #include "ThirdParty/FFX/host/ffx_sssr.h"
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 namespace fidelityfx_backend::api {
 bool LoadModule(rhi::Backend backend);

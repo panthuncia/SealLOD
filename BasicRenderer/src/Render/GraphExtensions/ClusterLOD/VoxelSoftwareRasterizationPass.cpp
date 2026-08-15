@@ -232,7 +232,7 @@ void VoxelSoftwareRasterizationPass::Update(const UpdateExecutionContext& execut
     BUFFER_UPLOAD(
         viewRasterInfo.data(),
         static_cast<uint32_t>(viewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-        rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+        org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
         0);
 
     m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);

@@ -26,9 +26,12 @@ class Skeleton;
 class SkeletonManager;
 class MeshInstance;
 class Material;
-class DynamicBuffer;
-class ResourceGroup;
-class BufferView;
+namespace org { class DynamicBuffer; }
+using org::DynamicBuffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
+namespace org { class BufferView; }
+using org::BufferView;
 class ViewManager;
 
 class MeshManager : public IResourceProvider {

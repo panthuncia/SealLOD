@@ -7,8 +7,10 @@
 #include "Scene/Components.h"
 #include "Materials/TechniqueDescriptor.h"
 
-class DynamicGloballyIndexedResource;
-class ResourceGroup;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 class ObjectManager;
 class SortedUnsignedIntBuffer;
 

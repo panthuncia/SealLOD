@@ -4,7 +4,8 @@
 
 #include "RenderPasses/Base/CopyPass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class ReyesCopyCounterPass final : public CopyPass, public IHasImmediateModeCommands {
 public:

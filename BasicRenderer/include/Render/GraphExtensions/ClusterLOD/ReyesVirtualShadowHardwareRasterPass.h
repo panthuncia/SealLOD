@@ -10,9 +10,12 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/RenderPass.h"
 
-class Buffer;
-class PixelBuffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class ReyesVirtualShadowHardwareRasterPass final : public RenderPass, public IDynamicDeclaredResources {
 public:

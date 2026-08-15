@@ -18,8 +18,10 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 #include "../../../../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class ClusterSoftwareRasterPageJobRasterPass : public ComputePass {
 public:

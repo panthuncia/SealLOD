@@ -69,7 +69,7 @@ public:
         
         // Rest will be filled in by the luminanceHistogramAverage shader
 
-        BUFFER_UPLOAD(&lpmConstants, sizeof(LPMConstants), rg::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
+        BUFFER_UPLOAD(&lpmConstants, sizeof(LPMConstants), org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
     }
 
 	PassReturn Execute(PassExecutionContext& executionContext) override {

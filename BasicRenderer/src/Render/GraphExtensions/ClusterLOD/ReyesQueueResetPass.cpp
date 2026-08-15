@@ -167,7 +167,7 @@ void ReyesQueueResetPass::Update(const UpdateExecutionContext& executionContext)
     telemetry.objectReyesAtlasDebugMinPatchUvYU16 = 0xFFFFFFFFu;
     telemetry.objectReyesAtlasDebugMinPageUvSetCount = 0xFFFFFFFFu;
     telemetry.objectReyesAtlasDebugMinHeightUvSetIndex = 0xFFFFFFFFu;
-    BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), rg::runtime::UploadTarget::FromShared(m_telemetryBuffer), 0);
+    BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), org::runtime::UploadTarget::FromShared(m_telemetryBuffer), 0);
 }
 
 void ReyesQueueResetPass::Cleanup() {}

@@ -234,7 +234,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
                 false,
                 true);
             m_dynamicWindBoundsCacheBuffer->SetName("CLod DynamicWind Meshlet Bounds Cache");
-            rg::memory::SetResourceUsageHint(*m_dynamicWindBoundsCacheBuffer, "DynamicWind VSM bounds cache");
+            org::memory::SetResourceUsageHint(*m_dynamicWindBoundsCacheBuffer, "DynamicWind VSM bounds cache");
         }
     }
 
@@ -247,7 +247,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
             false,
             false);
         m_workGraphComputePageJobDescriptorsBuffer->SetName("CLod Pure Compute Page Job Descriptors");
-        rg::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD pure compute");
+        org::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD pure compute");
     }
 
     if (m_voxelRasterWorkCapacity != 0u) {
@@ -259,7 +259,7 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
             false,
             false);
         m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Pure Compute Voxel Raster Queue Descriptors");
-        rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
+        org::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
     }
 
     const uint32_t frontierCapacity = std::max(1u, m_maxVisibleClusters);
@@ -273,43 +273,43 @@ HierarchicalDispatchCullingPass::HierarchicalDispatchCullingPass(
         static_cast<double>(clusterFrontierBytes) / (1024.0 * 1024.0));
     m_pureComputeCurrentNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeCurrentNodeFrontierBuffer->SetName("CLod Pure Compute Current Node Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeNextNodeFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeNextNodeFrontierBuffer->SetName("CLod Pure Compute Next Node Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextNodeFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeCurrentLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeCurrentLeafFrontierBuffer->SetName("CLod Pure Compute Current Leaf Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeNextLeafFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeNodeFrontierStrideBytes, true, false, false, true);
     m_pureComputeNextLeafFrontierBuffer->SetName("CLod Pure Compute Next Leaf Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextLeafFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeClusterFrontierBuffer = CreateAliasedUnmaterializedStructuredBuffer(frontierCapacity, CLodPureComputeClusterFrontierStrideBytes, true, false, false, true);
     m_pureComputeClusterFrontierBuffer->SetName("CLod Pure Compute Cluster Frontier");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterFrontierBuffer, "Cluster LOD pure compute frontiers");
     m_pureComputeCurrentNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeCurrentNodeCounterBuffer->SetName("CLod Pure Compute Current Node Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentNodeCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNextNodeCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeNextNodeCounterBuffer->SetName("CLod Pure Compute Next Node Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextNodeCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextNodeCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeCurrentLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeCurrentLeafCounterBuffer->SetName("CLod Pure Compute Current Leaf Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeCurrentLeafCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNextLeafCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeNextLeafCounterBuffer->SetName("CLod Pure Compute Next Leaf Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNextLeafCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeNextLeafCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(uint32_t), true, false, false, false);
     m_pureComputeClusterCounterBuffer->SetName("CLod Pure Compute Cluster Counter");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterCounterBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterCounterBuffer, "Cluster LOD pure compute");
     m_pureComputeNodeDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeNodeDispatchArgsBuffer->SetName("CLod Pure Compute Node Dispatch Args");
-    rg::memory::SetResourceUsageHint(*m_pureComputeNodeDispatchArgsBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeNodeDispatchArgsBuffer, "Cluster LOD pure compute");
     m_pureComputeLeafDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeLeafDispatchArgsBuffer->SetName("CLod Pure Compute Leaf Dispatch Args");
-    rg::memory::SetResourceUsageHint(*m_pureComputeLeafDispatchArgsBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeLeafDispatchArgsBuffer, "Cluster LOD pure compute");
     m_pureComputeClusterDispatchArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1u, sizeof(PureComputeDispatchCommand), true, false, false, false);
     m_pureComputeClusterDispatchArgsBuffer->SetName("CLod Pure Compute Cluster Dispatch Args");
-    rg::memory::SetResourceUsageHint(*m_pureComputeClusterDispatchArgsBuffer, "Cluster LOD pure compute");
+    org::memory::SetResourceUsageHint(*m_pureComputeClusterDispatchArgsBuffer, "Cluster LOD pure compute");
 
     const bool enableSharedSWClassificationPath =
         UsesSWClassification(m_workGraphMode) || m_workGraphComputePageJobDescriptorsBuffer != nullptr;
@@ -1536,12 +1536,12 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
     uint32_t zero = 0u;
     {
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadCounterResets");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
         if (m_swVisibleClustersCounterBuffer) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
+            BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
         }
         if (m_pageJobVisibleClustersCounterBuffer) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pageJobVisibleClustersCounterBuffer), 0);
+            BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pageJobVisibleClustersCounterBuffer), 0);
         }
     }
 
@@ -1566,11 +1566,11 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
 
     {
         ZoneScopedN("HierarchicalDispatchCullingPass::UploadPureComputeCounterResets");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeCurrentNodeCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeNextNodeCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeCurrentLeafCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeNextLeafCounterBuffer), 0);
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_pureComputeClusterCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeCurrentNodeCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeNextNodeCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeCurrentLeafCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeNextLeafCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_pureComputeClusterCounterBuffer), 0);
     }
 
     bool rebuildViewTables = false;
@@ -1636,7 +1636,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             BUFFER_UPLOAD(
                 m_cachedViewRasterInfo.data(),
                 static_cast<uint32_t>(m_cachedViewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-                rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+                org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
                 0);
         }
     }
@@ -1656,7 +1656,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
                 BUFFER_UPLOAD(
                     &pageJobDescriptors,
                     sizeof(CLodWorkGraphComputePageJobDescriptors),
-                    rg::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
+                    org::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
                     0);
             }
         }
@@ -1674,7 +1674,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
                 BUFFER_UPLOAD(
                     &voxelQueueDescriptors,
                     sizeof(CLodVoxelRasterQueueDescriptors),
-                    rg::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
+                    org::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
                     0);
             }
         }
@@ -1729,7 +1729,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
             BUFFER_UPLOAD(
                 m_cachedViewDepthSrvIndices.data(),
                 static_cast<uint32_t>(m_cachedViewDepthSrvIndices.size() * sizeof(CLodViewDepthSRVIndex)),
-                rg::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
+                org::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
                 0);
         }
     }
@@ -1752,7 +1752,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         BUFFER_UPLOAD(
             &replayState,
             sizeof(CLodReplayBufferState),
-            rg::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
+            org::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
             0);
     }
 
@@ -1762,7 +1762,7 @@ void HierarchicalDispatchCullingPass::Update(const UpdateExecutionContext& execu
         BUFFER_UPLOAD(
             m_zeroTelemetryScratch.data(),
             static_cast<uint32_t>(m_zeroTelemetryScratch.size() * sizeof(uint32_t)),
-            rg::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
+            org::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
             0);
     }
 }

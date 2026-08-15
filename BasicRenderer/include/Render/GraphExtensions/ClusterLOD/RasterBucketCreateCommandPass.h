@@ -4,7 +4,8 @@
 
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class RasterBucketCreateCommandPass : public ComputePass {
 public:

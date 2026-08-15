@@ -7,7 +7,8 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class CLodStreamingFeedbackSortPass final : public ComputePass {
 public:

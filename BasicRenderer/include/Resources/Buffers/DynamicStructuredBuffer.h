@@ -232,7 +232,7 @@ public:
 private:
     DynamicStructuredBuffer(UINT capacity = 64, std::string bufName = "", bool UAV = false)
         : m_capacity(capacity), m_UAV(UAV), m_needsUpdate(false) {
-		SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+		SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 		name = bufName;
         CreateBuffer(capacity);
         RegisterDeferredBackingResizeClient(this);
@@ -248,7 +248,7 @@ private:
         std::scoped_lock lock(m_mutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
-            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 const auto byteSize = m_data.size() * sizeof(T);
                 if (offset + size > byteSize) {
@@ -374,20 +374,20 @@ private:
             return;
         }
 
-        rg::runtime::UploadPolicyConfig config{};
+        org::runtime::UploadPolicyConfig config{};
         config.tag = tag;
         m_uploadPolicyState.SetPolicy(config, GetBufferSize());
     }
 
     void StageOrUpload(const void* data, size_t size, size_t offset) {
-        if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+        if (org::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
 #else
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
 #endif
-            BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+            BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
             return;
         }
 
@@ -404,7 +404,7 @@ private:
             return;
         }
 
-        BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+        BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
     }
 
     void AssignDescriptorSlots(uint32_t capacity)
@@ -493,8 +493,8 @@ private:
         if (replayElements > 0u) {
             SyncUploadPolicyState();
             const size_t replayBytes = replayElements * sizeof(T);
-            if (rg::runtime::GetActiveUploadService() != nullptr) {
-                BUFFER_UPLOAD(m_data.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+            if (org::runtime::GetActiveUploadService() != nullptr) {
+                BUFFER_UPLOAD(m_data.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
                 spdlog::debug(
                     "DynamicStructuredBuffer '{}' id={} GrowBuffer replayed CPU rows={} bytes={}",
                     name,
@@ -524,7 +524,7 @@ private:
         ApplyMetadataToBacking(bundle);
     }
 
-    rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
     AsyncBufferBackingResizeState m_asyncResizeState;
     uint32_t m_pendingResizeCapacity = 0u;
     bool m_pendingResizeValid = false;

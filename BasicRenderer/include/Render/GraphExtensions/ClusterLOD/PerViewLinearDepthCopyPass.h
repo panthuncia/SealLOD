@@ -2,7 +2,8 @@
 
 #include "RenderPasses/Base/ComputePass.h"
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class PerViewLinearDepthCopyPass : public ComputePass {
 public:

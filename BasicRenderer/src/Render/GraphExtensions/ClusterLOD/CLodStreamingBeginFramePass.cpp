@@ -132,7 +132,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
             BUFFER_UPLOAD(
                 m_activeGroupsBitsUploadScratch.data(),
                 static_cast<uint32_t>(m_activeGroupsBitsUploadScratch.size() * sizeof(uint32_t)),
-                rg::runtime::UploadTarget::FromShared(m_activeGroupsBits),
+                org::runtime::UploadTarget::FromShared(m_activeGroupsBits),
                 0);
         }
     }
@@ -146,7 +146,7 @@ void CLodStreamingBeginFramePass::Update(const UpdateExecutionContext& execution
         BUFFER_UPLOAD(
             &state,
             sizeof(CLodStreamingRuntimeState),
-            rg::runtime::UploadTarget::FromShared(m_runtimeState),
+            org::runtime::UploadTarget::FromShared(m_runtimeState),
             0);
     }
 

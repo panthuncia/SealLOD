@@ -404,12 +404,12 @@ void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
 {
     auto tagBufferUsage = [](const std::shared_ptr<Buffer>& buffer, std::string_view usage) {
         if (buffer) {
-            rg::memory::SetResourceUsageHint(*buffer, std::string(usage));
+            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
         }
     };
     auto tagTextureUsage = [](const std::shared_ptr<PixelBuffer>& texture, std::string_view usage) {
         if (texture) {
-            rg::memory::SetResourceUsageHint(*texture, std::string(usage));
+            org::memory::SetResourceUsageHint(*texture, std::string(usage));
         }
     };
 

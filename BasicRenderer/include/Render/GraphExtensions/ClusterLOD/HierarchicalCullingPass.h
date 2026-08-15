@@ -19,9 +19,12 @@
 #include "Resources/PixelBuffer.h"
 #include "ShaderBuffers.h"
 
-class Buffer;
-class PixelBuffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 enum class HierarchicalCullingWorkGraphMode : uint8_t {
     HardwareOnly,

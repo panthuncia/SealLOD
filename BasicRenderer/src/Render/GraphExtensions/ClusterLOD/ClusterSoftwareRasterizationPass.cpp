@@ -123,12 +123,12 @@ ClusterSoftwareRasterizationPass::ClusterSoftwareRasterizationPass(
                 m_dynamicWindSkinCacheAllocatorBuffer->SetName("CLod DynamicWind Skin Cache Allocator");
                 m_dynamicWindSkinCacheWorkRecordsBuffer->SetName("CLod DynamicWind Skin Cache Work Records");
                 m_dynamicWindSkinCacheIndirectArgsBuffer->SetName("CLod DynamicWind Skin Cache Indirect Args");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheMappingBuffer, "DynamicWind VSM vertex cache");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheHashBuffer, "DynamicWind VSM vertex cache");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCachePositionsBuffer, "DynamicWind VSM vertex cache");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheAllocatorBuffer, "DynamicWind VSM vertex cache");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheWorkRecordsBuffer, "DynamicWind VSM vertex cache");
-                rg::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheIndirectArgsBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheMappingBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheHashBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCachePositionsBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheAllocatorBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheWorkRecordsBuffer, "DynamicWind VSM vertex cache");
+                org::memory::SetResourceUsageHint(*m_dynamicWindSkinCacheIndirectArgsBuffer, "DynamicWind VSM vertex cache");
 
                 std::vector<DxcDefine> defines = {
                     { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" },
@@ -289,7 +289,7 @@ void ClusterSoftwareRasterizationPass::Update(const UpdateExecutionContext& exec
     BUFFER_UPLOAD(
         viewRasterInfo.data(),
         static_cast<uint32_t>(viewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-        rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+        org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
         0);
 
     m_declaredResourcesChanged = (nextVisibilityBuffers != m_visibilityBuffers);

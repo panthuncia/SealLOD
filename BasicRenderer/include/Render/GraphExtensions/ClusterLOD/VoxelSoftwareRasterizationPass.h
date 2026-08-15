@@ -11,8 +11,10 @@
 #include "RenderPasses/Base/ComputePass.h"
 #include "Resources/PixelBuffer.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class VoxelSoftwareRasterizationPass : public ComputePass, public IDynamicDeclaredResources {
 public:

@@ -21,11 +21,13 @@
 #include "Resources/Texture.h"
 
 class TextureFactory;
-class CopyPass;
-class Buffer;
+namespace org { class CopyPass; }
+using org::CopyPass;
+namespace org { class Buffer; }
+using org::Buffer;
 class MaterialTextureTransferService;
 
-namespace rg::runtime {
+namespace org::runtime {
 class IReadbackService;
 }
 

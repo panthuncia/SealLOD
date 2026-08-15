@@ -48,7 +48,7 @@ void UploadMatrixSpans(const std::shared_ptr<DynamicBuffer>& target, std::vector
         if (groupEnd == groupStart + 1) {
             BUFFER_UPLOAD(first.data,
                 static_cast<size_t>(first.matrixCount) * sizeof(DirectX::XMMATRIX),
-                rg::runtime::UploadTarget::FromShared(target),
+                org::runtime::UploadTarget::FromShared(target),
                 first.offsetBytes);
         }
         else {
@@ -62,7 +62,7 @@ void UploadMatrixSpans(const std::shared_ptr<DynamicBuffer>& target, std::vector
 
             BUFFER_UPLOAD(staging.data(),
                 staging.size() * sizeof(DirectX::XMMATRIX),
-                rg::runtime::UploadTarget::FromShared(target),
+                org::runtime::UploadTarget::FromShared(target),
                 first.offsetBytes);
         }
 
@@ -86,10 +86,10 @@ SkeletonManager::SkeletonManager() {
 
     m_instanceInfo = DynamicStructuredBuffer<SkinningInstanceGPUInfo>::CreateShared(64, "SkinningInstanceInfo", true);
 
-    rg::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_inverseSkinMatrices, "Skinning data");
-    rg::memory::SetResourceUsageHint(*m_instanceInfo, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_inverseBindMatrices, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_boneTransforms, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_inverseSkinMatrices, "Skinning data");
+    org::memory::SetResourceUsageHint(*m_instanceInfo, "Skinning data");
 
     // Expose via resource provider keys
     m_resources[Builtin::SkeletonResources::InverseBindMatrices] = m_inverseBindMatrices;
@@ -360,10 +360,10 @@ void SkeletonManager::UpdateInstanceTransforms(Skeleton& inst) {
 	}
 	rec.transformOffsetMatrices = rec.transformOffsetsMatrices[rec.currentTransformIndex];
     BUFFER_UPLOAD(skinMatrices.data(), bytes,
-        rg::runtime::UploadTarget::FromShared(m_boneTransforms),
+        org::runtime::UploadTarget::FromShared(m_boneTransforms),
 		static_cast<size_t>(rec.transformOffsetMatrices) * sizeof(DirectX::XMMATRIX));
     BUFFER_UPLOAD(inverseSkinMatrices.data(), bytes,
-        rg::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
+        org::runtime::UploadTarget::FromShared(m_inverseSkinMatrices),
         rec.inverseSkinView->GetOffset());
 	SkinningInstanceGPUInfo info = (*m_instanceInfo)[rec.instanceSlot];
 	info.transformOffsetMatrices = rec.transformOffsetMatrices;

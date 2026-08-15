@@ -435,12 +435,12 @@ TerrainManager::TerrainManager()
     m_regions = DynamicStructuredBuffer<TerrainRegionGPU>::CreateShared(1, "Builtin::Terrain::Regions", true);
     m_weightBlocks = DynamicStructuredBuffer<std::uint32_t>::CreateShared(1, "Builtin::Terrain::WeightBlocks", true);
     m_textureGroup = std::make_shared<ResourceGroup>("Builtin::Terrain::TextureGroup");
-    rg::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_stochasticLayers, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_layerRefs, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_regions, "Terrain material buffers");
-    rg::memory::SetResourceUsageHint(*m_weightBlocks, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_sets, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_layers, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_stochasticLayers, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_layerRefs, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_regions, "Terrain material buffers");
+    org::memory::SetResourceUsageHint(*m_weightBlocks, "Terrain material buffers");
     m_sets->UpdateAt(0u, MakeEmptySet());
     m_layers->UpdateAt(0u, MakeFallbackLayer());
     m_stochasticLayers->UpdateAt(0u, MakeFallbackStochasticLayer());

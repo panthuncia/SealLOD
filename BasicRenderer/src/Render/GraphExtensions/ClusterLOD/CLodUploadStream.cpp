@@ -162,7 +162,7 @@ std::shared_ptr<CLodUploadPage> CLodUploadStream::AcquirePage(size_t minimumSize
         page->capacity = capacity;
         page->buffer = Buffer::CreateShared(rhi::HeapType::Upload, capacity, false);
         page->buffer->SetName("CLodStreamingUploadPage_" + std::to_string(++m_nextPageId));
-        rg::memory::SetResourceUsageHint(*page->buffer, "Cluster LOD streaming upload staging");
+        org::memory::SetResourceUsageHint(*page->buffer, "Cluster LOD streaming upload staging");
     }
     page->tail = 0;
     m_openPages.push_back(page);
@@ -172,10 +172,10 @@ std::shared_ptr<CLodUploadPage> CLodUploadStream::AcquirePage(size_t minimumSize
 void CLodUploadStream::UploadPageData(
     const void* data,
     size_t size,
-    rg::runtime::UploadTarget target,
+    org::runtime::UploadTarget target,
     size_t destinationOffset) {
     if (m_bulkUploadActive && data != nullptr && size != 0u &&
-        target.kind == rg::runtime::UploadTarget::Kind::PinnedShared &&
+        target.kind == org::runtime::UploadTarget::Kind::PinnedShared &&
         target.pinned != nullptr) {
         m_deferredUploads.push_back({
             .data = data,
@@ -195,10 +195,10 @@ void CLodUploadStream::UploadPageData(
 void CLodUploadStream::UploadData(
     const void* data,
     size_t size,
-    rg::runtime::UploadTarget target,
+    org::runtime::UploadTarget target,
     size_t destinationOffset) {
     if (!data || size == 0u) return;
-    if (target.kind != rg::runtime::UploadTarget::Kind::PinnedShared || !target.pinned) {
+    if (target.kind != org::runtime::UploadTarget::Kind::PinnedShared || !target.pinned) {
         spdlog::error("CLodUploadStream requires a pinned shared destination");
         return;
     }

@@ -38,7 +38,7 @@ namespace
             + ", phase=" + std::to_string(workloadKey.renderPhase.hash)
             + ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0)
             + ", view=" + std::to_string(viewID) + ")");
-        rg::memory::SetResourceUsageHint(*res, "Indirect command buffers");
+        org::memory::SetResourceUsageHint(*res, "Indirect command buffers");
         return res;
     }
 

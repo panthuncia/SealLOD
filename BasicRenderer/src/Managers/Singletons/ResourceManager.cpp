@@ -70,7 +70,7 @@ namespace
     }
 }
 
-void ResourceManager::Initialize() {
+void ::ResourceManager::Initialize() {
 
 	auto device = DeviceManager::GetInstance().GetDevice();
 
@@ -88,7 +88,7 @@ void ResourceManager::Initialize() {
 	m_uavCounterReset->Unmap(0, 0);
 }
 
-void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
+void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
 	UpdateDirectionalShadowConstants(perFrameCBData);
 	perFrameCBData.mainCameraIndex = cameraIndex;
 	perFrameCBData.numLights = numLights;
@@ -180,9 +180,9 @@ void ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, Dir
 		}
 	}
 
-	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), rg::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
+	BUFFER_UPLOAD(&perFrameCBData, sizeof(PerFrameCB), org::runtime::UploadTarget::FromShared(m_perFrameBuffer), 0);
 }
-void ResourceManager::Cleanup()
+void ::ResourceManager::Cleanup()
 {
 	m_perFrameBuffer.reset();
 	m_uavCounterReset.Reset();

@@ -27,11 +27,14 @@
 #define DEBUG_ONLY(x)   ((void)0)
 #endif
 
-class DescriptorHeap;
-class Sampler;
+namespace org { class DescriptorHeap; }
+using org::DescriptorHeap;
+namespace org { class Sampler; }
+using org::Sampler;
 class TextureAsset;
 struct TextureFileMeta;
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 void ThrowIfFailed(HRESULT hr);
 

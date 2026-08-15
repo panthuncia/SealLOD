@@ -148,11 +148,11 @@ void AVBOITSetupPass::Update(const UpdateExecutionContext& executionContext)
         });
     }
 
-    BUFFER_UPLOAD(&config, sizeof(CLodAVBOITConfig), rg::runtime::UploadTarget::FromShared(m_configBuffer), 0);
+    BUFFER_UPLOAD(&config, sizeof(CLodAVBOITConfig), org::runtime::UploadTarget::FromShared(m_configBuffer), 0);
 
     if (m_fitStateBuffer && !m_fitStateInitialized) {
         const CLodAVBOITFitState fitState{};
-        BUFFER_UPLOAD(&fitState, sizeof(CLodAVBOITFitState), rg::runtime::UploadTarget::FromShared(m_fitStateBuffer), 0);
+        BUFFER_UPLOAD(&fitState, sizeof(CLodAVBOITFitState), org::runtime::UploadTarget::FromShared(m_fitStateBuffer), 0);
         m_fitStateInitialized = true;
     }
 }

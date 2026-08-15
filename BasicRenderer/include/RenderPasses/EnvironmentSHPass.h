@@ -27,7 +27,7 @@ public:
 		shSamplerDesc.minLod = 0.0f;
 		shSamplerDesc.maxLod = (std::numeric_limits<float>::max)();
 
-		m_samplerIndex = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(shSamplerDesc);
+		m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(shSamplerDesc);
 
 		CreatePSO();
 	}

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 
 #include <directx/d3d12.h>
@@ -81,7 +81,7 @@ using PerResourceMemIndex = std::unordered_map<uint64_t, PerResourceMemInfo>;
 
 static void BuildMemorySnapshotFromRecords(
     ui::MemorySnapshot& out,
-    const std::vector<rg::memory::ResourceMemoryRecord>& records,
+    const std::vector<org::memory::ResourceMemoryRecord>& records,
     PerResourceMemIndex* outIndex /*= nullptr*/)
 {
     out.categories.clear();
@@ -141,7 +141,7 @@ struct MemInfo {
 
 static void BuildIdToMemInfoIndex(
     std::unordered_map<uint64_t, MemInfo>& out,
-    const std::vector<rg::memory::ResourceMemoryRecord>& records)
+    const std::vector<org::memory::ResourceMemoryRecord>& records)
 {
     out.clear();
     out.reserve(2048);
@@ -2626,7 +2626,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
 	if (showMemoryIntrospection) {
         static ui::MemoryIntrospectionWidget g_memWidget;
 
-        std::vector<rg::memory::ResourceMemoryRecord> memoryRecords;
+        std::vector<org::memory::ResourceMemoryRecord> memoryRecords;
     if (m_renderGraph) {
         m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(memoryRecords);
     }
@@ -2663,7 +2663,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
         static uint64_t memoryAccountingFrame = 0;
         ++memoryAccountingFrame;
         if (logMemoryAccounting && (memoryAccountingFrame == 1 || memoryAccountingFrame % 120 == 0)) {
-            std::vector<rg::memory::ResourceMemoryRecord> diagnosticRecords;
+            std::vector<org::memory::ResourceMemoryRecord> diagnosticRecords;
             m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(diagnosticRecords);
             uint64_t introspectedBytes = 0;
             uint64_t zeroSizedRecords = 0;
@@ -2672,7 +2672,7 @@ inline void Menu::Render(const RenderContext& context, rhi::CommandList commandL
             struct ResourceAllocationGroup {
                 uint64_t bytes = 0;
                 uint64_t count = 0;
-                rg::memory::ResourceMemoryRecord representative;
+                org::memory::ResourceMemoryRecord representative;
             };
             std::unordered_map<std::string, ResourceAllocationGroup> allocationGroups;
             for (const auto& record : diagnosticRecords) {

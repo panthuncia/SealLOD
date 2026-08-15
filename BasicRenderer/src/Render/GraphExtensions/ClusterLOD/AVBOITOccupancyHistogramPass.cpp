@@ -54,7 +54,7 @@ void AVBOITOccupancyHistogramPass::Update(const UpdateExecutionContext& executio
     BUFFER_UPLOAD(
         zeroHistogram.data(),
         sizeof(zeroHistogram),
-        rg::runtime::UploadTarget::FromShared(m_occupancyHistogramBuffer),
+        org::runtime::UploadTarget::FromShared(m_occupancyHistogramBuffer),
         0);
 }
 

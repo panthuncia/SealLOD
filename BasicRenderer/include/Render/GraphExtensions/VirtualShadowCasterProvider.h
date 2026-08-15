@@ -12,8 +12,10 @@
 
 #include "Render/RenderGraph/RenderGraph.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 enum class VirtualShadowCasterMobility : uint8_t {
     Rigid,

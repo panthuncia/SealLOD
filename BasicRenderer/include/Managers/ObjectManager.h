@@ -25,8 +25,10 @@
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/Runtime/BufferUploadPolicy.h"
 
-class BufferView;
-class DynamicBuffer;
+namespace org { class BufferView; }
+using org::BufferView;
+namespace org { class DynamicBuffer; }
+using org::DynamicBuffer;
 class Material;
 class Mesh;
 
@@ -447,11 +449,11 @@ public:
 	std::vector<ActiveDrawSetCompactionPublishResult> PublishActiveDrawSetCompactionResults(std::size_t maxResults = 1);
 	std::vector<ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
-	rg::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
+	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
-	rg::runtime::BulkWriteHandle BeginPerInstanceTransformBulkWrite();
+	org::runtime::BulkWriteHandle BeginPerInstanceTransformBulkWrite();
 	void EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t dirtySize);
-	rg::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite();
+	org::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite();
 	void EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySize);
 
 	std::shared_ptr<DynamicBuffer>& GetPerObjectBuffers() {

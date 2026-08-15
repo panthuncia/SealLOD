@@ -102,7 +102,7 @@ uint32_t CLodIoTaskBatchSize() {
 }
 
 MeshManager::MeshManager() {
-	auto& resourceManager = ResourceManager::GetInstance();
+	auto& resourceManager = ::ResourceManager::GetInstance();
 
 	try {
 		auto& settingsManager = SettingsManager::GetInstance();
@@ -149,26 +149,26 @@ MeshManager::MeshManager() {
 	m_clusterLODAssemblyBoneRemapIndices = DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
 	m_clodGroupPageMap = DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
 
-	m_clodSharedGroupChunks->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
-	m_clodGroupPageMap->SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+	m_clodSharedGroupChunks->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
+	m_clodGroupPageMap->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 
 	// Tag resources for memory statistics
-	rg::memory::SetResourceUsageHint(*m_perMeshBuffers, "PerMesh, PerMeshInstance, PerObject");
-	rg::memory::SetResourceUsageHint(*m_perMeshInstanceBuffers, "PerMesh, PerMeshInstance, PerObject");
-	rg::memory::SetResourceUsageHint(*m_perMeshInstanceClodOffsets, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clodSharedGroupChunks, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clodMeshMetadata, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clodHierarchyLevelInfos, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODGroups, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODSegments, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODNodes, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODNodeSkinningInfos, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODNodeBoneIndices, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyTransforms, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyInstances, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemaps, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemapIndices, "Cluster LOD data");
-	rg::memory::SetResourceUsageHint(*m_clodGroupPageMap, "Cluster LOD streaming");
+	org::memory::SetResourceUsageHint(*m_perMeshBuffers, "PerMesh, PerMeshInstance, PerObject");
+	org::memory::SetResourceUsageHint(*m_perMeshInstanceBuffers, "PerMesh, PerMeshInstance, PerObject");
+	org::memory::SetResourceUsageHint(*m_perMeshInstanceClodOffsets, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clodSharedGroupChunks, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clodMeshMetadata, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clodHierarchyLevelInfos, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODGroups, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODSegments, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODNodes, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODNodeSkinningInfos, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODNodeBoneIndices, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODAssemblyTransforms, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODAssemblyInstances, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemaps, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clusterLODAssemblyBoneRemapIndices, "Cluster LOD data");
+	org::memory::SetResourceUsageHint(*m_clodGroupPageMap, "Cluster LOD streaming");
 
 	m_resources[Builtin::PerMeshBuffer] = m_perMeshBuffers;
 	m_resources[Builtin::PerMeshInstanceBuffer] = m_perMeshInstanceBuffers;
@@ -201,7 +201,7 @@ MeshManager::MeshManager() {
 		ppConfig.debugName    = "CLodPagePool";
 		m_clodPagePool = std::make_unique<PagePool>(ppConfig);
 	}
-	rg::memory::SetResourceUsageHint(*m_clodPagePool->GetPageTableBuffer(), "Cluster LOD streaming");
+	org::memory::SetResourceUsageHint(*m_clodPagePool->GetPageTableBuffer(), "Cluster LOD streaming");
 	m_resources[Builtin::CLod::PageTable] = m_clodPagePool->GetPageTableBuffer();
 	// Slab buffers are registered dynamically as they're allocated.
 	// The PagePoolSlabBase descriptor is resolved per-pass from the first slab.
@@ -3126,7 +3126,7 @@ void MeshManager::UploadCLodGroupChunkTable(const CLodSharedStreamingState& stat
 		m_clodStreamingUploadFn(
 			materializedGroupChunks.data(),
 			materializedGroupChunks.size() * sizeof(ClusterLODGroupChunk),
-			rg::runtime::UploadTarget::FromShared(m_clodSharedGroupChunks),
+			org::runtime::UploadTarget::FromShared(m_clodSharedGroupChunks),
 			state.groupChunksView->GetOffset());
 		return;
 	}
@@ -3153,7 +3153,7 @@ void MeshManager::UploadCLodGroupChunk(const CLodSharedStreamingState& state, ui
 		m_clodStreamingUploadFn(
 			&materializedGroupChunk,
 			byteSize,
-			rg::runtime::UploadTarget::FromShared(m_clodSharedGroupChunks),
+			org::runtime::UploadTarget::FromShared(m_clodSharedGroupChunks),
 			byteOffset);
 		return;
 	}
@@ -3183,7 +3183,7 @@ void MeshManager::UploadCLodGroupPageMapRange(
 		m_clodStreamingUploadFn(
 			pageMapEntries.data(),
 			byteSize,
-			rg::runtime::UploadTarget::FromShared(m_clodGroupPageMap),
+			org::runtime::UploadTarget::FromShared(m_clodGroupPageMap),
 			byteOffset);
 		return;
 	}
@@ -3199,7 +3199,7 @@ void MeshManager::UploadCLodGroupPageMapRange(
 		m_clodStreamingUploadFn(
 			state.pageMapEntriesCPU.data(),
 			state.pageMapEntriesCPU.size() * sizeof(GroupPageMapEntry),
-			rg::runtime::UploadTarget::FromShared(m_clodGroupPageMap),
+			org::runtime::UploadTarget::FromShared(m_clodGroupPageMap),
 			state.ownedPageMapView->GetOffset());
 	} else {
 		m_clodGroupPageMap->UpdateView(state.ownedPageMapView.get(), state.pageMapEntriesCPU.data());

@@ -57,7 +57,7 @@ PagePool::PagePool(const Config& config)
 	assert(m_config.numStreamingSlabs > 0);
 
 	m_pageTableBuffer = CreatePageTableBuffer(1u, m_config.debugName + "::PageTable");
-	rg::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
+	org::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 
 	// Resource group for slab buffers (render graph auto-invalidation).
 	m_slabResourceGroup = std::make_shared<ResourceGroup>(m_config.debugName + "::Slabs");
@@ -107,7 +107,7 @@ bool PagePool::AllocateNewSlab(
 			(role == SlabRole::Pinned ? "Pinned" : "Streaming") +
 			std::to_string(pageSizeBytes / 1024u) + "KSlab" +
 			std::to_string(slabIndex));
-	rg::memory::SetResourceUsageHint(*slab.buffer, role == SlabRole::Pinned ? "Cluster LOD pinned page slabs" : "Cluster LOD page slabs");
+	org::memory::SetResourceUsageHint(*slab.buffer, role == SlabRole::Pinned ? "Cluster LOD pinned page slabs" : "Cluster LOD page slabs");
 
 	m_slabs.push_back(std::move(slab));
 	m_totalPageCapacity += slabPageCount;
@@ -155,7 +155,7 @@ void PagePool::UploadToPage(uint32_t globalPageID, uint32_t intraPageByteOffset,
 	assert(intraPageByteOffset + dataSize <= m_slabs[si].pageSize);
 
 	auto& slab = m_slabs[si];
-	auto target = rg::runtime::UploadTarget::FromShared(slab.buffer);
+	auto target = org::runtime::UploadTarget::FromShared(slab.buffer);
 	if (m_uploadFn) {
 		m_uploadFn(data, dataSize, target, slabOffset);
 	} else {
@@ -180,10 +180,10 @@ void PagePool::FlushPageTableUpdates() {
 		m_pageTableBuffer = CreatePageTableBuffer(
 			static_cast<uint32_t>(m_pageTableCpu.size()),
 			m_config.debugName + "::PageTable");
-		rg::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
+		org::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
 	}
 
-	auto target = rg::runtime::UploadTarget::FromShared(m_pageTableBuffer);
+	auto target = org::runtime::UploadTarget::FromShared(m_pageTableBuffer);
 	if (m_uploadFn) {
 		m_uploadFn(m_pageTableCpu.data(), tableBytes, target, 0);
 	} else {

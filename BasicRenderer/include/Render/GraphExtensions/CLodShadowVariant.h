@@ -10,7 +10,8 @@
 
 class CLodExtension;
 struct CLodVariantTraits;
-class ResourceGroup;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 struct VirtualShadowCasterBuildContext;
 
 class CLodShadowVariant {

@@ -18,7 +18,8 @@
 #include "Managers/Singletons/SettingsManager.h"
 #include "Render/RasterBucketFlags.h"
 
-class DynamicGloballyIndexedResource;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
 class Material;
 
 class SkeletonVariantSet {

@@ -127,7 +127,7 @@ void ReyesBuildRasterWorkPass::Update(const UpdateExecutionContext& executionCon
 {
     (void)executionContext;
     const uint32_t zero = 0u;
-    BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_rasterWorkCounterBuffer), 0);
+    BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_rasterWorkCounterBuffer), 0);
 }
 
 PassReturn ReyesBuildRasterWorkPass::Execute(PassExecutionContext& executionContext)

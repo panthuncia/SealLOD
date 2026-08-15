@@ -18,8 +18,10 @@
 #include "../../../../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../../../../shaders/PerPassRootConstants/clodVirtualShadowBlockExpandRootConstants.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 enum class VirtualShadowBlockExpandMode : uint8_t
 {

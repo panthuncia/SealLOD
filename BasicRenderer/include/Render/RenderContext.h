@@ -15,7 +15,8 @@ class LightManager;
 class EnvironmentManager;
 class MaterialManager;
 class SkeletonManager;
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 namespace br::render {
 class CLodRayTracingSystem;

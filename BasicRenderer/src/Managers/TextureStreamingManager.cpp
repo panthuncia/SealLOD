@@ -142,8 +142,8 @@ TextureStreamingManager::TextureStreamingManager()
 		1u,
 		"Builtin::Material::TextureStreamingFeedbackBuffer",
 		true);
-	rg::memory::SetResourceUsageHint(*m_textureStreamingMetadataBuffer, "Material texture streaming buffers");
-	rg::memory::SetResourceUsageHint(*m_textureStreamingFeedbackBuffer, "Material texture streaming buffers");
+	org::memory::SetResourceUsageHint(*m_textureStreamingMetadataBuffer, "Material texture streaming buffers");
+	org::memory::SetResourceUsageHint(*m_textureStreamingFeedbackBuffer, "Material texture streaming buffers");
 	m_textureStreamingMetadataBuffer->UpdateAt(0u, TextureStreamingGPUInfo{});
 	m_textureStreamingFeedbackBuffer->UpdateAt(0u, kTextureStreamingFeedbackUnused);
 	m_resources[Builtin::Material::TextureStreamingMetadataBuffer] = m_textureStreamingMetadataBuffer;
@@ -840,7 +840,7 @@ std::shared_ptr<CopyPass> TextureStreamingManager::CreateTextureStreamingFeedbac
 		if (!slot.staging || slot.capacityBytes < bytes) {
 			slot.staging = Buffer::CreateShared(rhi::HeapType::Readback, bytes);
 			slot.staging->SetName(("MaterialTextureStreamingReadback_" + std::to_string(selectedSlot)).c_str());
-			rg::memory::SetResourceUsageHint(*slot.staging, "Material texture streaming readback");
+			org::memory::SetResourceUsageHint(*slot.staging, "Material texture streaming readback");
 			slot.capacityBytes = bytes;
 		}
 		slot.activeStreamingTextureIDs = std::move(activeIDs);

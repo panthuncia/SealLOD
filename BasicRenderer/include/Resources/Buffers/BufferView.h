@@ -3,6 +3,8 @@
 #include <memory>
 #include <cstdint>
 
+namespace org {
+
 class ViewedDynamicBufferBase;
 
 class BufferView {
@@ -27,3 +29,7 @@ private:
     uint64_t m_size;
     uint64_t m_elementSize;
 };
+
+} // namespace org
+
+using org::BufferView;

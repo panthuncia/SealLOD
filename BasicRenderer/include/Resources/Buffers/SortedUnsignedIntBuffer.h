@@ -112,7 +112,7 @@ public:
 private:
     SortedUnsignedIntBuffer(uint64_t capacity = 64, std::string name = "", bool UAV = false, bool activeEntryMode = false)
         : m_capacity(capacity), m_earliestModifiedIndex(0), m_UAV(UAV), m_activeEntryMode(activeEntryMode) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+        SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
         CreateBuffer(capacity);
         SetName(name);
         RegisterDeferredBackingResizeClient(this);
@@ -126,7 +126,7 @@ private:
     void OnUploadPolicyFlush() override {
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
-            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
                     return nullptr;
@@ -184,7 +184,7 @@ private:
             return;
         }
 
-        rg::runtime::UploadPolicyConfig config{};
+        org::runtime::UploadPolicyConfig config{};
         config.tag = tag;
         m_uploadPolicyState.SetPolicy(config, GetBufferSize());
     }
@@ -196,7 +196,7 @@ private:
         ApplyMetadataToBacking(bundle);
     }
 
-    rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
 
     void EnsureCpuShadowSize(size_t size) {
         if (m_cpuShadowData.size() < size) {

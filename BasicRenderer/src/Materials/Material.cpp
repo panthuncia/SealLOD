@@ -98,7 +98,7 @@ namespace {
 Material::Material(const std::string& name,
     MaterialFlags materialFlags, PSOFlags psoFlags)
     : m_name(name), m_psoFlags(psoFlags) {
-    auto& resourceManager = ResourceManager::GetInstance();
+    auto& resourceManager = ::ResourceManager::GetInstance();
     m_materialData.materialFlags = materialFlags;
 }
 
@@ -343,7 +343,7 @@ void Material::SetHeightmap(std::shared_ptr<TextureAsset> heightmap) {
     }
     if (!heightmap->IsUsingFallbackImage() && heightmap->HasUsableImage()) {
         image->SetName("HeightMap");
-        rg::memory::SetResourceUsageHint(*image, "Material textures");
+        org::memory::SetResourceUsageHint(*image, "Material textures");
     }
     m_materialData.heightMapIndex = image->GetSRVInfo(0).slot.index;
     m_materialData.heightSamplerIndex = heightmap->SamplerDescriptorIndex();
@@ -536,7 +536,7 @@ void Material::RefreshTextureBindings() {
             return;
         }
 
-        rg::memory::SetResourceUsageHint(*image, "Material textures");
+        org::memory::SetResourceUsageHint(*image, "Material textures");
         image->SetName(name);
     };
 
@@ -662,7 +662,7 @@ void Material::RefreshTextureBindings() {
             if (!image) {
                 return;
             }
-            rg::memory::SetResourceUsageHint(*image, "Material textures");
+            org::memory::SetResourceUsageHint(*image, "Material textures");
             image->SetName(name);
         }
     };

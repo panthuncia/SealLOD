@@ -40,14 +40,14 @@ void ClearDeepVisibilityPass::Update(const UpdateExecutionContext& executionCont
 
     const uint32_t zero = 0u;
     if (m_deepVisibilityCounterBuffer) {
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_deepVisibilityCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_deepVisibilityCounterBuffer), 0);
     }
     if (m_deepVisibilityOverflowCounterBuffer) {
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_deepVisibilityOverflowCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_deepVisibilityOverflowCounterBuffer), 0);
     }
     if (m_deepVisibilityStatsBuffer) {
         const CLodDeepVisibilityStats zeroStats{};
-        BUFFER_UPLOAD(&zeroStats, sizeof(CLodDeepVisibilityStats), rg::runtime::UploadTarget::FromShared(m_deepVisibilityStatsBuffer), 0);
+        BUFFER_UPLOAD(&zeroStats, sizeof(CLodDeepVisibilityStats), org::runtime::UploadTarget::FromShared(m_deepVisibilityStatsBuffer), 0);
     }
 
     std::vector<std::shared_ptr<PixelBuffer>> headPointerTextures;

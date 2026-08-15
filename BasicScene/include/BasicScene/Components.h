@@ -14,7 +14,8 @@
 #include "ShaderBuffers.h"
 
 class MeshInstance;
-class DynamicGloballyIndexedResource;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
 class TextureAsset;
 class Mesh;
 

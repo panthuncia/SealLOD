@@ -12,7 +12,7 @@
 
 class ReadbackCaptureExtension final : public RenderGraph::IRenderGraphExtension {
 public:
-    explicit ReadbackCaptureExtension(rg::runtime::IReadbackService* readbackService)
+    explicit ReadbackCaptureExtension(org::runtime::IReadbackService* readbackService)
         : m_readbackService(readbackService) {
     }
 
@@ -121,5 +121,5 @@ public:
     }
 
 private:
-    rg::runtime::IReadbackService* m_readbackService = nullptr; // non-owning
+    org::runtime::IReadbackService* m_readbackService = nullptr; // non-owning
 };

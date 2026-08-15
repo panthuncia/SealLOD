@@ -126,7 +126,7 @@ public:
 	void FreePinnedPages(const std::vector<uint32_t>& pageIDs);
 
 	// Upload callback signature: (data, dataSize, target, dstOffset).
-	using UploadFn = std::function<void(const void*, size_t, rg::runtime::UploadTarget, size_t)>;
+	using UploadFn = std::function<void(const void*, size_t, org::runtime::UploadTarget, size_t)>;
 
 	// Override the upload function used by UploadToPage / FlushPageTableUpdates.
 	// When not set, the default BUFFER_UPLOAD macro path is used.

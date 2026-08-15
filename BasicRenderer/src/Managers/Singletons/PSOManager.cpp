@@ -2731,11 +2731,11 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
     }
 
     const size_t descriptorSlotCount = libPP.mandatoryIDs.size() + libPP.optionalIDs.size();
-    if (descriptorSlotCount > rg::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
+    if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
         throw std::runtime_error(
             "Shader library preprocessing requires " + std::to_string(descriptorSlotCount) +
             " descriptor index root constants, but only " +
-            std::to_string(rg::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
+            std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
             " are available.");
     }
 
@@ -2884,11 +2884,11 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     std::sort(usedOptionalResourceIDsVec.begin(), usedOptionalResourceIDsVec.end());
 
     const size_t descriptorSlotCount = usedMandatoryResourceIDsVec.size() + usedOptionalResourceIDsVec.size();
-    if (descriptorSlotCount > rg::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
+    if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
         throw std::runtime_error(
             "Shader preprocessing requires " + std::to_string(descriptorSlotCount) +
             " descriptor index root constants, but only " +
-            std::to_string(rg::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
+            std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
             " are available.");
     }
 
@@ -3310,8 +3310,8 @@ void PSOManager::createRootSignature() {
 
     rhi::PushConstantRangeDesc pcs[] = {
     { rhi::ShaderStage::All, NumMiscUintRootConstants,          0, 4, rhi::PushConstantRangeType::EmulatedRootConstants },
-    { rhi::ShaderStage::All, rg::shaderapi::kNumResourceDescriptorIndicesRootConstants, 0, rg::shaderapi::kResourceDescriptorIndicesRootParameter, rhi::PushConstantRangeType::EmulatedRootConstants },
-    { rhi::ShaderStage::All, rg::shaderapi::kNumIndirectCommandSignatureRootConstants, 0, rg::shaderapi::kIndirectCommandSignatureRootParameter },
+    { rhi::ShaderStage::All, org::shaderapi::kNumResourceDescriptorIndicesRootConstants, 0, org::shaderapi::kResourceDescriptorIndicesRootParameter, rhi::PushConstantRangeType::EmulatedRootConstants },
+    { rhi::ShaderStage::All, org::shaderapi::kNumIndirectCommandSignatureRootConstants, 0, org::shaderapi::kIndirectCommandSignatureRootParameter },
     };
 
     rhi::SamplerDesc pointClamp = {

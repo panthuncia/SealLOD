@@ -16,9 +16,12 @@
 #include "Resources/Resolvers/ResourceGroupResolver.h"
 
 class IndirectCommandBufferManager;
-class ResourceGroup;
-class PixelBuffer;
-class DynamicGloballyIndexedResource;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class DynamicGloballyIndexedResource; }
+using org::DynamicGloballyIndexedResource;
 
 // Flags describing purpose/type of a view
 struct ViewFlags {

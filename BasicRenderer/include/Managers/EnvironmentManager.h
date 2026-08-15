@@ -13,9 +13,12 @@
 #include "Resources/ResourceGroup.h"
 #include "Interfaces/IResourceProvider.h"
 
-class BufferView;
-class DynamicBuffer;
-class PixelBuffer;
+namespace org { class BufferView; }
+using org::BufferView;
+namespace org { class DynamicBuffer; }
+using org::DynamicBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class EnvironmentManager : public IResourceProvider {
 public:

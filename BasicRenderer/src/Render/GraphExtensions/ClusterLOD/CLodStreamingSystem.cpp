@@ -818,7 +818,7 @@ namespace {
 CLodStreamingSystem::CLodStreamingSystem() {
     auto tagBufferUsage = [](const std::shared_ptr<Buffer>& buffer, std::string_view usage) {
         if (buffer) {
-            rg::memory::SetResourceUsageHint(*buffer, std::string(usage));
+            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
         }
     };
 
@@ -1461,7 +1461,7 @@ void CLodStreamingSystem::InstallStreamingUploadFunction(MeshManager* meshManage
 
     auto pagePoolUploadFn = [stream = m_uploadStream.get()](
         const void* data, size_t size,
-        rg::runtime::UploadTarget target, size_t offset) {
+        org::runtime::UploadTarget target, size_t offset) {
         stream->UploadPageData(
             data,
             size,
@@ -1470,8 +1470,8 @@ void CLodStreamingSystem::InstallStreamingUploadFunction(MeshManager* meshManage
     };
     auto meshUploadFn = [stream = m_uploadStream.get()](
         const void* data, size_t size,
-        rg::runtime::UploadTarget target, size_t offset) {
-        if (target.kind == rg::runtime::UploadTarget::Kind::PinnedShared) {
+        org::runtime::UploadTarget target, size_t offset) {
+        if (target.kind == org::runtime::UploadTarget::Kind::PinnedShared) {
             if (auto dynamicBuffer = std::dynamic_pointer_cast<DynamicBuffer>(target.pinned)) {
                 dynamicBuffer->RetainExternalUpload(data, size, offset);
             }
@@ -1633,7 +1633,7 @@ void CLodStreamingSystem::GatherStructuralPasses(RenderGraph& rg, std::vector<Re
             "CLod::StreamingUpload",
             std::make_shared<CLodStructuralStreamingUploadPass>(
                 []() {
-                    return rg::runtime::ConsumeStreamingUploadsDispatch();
+                    return org::runtime::ConsumeStreamingUploadsDispatch();
                 }))
             .At(std::move(streamingUploadInsertPoint))
             .PreferQueue(QueueKind::Copy));
@@ -1933,7 +1933,7 @@ bool CLodStreamingSystem::EnsureParallelSortResources() {
 
     auto tagBufferUsage = [](const std::shared_ptr<Buffer>& buffer, std::string_view usage) {
         if (buffer) {
-            rg::memory::SetResourceUsageHint(*buffer, std::string(usage));
+            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
         }
     };
 
@@ -3127,7 +3127,7 @@ void CLodStreamingSystem::ReleaseOwnedPagesForGroup(uint32_t groupIndex, MeshMan
 
 uint64_t CLodStreamingSystem::StreamingUploadVisibilityDelayTicks() const {
     const uint32_t framesInFlight = static_cast<uint32_t>(std::max<uint8_t>(
-        rg::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
+        org::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
         uint8_t{1}));
     return static_cast<uint64_t>(std::max<uint32_t>(m_streamingReadbackRingSize, framesInFlight) + 2u);
 }
@@ -3158,7 +3158,7 @@ void CLodStreamingSystem::QueuePendingNonResidentBitsUpload() {
         m_uploadStream->UploadData(
             uploadBits.data(),
             uploadBits.size() * sizeof(uint32_t),
-            rg::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
+            org::runtime::UploadTarget::FromShared(m_streamingNonResidentBits),
             firstWord * sizeof(uint32_t));
         uploadedWords += static_cast<uint64_t>(uploadBits.size());
         ++uploadedRuns;
@@ -4368,7 +4368,7 @@ void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshMan
     if (m_pageState[page] == CLodPhysicalPageState::Retiring) {
         if (page < m_pageRetireAfterTick.size()) {
             const uint32_t framesInFlight = static_cast<uint32_t>(std::max<uint8_t>(
-                rg::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
+                org::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
                 uint8_t{1}));
             const uint64_t retireDelayTicks = static_cast<uint64_t>(
                 std::max<uint32_t>(m_streamingReadbackRingSize, framesInFlight) + 2u);
@@ -4420,7 +4420,7 @@ void CLodStreamingSystem::RetirePhysicalPage(uint32_t page, MeshManager* meshMan
     m_retiringPhysicalPages.push_back(page);
     if (page < m_pageRetireAfterTick.size()) {
         const uint32_t framesInFlight = static_cast<uint32_t>(std::max<uint8_t>(
-            rg::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
+            org::runtime::GetOpenRenderGraphSettings().numFramesInFlight,
             uint8_t{1}));
         const uint64_t retireDelayTicks = static_cast<uint64_t>(
             std::max<uint32_t>(m_streamingReadbackRingSize, framesInFlight) + 2u);

@@ -24,7 +24,8 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Utilities/BoundedSpscQueue.h"
 
-class UploadInstance;
+namespace org { class UploadInstance; }
+using org::UploadInstance;
 
 struct CLodActiveGroupsSnapshot {
     std::vector<uint32_t> bits;

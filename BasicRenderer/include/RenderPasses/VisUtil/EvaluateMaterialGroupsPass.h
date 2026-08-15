@@ -371,7 +371,7 @@ private:
     void BindMaterialResourceDescriptorIndices(
         rhi::CommandList& commandList,
         const PipelineResources& resources) {
-        unsigned int indices[rg::shaderapi::kNumResourceDescriptorIndicesRootConstants] = {};
+        unsigned int indices[org::shaderapi::kNumResourceDescriptorIndicesRootConstants] = {};
         int indexCount = 0;
         for (const auto& binding : resources.mandatoryResourceDescriptorSlots) {
             const bool allowMissing =
@@ -387,7 +387,7 @@ private:
             commandList.PushConstants(
                 rhi::ShaderStage::Compute,
                 0,
-                rg::shaderapi::kResourceDescriptorIndicesRootParameter,
+                org::shaderapi::kResourceDescriptorIndicesRootParameter,
                 0,
                 indexCount,
                 indices);

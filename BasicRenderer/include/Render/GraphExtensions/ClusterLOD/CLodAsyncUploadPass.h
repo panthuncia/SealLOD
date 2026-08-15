@@ -13,8 +13,8 @@ struct CLodAsyncUploadInputs {
     std::unique_ptr<IResourceResolver> poolResolver;
 };
 
-inline rg::Hash64 HashValue(const CLodAsyncUploadInputs& i) {
-    return static_cast<rg::Hash64>(reinterpret_cast<uintptr_t>(i.uploadInstance));
+inline org::Hash64 HashValue(const CLodAsyncUploadInputs& i) {
+    return static_cast<org::Hash64>(reinterpret_cast<uintptr_t>(i.uploadInstance));
 }
 
 inline bool operator==(const CLodAsyncUploadInputs& a, const CLodAsyncUploadInputs& b) {

@@ -212,7 +212,7 @@ static_assert(sizeof(WindActiveInstanceGPU) == 32u);
 static_assert(sizeof(WindRootConstants) % sizeof(std::uint32_t) == 0u);
 
 struct WindSharedResources {
-    explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, rg::runtime::IReadbackService* readbackServiceIn)
+    explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, org::runtime::IReadbackService* readbackServiceIn)
         : runtime(std::move(runtimeIn))
 		, readbackService(readbackServiceIn)
         , fieldSlices{ DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice0"),
@@ -235,7 +235,7 @@ struct WindSharedResources {
 		, visibleSkeletonMembership(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.VisibleSkeletonMembership", true))
     {
 		const auto tagResource = [](const auto& resource) {
-			rg::memory::SetResourceUsageHint(*resource, "Procedural wind");
+			org::memory::SetResourceUsageHint(*resource, "Procedural wind");
 		};
 		tagResource(fieldSlices[0]);
 		tagResource(fieldSlices[1]);
@@ -706,7 +706,7 @@ struct WindSharedResources {
     }
 
     std::shared_ptr<ProceduralWindRuntime> runtime;
-	rg::runtime::IReadbackService* readbackService = nullptr;
+	org::runtime::IReadbackService* readbackService = nullptr;
     std::array<std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>, 2> fieldSlices;
 	std::shared_ptr<DynamicStructuredBuffer<DynamicWindFrameGPU>> frameState;
     std::shared_ptr<DynamicStructuredBuffer<WindBoneGPU>> boneEntries;

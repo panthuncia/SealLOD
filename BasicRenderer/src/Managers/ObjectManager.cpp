@@ -228,7 +228,7 @@ void PrepareStaticGroupsBulkPlanInPlace(
 }
 
 ObjectManager::ObjectManager() {
-	auto& resourceManager = ResourceManager::GetInstance();
+	auto& resourceManager = ::ResourceManager::GetInstance();
 	m_perObjectBuffers = DynamicBuffer::CreateShared(sizeof(PerObjectCB), 10000, "perObjectBuffers<PerObjectCB>");
 	m_perInstanceTransformBuffers = DynamicBuffer::CreateShared(sizeof(PerInstanceTransformCB), 10000, "perInstanceTransformBuffers<PerInstanceTransformCB>");
 	m_instanceDrawRecordBuffers = DynamicBuffer::CreateShared(sizeof(InstanceDrawRecordCB), 10000, "instanceDrawRecordBuffers<InstanceDrawRecordCB>");
@@ -239,13 +239,13 @@ ObjectManager::ObjectManager() {
 
 	m_normalMatrixBuffer = DynamicBuffer::CreateShared(sizeof(DirectX::XMFLOAT4X4), 10000, "normalMatrixBuffer");
 
-	rg::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
-	rg::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
-	rg::memory::SetResourceUsageHint(*m_instanceDrawRecordBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
-	rg::memory::SetResourceUsageHint(*m_drawRecordVisibilityGenerationSidecar, "PerMesh, InstanceDrawRecord, VisibilityGeneration");
-	rg::memory::SetResourceUsageHint(*m_normalMatrixBuffer, "PerMesh, PerMeshInstance, PerObject");
+	org::memory::SetResourceUsageHint(*m_perObjectBuffers, "PerMesh, PerMeshInstance, PerObject");
+	org::memory::SetResourceUsageHint(*m_perInstanceTransformBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
+	org::memory::SetResourceUsageHint(*m_instanceDrawRecordBuffers, "PerMesh, InstanceDrawRecord, PerInstanceTransform");
+	org::memory::SetResourceUsageHint(*m_drawRecordVisibilityGenerationSidecar, "PerMesh, InstanceDrawRecord, VisibilityGeneration");
+	org::memory::SetResourceUsageHint(*m_normalMatrixBuffer, "PerMesh, PerMeshInstance, PerObject");
 
-	rg::memory::SetResourceUsageHint(*m_masterIndirectCommandsBuffer, "Indirect command buffers");
+	org::memory::SetResourceUsageHint(*m_masterIndirectCommandsBuffer, "Indirect command buffers");
 
 	m_resources[Builtin::PerObjectBuffer] = m_perObjectBuffers;
 	m_resources[Builtin::PerInstanceTransformBuffer] = m_perInstanceTransformBuffers;
@@ -741,7 +741,7 @@ std::shared_ptr<SortedUnsignedIntBuffer> ObjectManager::EnsureActiveDrawSetIndic
 		+ ", clodOnly=" + std::to_string(workloadKey.clodOnly ? 1 : 0) + ")";
 	const auto capacity = (std::max<std::uint64_t>)(1u, static_cast<std::uint64_t>(initialCapacity));
 	auto buffer = SortedUnsignedIntBuffer::CreateActiveDrawSetShared(capacity, debugName);
-	rg::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
+	org::memory::SetResourceUsageHint(*buffer, "PerMesh, PerMeshInstance, PerObject");
 	buffer->GetECSEntity().add<Components::IsActiveDrawSetIndices>();
 	buffer->GetECSEntity().set<Components::Resource>({ buffer });
 	buffer->GetECSEntity().add<Components::ParticipatesInPass>(
@@ -3325,7 +3325,7 @@ void ObjectManager::UpdateNormalMatrixBuffer(BufferView* view, void* data) {
 	m_normalMatrixBuffer->UpdateView(view, data);
 }
 
-rg::runtime::BulkWriteHandle ObjectManager::BeginPerObjectBulkWrite() {
+org::runtime::BulkWriteHandle ObjectManager::BeginPerObjectBulkWrite() {
 	return m_perObjectBuffers->BeginBulkWrite();
 }
 
@@ -3333,7 +3333,7 @@ void ObjectManager::EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize) 
 	m_perObjectBuffers->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
-rg::runtime::BulkWriteHandle ObjectManager::BeginPerInstanceTransformBulkWrite() {
+org::runtime::BulkWriteHandle ObjectManager::BeginPerInstanceTransformBulkWrite() {
 	return m_perInstanceTransformBuffers->BeginBulkWrite();
 }
 
@@ -3341,7 +3341,7 @@ void ObjectManager::EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t 
 	m_perInstanceTransformBuffers->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
-rg::runtime::BulkWriteHandle ObjectManager::BeginNormalMatrixBulkWrite() {
+org::runtime::BulkWriteHandle ObjectManager::BeginNormalMatrixBulkWrite() {
 	return m_normalMatrixBuffer->BeginBulkWrite();
 }
 

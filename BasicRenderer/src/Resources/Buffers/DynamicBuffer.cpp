@@ -916,14 +916,14 @@ void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t of
         return;
     }
 
-    if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+    if (org::runtime::GetActiveUploadPolicyService() == nullptr) {
         SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
         m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
 #else
         m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
 #endif
-        BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+        BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
         return;
     }
 
@@ -940,7 +940,7 @@ void DynamicBuffer::StageOrUploadLocked(const void* data, size_t size, size_t of
         return;
     }
 
-    BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+    BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
 }
 
 void DynamicBuffer::EnsureCpuShadowSize(size_t size) {
@@ -1145,9 +1145,9 @@ void DynamicBuffer::ApplyResizeBackingLocked(std::unique_ptr<GpuBufferBacking> n
             // replacement must come from that shadow, not from the upload-policy
             // coalescing mirror, because long-lived sparse buffers can contain
             // bytes written through bulk or external upload paths.
-            if (rg::runtime::GetActiveUploadService() != nullptr) {
+            if (org::runtime::GetActiveUploadService() != nullptr) {
                 BT_ZONE_SCOPE("DynamicBuffer::ApplyResizeBackingLocked::ReplayCpuShadowUploadService");
-                BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
                 spdlog::debug(
                     "DynamicBuffer '{}' id={} GrowBuffer replayed CPU shadow bytes={}",
                     m_name,

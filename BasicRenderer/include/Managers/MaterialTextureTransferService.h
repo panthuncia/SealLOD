@@ -12,8 +12,10 @@
 
 #include "Factories/TextureFactory.h"
 
-class PixelBuffer;
-class Resource;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class Resource; }
+using org::Resource;
 
 // Owns final material-texture uploads and the one-time transition into the
 // immutable shader-resource state.  Resources submitted here must never be

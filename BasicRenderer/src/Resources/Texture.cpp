@@ -1055,7 +1055,7 @@ std::shared_ptr<PixelBuffer> CreatePlaceholderTexture(
 		desc,
 		TextureFactory::TextureInitialData::FromBytes({ bytes }));
 	if (placeholder) {
-		rg::memory::SetResourceUsageHint(*placeholder, "Material textures");
+		org::memory::SetResourceUsageHint(*placeholder, "Material textures");
 	}
 	return placeholder;
 }
@@ -1878,9 +1878,9 @@ void TextureAsset::ApplySourceShapeHint(uint32_t fullWidth, uint32_t fullHeight,
 
 void TextureAsset::RefreshStreamingStateFromDescription() {
 	if (m_image && m_meta.processing.isParticipatingMaterialTexture) {
-		rg::memory::SetResourceUsageHint(*m_image, "Material textures");
+		org::memory::SetResourceUsageHint(*m_image, "Material textures");
 		if (!m_meta.filePath.empty()) {
-			rg::memory::SetResourceMemoryIdentifier(*m_image, m_meta.filePath);
+			org::memory::SetResourceMemoryIdentifier(*m_image, m_meta.filePath);
 		}
 	}
 	const bool wasEligible = m_streamingState.eligible;

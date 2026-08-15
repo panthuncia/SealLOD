@@ -92,7 +92,7 @@ ClusterRasterizationPass::ClusterRasterizationPass(
 
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
     m_viewRasterInfoBuffer->SetName("CLodViewRasterInfoBuffer");
-    rg::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD rasterization");
+    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD rasterization");
 
     rhi::IndirectArg args[] = {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
@@ -409,7 +409,7 @@ void ClusterRasterizationPass::Update(const UpdateExecutionContext& executionCon
         BUFFER_UPLOAD(
             m_viewRasterInfos.data(),
             static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
             0);
         m_declaredResourcesChanged = true;
     }

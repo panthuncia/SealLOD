@@ -11,14 +11,18 @@
 #include "Managers/Singletons/PSOManager.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
 
-class PixelBuffer;
-class Sampler;
-class BufferView;
-class Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class Sampler; }
+using org::Sampler;
+namespace org { class BufferView; }
+using org::BufferView;
+namespace org { class Buffer; }
+using org::Buffer;
 struct TextureProcessingJobHandle;
 class MaterialTextureTransferService;
 
-namespace rg::runtime {
+namespace org::runtime {
     class IReadbackService;
 }
 
@@ -66,7 +70,7 @@ public:
     std::shared_ptr<RenderPass> GetBC7CompressionCopyPass() const { return m_bc7CompressionCopyPass; }
     std::shared_ptr<CopyPass> GetBC7CompressionReadbackPass() const { return m_bc7CompressionReadbackPass; }
 
-    void SetReadbackService(rg::runtime::IReadbackService* readbackService);
+    void SetReadbackService(org::runtime::IReadbackService* readbackService);
     bool SubmitBC7CompressionJob(
         const std::shared_ptr<TextureProcessingJobHandle>& handle,
         std::string_view debugName = {}) const;
@@ -274,7 +278,7 @@ private:
     public:
         void Setup() override;
 
-        void SetReadbackService(rg::runtime::IReadbackService* readbackService);
+        void SetReadbackService(org::runtime::IReadbackService* readbackService);
         bool HasReadbackService() const { return m_readbackService != nullptr; }
         void EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job);
 
@@ -296,7 +300,7 @@ private:
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         std::vector<uint64_t> m_pendingCaptureIds;
         mutable std::mutex m_pendingMutex;
-        rg::runtime::IReadbackService* m_readbackService = nullptr;
+        org::runtime::IReadbackService* m_readbackService = nullptr;
         std::atomic_bool m_declaredResourcesChanged = true;
     };
 

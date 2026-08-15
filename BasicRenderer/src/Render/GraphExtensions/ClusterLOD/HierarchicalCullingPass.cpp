@@ -215,7 +215,7 @@ HierarchicalCullingPass::HierarchicalCullingPass(
             false,
             false);
         m_voxelRasterQueueDescriptorsBuffer->SetName("CLod Voxel Raster Queue Descriptors");
-        rg::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
+        org::memory::SetResourceUsageHint(*m_voxelRasterQueueDescriptorsBuffer, "Cluster LOD voxel rasterization");
     }
     m_pageJobVisibleClustersBuffer = std::move(pageJobVisibleClustersBuffer);
     m_pageJobVisibleClusterTransformIndicesBuffer = std::move(pageJobVisibleClusterTransformIndicesBuffer);
@@ -228,7 +228,7 @@ HierarchicalCullingPass::HierarchicalCullingPass(
         false,
         false);
     m_workGraphComputePageJobDescriptorsBuffer->SetName("CLod Work Graph Compute Page Job Descriptors");
-    rg::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD work graph");
+    org::memory::SetResourceUsageHint(*m_workGraphComputePageJobDescriptorsBuffer, "Cluster LOD work graph");
     m_histogramIndirectCommand = std::move(histogramIndirectCommand);
     m_workGraphTelemetryBuffer = std::move(workGraphTelemetryBuffer);
     m_occlusionReplayBuffer = std::move(occlusionReplayBuffer);
@@ -999,9 +999,9 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
     uint32_t zero = 0u;
     {
         ZoneScopedN("HierarchicalCullingPass::UploadCounterResets");
-        BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
+        BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_visibleClustersCounterBuffer), 0);
         if (UsesSWClassification(m_workGraphMode)) {
-            BUFFER_UPLOAD(&zero, sizeof(uint32_t), rg::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
+            BUFFER_UPLOAD(&zero, sizeof(uint32_t), org::runtime::UploadTarget::FromShared(m_swVisibleClustersCounterBuffer), 0);
         }
     }
 
@@ -1020,7 +1020,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
                 BUFFER_UPLOAD(
                     &voxelQueueDescriptors,
                     sizeof(CLodVoxelRasterQueueDescriptors),
-                    rg::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
+                    org::runtime::UploadTarget::FromShared(m_voxelRasterQueueDescriptorsBuffer),
                     0);
             }
         }
@@ -1038,7 +1038,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             BUFFER_UPLOAD(
                 &pageJobDescriptors,
                 sizeof(CLodWorkGraphComputePageJobDescriptors),
-                rg::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
+                org::runtime::UploadTarget::FromShared(m_workGraphComputePageJobDescriptorsBuffer),
                 0);
         }
     }
@@ -1125,7 +1125,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
                 BUFFER_UPLOAD(
                     m_cachedViewRasterInfo.data(),
                     static_cast<uint32_t>(m_cachedViewRasterInfo.size() * sizeof(CLodViewRasterInfo)),
-                    rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+                    org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
                     0);
             }
             if (currentVisibilityBufferIds != m_declaredVisibilityBufferIds) {
@@ -1192,7 +1192,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             BUFFER_UPLOAD(
                 m_cachedViewDepthSrvIndices.data(),
                 static_cast<uint32_t>(m_cachedViewDepthSrvIndices.size() * sizeof(CLodViewDepthSRVIndex)),
-                rg::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
+                org::runtime::UploadTarget::FromShared(m_viewDepthSrvIndicesBuffer),
                 0);
         }
     }
@@ -1219,7 +1219,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
         BUFFER_UPLOAD(
             &replayState,
             sizeof(CLodReplayBufferState),
-            rg::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
+            org::runtime::UploadTarget::FromShared(m_occlusionReplayStateBuffer),
             0);
     }
 
@@ -1290,7 +1290,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
             BUFFER_UPLOAD(
                 nodeGpuInputs,
                 sizeof(nodeGpuInputs),
-                rg::runtime::UploadTarget::FromShared(m_occlusionNodeGpuInputsBuffer),
+                org::runtime::UploadTarget::FromShared(m_occlusionNodeGpuInputsBuffer),
                 0);
         }
     }
@@ -1302,7 +1302,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
         BUFFER_UPLOAD(
             m_zeroTelemetryScratch.data(),
             static_cast<uint32_t>(m_zeroTelemetryScratch.size() * sizeof(uint32_t)),
-            rg::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
+            org::runtime::UploadTarget::FromShared(m_workGraphTelemetryBuffer),
             0);
     }
 
@@ -1311,7 +1311,7 @@ void HierarchicalCullingPass::Update(const UpdateExecutionContext& executionCont
         CLodReyesTelemetry telemetry{};
         telemetry.phaseIndex = m_isFirstPass ? 1u : 2u;
         telemetry.configuredMaxSplitPassCount = CLodReyesMaxSplitPassCount;
-        BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), rg::runtime::UploadTarget::FromShared(m_reyesTelemetryBuffer), 0);
+        BUFFER_UPLOAD(&telemetry, sizeof(CLodReyesTelemetry), org::runtime::UploadTarget::FromShared(m_reyesTelemetryBuffer), 0);
     }
 }
 

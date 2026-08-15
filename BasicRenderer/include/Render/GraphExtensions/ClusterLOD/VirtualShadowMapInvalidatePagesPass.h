@@ -6,9 +6,12 @@
 #include "Render/RendererComponents.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class PixelBuffer;
-class DynamicBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class DynamicBuffer; }
+using org::DynamicBuffer;
 class VirtualShadowInvalidationQueue;
 
 class VirtualShadowMapInvalidatePagesPass final : public ComputePass {

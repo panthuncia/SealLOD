@@ -12,7 +12,8 @@
 #include "ShaderBuffers.h"
 
 class Skeleton; // base skeleton asset or instance
-class BufferView;
+namespace org { class BufferView; }
+using org::BufferView;
 
 class SkeletonManager : public IResourceProvider {
 public:

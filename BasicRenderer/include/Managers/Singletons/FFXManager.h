@@ -18,9 +18,11 @@
 #include "Scene/Components.h"
 
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 struct RenderContext;
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class FFXManager {
 public:

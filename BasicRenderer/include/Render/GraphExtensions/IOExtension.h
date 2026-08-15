@@ -18,7 +18,7 @@
 class RenderGraphIOExtension final : public RenderGraph::IRenderGraphExtension {
 public:
 	RenderGraphIOExtension(TextureFactory* textureFactory,
-		rg::runtime::IUploadService* uploadService,
+		org::runtime::IUploadService* uploadService,
 		br::ReadbackManager* readbackManager,
 		MaterialManager* materialManager)
 		: m_textureFactory(textureFactory),
@@ -28,7 +28,7 @@ public:
 	}
 
 	void OnRegistryReset(ResourceRegistry* reg) override {
-		rg::runtime::UploadResolveContext ctx;
+		org::runtime::UploadResolveContext ctx;
 		ctx.registry = reg;
 		ctx.epoch = 0; // TODO: Will this be useful?
 		if (m_uploadService) {
@@ -102,7 +102,7 @@ public:
 
 private:
 	TextureFactory* m_textureFactory = nullptr; // non-owning
-	rg::runtime::IUploadService* m_uploadService = nullptr; // non-owning
+	org::runtime::IUploadService* m_uploadService = nullptr; // non-owning
 	br::ReadbackManager* m_readbackManager = nullptr; // non-owning
 	MaterialManager* m_materialManager = nullptr; // non-owning
 };

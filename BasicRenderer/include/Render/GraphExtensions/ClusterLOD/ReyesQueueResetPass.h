@@ -6,7 +6,8 @@
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class ReyesQueueResetPass final : public ComputePass {
 public:

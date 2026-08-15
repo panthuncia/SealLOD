@@ -21,6 +21,8 @@
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 
+namespace org {
+
 class DynamicBuffer : public ViewedDynamicBufferBase, public IHasMemoryMetadata, public IDeferredBackingResizeClient {
 public:
     enum class ReadyResizePublishMode : std::uint8_t {
@@ -94,12 +96,12 @@ public:
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
 
-    rg::runtime::BulkWriteHandle BeginBulkWrite() {
+    org::runtime::BulkWriteHandle BeginBulkWrite() {
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
         EnsureCpuShadowSize(GetBufferSize());
-        rg::runtime::BulkWriteHandle handle{
+        org::runtime::BulkWriteHandle handle{
             reinterpret_cast<uint8_t*>(m_cpuShadowData.data()),
             m_cpuShadowData.size()
         };
@@ -115,7 +117,7 @@ public:
 
         EnsureCpuShadowSize(dirtyOffset + dirtySize);
         StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
-        if (rg::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
+        if (org::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
         }
     }
@@ -130,7 +132,7 @@ public:
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
-            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
                     return nullptr;
@@ -180,7 +182,7 @@ public:
 private:
     DynamicBuffer(bool byteAddress, size_t elementSize, size_t capacity, std::string name = "", bool UAV = false)
         : m_elementSize(elementSize), m_byteAddress(byteAddress), m_needsUpdate(false), m_UAV(UAV) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+        SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 
         size_t bufferSize = AlignBufferCapacity(elementSize * capacity, m_byteAddress);
 		m_capacity = bufferSize;
@@ -238,7 +240,7 @@ private:
             return;
         }
 
-        rg::runtime::UploadPolicyConfig config{};
+        org::runtime::UploadPolicyConfig config{};
         config.tag = tag;
         m_uploadPolicyState.SetPolicy(config, GetBufferSize());
     }
@@ -253,7 +255,7 @@ private:
         ApplyMetadataToBacking(bundle);
     }
 
-    rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
     // Authoritative CPU bytes for backing replacement. The upload-policy state
     // coalesces writes, but this shadow owns the long-lived contents.
     std::vector<std::byte> m_cpuShadowData;
@@ -265,3 +267,7 @@ private:
     size_t m_requestedResizeCapacity = 0;
     bool m_pendingResizeValid = false;
 };
+
+} // namespace org
+
+using org::DynamicBuffer;

@@ -4,7 +4,8 @@
 #include <string>
 #include <unordered_map>
 
-class Resource;
+namespace org { class Resource; }
+using org::Resource;
 class CLodStreamingSystem;
 class VirtualShadowCasterRegistry;
 

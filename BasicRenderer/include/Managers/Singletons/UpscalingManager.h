@@ -90,7 +90,8 @@ inline sl::DLSSMode ToSLQualityMode(UpscaleQualityMode mode) {
     }
 }
 
-class PixelBuffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 struct RenderContext;
 
 class UpscalingManager {

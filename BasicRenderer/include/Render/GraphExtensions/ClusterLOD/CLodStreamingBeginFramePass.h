@@ -6,8 +6,10 @@
 
 #include "RenderPasses/Base/ComputePass.h"
 
-class Buffer;
-class UploadInstance;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class UploadInstance; }
+using org::UploadInstance;
 
 class CLodStreamingBeginFramePass : public ComputePass {
 public:

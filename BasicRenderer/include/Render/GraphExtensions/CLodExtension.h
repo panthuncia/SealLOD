@@ -8,13 +8,16 @@
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Render/GraphExtensions/CLodExtensionComponents.h"
 
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 class CLodStreamingSystem;
 class CLodAlphaVariant;
 class CLodShadowVariant;
 class CLodVisibilityVariant;
-class PixelBuffer;
-class ResourceGroup;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 class VirtualShadowCasterRegistry;
 struct ProducerPersistentState;
 struct CLodVariantTraits;

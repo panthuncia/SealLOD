@@ -4,8 +4,10 @@
 
 #include "RenderPasses/Base/RenderPass.h"
 
-class Buffer;
-class PixelBuffer;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class PixelBuffer; }
+using org::PixelBuffer;
 
 class AVBOITSetupPass final : public RenderPass {
 public:

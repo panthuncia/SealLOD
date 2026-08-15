@@ -23,8 +23,10 @@
 #include "../../../../shaders/PerPassRootConstants/clodWorkGraphRootConstants.h"
 #include "../../../../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 
-class Buffer;
-class ResourceGroup;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class ResourceGroup; }
+using org::ResourceGroup;
 
 class ClusterSoftwareRasterPageJobExpandPass : public ComputePass {
 public:

@@ -9,8 +9,10 @@
 
 #include "Render/Runtime/UploadTypes.h"
 
-class Buffer;
-class Resource;
+namespace org { class Buffer; }
+using org::Buffer;
+namespace org { class Resource; }
+using org::Resource;
 
 enum class CLodUploadTicketState : uint8_t {
     Published,
@@ -70,12 +72,12 @@ public:
     void UploadPageData(
         const void* data,
         size_t size,
-        rg::runtime::UploadTarget target,
+        org::runtime::UploadTarget target,
         size_t destinationOffset);
     void UploadData(
         const void* data,
         size_t size,
-        rg::runtime::UploadTarget target,
+        org::runtime::UploadTarget target,
         size_t destinationOffset);
     [[nodiscard]] bool HasPendingWork() const noexcept { return !m_copies.empty(); }
     std::shared_ptr<CLodUploadBatch> Seal(
@@ -91,7 +93,7 @@ private:
     struct DeferredUpload {
         const void* data = nullptr;
         size_t size = 0;
-        rg::runtime::UploadTarget target;
+        org::runtime::UploadTarget target;
         size_t destinationOffset = 0;
     };
 

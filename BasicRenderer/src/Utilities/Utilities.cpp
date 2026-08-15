@@ -1022,7 +1022,7 @@ LoadTextureFromMemory(const void* bytes,
 
     DirectX::TexMetadata meta{};
     ImageFiletype kind{};
-    if (!detail::ProbeImageContainer(bytes, byteCount, kind, meta, flags)) {
+    if (!::detail::ProbeImageContainer(bytes, byteCount, kind, meta, flags)) {
         throw std::runtime_error("Unrecognized image container in memory buffer");
     }
 
@@ -1106,11 +1106,11 @@ LoadTextureFromFile(const std::wstring& filePath,
     // For WIC paths, FORCE_* ensures consistent format choice even if the file has metadata
     localFlags.wic = preferSRGB ? DirectX::WIC_FLAGS_FORCE_SRGB : DirectX::WIC_FLAGS_FORCE_LINEAR;
 
-    if (detail::IsProcessedTextureCachePath(filePath)) {
+    if (::detail::IsProcessedTextureCachePath(filePath)) {
         std::string processedCacheFailureReason;
-        if (!detail::kForceCpuTextureLoadPath) {
+        if (!::detail::kForceCpuTextureLoadPath) {
             ZoneScopedN("TryLoadProcessedTextureCacheToVRAM");
-            if (auto conditionedTexture = detail::TryLoadProcessedTextureCacheToVRAM(filePath, sampler, allowRTV, allowUAV, &processedCacheFailureReason)) {
+            if (auto conditionedTexture = ::detail::TryLoadProcessedTextureCacheToVRAM(filePath, sampler, allowRTV, allowUAV, &processedCacheFailureReason)) {
                 conditionedTexture->Meta().preferSRGB = preferSRGB;
                 return conditionedTexture;
             }
@@ -1136,9 +1136,9 @@ LoadTextureFromFile(const std::wstring& filePath,
         }
     }
 
-    if (!detail::kForceCpuTextureLoadPath && detail::IsDDSPath(filePath)) {
+    if (!::detail::kForceCpuTextureLoadPath && ::detail::IsDDSPath(filePath)) {
         ZoneScopedN("TryLoadDDSDirectToVRAM");
-        if (auto directStorageTexture = detail::TryLoadDDSDirectToVRAM(filePath, sampler, preferSRGB, localFlags, false, allowRTV, allowUAV)) {
+        if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(filePath, sampler, preferSRGB, localFlags, false, allowRTV, allowUAV)) {
             directStorageTexture->Meta().filePath = utf8;
             directStorageTexture->Meta().preferSRGB = preferSRGB;
             return directStorageTexture;
@@ -1148,7 +1148,7 @@ LoadTextureFromFile(const std::wstring& filePath,
     ZoneScopedN("LoadTextureFromFile fallback to CPU decode");
     std::shared_ptr<TextureAsset> texture;
     std::string mapError;
-    if (auto mapped = detail::MappedFileView::Open(filePath, &mapError)) {
+    if (auto mapped = ::detail::MappedFileView::Open(filePath, &mapError)) {
         ZoneScopedN("LoadTextureFromFile fallback mmap decode");
         TracyPlot("SARP.Texture.MMap.DecodeBytes", static_cast<int64_t>(mapped->Size()));
         texture = LoadTextureFromMemory(mapped->Data(), mapped->Size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
@@ -1156,10 +1156,10 @@ LoadTextureFromFile(const std::wstring& filePath,
             texture->RecordLoadPath(TextureLoadPathTelemetry::MemoryMappedFileRead, "texture decoded directly from memory-mapped file view");
         }
     } else {
-        detail::WarnOnce(
+        ::detail::WarnOnce(
             "mmap-decode|" + utf8 + "|" + mapError,
             "LoadTextureFromFile: memory-mapped decode failed for '" + utf8 + "' because " + mapError + "; falling back to copied file bytes");
-        const auto fileBytes = detail::ReadFileBytes(filePath);
+        const auto fileBytes = ::detail::ReadFileBytes(filePath);
         texture = LoadTextureFromMemory(fileBytes.data.data(), fileBytes.data.size(), sampler, localFlags, preferSRGB, allowRTV, allowUAV);
         if (texture) {
             texture->RecordLoadPath(
@@ -1197,9 +1197,9 @@ LoadTextureFromFileDeferred(
 
     TextureDescription desc{};
     std::string deferredShapeDetail = "texture load deferred; source path retained for async upload";
-    if (meta.isProcessingCacheArtifact || detail::IsProcessedTextureCachePath(filePath)) {
+    if (meta.isProcessingCacheArtifact || ::detail::IsProcessedTextureCachePath(filePath)) {
         std::string cacheShapeError;
-        if (auto cacheDesc = detail::TryBuildDeferredConditionedCacheDescription(filePath, allowRTV, allowUAV, &cacheShapeError)) {
+        if (auto cacheDesc = ::detail::TryBuildDeferredConditionedCacheDescription(filePath, allowRTV, allowUAV, &cacheShapeError)) {
             desc = std::move(*cacheDesc);
             meta.isProcessingCacheArtifact = true;
             deferredShapeDetail = "texture load deferred; conditioned cache shape populated from cache header";
@@ -1273,7 +1273,7 @@ std::shared_ptr<TextureAsset> LoadCubemapFromFile(const char* topPath, const cha
 }
 
 std::shared_ptr<TextureAsset> LoadCubemapFromFile(std::wstring ddsFilePath, bool allowRTV, bool allowUAV) {
-    if (auto directStorageTexture = detail::TryLoadDDSDirectToVRAM(ddsFilePath, Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
+    if (auto directStorageTexture = ::detail::TryLoadDDSDirectToVRAM(ddsFilePath, Sampler::GetDefaultSampler(), false, {}, true, allowRTV, allowUAV)) {
         return directStorageTexture;
     }
 
@@ -2410,7 +2410,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
 	std::shared_ptr<PixelBuffer> depthBuffer = PixelBuffer::CreateShared(desc);
 	depthBuffer->SetName("Depth Buffer");
-	rg::memory::SetResourceUsageHint(*depthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*depthBuffer, "Depth resources");
 
     TextureDescription downsampledDesc;
     // Pad yres and xres to power of two
@@ -2436,7 +2436,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
     std::shared_ptr<PixelBuffer> linearDepthBuffer = PixelBuffer::CreateShared(downsampledDesc);
     linearDepthBuffer->SetName("linear Depth Buffer");
-	rg::memory::SetResourceUsageHint(*linearDepthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*linearDepthBuffer, "Depth resources");
 
 	// Projected (non-linear) depth for upscalers — R32_Float with UAV+SRV, same resolution as depth buffer
 	TextureDescription projectedDesc;
@@ -2458,7 +2458,7 @@ Components::DepthMap CreateDepthMapComponent(unsigned int xRes, unsigned int yRe
 
 	std::shared_ptr<PixelBuffer> projectedDepthBuffer = PixelBuffer::CreateShared(projectedDesc);
 	projectedDepthBuffer->SetName("Projected Depth Buffer");
-	rg::memory::SetResourceUsageHint(*projectedDepthBuffer, "Depth resources");
+	org::memory::SetResourceUsageHint(*projectedDepthBuffer, "Depth resources");
 
 	Components::DepthMap depthMap;
 	depthMap.depthMap = depthBuffer;

@@ -448,30 +448,30 @@ void VirtualShadowMapSetupPass::Update(const UpdateExecutionContext& executionCo
     runtimeState.maxPhysicalPages = virtualShadowPhysicalPageCount;
     runtimeState.maxAllocationRequests = virtualShadowConfig.maxAllocationRequests;
     runtimeState.directionalLodBias = virtualShadowConfig.directionalLodBias;
-    BUFFER_UPLOAD(&runtimeState, sizeof(runtimeState), rg::runtime::UploadTarget::FromShared(m_runtimeStateBuffer), 0);
+    BUFFER_UPLOAD(&runtimeState, sizeof(runtimeState), org::runtime::UploadTarget::FromShared(m_runtimeStateBuffer), 0);
 
     BUFFER_UPLOAD(
         clipmapInfos.data(),
         static_cast<uint32_t>(clipmapInfos.size() * sizeof(CLodVirtualShadowClipmapInfo)),
-        rg::runtime::UploadTarget::FromShared(m_clipmapInfoBuffer),
+        org::runtime::UploadTarget::FromShared(m_clipmapInfoBuffer),
         0);
 
     BUFFER_UPLOAD(
         markClipmapData.data(),
         static_cast<uint32_t>(markClipmapData.size() * sizeof(CLodVirtualShadowMarkClipmapData)),
-        rg::runtime::UploadTarget::FromShared(m_markClipmapDataBuffer),
+        org::runtime::UploadTarget::FromShared(m_markClipmapDataBuffer),
         0);
 
     BUFFER_UPLOAD(
         &compactMainCamera,
         sizeof(compactMainCamera),
-        rg::runtime::UploadTarget::FromShared(m_compactMainCameraBuffer),
+        org::runtime::UploadTarget::FromShared(m_compactMainCameraBuffer),
         0);
 
     BUFFER_UPLOAD(
         compactShadowCameras.data(),
         static_cast<uint32_t>(compactShadowCameras.size() * sizeof(CLodVirtualShadowCompactShadowCameraInfo)),
-        rg::runtime::UploadTarget::FromShared(m_compactShadowCameraBuffer),
+        org::runtime::UploadTarget::FromShared(m_compactShadowCameraBuffer),
         0);
 }
 

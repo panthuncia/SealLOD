@@ -83,11 +83,11 @@ namespace
 }
 
 ViewManager::ViewManager() {
-    auto& resourceManager = ResourceManager::GetInstance();
+    auto& resourceManager = ::ResourceManager::GetInstance();
     m_cameraBuffer = LazyDynamicStructuredBuffer<CameraInfo>::CreateShared(1, "cameraBuffer<ViewManager>");
 	m_cullingCameraBuffer = LazyDynamicStructuredBuffer<CullingCameraInfo>::CreateShared(1, "cullingCameraBuffer<ViewManager>");
-    rg::memory::SetResourceUsageHint(*m_cameraBuffer, "Camera and view buffers");
-	rg::memory::SetResourceUsageHint(*m_cullingCameraBuffer, "Camera and view buffers");
+    org::memory::SetResourceUsageHint(*m_cameraBuffer, "Camera and view buffers");
+	org::memory::SetResourceUsageHint(*m_cullingCameraBuffer, "Camera and view buffers");
     m_linearDepthGroup = std::make_shared<ResourceGroup>("LinearDepthMaps");
     m_lastFrameLinearDepthGroup = std::make_shared<ResourceGroup>("LastFrameLinearDepthMaps");
 
@@ -223,7 +223,7 @@ void ViewManager::AttachDepth(uint64_t viewID,
             auto desc = linearDepth->GetDescription();
             auto history = PixelBuffer::CreateShared(desc);
             history->SetName("Last Frame Linear Depth");
-            rg::memory::SetResourceUsageHint(*history, "Depth resources");
+            org::memory::SetResourceUsageHint(*history, "Depth resources");
             m_lastFrameLinearDepthBySource[sourceID] = history;
             m_linearDepthGroup->AddResource(linearDepth);
             m_lastFrameLinearDepthGroup->AddResource(history);

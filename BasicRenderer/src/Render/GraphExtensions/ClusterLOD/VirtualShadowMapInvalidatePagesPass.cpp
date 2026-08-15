@@ -121,7 +121,7 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
         BUFFER_UPLOAD(
             extensionBounds.data(),
             static_cast<uint32_t>(extensionBounds.size() * sizeof(BoundsGpu)),
-            rg::runtime::UploadTarget::FromShared(m_boundsInvalidationBuffer),
+            org::runtime::UploadTarget::FromShared(m_boundsInvalidationBuffer),
             0);
     }
 
@@ -168,20 +168,20 @@ void VirtualShadowMapInvalidatePagesPass::Update(const UpdateExecutionContext& e
         BUFFER_UPLOAD(
             inputs.data(),
             static_cast<uint32_t>(inputs.size() * sizeof(CLodVirtualShadowInvalidationInput)),
-            rg::runtime::UploadTarget::FromShared(m_invalidationInputsBuffer),
+            org::runtime::UploadTarget::FromShared(m_invalidationInputsBuffer),
             0);
     }
 
     BUFFER_UPLOAD(
         &m_pendingInputCount,
         sizeof(m_pendingInputCount),
-        rg::runtime::UploadTarget::FromShared(m_invalidationCountBuffer),
+        org::runtime::UploadTarget::FromShared(m_invalidationCountBuffer),
         0);
 
     BUFFER_UPLOAD(
         invalidatedInstancesBitset.data(),
         static_cast<uint32_t>(invalidatedInstancesBitset.size() * sizeof(uint32_t)),
-        rg::runtime::UploadTarget::FromShared(m_invalidatedInstancesBitsetBuffer),
+        org::runtime::UploadTarget::FromShared(m_invalidatedInstancesBitsetBuffer),
         0);
 }
 

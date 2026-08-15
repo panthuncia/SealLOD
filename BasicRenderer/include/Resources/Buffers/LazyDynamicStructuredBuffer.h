@@ -22,6 +22,8 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace org {
+
 class LazyDynamicStructuredBufferBase : public ViewedDynamicBufferBase, public IHasMemoryMetadata { // Necessary to store these in a templateless vector
 public:
 	virtual size_t GetElementSize() const = 0;
@@ -251,12 +253,12 @@ public:
         return true;
     }
 
-    rg::runtime::BulkWriteHandle BeginBulkWrite() {
+    org::runtime::BulkWriteHandle BeginBulkWrite() {
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
         EnsureCpuShadowSize(GetBufferSize());
-        rg::runtime::BulkWriteHandle handle{
+        org::runtime::BulkWriteHandle handle{
             reinterpret_cast<uint8_t*>(m_cpuShadowData.data()),
             m_cpuShadowData.size()
         };
@@ -272,7 +274,7 @@ public:
 
         EnsureCpuShadowSize(dirtyOffset + dirtySize);
         StageOrUploadLocked(m_cpuShadowData.data() + static_cast<std::ptrdiff_t>(dirtyOffset), dirtySize, dirtyOffset);
-        if (rg::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
+        if (org::runtime::GetActiveUploadPolicyService() != nullptr && m_uploadPolicyState.HasPendingWork()) {
             MarkUploadPolicyDirty();
         }
     }
@@ -333,7 +335,7 @@ public:
         std::lock_guard<std::recursive_mutex> lock(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         m_uploadPolicyState.FlushToUploadService(
-            rg::runtime::UploadTarget::FromShared(shared_from_this()),
+            org::runtime::UploadTarget::FromShared(shared_from_this()),
             [this](size_t offset, size_t size) -> const void* {
                 if (offset + size > m_cpuShadowData.size()) {
                     return nullptr;
@@ -360,7 +362,7 @@ public:
 private:
     LazyDynamicStructuredBuffer(UINT capacity = 64, std::string name = "", uint64_t alignment = 1, bool UAV = false)
         : m_capacity(capacity), m_needsUpdate(false), m_UAV(UAV) {
-        SetUploadPolicyTag(rg::runtime::UploadPolicyTag::Coalesced);
+        SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
         if (alignment == 0) {
 			alignment = 1;
         }
@@ -528,8 +530,8 @@ private:
                 // Lazy buffers own an explicit CPU shadow. Re-upload preserved
                 // bytes from that shadow after backing replacement so sparse and
                 // bulk-written data survives buffer growth.
-                if (rg::runtime::GetActiveUploadService() != nullptr) {
-                    BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, rg::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
+                if (org::runtime::GetActiveUploadService() != nullptr) {
+                    BUFFER_UPLOAD(m_cpuShadowData.data(), replayBytes, org::runtime::UploadTarget::FromShared(shared_from_this()), 0u);
                 } else {
                     StageOrUploadLocked(m_cpuShadowData.data(), replayBytes, 0u);
                     if (m_uploadPolicyState.HasPendingWork()) {
@@ -555,7 +557,7 @@ private:
             return;
         }
 
-        rg::runtime::UploadPolicyConfig config{};
+        org::runtime::UploadPolicyConfig config{};
         config.tag = tag;
         m_uploadPolicyState.SetPolicy(config, GetBufferSize());
     }
@@ -571,14 +573,14 @@ private:
             return;
         }
 
-        if (rg::runtime::GetActiveUploadPolicyService() == nullptr) {
+        if (org::runtime::GetActiveUploadPolicyService() == nullptr) {
             SyncUploadPolicyState();
 #if BUILD_TYPE == BUILD_TYPE_DEBUG
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize(), __FILE__, __LINE__);
 #else
             m_uploadPolicyState.StageWrite(data, size, offset, GetBufferSize());
 #endif
-            BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+            BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
             return;
         }
 
@@ -595,7 +597,7 @@ private:
             return;
         }
 
-        BUFFER_UPLOAD(data, size, rg::runtime::UploadTarget::FromShared(shared_from_this()), offset);
+        BUFFER_UPLOAD(data, size, org::runtime::UploadTarget::FromShared(shared_from_this()), offset);
     }
 
     void EnsureCpuShadowSize(size_t size) {
@@ -618,9 +620,14 @@ private:
         ApplyMetadataToBacking(bundle);
     }
 
-    rg::runtime::BufferUploadPolicyState m_uploadPolicyState{};
+    org::runtime::BufferUploadPolicyState m_uploadPolicyState{};
     mutable std::recursive_mutex m_uploadPolicyMirrorMutex;
     AsyncBufferBackingResizeState m_asyncResizeState;
     uint32_t m_pendingResizeCapacity = 0u;
     bool m_pendingResizeValid = false;
 };
+
+} // namespace org
+
+using org::LazyDynamicStructuredBuffer;
+using org::LazyDynamicStructuredBufferBase;

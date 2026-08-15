@@ -41,7 +41,7 @@ public:
         BUFFER_UPLOAD(
             &gtaoInfo,
             sizeof(GTAOInfo),
-            rg::runtime::UploadTarget::FromHandle(m_gtaoConstantsHandle),
+            org::runtime::UploadTarget::FromHandle(m_gtaoConstantsHandle),
             0);
     }
 
@@ -114,7 +114,7 @@ private:
         samplerDesc.borderPreset = rhi::BorderPreset::TransparentBlack;
         samplerDesc.minLod = 0.0f;
         samplerDesc.maxLod = 0.0f;
-        m_samplerIndex = rg::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
+        m_samplerIndex = org::runtime::CreateIndexedSamplerFromActiveDescriptorService(samplerDesc);
     }
 
     void CreateXeGTAOComputePSO()

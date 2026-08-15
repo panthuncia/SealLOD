@@ -13,12 +13,13 @@
 #include "Render/MaterialCompileFlagsSlotRegistry.h"
 #include "Render/RasterBucketFlags.h"
 
-namespace rg::runtime {
+namespace org::runtime {
 class IReadbackService;
 }
 
 class TextureFactory;
-class CopyPass;
+namespace org { class CopyPass; }
+using org::CopyPass;
 
 // Manages buffers for per-material-compile-flag work (e.g., visibility buffer per-material)
 class MaterialManager : public IResourceProvider {

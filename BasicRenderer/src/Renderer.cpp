@@ -344,7 +344,7 @@ void WriteRendererExceptionNote(
 
 void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     auto& sm = SettingsManager::GetInstance();
-    rg::runtime::OpenRenderGraphSettings orgSettings{};
+    org::runtime::OpenRenderGraphSettings orgSettings{};
     orgSettings.numFramesInFlight = numFramesInFlight;
     orgSettings.collectPassStatistics = sm.getSettingGetter<bool>("collectPassStatistics")();
     orgSettings.collectPipelineStatistics = sm.getSettingGetter<bool>("collectPipelineStatistics")();
@@ -360,7 +360,7 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.autoAliasLogExclusionReasons = sm.getSettingGetter<bool>("autoAliasLogExclusionReasons")();
     orgSettings.autoAliasBuildDebugData = sm.getSettingGetter<bool>("autoAliasBuildDebugData")();
     orgSettings.queueSchedulingEnableLogging = sm.getSettingGetter<bool>("queueSchedulingEnableLogging")();
-    orgSettings.queueSchedulingSelectionPolicy = static_cast<rg::runtime::QueueSchedulingSelectionPolicy>(sm.getSettingGetter<uint8_t>("queueSchedulingSelectionPolicy")());
+    orgSettings.queueSchedulingSelectionPolicy = static_cast<org::runtime::QueueSchedulingSelectionPolicy>(sm.getSettingGetter<uint8_t>("queueSchedulingSelectionPolicy")());
     orgSettings.queueSchedulingWidthScale = sm.getSettingGetter<float>("queueSchedulingWidthScale")();
     orgSettings.queueSchedulingPenaltyBias = sm.getSettingGetter<float>("queueSchedulingPenaltyBias")();
     orgSettings.queueSchedulingMinPenalty = sm.getSettingGetter<float>("queueSchedulingMinPenalty")();
@@ -371,9 +371,9 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.queueSchedulingCrossQueueHandoffPenalty = sm.getSettingGetter<float>("queueSchedulingCrossQueueHandoffPenalty")();
     orgSettings.autoAliasPoolRetireIdleFrames = sm.getSettingGetter<uint32_t>("autoAliasPoolRetireIdleFrames")();
     orgSettings.autoAliasPoolGrowthHeadroom = sm.getSettingGetter<float>("autoAliasPoolGrowthHeadroom")();
-    orgSettings.transitionPlacementMode = static_cast<rg::runtime::TransitionPlacementMode>(sm.getSettingGetter<uint8_t>("transitionPlacementMode")());
+    orgSettings.transitionPlacementMode = static_cast<org::runtime::TransitionPlacementMode>(sm.getSettingGetter<uint8_t>("transitionPlacementMode")());
     orgSettings.heavyDebug = sm.getSettingGetter<bool>("heavyDebug")();
-    rg::runtime::SetOpenRenderGraphSettings(orgSettings);
+    org::runtime::SetOpenRenderGraphSettings(orgSettings);
 }
 
 bool IsStreamlineDisabledByEnvironment() {
@@ -693,20 +693,20 @@ void Renderer::Initialize(
 
     if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
-        rg::runtime::SetActiveUploadService(uploadService);
+        org::runtime::SetActiveUploadService(uploadService);
     }
     if (!m_uploadPolicyService) {
-        m_uploadPolicyService = rg::runtime::CreateDefaultUploadPolicyService();
+        m_uploadPolicyService = org::runtime::CreateDefaultUploadPolicyService();
     }
     if (m_uploadPolicyService) {
         m_uploadPolicyService->Initialize();
-        rg::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
+        org::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
     }
     if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
         descriptorService->Initialize();
-        rg::runtime::SetActiveDescriptorService(descriptorService);
+        org::runtime::SetActiveDescriptorService(descriptorService);
     }
-    ResourceManager::GetInstance().Initialize();
+    ::ResourceManager::GetInstance().Initialize();
     const uint32_t ioWorkerCount = ReadBoundedEnvironmentUint(
         "SARP_CLOD_IO_WORKER_COUNT", 32u, 1u, 64u);
     TaskSchedulerManager::GetInstance().Initialize(ioWorkerCount);
@@ -799,7 +799,9 @@ void Renderer::Initialize(
         m_pSkeletonManager.get(),
         m_pTextureFactory.get(),
         m_pTerrainManager.get(),
-        std::addressof(m_shaderVariantRequestService));
+        std::addressof(m_shaderVariantRequestService),
+		currentRenderGraph ? currentRenderGraph->GetUploadService() : nullptr,
+		currentRenderGraph ? currentRenderGraph->GetDescriptorService() : nullptr);
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;
@@ -1713,7 +1715,7 @@ void Renderer::CreateGlobalResources() {
         m_blueNoiseTexture = blueNoiseAsset->ImagePtr();
         if (m_blueNoiseTexture) {
             m_blueNoiseTexture->SetName("Blue Noise 2D");
-            rg::memory::SetResourceUsageHint(*m_blueNoiseTexture, "Noise lookup resources");
+            org::memory::SetResourceUsageHint(*m_blueNoiseTexture, "Noise lookup resources");
         }
     }
 
@@ -1748,14 +1750,14 @@ void Renderer::CreateDefaultEnvironmentResources() {
 
     if (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap) && !m_defaultEnvironmentCubemap) {
         m_defaultEnvironmentCubemap = makeFallbackCubemap(skyboxResolution, false, "Fallback Environment Cubemap");
-        rg::memory::SetResourceUsageHint(*m_defaultEnvironmentCubemap, "Fallback environment resources");
+        org::memory::SetResourceUsageHint(*m_defaultEnvironmentCubemap, "Fallback environment resources");
     }
     if (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentPrefilteredCubemap) && !m_defaultEnvironmentPrefilteredCubemap) {
         m_defaultEnvironmentPrefilteredCubemap = makeFallbackCubemap(
             reflectionResolution,
             true,
             "Fallback Prefiltered Environment Cubemap");
-        rg::memory::SetResourceUsageHint(*m_defaultEnvironmentPrefilteredCubemap, "Fallback environment resources");
+        org::memory::SetResourceUsageHint(*m_defaultEnvironmentPrefilteredCubemap, "Fallback environment resources");
     }
 }
 
@@ -2044,7 +2046,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
     settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
     settingsManager.registerSetting<bool>("queueSchedulingEnableLogging", false);
-    settingsManager.registerSetting<uint8_t>("queueSchedulingSelectionPolicy", static_cast<uint8_t>(rg::runtime::QueueSchedulingSelectionPolicy::FirstFit));
+    settingsManager.registerSetting<uint8_t>("queueSchedulingSelectionPolicy", static_cast<uint8_t>(org::runtime::QueueSchedulingSelectionPolicy::FirstFit));
     settingsManager.registerSetting<float>("queueSchedulingWidthScale", 0.0f); // Disable multi-queue scheduling
     settingsManager.registerSetting<float>("queueSchedulingPenaltyBias", 0.0f);
     settingsManager.registerSetting<float>("queueSchedulingMinPenalty", 1.0f);
@@ -2055,7 +2057,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>("queueSchedulingCrossQueueHandoffPenalty", 2.0f);
 	settingsManager.registerSetting<uint32_t>("autoAliasPoolRetireIdleFrames", 120u);
 	settingsManager.registerSetting<float>("autoAliasPoolGrowthHeadroom", 1.5f);
-    settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(rg::runtime::TransitionPlacementMode::CanonicalThenOptimize));
+    settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(org::runtime::TransitionPlacementMode::CanonicalThenOptimize));
     settingsManager.registerSetting<bool>("heavyDebug", false);
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);
@@ -2148,7 +2150,7 @@ void Renderer::SetSettings() {
     bool outputTypeRequiresRenderGraphRebuild =
         OutputTypeRequiresRenderGraphRebuild(settingsManager.getSettingGetter<unsigned int>("outputType")());
     m_settingsSubscriptions.push_back(settingsManager.addObserver<unsigned int>("outputType", [this, outputTypeRequiresRenderGraphRebuild](const unsigned int& newValue) mutable {
-        ResourceManager::GetInstance().SetOutputType(newValue);
+        ::ResourceManager::GetInstance().SetOutputType(newValue);
         const bool newOutputTypeRequiresRenderGraphRebuild = OutputTypeRequiresRenderGraphRebuild(newValue);
         if (newOutputTypeRequiresRenderGraphRebuild != outputTypeRequiresRenderGraphRebuild) {
             rebuildRenderGraph = true;
@@ -2404,7 +2406,7 @@ void Renderer::SetSettings() {
         settingsManager.getSettingSetter<std::vector<float>>("directionalLightCascadeSplits")(calculateCascadeSplits(newValue, zNear, zFar, zFar));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<std::vector<float>>("directionalLightCascadeSplits", [this](const std::vector<float>& newValue) {
-        ResourceManager::GetInstance().SetDirectionalCascadeSplits(newValue);
+        ::ResourceManager::GetInstance().SetDirectionalCascadeSplits(newValue);
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<UpscalingMode>("upscalingMode", [this](const UpscalingMode& newValue) {
 
@@ -2616,7 +2618,7 @@ void Renderer::CreateTextures() {
     hdrDesc.allowAlias = true;
     auto hdrColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
     hdrColorTarget->SetName("Primary Camera HDR Color Target");
-    rg::memory::SetResourceUsageHint(*hdrColorTarget, "Primary color buffers");
+    org::memory::SetResourceUsageHint(*hdrColorTarget, "Primary color buffers");
 	m_coreResourceProvider.m_HDRColorTarget = hdrColorTarget;
 
     auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
@@ -2629,7 +2631,7 @@ void Renderer::CreateTextures() {
     hdrDesc.allowAlias = true;
 	auto upscaledHDRColorTarget = PixelBuffer::CreateSharedUnmaterialized(hdrDesc);
 	upscaledHDRColorTarget->SetName("Upscaled HDR Color Target");
-    rg::memory::SetResourceUsageHint(*upscaledHDRColorTarget, "Upscaled color buffers");
+    org::memory::SetResourceUsageHint(*upscaledHDRColorTarget, "Upscaled color buffers");
 	m_coreResourceProvider.m_upscaledHDRColorTarget = upscaledHDRColorTarget;
 
     TextureDescription motionVectors;
@@ -2648,7 +2650,7 @@ void Renderer::CreateTextures() {
 	motionVectors.allowAlias = true;
     auto dilatedMotionVectorsBuffer = PixelBuffer::CreateSharedUnmaterialized(motionVectors);
     dilatedMotionVectorsBuffer->SetName("Dilated Motion Vectors");
-    rg::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
+    org::memory::SetResourceUsageHint(*dilatedMotionVectorsBuffer, "Upscaling resources");
 	m_coreResourceProvider.m_gbufferDilatedMotionVectors = dilatedMotionVectorsBuffer;
 }
 
@@ -2997,7 +2999,7 @@ void Renderer::Update(float elapsedSeconds) {
         m_dynamicBackbuffer->SetResource(m_backbufferResources[m_frameIndex]);
     }
 
-    auto& resourceManager = ResourceManager::GetInstance();
+    auto& resourceManager = ::ResourceManager::GetInstance();
     auto res = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     runCapturedStage("PerFrameBuffer", [&]() {
         ZoneScopedN("Renderer::Update::PerFrameBuffer");
@@ -3048,7 +3050,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     runCapturedStage("FlushUploadPolicies", [&]() {
         ZoneScopedN("Renderer::Update::FlushUploadPolicies");
-        rg::runtime::FlushUploadPolicies();
+        org::runtime::FlushUploadPolicies();
     });
 
     runCapturedStage("CommitGpuVisibleSnapshots", [&]() {
@@ -3146,7 +3148,7 @@ void Renderer::Update(float elapsedSeconds) {
 
     runCapturedStage("BeginUploadPolicyFrame", [&]() {
         ZoneScopedN("Renderer::Update::BeginUploadPolicyFrame");
-        rg::runtime::BeginUploadPolicyFrame();
+        org::runtime::BeginUploadPolicyFrame();
     });
 
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
@@ -4506,8 +4508,8 @@ void Renderer::Render() {
             m_context.currentScene = m_sceneRenderOverlapEnabled ? nullptr : currentScene.get();
             m_context.hasPrimaryCamera = false;
             m_context.primaryViewID = 0;
-            m_context.textureDescriptorHeap = rg::runtime::GetActiveSRVDescriptorHeap();
-            m_context.samplerDescriptorHeap = rg::runtime::GetActiveSamplerDescriptorHeap();
+            m_context.textureDescriptorHeap = org::runtime::GetActiveSRVDescriptorHeap();
+            m_context.samplerDescriptorHeap = org::runtime::GetActiveSamplerDescriptorHeap();
             m_context.rtvHeap = rtvHeap.Get();
             m_context.rtvDescriptorSize = rtvDescriptorSize;
             m_context.dsvDescriptorSize = dsvDescriptorSize;
@@ -4810,7 +4812,7 @@ void Renderer::Cleanup() {
     }
     SetAsyncBufferBackingResizeScheduler({});
     TaskSchedulerManager::GetInstance().Cleanup();
-    ResourceManager::GetInstance().Cleanup();
+    ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
     currentRenderGraph.reset();
     // Cleanup tears down the device. Preserve the state container so a module
@@ -4819,9 +4821,9 @@ void Renderer::Cleanup() {
     m_producerPersistentState->directionalVsm.InvalidateGpuState();
     m_producerPersistentState->virtualShadowCasters.reset();
     m_producerPersistentState->clodStreaming.reset();
-    rg::runtime::SetActiveUploadService(nullptr);
-    rg::runtime::SetActiveUploadPolicyService(nullptr);
-    rg::runtime::SetActiveDescriptorService(nullptr);
+    org::runtime::SetActiveUploadService(nullptr);
+    org::runtime::SetActiveUploadPolicyService(nullptr);
+    org::runtime::SetActiveDescriptorService(nullptr);
     m_uploadPolicyService.reset();
     m_renderGraphRuntimeInitialized = false;
     m_currentEnvironment.reset();
@@ -4967,7 +4969,7 @@ std::shared_ptr<Scene> Renderer::AppendScene(std::shared_ptr<Scene> scene) {
 		BufferBase::ScopedBackingMutation appendBackingMutation;
 		(void)PublishReadyDeferredBackingResizes(true);
 	}
-	rg::runtime::FlushUploadPolicies();
+	org::runtime::FlushUploadPolicies();
 	if (m_pMaterialManager) {
 		m_pMaterialManager->CommitGpuVisibleSnapshot();
 	}
@@ -5185,20 +5187,20 @@ void Renderer::CreateRenderGraph() {
 		currentRenderGraph = std::make_unique<RenderGraph>(DeviceManager::GetInstance().GetDevice());
         if (auto* uploadService = currentRenderGraph->GetUploadService()) {
             uploadService->Initialize();
-            rg::runtime::SetActiveUploadService(uploadService);
+            org::runtime::SetActiveUploadService(uploadService);
         }
         if (m_uploadPolicyService) {
-            rg::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
+            org::runtime::SetActiveUploadPolicyService(m_uploadPolicyService.get());
         }
         if (auto* descriptorService = currentRenderGraph->GetDescriptorService()) {
             descriptorService->Initialize();
-            rg::runtime::SetActiveDescriptorService(descriptorService);
+            org::runtime::SetActiveDescriptorService(descriptorService);
         }
         }
 
         if (!m_renderGraphRuntimeInitialized) {
         currentRenderGraph->GetMemorySnapshotProvider().SetProvider(
-            rg::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
+            org::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
         Menu::GetInstance().SetRenderGraph(currentRenderGraph.get());
 
         if (auto* textureFactory = m_managerInterface.GetTextureFactory()) {
@@ -5272,7 +5274,7 @@ void Renderer::CreateRenderGraph() {
                     Builtin::PrimaryCamera::ProjectedDepthTexture,
                     m_visibilityRendering ? depth.projectedDepthMap : depthTexture);
                 newGraph->RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
-                newGraph->RegisterResource(Builtin::PerFrameBuffer, ResourceManager::GetInstance().GetPerFrameBuffer());
+                newGraph->RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
                 break;
             case BrdfIntegration:
                 BuildBRDFIntegrationPass(newGraph.get());
@@ -5342,7 +5344,7 @@ void Renderer::CreateRenderGraph() {
                 desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
                 auto visibilityBuffer = PixelBuffer::CreateSharedUnmaterialized(desc);
                 visibilityBuffer->SetName("Visibility Buffer");
-                rg::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
+                org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
                 m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
                 CreateCanonicalSurfaceResources(newGraph.get());
@@ -5389,11 +5391,11 @@ void Renderer::CreateRenderGraph() {
             case Exposure: {
                 auto adapted = CreateIndexedStructuredBuffer(1, sizeof(float), true, false);
                 adapted->SetName("Adapted Luminance");
-                rg::memory::SetResourceUsageHint(*adapted, "Post-Processing resources");
+                org::memory::SetResourceUsageHint(*adapted, "Post-Processing resources");
                 newGraph->RegisterResource(Builtin::PostProcessing::AdaptedLuminance, adapted);
                 auto histogram = CreateIndexedStructuredBuffer(256, sizeof(uint32_t), true, false);
                 histogram->SetName("Luminance Histogram Buffer");
-                rg::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
+                org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
                 newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
                 newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
                 newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
@@ -5498,12 +5500,12 @@ void Renderer::SetEnvironmentInternal(std::wstring name) {
 		m_preFrameDeferredFunctions.defer([envpath, name, this]() { // Don't change this during rendering
             m_currentEnvironment = m_pEnvironmentManager->CreateEnvironment(name);
             m_pEnvironmentManager->SetFromHDRI(m_currentEnvironment.get(), envpath.string());
-			ResourceManager::GetInstance().SetActiveEnvironmentIndex(m_currentEnvironment->GetEnvironmentIndex());
+			::ResourceManager::GetInstance().SetActiveEnvironmentIndex(m_currentEnvironment->GetEnvironmentIndex());
 			});
     }
     else {
         m_currentEnvironment.reset();
-        ResourceManager::GetInstance().SetActiveEnvironmentIndex(0);
+        ::ResourceManager::GetInstance().SetActiveEnvironmentIndex(0);
         rebuildRenderGraph = true;
         if (!m_warnedUsingFallbackEnvironment) {
             spdlog::warn("Environment file not found: {}. Falling back to blank environment resources.", envpath.string());

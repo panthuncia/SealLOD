@@ -117,7 +117,7 @@ std::shared_ptr<PixelBuffer> CreateScalarTableTexture2D(
     initialData.subresources.push_back(MakeScalarBytes(data, 0, static_cast<size_t>(width) * height));
 
     auto texture = textureFactory.CreateAlwaysResidentPixelBuffer(desc, std::move(initialData), debugName);
-    rg::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
+    org::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
     return texture;
 }
 
@@ -151,7 +151,7 @@ std::shared_ptr<PixelBuffer> CreateScalarTableTexture2DArray(
     }
 
     auto texture = textureFactory.CreateAlwaysResidentPixelBuffer(desc, std::move(initialData), debugName);
-    rg::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
+    org::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
     return texture;
 }
 
@@ -182,7 +182,7 @@ std::shared_ptr<PixelBuffer> CreateFuzzLTCTableTexture(
     initialData.subresources.push_back(bytes);
 
     auto texture = textureFactory.CreateAlwaysResidentPixelBuffer(desc, std::move(initialData), debugName);
-    rg::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
+    org::memory::SetResourceUsageHint(*texture, "OpenPBR Lookup Resources");
     return texture;
 }
 

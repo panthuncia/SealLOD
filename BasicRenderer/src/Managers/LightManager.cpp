@@ -17,7 +17,7 @@
 #include "../../generated/BuiltinResources.h"
 
 LightManager::LightManager() {
-    auto& resourceManager = ResourceManager::GetInstance();
+    auto& resourceManager = ::ResourceManager::GetInstance();
 
 	m_activeLightIndices = SortedUnsignedIntBuffer::CreateShared(1, "activeLightIndices");
     m_lightBuffer = LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
@@ -25,11 +25,11 @@ LightManager::LightManager() {
     m_pointViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "pointViewInfo<uint>");
     m_directionalViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "direcitonalViewInfo<uint>");
 
-	rg::memory::SetResourceUsageHint(*m_activeLightIndices, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_lightBuffer, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_spotViewInfo, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_pointViewInfo, "Lighting buffers");
-	rg::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_activeLightIndices, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_lightBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_spotViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pointViewInfo, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
 
 	getNumDirectionalLightCascades = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades");
 	getShadowResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("shadowResolution");
@@ -52,7 +52,7 @@ LightManager::LightManager() {
 	auto numClusters = lightClusterSize.x * lightClusterSize.y * lightClusterSize.z;
 	m_pClusterBuffer = CreateIndexedStructuredBuffer(numClusters, sizeof(Cluster), true, false);
 	m_pClusterBuffer->SetName("lightingClusterBuffer");
-	rg::memory::SetResourceUsageHint(*m_pClusterBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pClusterBuffer, "Lighting buffers");
 
 	static const size_t avgPagesPerCluster = 10;
 	m_lightPagePoolSize = numClusters * avgPagesPerCluster;
@@ -65,7 +65,7 @@ LightManager::LightManager() {
 		rhi::HeapType::DeviceLocal);
 	m_pLightPagesBuffer->SetAllowAlias(true);
 	m_pLightPagesBuffer->SetName("lightPagesBuffer");
-	rg::memory::SetResourceUsageHint(*m_pLightPagesBuffer, "Lighting buffers");
+	org::memory::SetResourceUsageHint(*m_pLightPagesBuffer, "Lighting buffers");
 
 	m_resources[Builtin::Light::ClusterBuffer] = m_pClusterBuffer;
 	m_resources[Builtin::Light::PagesBuffer] = m_pLightPagesBuffer;

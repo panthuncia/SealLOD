@@ -49,7 +49,7 @@ ReyesVirtualShadowHardwareRasterPass::ReyesVirtualShadowHardwareRasterPass(
     , m_slabResourceGroup(std::move(slabResourceGroup)) {
     m_viewRasterInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodViewRasterInfo), false, false, false, false);
     m_viewRasterInfoBuffer->SetName("CLodReyesVirtualShadowHardwareViewRasterInfo");
-    rg::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow hardware");
+    org::memory::SetResourceUsageHint(*m_viewRasterInfoBuffer, "Cluster LOD Reyes virtual shadow hardware");
 
     rhi::IndirectArg args[] = {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
@@ -146,7 +146,7 @@ void ReyesVirtualShadowHardwareRasterPass::Update(const UpdateExecutionContext& 
         BUFFER_UPLOAD(
             m_viewRasterInfos.data(),
             static_cast<uint32_t>(m_viewRasterInfos.size() * sizeof(CLodViewRasterInfo)),
-            rg::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
+            org::runtime::UploadTarget::FromShared(m_viewRasterInfoBuffer),
             0);
         m_declaredResourcesChanged = true;
     }

@@ -21,7 +21,8 @@
 
 class MeshManager;
 class Skeleton;
-class Buffer;
+namespace org { class Buffer; }
+using org::Buffer;
 
 class Mesh {
 public:

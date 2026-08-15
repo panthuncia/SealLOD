@@ -158,7 +158,7 @@ namespace {
         auto device = DeviceManager::GetInstance().GetDevice();
 
         TEXTURE_UPLOAD_SUBRESOURCES(
-            rg::runtime::UploadTarget::FromShared(dstTexture),
+            org::runtime::UploadTarget::FromShared(dstTexture),
             desc.format,
             baseW,
             baseH,
@@ -768,7 +768,7 @@ std::shared_ptr<PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffer(
     return pb;
 }
 
-void TextureFactory::SetReadbackService(rg::runtime::IReadbackService* readbackService)
+void TextureFactory::SetReadbackService(org::runtime::IReadbackService* readbackService)
 {
     std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->SetReadbackService(readbackService);
 }
@@ -1581,7 +1581,7 @@ void TextureFactory::BC7CompressionReadbackPass::Setup()
 {
 }
 
-void TextureFactory::BC7CompressionReadbackPass::SetReadbackService(rg::runtime::IReadbackService* readbackService)
+void TextureFactory::BC7CompressionReadbackPass::SetReadbackService(org::runtime::IReadbackService* readbackService)
 {
     m_readbackService = readbackService;
 }
@@ -1758,7 +1758,7 @@ PassReturn TextureFactory::BC7CompressionReadbackPass::Execute(PassExecutionCont
     constexpr uint64_t fenceValue = 1;
     for (uint64_t captureId : m_pendingCaptureIds) {
         m_readbackService->FinalizeCapture(
-            rg::runtime::ReadbackCaptureToken{ captureId },
+            org::runtime::ReadbackCaptureToken{ captureId },
             QueueKind::Copy,
             signalFenceOwner,
             fenceValue);
