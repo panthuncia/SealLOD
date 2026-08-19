@@ -44,6 +44,17 @@ namespace {
         return disabled;
     }
 
+    bool IsUpscalingDisabledByEnvironment() {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, "BASICRENDERER_DISABLE_UPSCALING") != 0 || value == nullptr) {
+            return false;
+        }
+        const bool disabled = value[0] == '1' || value[0] == 't' || value[0] == 'T' || value[0] == 'y' || value[0] == 'Y';
+        free(value);
+        return disabled;
+    }
+
     bool IsStreamlineEnabledSetting() {
         if (IsStreamlineDisabledByEnvironment()) {
             return false;
@@ -122,6 +133,20 @@ void UpscalingManager::SyncSettingsFromSettingsManager()
 {
     m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
     m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
+    // Vulkan-primary temporal upscaling has an independent stability history
+    // and is not part of the interop experiment. Keep it disabled by default
+    // so motion-vector/history defects cannot poison interop validation.
+    const auto& deviceManager = DeviceManager::GetInstance();
+    const bool forceDisabled = IsUpscalingDisabledByEnvironment()
+        || (deviceManager.IsMultiRHIEnabled() && deviceManager.GetBackend() == rhi::Backend::Vulkan);
+    if (forceDisabled && m_upscalingMode != UpscalingMode::None) {
+        static bool logged = false;
+        if (!logged) {
+            spdlog::info("UpscalingManager: forcing upscaling off for Vulkan-primary multi-RHI validation");
+            logged = true;
+        }
+        m_upscalingMode = UpscalingMode::None;
+    }
 }
 
 bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {

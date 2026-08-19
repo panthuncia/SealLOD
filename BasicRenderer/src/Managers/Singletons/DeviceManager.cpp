@@ -72,7 +72,7 @@ bool IsNvPerfD3D12DebugLayerAllowedByEnvironment() {
 }
 
 bool IsDiagnosticsBuild() {
-#if BUILD_TYPE == BUILD_TYPE_DEBUG //|| BUILD_TYPE == BUILD_TYPE_RELEASE_DEBUG
+#if BUILD_TYPE == BUILD_TYPE_DEBUG || BUILD_TYPE == BUILD_TYPE_RELEASE_DEBUG
     return true;
 #else
     return false;
@@ -139,7 +139,7 @@ void DeviceManager::Initialize() {
         enableStreamline = false;
     }
 
-    bool enableDebug = IsDiagnosticsBuild();
+    bool enableDebug = IsDiagnosticsBuild() || IsTruthyEnvironmentValue("BASICRENDERER_VULKAN_VALIDATION");
     const bool nvPerfCaptureRequested =
         IsNvPerfCaptureRequestedByEnvironment() ||
         telemetry::nvperf::CaptureConfigured();

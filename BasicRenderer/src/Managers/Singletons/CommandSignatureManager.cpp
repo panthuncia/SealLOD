@@ -22,6 +22,7 @@ void CommandSignatureManager::Initialize() {
     auto device = DeviceManager::GetInstance().GetDevice();
 
     if (DeviceManager::GetInstance().GetMeshShadersSupported()) {
+		spdlog::info("CommandSignatureManager: creating dispatch-mesh signature");
         rhi::IndirectArg args[] = {
             {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
             {.kind = rhi::IndirectArgKind::DispatchMesh }
@@ -40,6 +41,7 @@ void CommandSignatureManager::Initialize() {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
+	spdlog::info("CommandSignatureManager: creating dispatch signature");
     auto& computeLayout = PSOManager::GetInstance().GetComputeRootSignature();
     auto result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(args2, std::size(args2)), sizeof(DispatchIndirectCommand) },
@@ -49,6 +51,7 @@ void CommandSignatureManager::Initialize() {
     rhi::IndirectArg rawDispatchArgs[] = {
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
+	spdlog::info("CommandSignatureManager: creating raw-dispatch signature");
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(rawDispatchArgs, std::size(rawDispatchArgs)), sizeof(D3D12_DISPATCH_ARGUMENTS) },
         computeLayout.GetHandle(), m_rawDispatchCommandSignature);
@@ -59,6 +62,7 @@ void CommandSignatureManager::Initialize() {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 4 } } },
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
+	spdlog::info("CommandSignatureManager: creating material-evaluation signature");
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(materialEvaluationArgs, 2), sizeof(MaterialEvaluationIndirectCommand) },
         computeLayout.GetHandle(), m_materialEvaluationCommandSignature);
@@ -68,6 +72,7 @@ void CommandSignatureManager::Initialize() {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 5 } } },
         {.kind = rhi::IndirectArgKind::Dispatch }
     };
+	spdlog::info("CommandSignatureManager: creating terrain-material signature");
     result = device.CreateCommandSignature(
         rhi::CommandSignatureDesc{ rhi::Span<rhi::IndirectArg>(terrainRegionMaterialEvaluationArgs, 2), sizeof(TerrainRegionMaterialEvaluationIndirectCommand) },
         computeLayout.GetHandle(), m_terrainRegionMaterialEvaluationCommandSignature);

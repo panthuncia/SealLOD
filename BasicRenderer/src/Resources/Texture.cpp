@@ -591,7 +591,11 @@ bool BuildProcessedTextureCacheLayouts(
 		return false;
 	}
 
-	auto* nativeDevice = rhi::dx12::get_device(DeviceManager::GetInstance().GetDevice());
+	// The conditioned cache format intentionally uses D3D12 copyable
+	// footprints. In Vulkan-primary multi-RHI mode the canonical D3D12 device is
+	// the peer, not GetDevice(), so resolve it explicitly by API.
+	auto* nativeDevice = rhi::dx12::get_device(
+		DeviceManager::GetInstance().GetDevice(rhi::Backend::D3D12));
 	if (nativeDevice == nullptr) {
 		if (outError) {
 			*outError = "failed to get native D3D12 device for conditioned texture cache layout";

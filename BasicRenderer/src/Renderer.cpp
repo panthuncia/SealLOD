@@ -315,13 +315,8 @@ public:
     org::PassReturn Execute(org::PassExecutionContext& context) override {
         if (!state_->active) return {};
         const auto shared = context.Resolve(*state_->bufferA);
-        const auto external = state_->primary == rhi::Backend::Vulkan;
         MultiRHIBufferBarrier(context.commandList, state_->upload.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopySource);
-        MultiRHIBufferBarrier(context.commandList, shared, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest,
-            external ? rhi::BufferBarrier::ExternalOwnership::Acquire : rhi::BufferBarrier::ExternalOwnership::None);
         context.commandList.CopyBufferRegion(shared.GetHandle(), 0, state_->upload->GetHandle(), 0, MultiRHIProbeBytes);
-        MultiRHIBufferBarrier(context.commandList, shared, rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::Common,
-            external ? rhi::BufferBarrier::ExternalOwnership::Release : rhi::BufferBarrier::ExternalOwnership::None);
         MultiRHIBufferBarrier(context.commandList, state_->upload.Get(), rhi::ResourceAccessType::CopySource, rhi::ResourceAccessType::Common);
         return {};
     }
@@ -342,14 +337,7 @@ public:
         if (!state_->active) return {};
         const auto source = context.Resolve(*state_->bufferA);
         const auto dest = context.Resolve(*state_->bufferB);
-        const auto external = state_->peer == rhi::Backend::Vulkan;
-        const auto ownership = external ? rhi::BufferBarrier::ExternalOwnership::Acquire : rhi::BufferBarrier::ExternalOwnership::None;
-        MultiRHIBufferBarrier(context.commandList, source, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopySource, ownership);
-        MultiRHIBufferBarrier(context.commandList, dest, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest, ownership);
         context.commandList.CopyBufferRegion(dest.GetHandle(), 0, source.GetHandle(), 0, MultiRHIProbeBytes);
-        const auto release = external ? rhi::BufferBarrier::ExternalOwnership::Release : rhi::BufferBarrier::ExternalOwnership::None;
-        MultiRHIBufferBarrier(context.commandList, source, rhi::ResourceAccessType::CopySource, rhi::ResourceAccessType::Common, release);
-        MultiRHIBufferBarrier(context.commandList, dest, rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::Common, release);
         return {};
     }
     void Cleanup() override {}
@@ -369,13 +357,8 @@ public:
     org::PassReturn Execute(org::PassExecutionContext& context) override {
         if (!state_->active) return {};
         const auto shared = context.Resolve(*state_->bufferB);
-        const auto external = state_->primary == rhi::Backend::Vulkan;
-        MultiRHIBufferBarrier(context.commandList, shared, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopySource,
-            external ? rhi::BufferBarrier::ExternalOwnership::Acquire : rhi::BufferBarrier::ExternalOwnership::None);
         MultiRHIBufferBarrier(context.commandList, state_->readback.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest);
         context.commandList.CopyBufferRegion(state_->readback->GetHandle(), 0, shared.GetHandle(), 0, MultiRHIProbeBytes);
-        MultiRHIBufferBarrier(context.commandList, shared, rhi::ResourceAccessType::CopySource, rhi::ResourceAccessType::Common,
-            external ? rhi::BufferBarrier::ExternalOwnership::Release : rhi::BufferBarrier::ExternalOwnership::None);
         MultiRHIBufferBarrier(context.commandList, state_->readback.Get(), rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::Common);
         state_->issued.fetch_add(1, std::memory_order_release);
         return {};
@@ -804,6 +787,13 @@ flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stable
 
 } // namespace
 
+Renderer::~Renderer() {
+    // Resources unregister from this process-global service during member
+    // destruction. Clear the slot before the service member itself is
+    // destroyed so exception unwinding cannot call through a dangling pointer.
+    org::runtime::SetActiveUploadPolicyService(nullptr);
+}
+
 void Renderer::Initialize(
     HWND hwnd,
     UINT x_res,
@@ -1046,11 +1036,17 @@ void Renderer::Initialize(
         TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
     });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
+    spdlog::info("Renderer initialization: initializing PSO manager");
     PSOManager::GetInstance().initialize();
+    spdlog::info("Renderer initialization: initializing deletion manager");
     DeletionManager::GetInstance().Initialize();
+	spdlog::info("Renderer initialization: initializing command signatures");
 	CommandSignatureManager::GetInstance().Initialize();
+    spdlog::info("Renderer initialization: command signatures initialized");
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after PSO and command signatures");
+    spdlog::info("Renderer initialization: initializing menu");
     Menu::GetInstance().Initialize(hwnd, m_swapChain.Get());
+    spdlog::info("Renderer initialization: menu initialized");
     if (auto* readbackService = currentRenderGraph->GetReadbackService()) {
         readbackService->Initialize(m_readbackFence.Get(), m_copyReadbackFence.Get());
     }
@@ -1061,6 +1057,7 @@ void Renderer::Initialize(
         statisticsService->Initialize();
     }
 
+    spdlog::info("Renderer initialization: initializing upscaling managers");
     UpscalingManager::GetInstance().InitFFX(); // Needs device and must precede Setup for FSR queries.
     UpscalingManager::GetInstance().Setup();
     FFXManager::GetInstance().InitFFX();
@@ -5097,20 +5094,25 @@ void Renderer::StallPipeline() {
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
-    auto device = DeviceManager::GetInstance().GetDevice();
-    spdlog::info("Renderer::StallPipeline waiting for device idle");
-    device.WaitIdle();
-    spdlog::info("Renderer::StallPipeline device idle complete");
+    auto& devices = DeviceManager::GetInstance();
+    spdlog::info("Renderer::StallPipeline waiting for all initialized devices idle");
+    devices.GetDevice().WaitIdle();
+    if (devices.IsMultiRHIEnabled()) {
+        devices.GetPeerDevice().WaitIdle();
+    }
+    spdlog::info("Renderer::StallPipeline all initialized devices idle complete");
 }
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
-    if (currentRenderGraph) {
-        currentRenderGraph->ShutdownExtensions();
-    }
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
+	// Extensions own graph resources and bridge objects.  Do not let them
+	// release those objects until work on both API devices has completed.
+    if (currentRenderGraph) {
+        currentRenderGraph->ShutdownExtensions();
+    }
 	if (currentScene) {
 		currentScene->Deactivate();
 	}

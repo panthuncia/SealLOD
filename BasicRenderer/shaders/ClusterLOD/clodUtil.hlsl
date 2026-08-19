@@ -1786,7 +1786,9 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
     RWStructuredBuffer<uint> dirtyFlags =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_DEDUPLICATE_DIRTY_FLAGS_DESCRIPTOR_INDEX];
 
-    const uint rawPageCount = min(rawPageCountBuffer[0], kCLodVirtualShadowPredictiveRawPageCapacity);
+    const uint reportedRawPageCount = rawPageCountBuffer[0];
+    const uint rawPageCount = reportedRawPageCount < kCLodVirtualShadowPredictiveRawPageCapacity
+        ? reportedRawPageCount : kCLodVirtualShadowPredictiveRawPageCapacity;
     const uint rawPageIndex = dispatchThreadId.x;
     if (rawPageIndex >= rawPageCount)
     {
@@ -2616,7 +2618,9 @@ void CLodVirtualShadowResolveMarkedBlocksCSMain(uint3 dispatchThreadId : SV_Disp
     StructuredBuffer<CLodVirtualShadowMarkClipmapData> markClipmapDataBuffer =
         ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_CLIPMAP_DATA_DESCRIPTOR_INDEX];
 
-    const uint markedBlockCount = min(markedBlockCountBuffer.Load(0), kCLodVirtualShadowMaxMarkedBlockCount);
+    const uint reportedMarkedBlockCount = markedBlockCountBuffer.Load(0u);
+    const uint markedBlockCount = reportedMarkedBlockCount < kCLodVirtualShadowMaxMarkedBlockCount
+        ? reportedMarkedBlockCount : kCLodVirtualShadowMaxMarkedBlockCount;
     const uint markedBlockIndex = dispatchThreadId.x;
     if (markedBlockIndex >= markedBlockCount)
     {
@@ -3144,8 +3148,12 @@ void CLodVirtualShadowAllocatePagesCSMain(uint3 dispatchThreadId : SV_DispatchTh
     {
         return;
     }
-    const uint freePageCount = min(pageListHeader[0].x, CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT);
-    const uint reusablePageCount = min(pageListHeader[0].y, CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT);
+    const uint reportedFreePageCount = pageListHeader[0].x;
+    const uint reportedReusablePageCount = pageListHeader[0].y;
+    const uint freePageCount = reportedFreePageCount < CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT
+        ? reportedFreePageCount : CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT;
+    const uint reusablePageCount = reportedReusablePageCount < CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT
+        ? reportedReusablePageCount : CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT;
 
     uint selectedPhysicalPageIndex = CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT;
     if (requestIndex < freePageCount)
@@ -3734,7 +3742,13 @@ void CreateRasterBucketsHistogramCommandCSMain()
     // Producers use monotonic counters and may report more work than fit in the
     // destination buffer. Never turn that overflow value into an unbounded
     // indirect dispatch.
-    uint clusterCount = min(clusterCountBuffer.Load(0), CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY);
+    // Keep both operands explicitly unsigned. DXIL accepts the untyped macro
+    // literal here, but DXC's SPIR-V path otherwise emits an invalid mixed-type
+    // GLSL.std.450 UMin instruction.
+    const uint reportedClusterCount = clusterCountBuffer.Load(0u);
+    uint clusterCount = reportedClusterCount < uint(CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY)
+        ? reportedClusterCount
+        : uint(CLOD_CREATE_VISIBLE_CLUSTERS_CAPACITY);
     uint numBuckets = CLOD_CREATE_NUM_RASTER_BUCKETS;
     uint totalItems = max(clusterCount, numBuckets);
 
@@ -3835,7 +3849,8 @@ void ClusterRasterBucketsHistogramCSMain(uint3 DTid : SV_DispatchThreadID)
     const uint readableCount = (readBase < CLOD_HISTOGRAM_READ_CAPACITY)
         ? (CLOD_HISTOGRAM_READ_CAPACITY - readBase)
         : 0u;
-    uint clusterCount = min(clusterCountBuffer.Load(0), readableCount);
+    const uint reportedClusterCount = clusterCountBuffer.Load(0u);
+    uint clusterCount = reportedClusterCount < readableCount ? reportedClusterCount : readableCount;
     
     if (linearizedID >= clusterCount) {
         return;
@@ -4078,7 +4093,8 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
     const uint readableCount = (readBase < CLOD_COMPACTION_READ_CAPACITY)
         ? (CLOD_COMPACTION_READ_CAPACITY - readBase)
         : 0u;
-    const uint clusterCount = min(visibleClusterCountBuffer.Load(0), readableCount);
+    const uint reportedClusterCount = visibleClusterCountBuffer.Load(0u);
+    const uint clusterCount = reportedClusterCount < readableCount ? reportedClusterCount : readableCount;
 
     StructuredBuffer<uint> histogram = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX];
     const uint numBucketsPacked = CLOD_COMPACTION_NUM_RASTER_BUCKETS;
@@ -4176,7 +4192,8 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
         const uint availableCount = (bucketBase >= baseClusterOffset && bucketBase < CLOD_COMPACTION_READ_CAPACITY)
             ? (CLOD_COMPACTION_READ_CAPACITY - bucketBase)
             : 0u;
-        uint count = min(histogram[linearizedID], availableCount);
+        const uint histogramCount = histogram[linearizedID];
+        uint count = histogramCount < availableCount ? histogramCount : availableCount;
 
         RasterizeClustersCommand cmd = (RasterizeClustersCommand)0;
         if (count > 0)
@@ -4229,7 +4246,8 @@ void CLodVirtualShadowGatherStatsCSMain(uint3 dispatchThreadId : SV_DispatchThre
     {
         if (capturePreAllocateState)
         {
-            statsBuffer[0].activeClipmapCount = min(perFrameBuffer.numDirectionalClipmaps, CLOD_VIRTUAL_SHADOW_GATHER_STATS_CLIPMAP_COUNT);
+            statsBuffer[0].activeClipmapCount = perFrameBuffer.numDirectionalClipmaps < CLOD_VIRTUAL_SHADOW_GATHER_STATS_CLIPMAP_COUNT
+                ? perFrameBuffer.numDirectionalClipmaps : CLOD_VIRTUAL_SHADOW_GATHER_STATS_CLIPMAP_COUNT;
             statsBuffer[0].allocationRequestCount = allocationCountBuffer.Load(0);
             statsBuffer[0].allocationDispatchGroupCount = allocationIndirectArgsBuffer[0].dispatchX;
 
