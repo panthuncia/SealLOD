@@ -1033,7 +1033,8 @@ void BuildPPLLPipeline(RenderGraph* graph) {
     //graph->BuildRenderPass<PPLLResolvePass>("PPLLResolvePass");
 }
 
-void BuildBloomPipeline(RenderGraph* graph) {
+void BuildBloomPipeline(RenderGraph* graph, bool placeMiddlePassOnPeer = false,
+    rhi::Backend peerBackend = rhi::Backend::Null) {
 	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
 
     TextureDescription bloomDesc;
@@ -1063,7 +1064,10 @@ void BuildBloomPipeline(RenderGraph* graph) {
 	// Downsample numBloomMips mips of the HDR color target
     for (unsigned int i = 0; i < numBloomMips; i++) {
         const std::string passName = "BloomDownsamplePass" + std::to_string(i);
-        graph->BuildRenderPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, false });
+        auto& builder = graph->BuildRenderPass<BloomSamplePass>(passName, BloomSamplePassInputs{ i, false });
+        if (placeMiddlePassOnPeer && i == 2) {
+            builder.RequireBackend(peerBackend);
+        }
         graph->SetPassTechnique(passName, "Post Process::Bloom");
     }
 

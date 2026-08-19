@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
@@ -21,17 +23,25 @@ public:
 		// Removed redundant Register calls now covered by declared-resource auto descriptor registration
     }
 
-    PassReturn Execute(PassExecutionContext& executionContext) override {
+	PassReturn Execute(PassExecutionContext& executionContext) override {
+		if (executionContext.backendInstance != BackendInstanceId::Primary) {
+			const uint32_t validationFrame = m_peerExecutionCount.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (validationFrame == 1 || validationFrame == 120) {
+				spdlog::info("Multi-RHI substantive histogram validation {}/120: backendInstance={}",
+					validationFrame, static_cast<uint32_t>(executionContext.backendInstance));
+			}
+		}
         auto* renderContext = executionContext.hostData->Get<RenderContext>();
         auto& context = *renderContext;
         auto& psoManager = PSOManager::GetInstance();
         auto& commandList = executionContext.commandList;
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+		commandList.SetDescriptorHeaps(executionContext.GetResourceDescriptorHeap().GetHandle(),
+			executionContext.GetSamplerDescriptorHeap().GetHandle());
 
         // Set the compute pipeline state
-		commandList.BindLayout(psoManager.GetComputeRootSignature().GetHandle());
-		commandList.BindPipeline(m_pso.GetAPIPipelineState().GetHandle());
+		commandList.BindLayout(psoManager.GetComputeRootSignature(executionContext.backendInstance).GetHandle());
+		commandList.BindPipeline(psoManager.ResolvePipeline(m_pso, executionContext.backendInstance).GetHandle());
 
         uint32_t passConstants[NumMiscUintRootConstants] = {};
         passConstants[MIN_LOG_LUMINANCE] = as_uint(0.001f); // Minimum log luminance value
@@ -57,6 +67,7 @@ public:
     }
 
 private:
+	std::atomic<uint32_t> m_peerExecutionCount{ 0 };
     PipelineState m_pso;
 
     void CreateComputePSO()

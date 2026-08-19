@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "RenderPasses/Base/RenderPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -50,22 +52,30 @@ public:
     }
 
     PassReturn Execute(PassExecutionContext& executionContext) override {
-        auto* renderContext = executionContext.hostData->Get<RenderContext>();
-        auto& context = *renderContext;
         auto& psoManager = PSOManager::GetInstance();
         auto& commandList = executionContext.commandList;
+		if (executionContext.backendInstance != BackendInstanceId::Primary) {
+			const uint32_t validationFrame = m_peerExecutionCount.fetch_add(1, std::memory_order_relaxed) + 1;
+			if (validationFrame == 1 || validationFrame == 120) {
+				spdlog::info("Multi-RHI substantive bloom validation {}/120: mip={} upsample={} backendInstance={}",
+					validationFrame, m_mipIndex, m_isUpsample,
+					static_cast<uint32_t>(executionContext.backendInstance));
+			}
+		}
 
-		commandList.SetDescriptorHeaps(context.textureDescriptorHeap.GetHandle(), context.samplerDescriptorHeap.GetHandle());
+		commandList.SetDescriptorHeaps(
+            executionContext.GetResourceDescriptorHeap().GetHandle(),
+            executionContext.GetSamplerDescriptorHeap().GetHandle());
 
         unsigned int mipOffset = m_isUpsample ? 0 : 1;
 
 		rhi::PassBeginInfo passInfo{};
 		rhi::ColorAttachment colorAttachment{};
-		colorAttachment.rtv = m_pBloomTarget->GetRTVInfo(m_mipIndex + mipOffset).slot;
+		colorAttachment.rtv = executionContext.ResolveRTV(*m_pBloomTarget, m_mipIndex + mipOffset);
 		colorAttachment.loadOp = m_isUpsample ? rhi::LoadOp::Load : rhi::LoadOp::DontCare;
 		colorAttachment.mipSlice = m_mipIndex + mipOffset;
 		colorAttachment.storeOp = rhi::StoreOp::Store;
-		colorAttachment.resource = m_pBloomTarget->GetAPIResource().GetHandle();
+		colorAttachment.resource = executionContext.Resolve(*m_pBloomTarget).GetHandle();
 		passInfo.colors = { &colorAttachment };
         passInfo.width = m_pBloomTarget->GetWidth() >> (m_mipIndex + mipOffset);
         passInfo.height = m_pBloomTarget->GetHeight() >> (m_mipIndex + mipOffset);
@@ -74,13 +84,13 @@ public:
         commandList.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleStrip);
 
         if (m_isUpsample) {
-			commandList.BindPipeline(m_upsamplePso->GetHandle());
+			commandList.BindPipeline(m_upsamplePso.GetAPIPipelineState(executionContext.backendInstance).GetHandle());
         }
         else {
-			commandList.BindPipeline(m_downsamplePso->GetHandle());
+			commandList.BindPipeline(m_downsamplePso.GetAPIPipelineState(executionContext.backendInstance).GetHandle());
         }
 
-        auto rootSignature = psoManager.GetRootSignature();
+        auto rootSignature = psoManager.GetRootSignature(executionContext.backendInstance);
 		commandList.BindLayout(rootSignature.GetHandle());
 
 		BindResourceDescriptorIndices(commandList, m_resourceDescriptorBindings);
@@ -114,26 +124,30 @@ private:
 
     unsigned int m_mipIndex;
     bool m_isUpsample = false;
+	std::atomic<uint32_t> m_peerExecutionCount{ 0 };
 
-    rhi::PipelinePtr m_downsamplePso;
-    rhi::PipelinePtr m_upsamplePso;
+    PipelineState m_downsamplePso;
+    PipelineState m_upsamplePso;
 
 	PixelBuffer* m_pBloomTarget = nullptr;
 	PixelBuffer* m_pUpscaledHDRTarget = nullptr;
 
 	PipelineResources m_resourceDescriptorBindings;
 
-    void CreatePSO() {
-        auto dev = DeviceManager::GetInstance().GetDevice();
+    void CreatePSOForBackend(BackendInstanceId backendInstance) {
+        auto& deviceManager = DeviceManager::GetInstance();
+        auto dev = backendInstance == BackendInstanceId::Primary
+            ? deviceManager.GetDevice() : deviceManager.GetPeerDevice();
+        if (!dev) return;
 
         ShaderInfoBundle sib;
         sib.vertexShader = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
         sib.pixelShader = { L"shaders/PostProcessing/bloomDownsample.hlsl", L"downsample", L"ps_6_6" };
-        auto compiled = PSOManager::GetInstance().CompileShaders(sib);
+        auto compiled = PSOManager::GetInstance().CompileShaders(sib, backendInstance);
 
         m_resourceDescriptorBindings = compiled.resourceDescriptorSlots;
 
-        auto& layout = PSOManager::GetInstance().GetRootSignature(); // rhi::PipelineLayout&
+        auto& layout = PSOManager::GetInstance().GetRootSignature(backendInstance);
         rhi::SubobjLayout soLayout{ layout.GetHandle() };
         rhi::SubobjShader soVS{ rhi::ShaderStage::Vertex, rhi::DXIL(compiled.vertexShader.Get()), "FullscreenVSNoViewRayMain" };
 
@@ -180,16 +194,20 @@ private:
 				rhi::Make(soTopo),
             };
 
-            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_downsamplePso);
+            rhi::PipelinePtr pipeline;
+            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
             if (Failed(result)) {
                 throw std::runtime_error("Failed to create bloom downsample PSO (RHI)");
             }
-            m_downsamplePso->SetName("Bloom.Downsample");
+            pipeline->SetName("Bloom.Downsample");
+            m_downsamplePso.AttachBackendPipeline(
+                backendInstance, std::move(pipeline), compiled.resourceIDsHash,
+                compiled.resourceDescriptorSlots);
         }
 
 
         sib.pixelShader = { L"shaders/PostProcessing/bloomUpsample.hlsl", L"upsample", L"ps_6_6" };
-        auto compiledUp = PSOManager::GetInstance().CompileShaders(sib);
+        auto compiledUp = PSOManager::GetInstance().CompileShaders(sib, backendInstance);
         rhi::SubobjShader soPS_up{ rhi::ShaderStage::Pixel, rhi::DXIL(compiledUp.pixelShader.Get()), "upsample" };
 
         rhi::BlendState bsUp{};
@@ -225,11 +243,22 @@ private:
 				rhi::Make(soTopo),
             };
 
-            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), m_upsamplePso);
+            rhi::PipelinePtr pipeline;
+            auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pipeline);
             if (Failed(result)) {
                 throw std::runtime_error("Failed to create bloom upsample PSO (RHI)");
             }
-            m_upsamplePso->SetName("Bloom.Upsample");
+            pipeline->SetName("Bloom.Upsample");
+            m_upsamplePso.AttachBackendPipeline(
+                backendInstance, std::move(pipeline), compiledUp.resourceIDsHash,
+                compiledUp.resourceDescriptorSlots);
+        }
+    }
+
+    void CreatePSO() {
+        CreatePSOForBackend(BackendInstanceId::Primary);
+        if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
+            CreatePSOForBackend(BackendInstanceId::Peer);
         }
     }
 };

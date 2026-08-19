@@ -90,10 +90,21 @@ namespace {
 }
 
 namespace {
+	thread_local std::optional<rhi::Backend> g_shaderBackendOverride;
+	class ScopedShaderBackend {
+	public:
+		explicit ScopedShaderBackend(rhi::Backend backend) : previous(g_shaderBackendOverride) {
+			g_shaderBackendOverride = backend;
+		}
+		~ScopedShaderBackend() { g_shaderBackendOverride = previous; }
+	private:
+		std::optional<rhi::Backend> previous;
+	};
 
 shadercache::BinaryFormat GetActiveShaderBinaryFormat()
 {
-    return DeviceManager::GetInstance().GetBackend() == rhi::Backend::Vulkan
+	const rhi::Backend backend = g_shaderBackendOverride.value_or(DeviceManager::GetInstance().GetBackend());
+    return backend == rhi::Backend::Vulkan
         ? shadercache::BinaryFormat::Spirv
         : shadercache::BinaryFormat::Dxil;
 }
@@ -566,7 +577,9 @@ void PSOManager::Cleanup() {
     debugPSO.Reset();
     environmentConversionPSO.Reset();
     m_rootSignature.Reset();
+	m_peerRootSignature.Reset();
     m_computeRootSignature.Reset();
+	m_peerComputeRootSignature.Reset();
     m_debugRootSignature.Reset();
     m_environmentConversionRootSignature.Reset();
     pUtils.Reset();
@@ -2231,7 +2244,50 @@ PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe, cons
     }
     payload->sourceHash = sourceHash;
     payload->label = options && !options->label.empty() ? options->label : "initial";
+
     return out;
+}
+
+void PSOManager::BuildComputePipelineForBackend(const ComputeRecipe& recipe, const PipelineState& pipeline,
+	BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary || pipeline.HasBackendPipeline(backendInstance)) return;
+	std::vector<DxcDefine> defines;
+	defines.reserve(recipe.defines.size());
+	for (const OwnedDefine& define : recipe.defines) defines.push_back({ define.name.c_str(), define.value.c_str() });
+	ShaderInfoBundle sib;
+	sib.computeShader = { recipe.shaderPath, recipe.entryPoint, L"cs_6_6" };
+	sib.defines = defines;
+	auto compiled = CompileShaders(sib, backendInstance);
+	rhi::SubobjLayout layout{ GetComputeRootSignature(backendInstance).GetHandle() };
+	rhi::SubobjShader shader{ rhi::ShaderStage::Compute, rhi::DXIL(compiled.computeShader.Get()), ws2s(recipe.entryPoint) };
+	const rhi::PipelineStreamItem items[] = { rhi::Make(layout), rhi::Make(shader) };
+	rhi::PipelinePtr pso;
+	auto device = backendInstance == BackendInstanceId::Primary
+		? DeviceManager::GetInstance().GetDevice() : DeviceManager::GetInstance().GetPeerDevice();
+	const auto result = device.CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
+	if (Failed(result)) throw std::runtime_error("Failed to create backend-local compute PSO");
+	if (!recipe.debugName.empty()) {
+		const std::string name = recipe.debugName + ".backend" + std::to_string(static_cast<uint8_t>(backendInstance));
+		pso->SetName(name.c_str());
+	}
+	pipeline.AttachBackendPipeline(backendInstance, std::move(pso), compiled.resourceIDsHash,
+		compiled.resourceDescriptorSlots);
+	spdlog::info("PSOManager materialized compute pipeline '{}' for backend instance {}",
+		recipe.debugName, static_cast<uint8_t>(backendInstance));
+}
+
+const rhi::Pipeline& PSOManager::ResolvePipeline(const PipelineState& pipeline, BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return pipeline.GetAPIPipelineState();
+	if (!pipeline.HasBackendPipeline(backendInstance)) {
+		std::scoped_lock lock(m_livePipelineMutex);
+		for (auto& [id, entry] : m_livePipelines) {
+			if (entry.state.GetSlot() == pipeline.GetSlot() && !entry.computeRecipe.shaderPath.empty()) {
+				BuildComputePipelineForBackend(entry.computeRecipe, pipeline, backendInstance);
+				break;
+			}
+		}
+	}
+	return pipeline.GetAPIPipelineState(backendInstance);
 }
 
 PipelineState PSOManager::RegisterComputePipeline(PipelineState state, ComputeRecipe recipe)
@@ -2965,6 +3021,17 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
 	return bundle;
 }
 
+ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info, BackendInstanceId backendInstance) {
+	const auto& devices = DeviceManager::GetInstance();
+	const rhi::Backend backend = backendInstance == BackendInstanceId::Primary
+		? devices.GetBackend() : devices.GetPeerBackend();
+	if (backend == rhi::Backend::Null) {
+		throw std::runtime_error("Shader compilation requested for an unavailable backend instance");
+	}
+	ScopedShaderBackend scope(backend);
+	return CompileShaders(info);
+}
+
 // for string delimiter
 std::vector<std::string> split(std::string s, std::string delimiter) {
     size_t pos_start = 0, pos_end, delim_len = delimiter.length();
@@ -3381,6 +3448,30 @@ void PSOManager::createRootSignature() {
             std::to_string(static_cast<uint32_t>(result)) +
             ")");
     }
+
+	if (auto peerDevice = DeviceManager::GetInstance().GetPeerDevice()) {
+		result = peerDevice.CreatePipelineLayout(
+			rhi::PipelineLayoutDesc{
+				.ranges = {},
+				.pushConstants = rhi::Span<rhi::PushConstantRangeDesc>(pcs, std::size(pcs)),
+				.staticSamplers = rhi::Span<rhi::StaticSamplerDesc>(staticSamplers, std::size(staticSamplers)),
+				.flags = rhi::PipelineLayoutFlags::PF_AllowInputAssembler },
+			m_peerRootSignature);
+		if (Failed(result) || !m_peerRootSignature || !m_peerRootSignature->IsValid()) {
+			throw std::runtime_error("Failed to create peer graphics pipeline layout");
+		}
+		result = peerDevice.CreatePipelineLayout(
+			rhi::PipelineLayoutDesc{
+				.ranges = {},
+				.pushConstants = rhi::Span<rhi::PushConstantRangeDesc>(pcs, std::size(pcs)),
+				.staticSamplers = rhi::Span<rhi::StaticSamplerDesc>(staticSamplers, std::size(staticSamplers)),
+				.flags = rhi::PipelineLayoutFlags::PF_None },
+			m_peerComputeRootSignature);
+		if (Failed(result) || !m_peerComputeRootSignature || !m_peerComputeRootSignature->IsValid()) {
+			throw std::runtime_error("Failed to create peer compute pipeline layout");
+		}
+		spdlog::info("PSOManager created graphics and compute layouts for the peer backend");
+	}
 }
 
 const rhi::PipelineLayout& PSOManager::GetRootSignature() {
@@ -3395,6 +3486,22 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature() {
 		throw std::runtime_error("Compute root signature / pipeline layout is not initialized");
 	}
 	return m_computeRootSignature.Get();
+}
+
+const rhi::PipelineLayout& PSOManager::GetRootSignature(BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return GetRootSignature();
+	if (!m_peerRootSignature || !m_peerRootSignature->IsValid()) {
+		throw std::runtime_error("Peer graphics pipeline layout is not initialized");
+	}
+	return m_peerRootSignature.Get();
+}
+
+const rhi::PipelineLayout& PSOManager::GetComputeRootSignature(BackendInstanceId backendInstance) {
+	if (backendInstance == BackendInstanceId::Primary) return GetComputeRootSignature();
+	if (!m_peerComputeRootSignature || !m_peerComputeRootSignature->IsValid()) {
+		throw std::runtime_error("Peer compute pipeline layout is not initialized");
+	}
+	return m_peerComputeRootSignature.Get();
 }
 
 bool PSOManager::RebuildAllPipelines(std::string& error) {

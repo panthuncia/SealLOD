@@ -233,6 +233,7 @@ public:
         const wchar_t* entryPoint,
         std::vector<DxcDefine> defines = {},
         const char* debugName = nullptr);
+	const rhi::Pipeline& ResolvePipeline(const PipelineState& pipeline, BackendInstanceId backendInstance);
 
     PipelineState RegisterExternalPipeline(
         PipelineState state,
@@ -243,6 +244,8 @@ public:
 
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
+	const rhi::PipelineLayout& GetRootSignature(BackendInstanceId backendInstance);
+	const rhi::PipelineLayout& GetComputeRootSignature(BackendInstanceId backendInstance);
     bool RebuildAllPipelines(std::string& error);
     std::vector<LivePipelineInfo> ListPipelines() const;
     std::optional<LiveJobInfo> GetLiveJob(uint64_t jobId) const;
@@ -255,6 +258,7 @@ public:
     std::vector<DxcDefine> GetShaderDefines(UINT psoFlags, MaterialCompileFlags materialFlags);
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
+	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, BackendInstanceId backendInstance);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
@@ -327,8 +331,10 @@ private:
     };
 
     PSOManager() = default;
-    rhi::PipelineLayoutPtr m_rootSignature;
-    rhi::PipelineLayoutPtr m_computeRootSignature;
+	rhi::PipelineLayoutPtr m_rootSignature;
+	rhi::PipelineLayoutPtr m_peerRootSignature;
+	rhi::PipelineLayoutPtr m_computeRootSignature;
+	rhi::PipelineLayoutPtr m_peerComputeRootSignature;
     rhi::PipelineLayoutPtr m_debugRootSignature;
     rhi::PipelineLayoutPtr m_environmentConversionRootSignature;
 
@@ -414,6 +420,8 @@ private:
 
     PipelineState CreateDeferredPSO(UINT psoFlags);
     PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const RecompileOptions* options = nullptr);
+	void BuildComputePipelineForBackend(const ComputeRecipe& recipe, const PipelineState& pipeline,
+		BackendInstanceId backendInstance);
     PipelineState RegisterComputePipeline(PipelineState state, ComputeRecipe recipe);
     PipelineState RegisterPipeline(
         PipelineState state,
