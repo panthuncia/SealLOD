@@ -843,7 +843,9 @@ void Renderer::Initialize(
     settingsManager.registerSetting<bool>("reshapeSynchronousRecording", false);
     settingsManager.registerSetting<bool>("reshapeTexelAddressing", true);
     settingsManager.registerSetting<uint64_t>("reshapeGlobalFeatureMask", 0ull);
-    settingsManager.registerSetting<bool>("renderGraphBatchTraceEnabled", false);
+    settingsManager.registerSetting<bool>(
+        "renderGraphBatchTraceEnabled",
+        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
     settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
@@ -2858,6 +2860,22 @@ void Renderer::ToggleMeshShaders(bool useMeshShaders) {
 
 void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     UINT dxgiFactoryFlags = 0;
+	RECT clientRect{};
+	if (hwnd && GetClientRect(hwnd, &clientRect)) {
+		const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
+		const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
+		if (clientWidth != 0 && clientHeight != 0 && (clientWidth != x_res || clientHeight != y_res)) {
+			spdlog::info(
+				"Renderer: using actual client extent {}x{} for initial swapchain instead of requested {}x{}",
+				clientWidth,
+				clientHeight,
+				x_res,
+				y_res);
+			x_res = clientWidth;
+			y_res = clientHeight;
+			SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ x_res, y_res });
+		}
+	}
 
     DeviceManager::GetInstance().Initialize();
 
@@ -4822,7 +4840,23 @@ void Renderer::Render() {
 
     const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
 
-    const uint8_t renderedFrameIndex = m_frameIndex;
+    // Vulkan does not guarantee round-robin swapchain acquisition.  Re-read the
+    // acquired image at the last responsible point and bind the graph's dynamic
+    // backbuffer to that exact image.  Using the CPU frame slot here can record
+    // transitions for a presentable image that was not acquired.
+    const uint8_t renderedFrameIndex = m_swapChain
+        ? static_cast<uint8_t>(m_swapChain->CurrentImageIndex())
+        : m_frameIndex;
+    if (renderedFrameIndex != m_frameIndex) {
+        spdlog::warn(
+            "Renderer: acquired swapchain image changed before render (frame slot={} acquired={}); resynchronizing",
+            static_cast<unsigned>(m_frameIndex),
+            static_cast<unsigned>(renderedFrameIndex));
+        m_frameIndex = renderedFrameIndex;
+    }
+    if (m_dynamicBackbuffer && renderedFrameIndex < m_backbufferResources.size()) {
+        m_dynamicBackbuffer->SetResource(m_backbufferResources[renderedFrameIndex]);
+    }
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
 	const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
@@ -5016,6 +5050,7 @@ void Renderer::Render() {
     });
 
     // Present the frame
+    rhi::Result presentResult = rhi::Result::Ok;
     runCapturedStage("Present", [&]() {
         ZoneScopedN("Renderer::Render::Present");
         if (renderGraphBatchTraceEnabled) {
@@ -5027,11 +5062,32 @@ void Renderer::Render() {
                 .queue = presentDependency->queue,
                 .wait = presentDependency->wait,
             };
-            m_swapChain->Present(!m_allowTearing, presentSync);
+            presentResult = m_swapChain->Present(!m_allowTearing, presentSync);
         } else {
-            m_swapChain->Present(!m_allowTearing);
+            presentResult = m_swapChain->Present(!m_allowTearing);
         }
     });
+	if (presentResult == rhi::Result::ModeChanged) {
+		RECT clientRect{};
+		if (m_hwnd && GetClientRect(m_hwnd, &clientRect)) {
+			const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
+			const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
+			if (clientWidth != 0 && clientHeight != 0) {
+				spdlog::info(
+					"Renderer: presentation reported mode change; rebuilding swapchain for client extent {}x{}",
+					clientWidth,
+					clientHeight);
+				OnResize(clientWidth, clientHeight);
+				return;
+			}
+		}
+		spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
+		return;
+	}
+	if (presentResult != rhi::Result::Ok) {
+		spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
+		return;
+	}
 
     runCapturedStage("SignalFence", [&]() {
         ZoneScopedN("Renderer::Render::SignalFence");
@@ -5403,6 +5459,11 @@ void Renderer::SetupInputHandlers() {
 }
 
 void Renderer::RegisterPipelineExtensions() {
+	if (ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_PROBE_ONLY") &&
+		!ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_EXTENSIONS")) {
+		spdlog::info("Render-graph isolation: all pipeline extensions disabled");
+		return;
+	}
     currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
         m_managerInterface.GetTextureFactory(),
         currentRenderGraph->GetUploadService(),
@@ -5470,6 +5531,10 @@ void Renderer::RegisterPipelineExtensions() {
     // every extension has been gathered, so this does not require their target
     // passes to have been materialized yet.
     for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
+		if (id == "SARPGrass" && ReadTruthyEnvironmentFlag("BASICRENDERER_DISABLE_SARP_GRASS_EXTENSION")) {
+			spdlog::info("Render-graph isolation: SARPGrass extension disabled");
+			continue;
+		}
         auto extension = factory();
         if (!extension) {
             throw std::runtime_error("Pipeline extension factory returned null: " + id);
@@ -5811,10 +5876,22 @@ void Renderer::CreateRenderGraph() {
 
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::BuildTechniques");
-    for (const auto& entry : m_pipelineRecipe.Techniques()) {
-        entry.technique->Build(buildContext);
-        probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
-    }
+	const bool isolationProbeOnly = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_PROBE_ONLY");
+	const bool isolationTechniquesEnabled = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_TECHNIQUES");
+	const bool isolationExtensionsEnabled = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_EXTENSIONS");
+	if (!isolationProbeOnly || isolationTechniquesEnabled || isolationExtensionsEnabled) {
+		for (const auto& entry : m_pipelineRecipe.Techniques()) {
+			if (isolationProbeOnly && !isolationTechniquesEnabled &&
+				entry.id != br::pipeline::TechniqueId::FrameResources &&
+				entry.id != br::pipeline::TechniqueId::CanonicalSurfaceResources) {
+				continue;
+			}
+			entry.technique->Build(buildContext);
+			probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
+		}
+	} else {
+		spdlog::info("Render-graph isolation: all recipe techniques disabled; building interop probes only");
+	}
     }
 
     if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
@@ -5822,13 +5899,17 @@ void Renderer::CreateRenderGraph() {
         newGraph->BuildCopyPass<MultiRHISeedPass>("MultiRHI::Seed", probe);
         newGraph->BuildCopyPass<MultiRHIPeerCopyPass>("MultiRHI::PeerCopy", probe);
         newGraph->BuildCopyPass<MultiRHIVerifyPass>("MultiRHI::Verify", probe);
-		newGraph->BuildCopyPass<MultiRHITextureSeedPass>("MultiRHI::TextureSeed", probe);
-		newGraph->BuildCopyPass<MultiRHITexturePeerCopyPass>("MultiRHI::TexturePeerCopy", probe);
-		newGraph->BuildCopyPass<MultiRHITextureVerifyPass>("MultiRHI::TextureVerify", probe);
         newGraph->AddExplicitPassDependency("MultiRHI::Seed", "MultiRHI::PeerCopy");
         newGraph->AddExplicitPassDependency("MultiRHI::PeerCopy", "MultiRHI::Verify");
-		newGraph->AddExplicitPassDependency("MultiRHI::TextureSeed", "MultiRHI::TexturePeerCopy");
-		newGraph->AddExplicitPassDependency("MultiRHI::TexturePeerCopy", "MultiRHI::TextureVerify");
+		if (!ReadTruthyEnvironmentFlag("BASICRENDERER_MULTI_RHI_DISABLE_TEXTURE_PROBE")) {
+			newGraph->BuildCopyPass<MultiRHITextureSeedPass>("MultiRHI::TextureSeed", probe);
+			newGraph->BuildCopyPass<MultiRHITexturePeerCopyPass>("MultiRHI::TexturePeerCopy", probe);
+			newGraph->BuildCopyPass<MultiRHITextureVerifyPass>("MultiRHI::TextureVerify", probe);
+			newGraph->AddExplicitPassDependency("MultiRHI::TextureSeed", "MultiRHI::TexturePeerCopy");
+			newGraph->AddExplicitPassDependency("MultiRHI::TexturePeerCopy", "MultiRHI::TextureVerify");
+		} else {
+			spdlog::info("Multi-RHI texture diagnostic disabled for pipeline isolation");
+		}
     }
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");
@@ -5859,12 +5940,16 @@ void Renderer::CreateRenderGraph() {
 
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::CompileStructural");
+	spdlog::info("Renderer::CreateRenderGraph entering CompileStructural");
     newGraph->CompileStructural();
+	spdlog::info("Renderer::CreateRenderGraph leaving CompileStructural");
     }
     probeGraphBuildPhase("CreateRenderGraph after CompileStructural");
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::Setup");
+	spdlog::info("Renderer::CreateRenderGraph entering Setup");
     newGraph->Setup();
+	spdlog::info("Renderer::CreateRenderGraph leaving Setup");
     }
     probeGraphBuildPhase("CreateRenderGraph after Setup");
 

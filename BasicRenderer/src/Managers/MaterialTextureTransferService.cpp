@@ -7,6 +7,7 @@
 
 #include <DirectXTex.h>
 #include <rhi_conversions_dx12.h>
+#include <rhi_interop.h>
 
 #include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
@@ -238,13 +239,19 @@ void MaterialTextureTransferService::Pump()
 				if (request.description.imageDimensions.empty() || request.initialData.Empty()) {
 					throw std::runtime_error("material texture upload has no subresource data");
 				}
+				rhi::VulkanDeviceInfo vulkanDeviceInfo{};
+				const bool vulkanImageStartsUndefined = rhi::QueryNativeDevice(
+					m_device,
+					rhi::RHI_IID_VK_DEVICE,
+					&vulkanDeviceInfo,
+					sizeof(vulkanDeviceInfo));
 				auto toCopy = MakeWholeTextureBarrier(
 					*request.image,
-					rhi::ResourceAccessType::Common,
+					vulkanImageStartsUndefined ? rhi::ResourceAccessType::None : rhi::ResourceAccessType::Common,
 					rhi::ResourceAccessType::CopyDest,
-					rhi::ResourceLayout::Common,
+					vulkanImageStartsUndefined ? rhi::ResourceLayout::Undefined : rhi::ResourceLayout::Common,
 					rhi::ResourceLayout::CopyDest,
-					rhi::ResourceSyncState::All,
+					vulkanImageStartsUndefined ? rhi::ResourceSyncState::None : rhi::ResourceSyncState::All,
 					rhi::ResourceSyncState::Copy);
 				rhi::BarrierBatch barriers{};
 				barriers.textures = {&toCopy, 1};

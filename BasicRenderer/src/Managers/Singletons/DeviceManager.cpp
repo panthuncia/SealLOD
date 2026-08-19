@@ -140,6 +140,13 @@ void DeviceManager::Initialize() {
     }
 
     bool enableDebug = IsDiagnosticsBuild() || IsTruthyEnvironmentValue("BASICRENDERER_VULKAN_VALIDATION");
+    // Allow an explicit false value to override diagnostics-build defaults.
+    // This is useful for isolating validation-layer/driver interactions while
+    // retaining validation by default for RelWithDebInfo development builds.
+    const std::string validationSetting = GetEnvironmentString("BASICRENDERER_VULKAN_VALIDATION");
+    if (!validationSetting.empty() && !IsTruthyEnvironmentValue("BASICRENDERER_VULKAN_VALIDATION")) {
+        enableDebug = false;
+    }
     const bool nvPerfCaptureRequested =
         IsNvPerfCaptureRequestedByEnvironment() ||
         telemetry::nvperf::CaptureConfigured();

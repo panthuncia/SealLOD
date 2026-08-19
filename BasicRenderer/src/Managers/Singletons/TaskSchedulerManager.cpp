@@ -154,11 +154,22 @@ void TaskSchedulerManager::Initialize(uint32_t ioThreadCount, uint32_t backgroun
     const uint32_t tbbParallelism = (std::max)(detectedConcurrency - reservedLogicalCpuCount, 1u);
     const uint32_t resolvedBackgroundThreadCount =
         backgroundThreadCount != 0 ? backgroundThreadCount : (std::clamp)(detectedConcurrency / 4u, 1u, 4u);
-    const uint32_t resolvedShaderCompileThreadCount = (std::max)(
+    uint32_t resolvedShaderCompileThreadCount = (std::max)(
         1u,
         detectedConcurrency > reservedLogicalCpuCount + 1u
             ? detectedConcurrency - reservedLogicalCpuCount - 1u
             : 1u);
+    char* configured = nullptr;
+    size_t configuredLength = 0;
+    (void)_dupenv_s(&configured, &configuredLength, "BASICRENDERER_SHADER_COMPILE_THREADS");
+    if (configured && *configured) {
+        char* end = nullptr;
+        const unsigned long requested = std::strtoul(configured, &end, 10);
+        if (end != configured && requested > 0) {
+            resolvedShaderCompileThreadCount = static_cast<uint32_t>((std::min)(requested, 64ul));
+        }
+    }
+    std::free(configured);
     m_workerThreadCount = tbbParallelism;
     m_runtimeState = std::make_unique<RuntimeState>();
     m_runtimeState->parallelismControl = std::make_unique<tbb::global_control>(

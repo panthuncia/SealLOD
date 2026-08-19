@@ -2875,13 +2875,6 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     for (;;) {
         if (!g_bypassShaderArtifactCacheReads) {
             if (std::optional<ShaderBundle> cachedBundle = TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get()); cachedBundle.has_value()) {
-            if (logMaterialEvalCache) {
-                spdlog::info(
-                    "VisUtil material eval shader artifact cache hit identity=0x{:X} build=0x{:X} file='{}'",
-                    cacheKey.identityHash,
-                    buildConfigHash,
-                    ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
-            }
             return *cachedBundle;
             }
         }
@@ -2891,11 +2884,7 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
     }
     ShaderCompileFlightScope flightScope(flightKey);
     if (logMaterialEvalCache) {
-        spdlog::info(
-            "VisUtil material eval shader artifact cache miss; compiling identity=0x{:X} build=0x{:X} file='{}'",
-            cacheKey.identityHash,
-            buildConfigHash,
-            ws2s(shadercache::BuildCacheFileName(cacheKey, buildConfigHash)));
+        spdlog::debug("VisUtil material eval shader artifact cache miss; compiling identity=0x{:X}", cacheKey.identityHash);
     }
 
     auto prepareSlot = [&](const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer)

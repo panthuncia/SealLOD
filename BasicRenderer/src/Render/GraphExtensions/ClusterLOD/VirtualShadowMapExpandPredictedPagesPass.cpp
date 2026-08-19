@@ -33,24 +33,28 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_physicalPageCount(physicalPageCount)
 {
+    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: stamp pipeline begin");
     m_stampContentGenerationPso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"CLodVirtualShadowStampRenderedPageGenerationsCSMain",
         {},
         "CLod.VirtualShadow.StampRenderedPageGenerations.PSO");
+    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: stamp pipeline complete; expand pipeline begin");
     m_pso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"CLodVirtualShadowExpandPredictedPagesCSMain",
         {},
         "CLod.VirtualShadow.ExpandPredictedPages.PSO");
+    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: expand pipeline complete; reset pipeline begin");
     m_resetCandidateCountPso = PSOManager::GetInstance().MakeComputePipeline(
         PSOManager::GetInstance().GetComputeRootSignature().GetHandle(),
         L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"CLodVirtualShadowResetFallbackCandidateCountCSMain",
         {},
         "CLod.VirtualShadow.ResetFallbackCandidateCount.PSO");
+    spdlog::info("VirtualShadowMapExpandPredictedPagesPass: reset pipeline complete");
 }
 
 void VirtualShadowMapExpandPredictedPagesPass::DeclareResourceUsages(ComputePassBuilder* builder)
