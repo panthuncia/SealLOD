@@ -670,7 +670,8 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 			return fmt::format(
 				"streamingID={} bindingRevision={} publishedRevision={} publishedResource={} publishedSrv={} "
 				"preparedResource={} preparedSrv={} residentTopMip={} requestedTopMip={} pendingTopMip={} "
-				"usable={} fallback={} initialData='{}' loadPath={} uploadPath={}",
+				"usable={} fallback={} pendingWork={} processing={} reload={} directStorage={} "
+				"initialData='{}' loadPath={} uploadPath={}",
 				texture->GetStreamingTextureID(),
 				texture->GetBindingRevision(),
 				published.bindingRevision,
@@ -683,6 +684,10 @@ void MaterialManager::FlushDirtyMaterial(Material& material, TextureFactory* tex
 				streaming.pendingTopMip,
 				texture->HasUsableImage(),
 				texture->IsUsingFallbackImage(),
+				texture->HasPendingUploadWork(),
+				pending.processingState,
+				pending.reloadState,
+				pending.directStorageState,
 				pending.initialData,
 				pending.loadPath,
 				pending.uploadPath);

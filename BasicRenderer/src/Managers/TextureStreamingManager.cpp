@@ -15,8 +15,11 @@
 #include "Resources/Buffers/Buffer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <format>
 #include <limits>
 
 #include <tracy/Tracy.hpp>
@@ -45,6 +48,45 @@ namespace {
 			return isSet;
 		}();
 		return enabled;
+	}
+
+	const std::filesystem::path& MaterialTextureCaptureDirectory() {
+		static const std::filesystem::path directory = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			std::filesystem::path result;
+			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_CAPTURE_DIR") == 0 &&
+				value != nullptr && value[0] != '\0') {
+				result = value;
+				std::error_code error;
+				std::filesystem::create_directories(result, error);
+				if (error) {
+					spdlog::error("Material texture capture directory '{}' could not be created: {}",
+						result.string(), error.message());
+					result.clear();
+				}
+			}
+			std::free(value);
+			return result;
+		}();
+		return directory;
+	}
+
+	uint64_t MaterialTextureCaptureId() {
+		static const uint64_t id = [] {
+			char* value = nullptr;
+			size_t valueLength = 0;
+			uint64_t result = UINT64_MAX;
+			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_CAPTURE_ID") == 0 &&
+				value != nullptr && value[0] != '\0') {
+				char* end = nullptr;
+				const auto parsed = std::strtoull(value, &end, 0);
+				if (end != value && *end == '\0') result = parsed;
+			}
+			std::free(value);
+			return result;
+		}();
+		return id;
 	}
 
 	uint32_t TextureSrvIndex(const std::shared_ptr<PixelBuffer>& image) {
@@ -283,16 +325,13 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 	}
 	{
 		ZoneScopedN("TextureStreamingWorker::WaitReadbackFence");
-		while (m_readbackFence.GetCompletedValue() < submitted) {
-			// A graph can be abandoned after assigning a timeline value but before
-			// submitting its signal.  Use a bounded wait so Shutdown can always join
-			// the worker instead of hanging forever on an unsignalled value.
-			const auto result = m_readbackFence.HostWait(submitted, 50u);
-			if (m_workerQuit.load(std::memory_order_acquire)) {
+		if (m_readbackFence.GetCompletedValue() < submitted) {
+			// A delayed feedback copy must not monopolize the streaming worker.
+			// Poll once, then service queued reload/processing completions and retry
+			// the feedback fence on the next worker iteration.
+			const auto result = m_readbackFence.HostWait(submitted, 5u);
+			if (m_workerQuit.load(std::memory_order_acquire) || result == rhi::Result::WaitTimeout) {
 				return;
-			}
-			if (result == rhi::Result::WaitTimeout) {
-				continue;
 			}
 			if (result != rhi::Result::Ok) {
 				return;
@@ -413,6 +452,7 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 	if (command.options.alphaTested) {
 		++m_alphaTestedBindingCountsByStreamingTextureID[streamingTextureID];
 	}
+
 	if (!command.options.allowIdleCoarsening) {
 		++m_idleCoarseningDisabledBindingCountsByStreamingTextureID[streamingTextureID];
 	}
@@ -1114,6 +1154,32 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		for (auto& image : change.supersededImages) {
 			if (image && image != change.newImage && !isCurrentImage(image)) {
 				DescriptorHeapManager::GetInstance().RetireResource(std::move(image));
+			}
+		}
+		const auto& captureDirectory = MaterialTextureCaptureDirectory();
+		const uint64_t captureId = MaterialTextureCaptureId();
+		if (!captureDirectory.empty() && change.newImage &&
+			change.metadata.residentTopMip == 0u && change.bindingRevision >= 3u &&
+			(captureId == UINT64_MAX || change.streamingTextureID == captureId)) {
+			static std::atomic_uint32_t captureIndex{ 0 };
+			const uint32_t index = captureIndex.fetch_add(1, std::memory_order_relaxed);
+			constexpr uint32_t kMaximumCapturedTextures = 1;
+			if (index < kMaximumCapturedTextures) {
+				const auto output = captureDirectory /
+					(std::format("material_{:02}_texture_{:08}.dds", index, change.streamingTextureID));
+				m_materialTextureTransfers->RequestReadback(
+					change.newImage,
+					output.wstring(),
+					[output] { spdlog::info("Material texture capture completed: '{}'", output.string()); });
+				spdlog::info(
+					"Material texture capture requested: textureID={} srv={} format={} dimensions={}x{} mips={} file='{}'",
+					change.streamingTextureID,
+					newSrv,
+					static_cast<uint32_t>(change.newImage->GetFormat()),
+					change.newImage->GetWidth(),
+					change.newImage->GetHeight(),
+					change.newImage->GetMipLevels(),
+					output.string());
 			}
 		}
 		if (MaterialTextureStreamingTransitionLoggingEnabled()) {

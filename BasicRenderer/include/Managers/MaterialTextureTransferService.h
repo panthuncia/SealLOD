@@ -66,6 +66,7 @@ private:
 			uint32_t height = 0;
 			uint32_t mipLevels = 0;
 			rhi::Format format = rhi::Format::Unknown;
+			uint64_t bufferSize = 0;
 			std::wstring outputFile;
 			std::function<void()> callback;
 		};

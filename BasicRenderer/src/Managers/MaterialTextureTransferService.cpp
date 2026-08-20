@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <stdexcept>
 
+#include <wincodec.h>
 #include <DirectXTex.h>
 #include <rhi_conversions_dx12.h>
 #include <rhi_interop.h>
@@ -59,12 +60,30 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 	for (uint32_t mip = 0; mip < completion.mipLevels; ++mip) {
 		const auto& footprint = completion.footprints[mip];
 		const auto* destination = image.GetImage(mip, 0, 0);
+		if (!destination || destination->rowPitch == 0) {
+			completion.buffer->GetAPIResource().Unmap(0, 0);
+			spdlog::error("Material texture external readback has an invalid destination image at mip {}.", mip);
+			return;
+		}
+		const auto blockInfo = rhi::GetBlockInfo(completion.format);
+		const size_t rows = blockInfo.isCompressed
+			? (std::max)(size_t{1}, (destination->height + blockInfo.blockHeight - 1u) / blockInfo.blockHeight)
+			: destination->height;
+		const uint64_t sourceEnd = footprint.offset + static_cast<uint64_t>(footprint.rowPitch) * rows;
+		if (footprint.rowPitch < destination->rowPitch || sourceEnd > completion.bufferSize) {
+			completion.buffer->GetAPIResource().Unmap(0, 0);
+			spdlog::error(
+				"Material texture external readback footprint is invalid at mip {}: offset={} rowPitch={} rows={} "
+				"destinationRowPitch={} bufferSize={}.",
+				mip, footprint.offset, footprint.rowPitch, rows, destination->rowPitch, completion.bufferSize);
+			return;
+		}
 		const auto* source = static_cast<const uint8_t*>(mapped) + footprint.offset;
-		for (size_t row = 0; row < destination->height; ++row) {
+		for (size_t row = 0; row < rows; ++row) {
 			std::memcpy(
 				destination->pixels + row * destination->rowPitch,
 				source + row * footprint.rowPitch,
-				(std::min)(destination->rowPitch, static_cast<size_t>(footprint.rowPitch)));
+				destination->rowPitch);
 		}
 	}
 	completion.buffer->GetAPIResource().Unmap(0, 0);
@@ -73,6 +92,24 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 		DirectX::DDS_FLAGS_NONE, completion.outputFile.c_str());
 	if (FAILED(result)) {
 		spdlog::error("Material texture external readback failed to save '{}'.", std::filesystem::path(completion.outputFile).string());
+	}
+	else {
+		DirectX::ScratchImage preview;
+		const HRESULT decompressResult = DirectX::Decompress(
+			image.GetImages(), image.GetImageCount(), image.GetMetadata(),
+			DXGI_FORMAT_R8G8B8A8_UNORM, preview);
+		if (SUCCEEDED(decompressResult) && preview.GetImageCount() != 0) {
+			auto previewFile = std::filesystem::path(completion.outputFile).replace_extension(L".png");
+			const HRESULT previewResult = DirectX::SaveToWICFile(
+				*preview.GetImage(0, 0, 0), DirectX::WIC_FLAGS_NONE,
+				GUID_ContainerFormatPng, previewFile.c_str());
+			if (FAILED(previewResult)) {
+				spdlog::warn("Material texture external readback failed to save preview '{}'.", previewFile.string());
+			}
+		}
+		else if (FAILED(decompressResult)) {
+			spdlog::warn("Material texture external readback failed to decompress preview for '{}'.", std::filesystem::path(completion.outputFile).string());
+		}
 	}
 	if (completion.callback) completion.callback();
 }
@@ -347,6 +384,7 @@ void MaterialTextureTransferService::Pump()
 			.height = request.image->GetHeight(),
 			.mipLevels = mipLevels,
 			.format = request.image->GetFormat(),
+			.bufferSize = footprintInfo.totalBytes,
 			.outputFile = std::move(request.outputFile),
 			.callback = std::move(request.callback)});
 	}

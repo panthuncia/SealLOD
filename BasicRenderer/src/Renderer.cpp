@@ -16,6 +16,7 @@
 #include <sstream>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <stacktrace>
 #include <thread>
 #include <unordered_map>
@@ -134,6 +135,162 @@ void D3D12DebugCallback(
 }
 
 namespace {
+
+float CaptureHalfToFloat(uint16_t h)
+{
+    const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+    uint32_t exponent = (h >> 10) & 0x1fu;
+    uint32_t mantissa = h & 0x3ffu;
+    uint32_t bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) bits = sign;
+        else {
+            exponent = 1;
+            while ((mantissa & 0x400u) == 0) { mantissa <<= 1; --exponent; }
+            bits = sign | ((exponent + 112u) << 23) | ((mantissa & 0x3ffu) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    return std::bit_cast<float>(bits);
+}
+
+void SaveFrameCaptureArtifacts(const std::filesystem::path& basePath, ReadbackCaptureResult&& result)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(basePath.parent_path(), ec);
+    {
+        std::ofstream raw(basePath.string() + ".bin", std::ios::binary | std::ios::trunc);
+        raw.write(reinterpret_cast<const char*>(result.data.data()), static_cast<std::streamsize>(result.data.size()));
+    }
+    if (result.desc.kind != ReadbackResourceKind::Texture || result.layouts.empty()) return;
+
+    const auto& fp = result.layouts.front();
+    const uint32_t width = fp.width;
+    const uint32_t height = fp.height;
+    if (!width || !height || fp.offset >= result.data.size()) return;
+    std::vector<uint8_t> bgra(static_cast<size_t>(width) * height * 4, 255);
+    double minimum = std::numeric_limits<double>::infinity();
+    double maximum = -std::numeric_limits<double>::infinity();
+    long double sum = 0.0;
+    uint64_t finiteValues = 0, nonFiniteValues = 0;
+    auto record = [&](float v) {
+        if (std::isfinite(v)) { minimum = (std::min)(minimum, static_cast<double>(v)); maximum = (std::max)(maximum, static_cast<double>(v)); sum += v; ++finiteValues; }
+        else ++nonFiniteValues;
+    };
+    auto byte = [](float v) { return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+    for (uint32_t y = 0; y < height; ++y) {
+        const auto* row = reinterpret_cast<const uint8_t*>(result.data.data()) + fp.offset + static_cast<size_t>(y) * fp.rowPitch;
+        for (uint32_t x = 0; x < width; ++x) {
+            float r = 0, g = 0, b = 0, a = 1;
+            switch (result.format) {
+            case rhi::Format::R8G8B8A8_UNorm:
+            case rhi::Format::R8G8B8A8_UNorm_sRGB:
+                r = row[x * 4 + 0] / 255.0f; g = row[x * 4 + 1] / 255.0f;
+                b = row[x * 4 + 2] / 255.0f; a = row[x * 4 + 3] / 255.0f; break;
+            case rhi::Format::R16G16B16A16_Float: {
+                auto p = reinterpret_cast<const uint16_t*>(row + x * 8);
+                r = CaptureHalfToFloat(p[0]); g = CaptureHalfToFloat(p[1]); b = CaptureHalfToFloat(p[2]); a = CaptureHalfToFloat(p[3]);
+                record(r); record(g); record(b); record(a);
+                r = std::pow((std::max)(0.0f, r) / (1.0f + (std::max)(0.0f, r)), 1.0f / 2.2f);
+                g = std::pow((std::max)(0.0f, g) / (1.0f + (std::max)(0.0f, g)), 1.0f / 2.2f);
+                b = std::pow((std::max)(0.0f, b) / (1.0f + (std::max)(0.0f, b)), 1.0f / 2.2f); a = 1; break;
+            }
+            case rhi::Format::R16G16_Float: {
+                auto p = reinterpret_cast<const uint16_t*>(row + x * 4);
+                const float vx = CaptureHalfToFloat(p[0]), vy = CaptureHalfToFloat(p[1]); record(vx); record(vy);
+                r = 0.5f + vx * 16.0f; g = 0.5f + vy * 16.0f; b = 0.5f; break;
+            }
+            case rhi::Format::R32_Float: {
+                float v; std::memcpy(&v, row + x * 4, 4); record(v); r = g = b = std::isfinite(v) ? v : 1.0f; break;
+            }
+            case rhi::Format::R32G32_UInt: {
+                uint32_t p[2]; std::memcpy(p, row + x * 8, 8); r = ((p[0] * 37u) & 255u) / 255.0f; g = ((p[1] * 73u) & 255u) / 255.0f; b = (((p[0] ^ p[1]) * 17u) & 255u) / 255.0f; break;
+            }
+            default: break;
+            }
+            const size_t o = (static_cast<size_t>(height - 1 - y) * width + x) * 4;
+            bgra[o + 0] = byte(b); bgra[o + 1] = byte(g); bgra[o + 2] = byte(r); bgra[o + 3] = byte(a);
+        }
+    }
+    struct BmpHeader { uint16_t type; uint32_t size; uint16_t r1, r2; uint32_t offset; };
+    struct DibHeader { uint32_t size; int32_t width, height; uint16_t planes, bpp; uint32_t compression, imageSize; int32_t xppm, yppm; uint32_t used, important; };
+    const BmpHeader bh{ 0x4d42, static_cast<uint32_t>(14 + 40 + bgra.size()), 0, 0, 54 };
+    const DibHeader dh{ 40, static_cast<int32_t>(width), static_cast<int32_t>(height), 1, 32, 0, static_cast<uint32_t>(bgra.size()), 2835, 2835, 0, 0 };
+    std::ofstream bmp(basePath.string() + ".bmp", std::ios::binary | std::ios::trunc);
+    bmp.write(reinterpret_cast<const char*>(&bh.type), 2); bmp.write(reinterpret_cast<const char*>(&bh.size), 4);
+    bmp.write(reinterpret_cast<const char*>(&bh.r1), 2); bmp.write(reinterpret_cast<const char*>(&bh.r2), 2); bmp.write(reinterpret_cast<const char*>(&bh.offset), 4);
+    bmp.write(reinterpret_cast<const char*>(&dh), sizeof(dh)); bmp.write(reinterpret_cast<const char*>(bgra.data()), static_cast<std::streamsize>(bgra.size()));
+    std::ofstream meta(basePath.string() + ".json", std::ios::trunc);
+    meta << "{\n  \"width\": " << width << ",\n  \"height\": " << height << ",\n  \"format\": " << static_cast<uint32_t>(result.format)
+         << ",\n  \"bytes\": " << result.data.size() << ",\n  \"finite_values\": " << finiteValues << ",\n  \"non_finite_values\": " << nonFiniteValues
+         << ",\n  \"minimum\": " << (finiteValues ? minimum : 0.0) << ",\n  \"maximum\": " << (finiteValues ? maximum : 0.0)
+         << ",\n  \"mean\": " << (finiteValues ? static_cast<double>(sum / finiteValues) : 0.0) << "\n}\n";
+    spdlog::info("SARP frame capture saved '{}' ({}x{}, format={}, nonfinite={}).", basePath.string(), width, height, static_cast<uint32_t>(result.format), nonFiniteValues);
+}
+
+uint32_t ReadBoundedEnvironmentUint(
+    const char* name,
+    uint32_t fallback,
+    uint32_t minimum,
+    uint32_t maximum);
+
+void MaybeRequestFrameArtifactCaptures(RenderGraph* graph, uint64_t frameNumber)
+{
+    static bool requested = false;
+    if (requested || !graph) return;
+    const uint64_t captureFrame = ReadBoundedEnvironmentUint(
+        "SARP_FRAME_CAPTURE_START_FRAME", 120u, 1u, UINT32_MAX);
+    if (frameNumber < captureFrame) return;
+    wchar_t* value = nullptr;
+    size_t length = 0;
+    if (_wdupenv_s(&value, &length, L"SARP_FRAME_CAPTURE_DIR") != 0 || !value || !value[0]) {
+        std::free(value);
+        return;
+    }
+    const std::filesystem::path outputDirectory(value);
+    std::free(value);
+    auto* service = graph->GetReadbackService();
+    if (!service) return;
+    struct Capture { std::string_view id; const char* anchor; const char* name; uint32_t mip; };
+    static constexpr Capture captures[] = {
+        // Capture the cross-API bloom resource first. Its readback can require
+        // an additional bridge round trip, so leave the longest drain window
+        // before the benchmark's automatic exit.
+        { Builtin::PostProcessing::BloomTexture, "TonemappingPass", "07_bloom_mip1", 1 },
+        { Builtin::Surface::BaseColorOpacity, "EvaluateMaterialGroupsPass", "01_surface_base_color", 0 },
+        { Builtin::Surface::NormalRoughness, "EvaluateMaterialGroupsPass", "02_surface_normal_roughness", 0 },
+        { Builtin::Surface::Motion, "EvaluateMaterialGroupsPass", "03_surface_motion", 0 },
+        { Builtin::PrimaryCamera::LinearDepthMap, "DeferredShadingPass", "04_linear_depth", 0 },
+        { Builtin::Color::HDRColorTarget, "DeferredShadingPass", "05_hdr_after_lighting", 0 },
+        { Builtin::PostProcessing::UpscaledHDR, "UpscalingPass", "06_upscaled_hdr", 0 },
+        { Builtin::Backbuffer, "MenuRenderPass", "08_final_backbuffer", 0 },
+    };
+    requested = true;
+    size_t queued = 0;
+    for (const auto& capture : captures) {
+        auto resource = graph->RequestResourcePtr(capture.id, true);
+        if (!resource) {
+            spdlog::warn("SARP frame capture: resource '{}' unavailable; skipping '{}'.", capture.id, capture.name);
+            continue;
+        }
+        RangeSpec range{};
+        range.mipLower = { BoundType::Exact, capture.mip };
+        range.mipUpper = { BoundType::Exact, capture.mip };
+        range.sliceLower = { BoundType::Exact, 0 };
+        range.sliceUpper = { BoundType::Exact, 0 };
+        const auto path = outputDirectory / capture.name;
+        service->RequestReadbackCapture(capture.anchor, resource.get(), range,
+            [path](ReadbackCaptureResult&& result) { SaveFrameCaptureArtifacts(path, std::move(result)); });
+        ++queued;
+        spdlog::info("SARP frame capture: requested '{}' at common frame {} into '{}'.",
+            capture.name, frameNumber, outputDirectory.string());
+    }
+    spdlog::info("SARP frame capture: queued {}/{} stages for common frame {}.",
+        queued, std::size(captures), frameNumber);
+}
 
 constexpr uint64_t MultiRHIProbeBytes = 4096;
 constexpr uint64_t MultiRHIProbeValidationFrames = 120;
@@ -2389,7 +2546,9 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<uint32_t>("autoAliasPoolRetireIdleFrames", 120u);
 	settingsManager.registerSetting<float>("autoAliasPoolGrowthHeadroom", 1.5f);
     settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(org::runtime::TransitionPlacementMode::CanonicalThenOptimize));
-    settingsManager.registerSetting<bool>("heavyDebug", false);
+    settingsManager.registerSetting<bool>(
+        "heavyDebug",
+        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_HEAVY_DEBUG"));
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, false);
@@ -2905,7 +3064,7 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
     m_backbufferResources.resize(m_numFramesInFlight);
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
         m_backbufferResources[n] = std::make_shared<ExternalTextureResource>(
-            renderTargets[n], x_res, y_res);
+            renderTargets[n], x_res, y_res, rhi::Format::R8G8B8A8_UNorm);
         m_backbufferResources[n]->SetName("Backbuffer " + std::to_string(n));
     }
     m_dynamicBackbuffer = std::make_shared<DynamicResource>(m_backbufferResources[0]);
@@ -3417,6 +3576,7 @@ void Renderer::Update(float elapsedSeconds) {
     context.hostData = &updateHostData;
     context.beforeCompileFrame = [this]() {
         ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
+        MaybeRequestFrameArtifactCaptures(currentRenderGraph.get(), m_totalFramesRendered);
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
         static bool materialBufferReadbackRequested = false;
