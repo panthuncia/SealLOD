@@ -362,6 +362,12 @@ struct MultiRHIProbeState {
         bufferB = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, MultiRHIProbeBytes);
         bufferA->SetName("Multi-RHI automatic buffer A");
         bufferB->SetName("Multi-RHI automatic buffer B");
+		// A and B overlap at the peer copy and therefore receive distinct offsets,
+		// but assigning one explicit pool makes the diagnostic exercise the single
+		// D3D12 heap/imported-Vulkan-memory pool path every run.
+		constexpr uint64_t MultiRHIProbeAliasPool = 0x4D52484950524F42ull; // "MRHIPROB"
+		bufferA->SetAliasingPool(MultiRHIProbeAliasPool);
+		bufferB->SetAliasingPool(MultiRHIProbeAliasPool);
         org::TextureDescription textureDesc{};
         textureDesc.imageDimensions = { { MultiRHITextureExtent, MultiRHITextureExtent,
             MultiRHITextureRowPitch, MultiRHITextureRowPitch * MultiRHITextureExtent } };
@@ -417,7 +423,14 @@ struct MultiRHIProbeState {
             void* mapped = nullptr;
             readback->Map(&mapped, 0, MultiRHIProbeBytes);
             if (!mapped || std::memcmp(mapped, expected.data(), expected.size()) != 0) {
-                spdlog::critical("Multi-RHI diagnostic checksum mismatch at validation {}", verified + 1);
+                const auto* actual = static_cast<const uint8_t*>(mapped);
+                const auto* wanted = reinterpret_cast<const uint8_t*>(expected.data());
+                size_t mismatch = 0;
+                while (mismatch < MultiRHIProbeBytes && actual && actual[mismatch] == wanted[mismatch]) ++mismatch;
+                spdlog::critical("Multi-RHI diagnostic checksum mismatch at validation {} offset={} actual={} expected={}",
+                    verified + 1, mismatch,
+                    actual && mismatch < MultiRHIProbeBytes ? actual[mismatch] : 0,
+                    mismatch < MultiRHIProbeBytes ? wanted[mismatch] : 0);
                 std::abort();
             }
             readback->Unmap(0, 0);

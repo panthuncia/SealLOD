@@ -133,16 +133,17 @@ void UpscalingManager::SyncSettingsFromSettingsManager()
 {
     m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
     m_upscaleQualityMode = ReadUpscalingQualityModeSetting(m_upscaleQualityMode);
-    // Vulkan-primary temporal upscaling has an independent stability history
-    // and is not part of the interop experiment. Keep it disabled by default
-    // so motion-vector/history defects cannot poison interop validation.
+    // Vulkan temporal upscaling is not yet stable (including the single-device
+    // path, where Streamline can fail while setting constants and corrupt its
+    // teardown state). Keep it disabled until that integration is validated;
+    // this also prevents motion-vector/history defects from masking interop.
     const auto& deviceManager = DeviceManager::GetInstance();
     const bool forceDisabled = IsUpscalingDisabledByEnvironment()
-        || (deviceManager.IsMultiRHIEnabled() && deviceManager.GetBackend() == rhi::Backend::Vulkan);
+        || deviceManager.GetBackend() == rhi::Backend::Vulkan;
     if (forceDisabled && m_upscalingMode != UpscalingMode::None) {
         static bool logged = false;
         if (!logged) {
-            spdlog::info("UpscalingManager: forcing upscaling off for Vulkan-primary multi-RHI validation");
+            spdlog::info("UpscalingManager: forcing upscaling off for Vulkan stability");
             logged = true;
         }
         m_upscalingMode = UpscalingMode::None;
