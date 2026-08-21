@@ -15,11 +15,8 @@
 #include "Resources/Buffers/Buffer.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <format>
 #include <limits>
 
 #include <tracy/Tracy.hpp>
@@ -48,45 +45,6 @@ namespace {
 			return isSet;
 		}();
 		return enabled;
-	}
-
-	const std::filesystem::path& MaterialTextureCaptureDirectory() {
-		static const std::filesystem::path directory = [] {
-			char* value = nullptr;
-			size_t valueLength = 0;
-			std::filesystem::path result;
-			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_CAPTURE_DIR") == 0 &&
-				value != nullptr && value[0] != '\0') {
-				result = value;
-				std::error_code error;
-				std::filesystem::create_directories(result, error);
-				if (error) {
-					spdlog::error("Material texture capture directory '{}' could not be created: {}",
-						result.string(), error.message());
-					result.clear();
-				}
-			}
-			std::free(value);
-			return result;
-		}();
-		return directory;
-	}
-
-	uint64_t MaterialTextureCaptureId() {
-		static const uint64_t id = [] {
-			char* value = nullptr;
-			size_t valueLength = 0;
-			uint64_t result = UINT64_MAX;
-			if (_dupenv_s(&value, &valueLength, "SARP_MATERIAL_TEXTURE_CAPTURE_ID") == 0 &&
-				value != nullptr && value[0] != '\0') {
-				char* end = nullptr;
-				const auto parsed = std::strtoull(value, &end, 0);
-				if (end != value && *end == '\0') result = parsed;
-			}
-			std::free(value);
-			return result;
-		}();
-		return id;
 	}
 
 	uint32_t TextureSrvIndex(const std::shared_ptr<PixelBuffer>& image) {
@@ -1154,32 +1112,6 @@ std::size_t TextureStreamingManager::DrainPendingBindingChanges()
 		for (auto& image : change.supersededImages) {
 			if (image && image != change.newImage && !isCurrentImage(image)) {
 				DescriptorHeapManager::GetInstance().RetireResource(std::move(image));
-			}
-		}
-		const auto& captureDirectory = MaterialTextureCaptureDirectory();
-		const uint64_t captureId = MaterialTextureCaptureId();
-		if (!captureDirectory.empty() && change.newImage &&
-			change.metadata.residentTopMip == 0u && change.bindingRevision >= 3u &&
-			(captureId == UINT64_MAX || change.streamingTextureID == captureId)) {
-			static std::atomic_uint32_t captureIndex{ 0 };
-			const uint32_t index = captureIndex.fetch_add(1, std::memory_order_relaxed);
-			constexpr uint32_t kMaximumCapturedTextures = 1;
-			if (index < kMaximumCapturedTextures) {
-				const auto output = captureDirectory /
-					(std::format("material_{:02}_texture_{:08}.dds", index, change.streamingTextureID));
-				m_materialTextureTransfers->RequestReadback(
-					change.newImage,
-					output.wstring(),
-					[output] { spdlog::info("Material texture capture completed: '{}'", output.string()); });
-				spdlog::info(
-					"Material texture capture requested: textureID={} srv={} format={} dimensions={}x{} mips={} file='{}'",
-					change.streamingTextureID,
-					newSrv,
-					static_cast<uint32_t>(change.newImage->GetFormat()),
-					change.newImage->GetWidth(),
-					change.newImage->GetHeight(),
-					change.newImage->GetMipLevels(),
-					output.string());
 			}
 		}
 		if (MaterialTextureStreamingTransitionLoggingEnabled()) {

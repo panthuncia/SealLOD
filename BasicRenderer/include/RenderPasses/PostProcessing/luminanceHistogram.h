@@ -1,7 +1,5 @@
 #pragma once
 
-#include <atomic>
-
 #include "RenderPasses/Base/ComputePass.h"
 #include "Managers/Singletons/PSOManager.h"
 #include "Render/RenderContext.h"
@@ -24,13 +22,6 @@ public:
     }
 
 	PassReturn Execute(PassExecutionContext& executionContext) override {
-		if (executionContext.backendInstance != BackendInstanceId::Primary) {
-			const uint32_t validationFrame = m_peerExecutionCount.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (validationFrame == 1 || validationFrame == 120) {
-				spdlog::info("Multi-RHI substantive histogram validation {}/120: backendInstance={}",
-					validationFrame, static_cast<uint32_t>(executionContext.backendInstance));
-			}
-		}
         auto* renderContext = executionContext.hostData->Get<RenderContext>();
         auto& context = *renderContext;
         auto& psoManager = PSOManager::GetInstance();
@@ -67,7 +58,6 @@ public:
     }
 
 private:
-	std::atomic<uint32_t> m_peerExecutionCount{ 0 };
     PipelineState m_pso;
 
     void CreateComputePSO()

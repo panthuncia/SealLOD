@@ -1,7 +1,5 @@
 #pragma once
 
-#include <atomic>
-
 #include "RenderPasses/Base/RenderPass.h"
 #include "Managers/Singletons/DeviceManager.h"
 #include "Managers/Singletons/PSOManager.h"
@@ -54,14 +52,6 @@ public:
     PassReturn Execute(PassExecutionContext& executionContext) override {
         auto& psoManager = PSOManager::GetInstance();
         auto& commandList = executionContext.commandList;
-		if (executionContext.backendInstance != BackendInstanceId::Primary) {
-			const uint32_t validationFrame = m_peerExecutionCount.fetch_add(1, std::memory_order_relaxed) + 1;
-			if (validationFrame == 1 || validationFrame == 120) {
-				spdlog::info("Multi-RHI substantive bloom validation {}/120: mip={} upsample={} backendInstance={}",
-					validationFrame, m_mipIndex, m_isUpsample,
-					static_cast<uint32_t>(executionContext.backendInstance));
-			}
-		}
 
 		commandList.SetDescriptorHeaps(
             executionContext.GetResourceDescriptorHeap().GetHandle(),
@@ -124,7 +114,6 @@ private:
 
     unsigned int m_mipIndex;
     bool m_isUpsample = false;
-	std::atomic<uint32_t> m_peerExecutionCount{ 0 };
 
     PipelineState m_downsamplePso;
     PipelineState m_upsamplePso;

@@ -12,11 +12,8 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
-#include <iomanip>
 #include <sstream>
 #include <array>
-#include <atomic>
-#include <bit>
 #include <stacktrace>
 #include <thread>
 #include <unordered_map>
@@ -25,8 +22,6 @@
 #include <utility>
 
 #include <rhi_debug.h>
-#include <rhi_helpers.h>
-#include <rhi_interop_dx12.h>
 #include <tracy/Tracy.hpp>
 #include <spdlog/spdlog.h>
 #include "Utilities/Utilities.h"
@@ -72,6 +67,9 @@
 #include "Scene/MovementState.h"
 #include "ThirdParty/XeGTAO.h"
 #include "Managers/EnvironmentManager.h"
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+#include "Validation/SARPInteropValidation.h"
+#endif
 #include "Render/TonemapTypes.h"
 #include "../generated/BuiltinResources.h"
 #include "Resources/ResourceIdentifier.h"
@@ -135,484 +133,6 @@ void D3D12DebugCallback(
 }
 
 namespace {
-
-float CaptureHalfToFloat(uint16_t h)
-{
-    const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
-    uint32_t exponent = (h >> 10) & 0x1fu;
-    uint32_t mantissa = h & 0x3ffu;
-    uint32_t bits = 0;
-    if (exponent == 0) {
-        if (mantissa == 0) bits = sign;
-        else {
-            exponent = 1;
-            while ((mantissa & 0x400u) == 0) { mantissa <<= 1; --exponent; }
-            bits = sign | ((exponent + 112u) << 23) | ((mantissa & 0x3ffu) << 13);
-        }
-    } else if (exponent == 31) {
-        bits = sign | 0x7f800000u | (mantissa << 13);
-    } else {
-        bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
-    }
-    return std::bit_cast<float>(bits);
-}
-
-void SaveFrameCaptureArtifacts(const std::filesystem::path& basePath, ReadbackCaptureResult&& result)
-{
-    std::error_code ec;
-    std::filesystem::create_directories(basePath.parent_path(), ec);
-    {
-        std::ofstream raw(basePath.string() + ".bin", std::ios::binary | std::ios::trunc);
-        raw.write(reinterpret_cast<const char*>(result.data.data()), static_cast<std::streamsize>(result.data.size()));
-    }
-    if (result.desc.kind != ReadbackResourceKind::Texture || result.layouts.empty()) return;
-
-    const auto& fp = result.layouts.front();
-    const uint32_t width = fp.width;
-    const uint32_t height = fp.height;
-    if (!width || !height || fp.offset >= result.data.size()) return;
-    std::vector<uint8_t> bgra(static_cast<size_t>(width) * height * 4, 255);
-    double minimum = std::numeric_limits<double>::infinity();
-    double maximum = -std::numeric_limits<double>::infinity();
-    long double sum = 0.0;
-    uint64_t finiteValues = 0, nonFiniteValues = 0;
-    auto record = [&](float v) {
-        if (std::isfinite(v)) { minimum = (std::min)(minimum, static_cast<double>(v)); maximum = (std::max)(maximum, static_cast<double>(v)); sum += v; ++finiteValues; }
-        else ++nonFiniteValues;
-    };
-    auto byte = [](float v) { return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-    for (uint32_t y = 0; y < height; ++y) {
-        const auto* row = reinterpret_cast<const uint8_t*>(result.data.data()) + fp.offset + static_cast<size_t>(y) * fp.rowPitch;
-        for (uint32_t x = 0; x < width; ++x) {
-            float r = 0, g = 0, b = 0, a = 1;
-            switch (result.format) {
-            case rhi::Format::R8G8B8A8_UNorm:
-            case rhi::Format::R8G8B8A8_UNorm_sRGB:
-                r = row[x * 4 + 0] / 255.0f; g = row[x * 4 + 1] / 255.0f;
-                b = row[x * 4 + 2] / 255.0f; a = row[x * 4 + 3] / 255.0f; break;
-            case rhi::Format::R16G16B16A16_Float: {
-                auto p = reinterpret_cast<const uint16_t*>(row + x * 8);
-                r = CaptureHalfToFloat(p[0]); g = CaptureHalfToFloat(p[1]); b = CaptureHalfToFloat(p[2]); a = CaptureHalfToFloat(p[3]);
-                record(r); record(g); record(b); record(a);
-                r = std::pow((std::max)(0.0f, r) / (1.0f + (std::max)(0.0f, r)), 1.0f / 2.2f);
-                g = std::pow((std::max)(0.0f, g) / (1.0f + (std::max)(0.0f, g)), 1.0f / 2.2f);
-                b = std::pow((std::max)(0.0f, b) / (1.0f + (std::max)(0.0f, b)), 1.0f / 2.2f); a = 1; break;
-            }
-            case rhi::Format::R16G16_Float: {
-                auto p = reinterpret_cast<const uint16_t*>(row + x * 4);
-                const float vx = CaptureHalfToFloat(p[0]), vy = CaptureHalfToFloat(p[1]); record(vx); record(vy);
-                r = 0.5f + vx * 16.0f; g = 0.5f + vy * 16.0f; b = 0.5f; break;
-            }
-            case rhi::Format::R32_Float: {
-                float v; std::memcpy(&v, row + x * 4, 4); record(v); r = g = b = std::isfinite(v) ? v : 1.0f; break;
-            }
-            case rhi::Format::R32G32_UInt: {
-                uint32_t p[2]; std::memcpy(p, row + x * 8, 8); r = ((p[0] * 37u) & 255u) / 255.0f; g = ((p[1] * 73u) & 255u) / 255.0f; b = (((p[0] ^ p[1]) * 17u) & 255u) / 255.0f; break;
-            }
-            default: break;
-            }
-            const size_t o = (static_cast<size_t>(height - 1 - y) * width + x) * 4;
-            bgra[o + 0] = byte(b); bgra[o + 1] = byte(g); bgra[o + 2] = byte(r); bgra[o + 3] = byte(a);
-        }
-    }
-    struct BmpHeader { uint16_t type; uint32_t size; uint16_t r1, r2; uint32_t offset; };
-    struct DibHeader { uint32_t size; int32_t width, height; uint16_t planes, bpp; uint32_t compression, imageSize; int32_t xppm, yppm; uint32_t used, important; };
-    const BmpHeader bh{ 0x4d42, static_cast<uint32_t>(14 + 40 + bgra.size()), 0, 0, 54 };
-    const DibHeader dh{ 40, static_cast<int32_t>(width), static_cast<int32_t>(height), 1, 32, 0, static_cast<uint32_t>(bgra.size()), 2835, 2835, 0, 0 };
-    std::ofstream bmp(basePath.string() + ".bmp", std::ios::binary | std::ios::trunc);
-    bmp.write(reinterpret_cast<const char*>(&bh.type), 2); bmp.write(reinterpret_cast<const char*>(&bh.size), 4);
-    bmp.write(reinterpret_cast<const char*>(&bh.r1), 2); bmp.write(reinterpret_cast<const char*>(&bh.r2), 2); bmp.write(reinterpret_cast<const char*>(&bh.offset), 4);
-    bmp.write(reinterpret_cast<const char*>(&dh), sizeof(dh)); bmp.write(reinterpret_cast<const char*>(bgra.data()), static_cast<std::streamsize>(bgra.size()));
-    std::ofstream meta(basePath.string() + ".json", std::ios::trunc);
-    meta << "{\n  \"width\": " << width << ",\n  \"height\": " << height << ",\n  \"format\": " << static_cast<uint32_t>(result.format)
-         << ",\n  \"bytes\": " << result.data.size() << ",\n  \"finite_values\": " << finiteValues << ",\n  \"non_finite_values\": " << nonFiniteValues
-         << ",\n  \"minimum\": " << (finiteValues ? minimum : 0.0) << ",\n  \"maximum\": " << (finiteValues ? maximum : 0.0)
-         << ",\n  \"mean\": " << (finiteValues ? static_cast<double>(sum / finiteValues) : 0.0) << "\n}\n";
-    spdlog::info("SARP frame capture saved '{}' ({}x{}, format={}, nonfinite={}).", basePath.string(), width, height, static_cast<uint32_t>(result.format), nonFiniteValues);
-}
-
-uint32_t ReadBoundedEnvironmentUint(
-    const char* name,
-    uint32_t fallback,
-    uint32_t minimum,
-    uint32_t maximum);
-
-void MaybeRequestFrameArtifactCaptures(RenderGraph* graph, uint64_t frameNumber)
-{
-    static bool requested = false;
-    if (requested || !graph) return;
-    const uint64_t captureFrame = ReadBoundedEnvironmentUint(
-        "SARP_FRAME_CAPTURE_START_FRAME", 120u, 1u, UINT32_MAX);
-    if (frameNumber < captureFrame) return;
-    wchar_t* value = nullptr;
-    size_t length = 0;
-    if (_wdupenv_s(&value, &length, L"SARP_FRAME_CAPTURE_DIR") != 0 || !value || !value[0]) {
-        std::free(value);
-        return;
-    }
-    const std::filesystem::path outputDirectory(value);
-    std::free(value);
-    auto* service = graph->GetReadbackService();
-    if (!service) return;
-    struct Capture { std::string_view id; const char* anchor; const char* name; uint32_t mip; };
-    static constexpr Capture captures[] = {
-        // Capture the cross-API bloom resource first. Its readback can require
-        // an additional bridge round trip, so leave the longest drain window
-        // before the benchmark's automatic exit.
-        { Builtin::PostProcessing::BloomTexture, "TonemappingPass", "07_bloom_mip1", 1 },
-        { Builtin::Surface::BaseColorOpacity, "EvaluateMaterialGroupsPass", "01_surface_base_color", 0 },
-        { Builtin::Surface::NormalRoughness, "EvaluateMaterialGroupsPass", "02_surface_normal_roughness", 0 },
-        { Builtin::Surface::Motion, "EvaluateMaterialGroupsPass", "03_surface_motion", 0 },
-        { Builtin::PrimaryCamera::LinearDepthMap, "DeferredShadingPass", "04_linear_depth", 0 },
-        { Builtin::Color::HDRColorTarget, "DeferredShadingPass", "05_hdr_after_lighting", 0 },
-        { Builtin::PostProcessing::UpscaledHDR, "UpscalingPass", "06_upscaled_hdr", 0 },
-        { Builtin::Backbuffer, "MenuRenderPass", "08_final_backbuffer", 0 },
-    };
-    requested = true;
-    size_t queued = 0;
-    for (const auto& capture : captures) {
-        auto resource = graph->RequestResourcePtr(capture.id, true);
-        if (!resource) {
-            spdlog::warn("SARP frame capture: resource '{}' unavailable; skipping '{}'.", capture.id, capture.name);
-            continue;
-        }
-        RangeSpec range{};
-        range.mipLower = { BoundType::Exact, capture.mip };
-        range.mipUpper = { BoundType::Exact, capture.mip };
-        range.sliceLower = { BoundType::Exact, 0 };
-        range.sliceUpper = { BoundType::Exact, 0 };
-        const auto path = outputDirectory / capture.name;
-        service->RequestReadbackCapture(capture.anchor, resource.get(), range,
-            [path](ReadbackCaptureResult&& result) { SaveFrameCaptureArtifacts(path, std::move(result)); });
-        ++queued;
-        spdlog::info("SARP frame capture: requested '{}' at common frame {} into '{}'.",
-            capture.name, frameNumber, outputDirectory.string());
-    }
-    spdlog::info("SARP frame capture: queued {}/{} stages for common frame {}.",
-        queued, std::size(captures), frameNumber);
-}
-
-constexpr uint64_t MultiRHIProbeBytes = 4096;
-constexpr uint64_t MultiRHIProbeValidationFrames = 120;
-constexpr uint32_t MultiRHITextureExtent = 16;
-constexpr uint32_t MultiRHITextureRowPitch = 256;
-
-void MultiRHIBufferBarrier(rhi::CommandList list, rhi::Resource resource,
-    rhi::ResourceAccessType before, rhi::ResourceAccessType after,
-    rhi::BufferBarrier::ExternalOwnership ownership = rhi::BufferBarrier::ExternalOwnership::None)
-{
-    const rhi::BufferBarrier barrier{
-        .buffer = resource.GetHandle(),
-        .beforeSync = rhi::ResourceSyncState::Copy,
-        .afterSync = rhi::ResourceSyncState::Copy,
-        .beforeAccess = before,
-        .afterAccess = after,
-        .externalOwnership = ownership,
-    };
-    list.Barriers({ .buffers = { &barrier, 1 } });
-}
-
-void MultiRHITextureBarrier(rhi::CommandList list, rhi::Resource resource,
-    rhi::ResourceAccessType beforeAccess, rhi::ResourceAccessType afterAccess,
-    rhi::ResourceLayout beforeLayout, rhi::ResourceLayout afterLayout,
-    rhi::TextureBarrier::ExternalOwnership ownership = rhi::TextureBarrier::ExternalOwnership::None)
-{
-    const rhi::TextureBarrier barrier{
-        .texture = resource.GetHandle(),
-        .range = { .baseMip = 0, .mipCount = 1, .baseLayer = 0, .layerCount = 1 },
-        .beforeSync = rhi::ResourceSyncState::Copy,
-        .afterSync = rhi::ResourceSyncState::Copy,
-        .beforeAccess = beforeAccess,
-        .afterAccess = afterAccess,
-        .beforeLayout = beforeLayout,
-        .afterLayout = afterLayout,
-        .externalOwnership = ownership,
-    };
-    list.Barriers({ .textures = { &barrier, 1 } });
-}
-
-struct MultiRHIProbeState {
-    rhi::Backend primary = rhi::Backend::Null;
-    rhi::Backend peer = rhi::Backend::Null;
-    std::shared_ptr<org::Buffer> bufferA;
-    std::shared_ptr<org::Buffer> bufferB;
-    std::shared_ptr<org::PixelBuffer> textureA;
-    std::shared_ptr<org::PixelBuffer> textureB;
-    rhi::ResourcePtr upload;
-    rhi::ResourcePtr readback;
-    rhi::ResourcePtr textureUpload;
-    rhi::ResourcePtr textureReadback;
-    std::array<std::byte, MultiRHIProbeBytes> expected{};
-    std::atomic<uint64_t> issued{ 0 };
-    std::atomic<uint64_t> textureIssued{ 0 };
-    uint64_t verified = 0;
-    uint64_t textureVerified = 0;
-    bool active = true;
-
-    MultiRHIProbeState()
-    {
-        auto& devices = DeviceManager::GetInstance();
-        primary = devices.GetBackend();
-        peer = devices.GetPeerBackend();
-        for (size_t i = 0; i < expected.size(); ++i) {
-            expected[i] = static_cast<std::byte>((i * 37u + 11u) & 0xffu);
-        }
-
-        bufferA = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, MultiRHIProbeBytes);
-        bufferB = org::Buffer::CreateShared(rhi::HeapType::DeviceLocal, MultiRHIProbeBytes);
-        bufferA->SetName("Multi-RHI automatic buffer A");
-        bufferB->SetName("Multi-RHI automatic buffer B");
-		// A and B overlap at the peer copy and therefore receive distinct offsets,
-		// but assigning one explicit pool makes the diagnostic exercise the single
-		// D3D12 heap/imported-Vulkan-memory pool path every run.
-		constexpr uint64_t MultiRHIProbeAliasPool = 0x4D52484950524F42ull; // "MRHIPROB"
-		bufferA->SetAliasingPool(MultiRHIProbeAliasPool);
-		bufferB->SetAliasingPool(MultiRHIProbeAliasPool);
-        org::TextureDescription textureDesc{};
-        textureDesc.imageDimensions = { { MultiRHITextureExtent, MultiRHITextureExtent,
-            MultiRHITextureRowPitch, MultiRHITextureRowPitch * MultiRHITextureExtent } };
-        textureDesc.channels = 4;
-        textureDesc.format = rhi::Format::R8G8B8A8_UNorm;
-        textureA = org::PixelBuffer::CreateSharedUnmaterialized(textureDesc);
-        textureB = org::PixelBuffer::CreateSharedUnmaterialized(textureDesc);
-        textureA->SetName("Multi-RHI automatic texture A");
-        textureB->SetName("Multi-RHI automatic texture B");
-        auto device = devices.GetDevice();
-        if (!rhi::IsOk(device.CreateCommittedResource(
-                rhi::helpers::ResourceDesc::Buffer(MultiRHIProbeBytes, rhi::HeapType::Upload), upload)) ||
-            !rhi::IsOk(device.CreateCommittedResource(
-                rhi::helpers::ResourceDesc::Buffer(MultiRHIProbeBytes, rhi::HeapType::Readback), readback)) ||
-            !rhi::IsOk(device.CreateCommittedResource(
-                rhi::helpers::ResourceDesc::Buffer(MultiRHIProbeBytes, rhi::HeapType::Upload), textureUpload)) ||
-            !rhi::IsOk(device.CreateCommittedResource(
-                rhi::helpers::ResourceDesc::Buffer(MultiRHIProbeBytes, rhi::HeapType::Readback), textureReadback))) {
-            throw std::runtime_error("Multi-RHI diagnostic could not create staging buffers");
-        }
-        void* mapped = nullptr;
-        upload->Map(&mapped, 0, MultiRHIProbeBytes);
-        if (!mapped) {
-            throw std::runtime_error("Multi-RHI diagnostic could not map its upload buffer");
-        }
-        std::memcpy(mapped, expected.data(), expected.size());
-        upload->Unmap(0, MultiRHIProbeBytes);
-        textureUpload->Map(&mapped, 0, MultiRHIProbeBytes);
-        if (!mapped) throw std::runtime_error("Multi-RHI diagnostic could not map its texture upload buffer");
-        std::memset(mapped, 0, MultiRHIProbeBytes);
-        for (uint32_t y = 0; y < MultiRHITextureExtent; ++y) {
-            auto* row = static_cast<std::byte*>(mapped) + y * MultiRHITextureRowPitch;
-            for (uint32_t x = 0; x < MultiRHITextureExtent * 4; ++x) {
-                row[x] = static_cast<std::byte>((x * 13u + y * 29u + 7u) & 0xffu);
-            }
-        }
-        textureUpload->Unmap(0, MultiRHIProbeBytes);
-        spdlog::info("Multi-RHI diagnostic enabled: primary={} peer={} targetValidations={}",
-            static_cast<uint32_t>(primary), static_cast<uint32_t>(peer), MultiRHIProbeValidationFrames);
-    }
-
-    void VerifyPreviousFrame()
-    {
-        const uint64_t submitted = issued.load(std::memory_order_acquire);
-        const uint64_t submittedTextures = textureIssued.load(std::memory_order_acquire);
-        if (!active || (submitted <= verified && submittedTextures <= textureVerified)) return;
-        auto& devices = DeviceManager::GetInstance();
-        if (!rhi::IsOk(devices.GetDevice().WaitIdle()) || !rhi::IsOk(devices.GetPeerDevice().WaitIdle())) {
-            spdlog::critical("Multi-RHI diagnostic failed while waiting for both devices");
-            std::abort();
-        }
-        if (submitted > verified) {
-            void* mapped = nullptr;
-            readback->Map(&mapped, 0, MultiRHIProbeBytes);
-            if (!mapped || std::memcmp(mapped, expected.data(), expected.size()) != 0) {
-                const auto* actual = static_cast<const uint8_t*>(mapped);
-                const auto* wanted = reinterpret_cast<const uint8_t*>(expected.data());
-                size_t mismatch = 0;
-                while (mismatch < MultiRHIProbeBytes && actual && actual[mismatch] == wanted[mismatch]) ++mismatch;
-                spdlog::critical("Multi-RHI diagnostic checksum mismatch at validation {} offset={} actual={} expected={}",
-                    verified + 1, mismatch,
-                    actual && mismatch < MultiRHIProbeBytes ? actual[mismatch] : 0,
-                    mismatch < MultiRHIProbeBytes ? wanted[mismatch] : 0);
-                std::abort();
-            }
-            readback->Unmap(0, 0);
-            verified = submitted;
-        }
-        if (submittedTextures > textureVerified) {
-            void* textureMapped = nullptr;
-            textureReadback->Map(&textureMapped, 0, MultiRHIProbeBytes);
-            void* textureExpected = nullptr;
-            textureUpload->Map(&textureExpected, 0, MultiRHIProbeBytes);
-            bool textureMatches = textureMapped && textureExpected;
-            for (uint32_t y = 0; textureMatches && y < MultiRHITextureExtent; ++y) {
-                const auto* actualRow = static_cast<const std::byte*>(textureMapped) + y * MultiRHITextureRowPitch;
-                const auto* expectedRow = static_cast<const std::byte*>(textureExpected) + y * MultiRHITextureRowPitch;
-                textureMatches = std::memcmp(actualRow, expectedRow, MultiRHITextureExtent * 4) == 0;
-            }
-            if (!textureMatches) {
-                const auto* actual = static_cast<const uint8_t*>(textureMapped);
-                const auto* wanted = static_cast<const uint8_t*>(textureExpected);
-                size_t mismatch = 0;
-                while (mismatch < MultiRHIProbeBytes && actual && wanted && actual[mismatch] == wanted[mismatch]) ++mismatch;
-                spdlog::critical("Multi-RHI diagnostic texture checksum mismatch at validation {} offset={} actual={} expected={}",
-                    textureVerified + 1, mismatch,
-                    actual && mismatch < MultiRHIProbeBytes ? actual[mismatch] : 0,
-                    wanted && mismatch < MultiRHIProbeBytes ? wanted[mismatch] : 0);
-                std::abort();
-            }
-			if (textureMapped) textureReadback->Unmap(0, 0);
-			if (textureExpected) textureUpload->Unmap(0, 0);
-            textureVerified = submittedTextures;
-			if (textureVerified == 1 || textureVerified % 30 == 0) {
-				spdlog::info("Multi-RHI diagnostic texture validation {}/{} succeeded (primary->peer->primary)",
-					textureVerified, MultiRHIProbeValidationFrames);
-			}
-        }
-        if (verified == 1 || verified % 30 == 0) {
-            spdlog::info("Multi-RHI diagnostic buffer validation {}/{} succeeded (primary->peer->primary)",
-                verified, MultiRHIProbeValidationFrames);
-        }
-        if (verified >= MultiRHIProbeValidationFrames) {
-            active = false;
-            spdlog::info("Multi-RHI diagnostic completed {} successful round trips", verified);
-        }
-    }
-};
-
-class MultiRHISeedPass final : public org::CopyPass {
-public:
-    explicit MultiRHISeedPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    void Update(const org::UpdateExecutionContext&) override { state_->VerifyPreviousFrame(); }
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto shared = context.Resolve(*state_->bufferA);
-        MultiRHIBufferBarrier(context.commandList, state_->upload.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopySource);
-        context.commandList.CopyBufferRegion(shared.GetHandle(), 0, state_->upload->GetHandle(), 0, MultiRHIProbeBytes);
-        MultiRHIBufferBarrier(context.commandList, state_->upload.Get(), rhi::ResourceAccessType::CopySource, rhi::ResourceAccessType::Common);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopyDest(state_->bufferA).PreferQueue(org::QueueKind::Copy);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
-
-class MultiRHIPeerCopyPass final : public org::CopyPass {
-public:
-    explicit MultiRHIPeerCopyPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto source = context.Resolve(*state_->bufferA);
-        const auto dest = context.Resolve(*state_->bufferB);
-        context.commandList.CopyBufferRegion(dest.GetHandle(), 0, source.GetHandle(), 0, MultiRHIProbeBytes);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopySource(state_->bufferA).WithCopyDest(state_->bufferB)
-            .PreferQueue(org::QueueKind::Copy).RequireBackend(state_->peer);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
-
-class MultiRHIVerifyPass final : public org::CopyPass {
-public:
-    explicit MultiRHIVerifyPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto shared = context.Resolve(*state_->bufferB);
-        MultiRHIBufferBarrier(context.commandList, state_->readback.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest);
-        context.commandList.CopyBufferRegion(state_->readback->GetHandle(), 0, shared.GetHandle(), 0, MultiRHIProbeBytes);
-        MultiRHIBufferBarrier(context.commandList, state_->readback.Get(), rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::Common);
-        state_->issued.fetch_add(1, std::memory_order_release);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopySource(state_->bufferB).PreferQueue(org::QueueKind::Copy);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
-
-class MultiRHITextureSeedPass final : public org::CopyPass {
-public:
-    explicit MultiRHITextureSeedPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto texture = context.Resolve(*state_->textureA);
-        MultiRHIBufferBarrier(context.commandList, state_->textureUpload.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopySource);
-        context.commandList.CopyBufferToTexture({
-            .texture = texture.GetHandle(), .buffer = state_->textureUpload->GetHandle(), .mip = 0, .arraySlice = 0,
-            .footprint = { .offset = 0, .rowPitch = MultiRHITextureRowPitch,
-                .width = MultiRHITextureExtent, .height = MultiRHITextureExtent, .depth = 1 } });
-        MultiRHIBufferBarrier(context.commandList, state_->textureUpload.Get(), rhi::ResourceAccessType::CopySource, rhi::ResourceAccessType::Common);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopyDest(state_->textureA).PreferQueue(org::QueueKind::Copy);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
-
-class MultiRHITexturePeerCopyPass final : public org::CopyPass {
-public:
-    explicit MultiRHITexturePeerCopyPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto source = context.Resolve(*state_->textureA);
-        const auto dest = context.Resolve(*state_->textureB);
-        const rhi::TextureCopyRegion sourceRegion{ .texture = source.GetHandle(), .width = MultiRHITextureExtent, .height = MultiRHITextureExtent };
-        const rhi::TextureCopyRegion destRegion{ .texture = dest.GetHandle(), .width = MultiRHITextureExtent, .height = MultiRHITextureExtent };
-        context.commandList.CopyTextureRegion(destRegion, sourceRegion);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopySource(state_->textureA).WithCopyDest(state_->textureB)
-            .PreferQueue(org::QueueKind::Copy).RequireBackend(state_->peer);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
-
-class MultiRHITextureVerifyPass final : public org::CopyPass {
-public:
-    explicit MultiRHITextureVerifyPass(std::shared_ptr<MultiRHIProbeState> state) : state_(std::move(state)) {}
-    void Setup() override {}
-    org::PassReturn Execute(org::PassExecutionContext& context) override {
-        if (!state_->active) return {};
-        const auto texture = context.Resolve(*state_->textureB);
-        MultiRHIBufferBarrier(context.commandList, state_->textureReadback.Get(), rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest);
-        context.commandList.CopyTextureToBuffer({
-            .texture = texture.GetHandle(), .buffer = state_->textureReadback->GetHandle(), .mip = 0, .arraySlice = 0,
-            .footprint = { .offset = 0, .rowPitch = MultiRHITextureRowPitch,
-                .width = MultiRHITextureExtent, .height = MultiRHITextureExtent, .depth = 1 } });
-        MultiRHIBufferBarrier(context.commandList, state_->textureReadback.Get(), rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::Common);
-        state_->textureIssued.fetch_add(1, std::memory_order_release);
-        return {};
-    }
-    void Cleanup() override {}
-protected:
-    void DeclareResourceUsages(org::CopyPassBuilder* builder) override {
-        builder->WithCopySource(state_->textureB).PreferQueue(org::QueueKind::Copy);
-    }
-private:
-    std::shared_ptr<MultiRHIProbeState> state_;
-};
 
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
 constexpr const char* CLodVirtualShadowTelemetryDebugSettingName = "clodVirtualShadowTelemetryDebug";
@@ -3349,10 +2869,12 @@ void Renderer::Update(float elapsedSeconds) {
     ZoneScopedN("Renderer::Update");
     BufferBase::ScopedBackingMutation frameBoundaryBackingMutation;
 
-    PSOManager::GetInstance().PublishPendingLivePipelines(m_currentFrameFenceValue);
-    if (m_frameFence) {
-        PSOManager::GetInstance().CollectRetiredLivePipelines(m_frameFence->GetCompletedValue());
-    }
+	std::vector<PSOManager::PipelineRetirementPoint> pipelineRetirementPoints;
+	for (const auto& point : DescriptorHeapManager::GetInstance().GetQueueFenceSnapshot()) {
+		pipelineRetirementPoints.push_back({ point.timeline, point.value });
+	}
+	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
+	PSOManager::GetInstance().CollectRetiredLivePipelines();
 
     BeginFrameTaskGraphCapture();
 
@@ -3589,7 +3111,6 @@ void Renderer::Update(float elapsedSeconds) {
     context.hostData = &updateHostData;
     context.beforeCompileFrame = [this]() {
         ZoneScopedN("Renderer::Update::TerrainRvtTelemetry");
-        MaybeRequestFrameArtifactCaptures(currentRenderGraph.get(), m_totalFramesRendered);
         MaybeRequestTerrainRvtTelemetry();
         MaybeRequestObjectReyesAtlasTelemetry();
         static bool materialBufferReadbackRequested = false;
@@ -5632,11 +5153,6 @@ void Renderer::SetupInputHandlers() {
 }
 
 void Renderer::RegisterPipelineExtensions() {
-	if (ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_PROBE_ONLY") &&
-		!ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_EXTENSIONS")) {
-		spdlog::info("Render-graph isolation: all pipeline extensions disabled");
-		return;
-	}
     currentRenderGraph->RegisterExtension(std::make_unique<RenderGraphIOExtension>(
         m_managerInterface.GetTextureFactory(),
         currentRenderGraph->GetUploadService(),
@@ -5745,6 +5261,7 @@ void Renderer::CreateRenderGraph() {
     // snapshots contain non-owning timeline handles, so consume all pending
     // releases and clear the snapshot while those timelines are still alive.
     DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // TODO: Find a better way to handle resources like this
     // TODO: this access pattern is stupid
@@ -5813,6 +5330,7 @@ void Renderer::CreateRenderGraph() {
     // native objects survive for numFramesInFlight + 1 frames and can retain
     // stale graph backing through the rebuilt graph's first frames.
     DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
+	PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
 
     // Everything released above is GPU-idle, so it is safe (and important) to
     // release its native objects before materializing the candidate graph.
@@ -5983,12 +5501,10 @@ void Renderer::CreateRenderGraph() {
                 org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
                 newGraph->RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
 				auto& histogramBuilder = newGraph->BuildComputePass<LuminanceHistogramPass>("luminanceHistogramPass");
-				if (DeviceManager::GetInstance().IsMultiRHIEnabled() &&
-					ReadTruthyEnvironmentFlag("BASICRENDERER_MULTI_RHI_SUBSTANTIVE")) {
-					histogramBuilder.RequireBackend(DeviceManager::GetInstance().GetPeerBackend());
-					spdlog::info("Multi-RHI substantive validation: LuminanceHistogramPass requires peer backend {}",
-						static_cast<uint32_t>(DeviceManager::GetInstance().GetPeerBackend()));
-				}
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+				br::validation::SARPInteropValidation::ApplyPassPolicy(
+					"luminanceHistogramPass", histogramBuilder, DeviceManager::GetInstance().GetPeerBackend());
+#endif
                 newGraph->SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
                 newGraph->BuildComputePass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
                 newGraph->SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
@@ -6004,11 +5520,7 @@ void Renderer::CreateRenderGraph() {
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
                 break;
             case Bloom:
-                BuildBloomPipeline(
-                    newGraph.get(),
-                    DeviceManager::GetInstance().IsMultiRHIEnabled() &&
-                        ReadTruthyEnvironmentFlag("BASICRENDERER_MULTI_RHI_SUBSTANTIVE"),
-                    DeviceManager::GetInstance().GetPeerBackend());
+				BuildBloomPipeline(newGraph.get());
                 break;
             case Tonemapping:
                 newGraph->BuildRenderPass<TonemappingPass>(
@@ -6049,40 +5561,10 @@ void Renderer::CreateRenderGraph() {
 
     {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph::BuildTechniques");
-	const bool isolationProbeOnly = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_PROBE_ONLY");
-	const bool isolationTechniquesEnabled = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_TECHNIQUES");
-	const bool isolationExtensionsEnabled = ReadTruthyEnvironmentFlag("BASICRENDERER_GRAPH_ISOLATION_ENABLE_EXTENSIONS");
-	if (!isolationProbeOnly || isolationTechniquesEnabled || isolationExtensionsEnabled) {
-		for (const auto& entry : m_pipelineRecipe.Techniques()) {
-			if (isolationProbeOnly && !isolationTechniquesEnabled &&
-				entry.id != br::pipeline::TechniqueId::FrameResources &&
-				entry.id != br::pipeline::TechniqueId::CanonicalSurfaceResources) {
-				continue;
-			}
-			entry.technique->Build(buildContext);
-			probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
-		}
-	} else {
-		spdlog::info("Render-graph isolation: all recipe techniques disabled; building interop probes only");
+	for (const auto& entry : m_pipelineRecipe.Techniques()) {
+		entry.technique->Build(buildContext);
+		probeGraphBuildPhase(("CreateRenderGraph after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
 	}
-    }
-
-    if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
-        auto probe = std::make_shared<MultiRHIProbeState>();
-        newGraph->BuildCopyPass<MultiRHISeedPass>("MultiRHI::Seed", probe);
-        newGraph->BuildCopyPass<MultiRHIPeerCopyPass>("MultiRHI::PeerCopy", probe);
-        newGraph->BuildCopyPass<MultiRHIVerifyPass>("MultiRHI::Verify", probe);
-        newGraph->AddExplicitPassDependency("MultiRHI::Seed", "MultiRHI::PeerCopy");
-        newGraph->AddExplicitPassDependency("MultiRHI::PeerCopy", "MultiRHI::Verify");
-		if (!ReadTruthyEnvironmentFlag("BASICRENDERER_MULTI_RHI_DISABLE_TEXTURE_PROBE")) {
-			newGraph->BuildCopyPass<MultiRHITextureSeedPass>("MultiRHI::TextureSeed", probe);
-			newGraph->BuildCopyPass<MultiRHITexturePeerCopyPass>("MultiRHI::TexturePeerCopy", probe);
-			newGraph->BuildCopyPass<MultiRHITextureVerifyPass>("MultiRHI::TextureVerify", probe);
-			newGraph->AddExplicitPassDependency("MultiRHI::TextureSeed", "MultiRHI::TexturePeerCopy");
-			newGraph->AddExplicitPassDependency("MultiRHI::TexturePeerCopy", "MultiRHI::TextureVerify");
-		} else {
-			spdlog::info("Multi-RHI texture diagnostic disabled for pipeline isolation");
-		}
     }
 
     probeGraphBuildPhase("CreateRenderGraph before CompileStructural");

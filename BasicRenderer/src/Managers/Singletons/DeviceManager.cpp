@@ -4,7 +4,6 @@
 #include <cctype>
 #include <cstdlib>
 #include <string>
-#include <Windows.h>
 
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
@@ -320,80 +319,6 @@ void DeviceManager::Cleanup() {
     if (m_peerDevice) {
         m_peerDevice.Reset();
     }
-}
-
-rhi::Result DeviceManager::CreateSharedBuffer(const rhi::ResourceDesc& requestedDesc, SharedBufferPair& out) const {
-    out = {};
-    if (!m_peerDevice || requestedDesc.type != rhi::ResourceType::Buffer ||
-        requestedDesc.heapType != rhi::HeapType::DeviceLocal || requestedDesc.buffer.sizeBytes == 0) {
-        return rhi::Result::InvalidArgument;
-    }
-    rhi::Device d3d12Device = GetDevice(rhi::Backend::D3D12);
-    rhi::Device vulkanDevice = GetDevice(rhi::Backend::Vulkan);
-    if (!d3d12Device || !vulkanDevice) return rhi::Result::Unsupported;
-
-    rhi::ResourceDesc desc = requestedDesc;
-    desc.heapFlags |= rhi::HeapFlags::Shared;
-    auto result = d3d12Device.CreateCommittedResource(desc, out.d3d12);
-    if (rhi::Failed(result)) return result;
-    rhi::dx12::SharedHandle shared{};
-    result = rhi::dx12::export_shared_resource(d3d12Device, out.d3d12.Get(), shared);
-    if (rhi::Failed(result)) {
-        out = {};
-        return result;
-    }
-    result = rhi::vulkan::import_d3d12_buffer(vulkanDevice, shared.value, desc, out.vulkan);
-    CloseHandle(static_cast<HANDLE>(shared.value));
-    if (rhi::Failed(result)) {
-        out = {};
-        return result;
-    }
-    out.sizeBytes = desc.buffer.sizeBytes;
-    return rhi::Result::Ok;
-}
-
-rhi::Result DeviceManager::CreateSharedTexture(const rhi::ResourceDesc& requestedDesc, SharedTexturePair& out) const {
-    out = {};
-    if (!m_peerDevice || requestedDesc.type != rhi::ResourceType::Texture2D ||
-        requestedDesc.heapType != rhi::HeapType::DeviceLocal) return rhi::Result::InvalidArgument;
-    rhi::Device d3d12Device = GetDevice(rhi::Backend::D3D12);
-    rhi::Device vulkanDevice = GetDevice(rhi::Backend::Vulkan);
-    if (!d3d12Device || !vulkanDevice) return rhi::Result::Unsupported;
-    if (!rhi::vulkan::query_d3d12_texture_support(vulkanDevice, requestedDesc).supported) return rhi::Result::Unsupported;
-    rhi::ResourceDesc desc = requestedDesc;
-    desc.heapFlags |= rhi::HeapFlags::Shared;
-    auto result = d3d12Device.CreateCommittedResource(desc, out.d3d12);
-    if (rhi::Failed(result)) return result;
-    rhi::dx12::SharedHandle handle{};
-    result = rhi::dx12::export_shared_resource(d3d12Device, out.d3d12.Get(), handle);
-    if (rhi::IsOk(result)) result = rhi::vulkan::import_d3d12_texture(vulkanDevice, handle.value, desc, out.vulkan);
-    if (handle.value) CloseHandle(static_cast<HANDLE>(handle.value));
-    if (rhi::Failed(result)) { out = {}; return result; }
-    out.description = desc;
-    return rhi::Result::Ok;
-}
-
-rhi::Result DeviceManager::CreateSharedHeap(const rhi::HeapDesc& requestedDesc, SharedHeapPair& out) const {
-    out = {};
-    if (!m_peerDevice || requestedDesc.sizeBytes == 0 || requestedDesc.memory != rhi::HeapType::DeviceLocal) {
-        return rhi::Result::InvalidArgument;
-    }
-    rhi::Device d3d12Device = GetDevice(rhi::Backend::D3D12);
-    rhi::Device vulkanDevice = GetDevice(rhi::Backend::Vulkan);
-    if (!d3d12Device || !vulkanDevice || !rhi::vulkan::query_win32_external_interop(vulkanDevice).d3d12Heaps) {
-        return rhi::Result::Unsupported;
-    }
-    rhi::HeapDesc desc = requestedDesc;
-    desc.flags |= rhi::HeapFlags::Shared;
-    auto result = d3d12Device.CreateHeap(desc, out.d3d12);
-    if (rhi::Failed(result)) return result;
-    rhi::dx12::SharedHandle handle{};
-    result = rhi::dx12::export_shared_heap(d3d12Device, out.d3d12.Get(), handle);
-    if (rhi::IsOk(result)) result = rhi::vulkan::import_d3d12_heap(vulkanDevice, handle.value, desc, out.vulkan);
-    if (handle.value) CloseHandle(static_cast<HANDLE>(handle.value));
-    if (rhi::Failed(result)) { out = {}; return result; }
-    out.description = desc;
-    return rhi::Result::Ok;
 }
 
 void DeviceManager::CheckGPUFeatures() {

@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <stdexcept>
 
-#include <wincodec.h>
 #include <DirectXTex.h>
 #include <rhi_conversions_dx12.h>
 #include <rhi_interop.h>
@@ -92,24 +91,6 @@ void MaterialTextureTransferService::SaveReadbackToDds(InFlightBatch::ReadbackCo
 		DirectX::DDS_FLAGS_NONE, completion.outputFile.c_str());
 	if (FAILED(result)) {
 		spdlog::error("Material texture external readback failed to save '{}'.", std::filesystem::path(completion.outputFile).string());
-	}
-	else {
-		DirectX::ScratchImage preview;
-		const HRESULT decompressResult = DirectX::Decompress(
-			image.GetImages(), image.GetImageCount(), image.GetMetadata(),
-			DXGI_FORMAT_R8G8B8A8_UNORM, preview);
-		if (SUCCEEDED(decompressResult) && preview.GetImageCount() != 0) {
-			auto previewFile = std::filesystem::path(completion.outputFile).replace_extension(L".png");
-			const HRESULT previewResult = DirectX::SaveToWICFile(
-				*preview.GetImage(0, 0, 0), DirectX::WIC_FLAGS_NONE,
-				GUID_ContainerFormatPng, previewFile.c_str());
-			if (FAILED(previewResult)) {
-				spdlog::warn("Material texture external readback failed to save preview '{}'.", previewFile.string());
-			}
-		}
-		else if (FAILED(decompressResult)) {
-			spdlog::warn("Material texture external readback failed to decompress preview for '{}'.", std::filesystem::path(completion.outputFile).string());
-		}
 	}
 	if (completion.callback) completion.callback();
 }
