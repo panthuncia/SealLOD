@@ -121,7 +121,9 @@ uint64_t GetFileSize(const std::filesystem::path& path) {
 
 std::vector<uint8_t> ReadFileRange(const std::filesystem::path& path, uint64_t offset, uint64_t size) {
 	std::vector<uint8_t> out;
-	TaskSchedulerManager::GetInstance().RunIoTask("GlTFGeometryExtractor::ReadFileRange", [&]() {
+	auto& scheduler = TaskSchedulerManager::GetInstance();
+	auto ioScope = scheduler.CreateScope("GlTFGeometryExtractor::ReadFileRange");
+	scheduler.SubmitBlockingIo(ioScope, TaskDomain::AssetImport, "GlTFGeometryExtractor::ReadFileRange", [&](const br::TaskContext&) {
 		std::ifstream file(path, std::ios::binary);
 		if (!file) {
 			throw std::runtime_error("Failed to open file: " + path.string());
@@ -140,7 +142,8 @@ std::vector<uint8_t> ReadFileRange(const std::filesystem::path& path, uint64_t o
 				throw std::runtime_error("Failed to read file range: " + path.string());
 			}
 		}
-		});
+	}, TaskLane::Streaming, {});
+	ioScope.Wait();
 
 	return out;
 }

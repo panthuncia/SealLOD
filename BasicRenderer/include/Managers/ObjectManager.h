@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -9,7 +8,6 @@
 #include <cstdint>
 #include <deque>
 #include <span>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -24,6 +22,7 @@
 #include "Interfaces/IResourceProvider.h"
 #include "Materials/TechniqueDescriptor.h"
 #include "Render/Runtime/BufferUploadPolicy.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 
 namespace org { class BufferView; }
 using org::BufferView;
@@ -534,7 +533,8 @@ private:
 
 	void StartDeferredRetireWorker();
 	void StopDeferredRetireWorker();
-	void DeferredRetireWorkerMain();
+	void ScheduleDeferredRetireDrain();
+	void DeferredRetireDrain(const br::TaskContext& context);
 	void EnqueueDeferredBufferRangeRetire(
 		const std::shared_ptr<DynamicBuffer>& buffer,
 		std::uint64_t offset,
@@ -547,7 +547,7 @@ private:
 	void EnqueueDeferredBufferRangeRetires(std::vector<DeferredBufferRangeRetire> retires);
 	void StartActiveDrawSetCompactionWorker();
 	void StopActiveDrawSetCompactionWorker();
-	void ActiveDrawSetCompactionWorkerMain();
+	void RunActiveDrawSetCompaction(ActiveDrawSetCompactionJob job, const br::TaskContext& context);
 	void PumpActiveDrawSetCompactionRequests(std::size_t maxRequests);
 	void MaybeQueueActiveDrawSetCompaction(
 		const DrawWorkloadKey& workloadKey,
@@ -576,9 +576,9 @@ private:
     uint64_t m_drawSetDeclarationRevision = 1u;
 	Stats m_stats{};
 	std::mutex m_deferredRetireMutex;
-	std::condition_variable m_deferredRetireCv;
 	std::deque<DeferredBufferRangeRetire> m_deferredRetireQueue;
-	std::thread m_deferredRetireWorker;
+	TaskScope m_deferredRetireScope;
+	std::atomic_bool m_deferredRetireDrainScheduled{ false };
 	std::atomic_bool m_deferredRetireStop{ false };
 	std::atomic<std::uint64_t> m_deferredRetireCompletedFrame{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireDelayFrames{ 4 };
@@ -589,12 +589,11 @@ private:
 	std::atomic<std::uint64_t> m_deferredRetireQueueDepth{ 0 };
 	std::atomic<std::uint64_t> m_deferredRetireWorkerUs{ 0 };
 	std::mutex m_activeDrawSetCompactionMutex;
-	std::condition_variable m_activeDrawSetCompactionCv;
 	std::deque<DrawWorkloadKey> m_activeDrawSetCompactionRequests;
 	std::deque<ActiveDrawSetCompactionJob> m_activeDrawSetCompactionJobs;
 	std::deque<ActiveDrawSetCompactionResult> m_activeDrawSetCompactionResults;
 	std::unordered_set<DrawWorkloadKey, DrawWorkloadKey::Hasher> m_activeDrawSetCompactionQueued;
-	std::thread m_activeDrawSetCompactionWorker;
+	TaskScope m_activeDrawSetCompactionScope;
 	std::atomic_bool m_activeDrawSetCompactionStop{ false };
 	std::mutex m_objectUpdateMutex; // Mutex for thread safety
 	std::mutex m_normalMatrixUpdateMutex; // Mutex for thread safety

@@ -171,7 +171,8 @@ void TextureStreamingManager::Initialize(TextureFactory& textureFactory, uint32_
 	}
 	m_readbackSlots.resize((std::max)(framesInFlight, 1u));
 	m_workerQuit.store(false, std::memory_order_release);
-	m_workerThread = std::thread(&TextureStreamingManager::WorkerMain, this);
+	m_lastProcessedReadbackFence = 0;
+	m_taskScope = TaskSchedulerManager::GetInstance().CreateScope("TextureStreamingManager");
 }
 
 void TextureStreamingManager::Shutdown()
@@ -180,10 +181,8 @@ void TextureStreamingManager::Shutdown()
 		return;
 	}
 	m_workerQuit.store(true, std::memory_order_release);
-	m_workerCV.notify_all();
-	if (m_workerThread.joinable()) {
-		m_workerThread.join();
-	}
+	if (m_taskScope.Valid()) m_taskScope.CancelAndWait();
+	m_drainScheduled.store(false, std::memory_order_release);
 	if (m_textureFactory) m_textureFactory->SetMaterialTextureTransferService(nullptr);
 	if (m_materialTextureTransfers) m_materialTextureTransfers->Shutdown();
 	m_materialTextureTransfers.reset();
@@ -209,7 +208,7 @@ void TextureStreamingManager::QueueCommand(WorkerCommand&& command)
 		std::lock_guard lock(m_workerCommandMutex);
 		m_workerCommands.push_back(std::move(command));
 	}
-	m_workerCV.notify_one();
+	ScheduleDrain();
 }
 
 void TextureStreamingManager::EnqueueFrameTick(uint64_t frameIndex)
@@ -232,24 +231,31 @@ void TextureStreamingManager::EnqueueTextureUploadAdvance(
 	QueueCommand(std::move(command));
 }
 
-void TextureStreamingManager::WorkerMain()
+void TextureStreamingManager::ScheduleDrain()
 {
-	ZoneScopedN("TextureStreamingWorker::Main");
-	uint64_t lastProcessedReadbackFence = 0;
-	while (!m_workerQuit.load(std::memory_order_acquire)) {
-		std::deque<WorkerCommand> commands;
-		{
-			std::unique_lock lock(m_workerCommandMutex);
-			m_workerCV.wait(lock, [this, &lastProcessedReadbackFence] {
-				return m_workerQuit.load(std::memory_order_relaxed) || !m_workerCommands.empty() ||
-					m_readbackFenceCounter.load(std::memory_order_acquire) > lastProcessedReadbackFence;
-			});
-			if (m_workerQuit.load(std::memory_order_relaxed)) {
-				break;
-			}
-			commands.swap(m_workerCommands);
+	if (m_workerQuit.load(std::memory_order_acquire) || !m_taskScope.Valid()) return;
+	bool expected = false;
+	if (!m_drainScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	if (!TaskSchedulerManager::GetInstance().Submit(m_taskScope, TaskLane::Streaming,
+		TaskDomain::TextureProcessing, "TextureStreamingManager::Drain",
+		[this](const br::TaskContext& context) { Drain(context); })) {
+		m_drainScheduled.store(false, std::memory_order_release);
+	}
+}
+
+void TextureStreamingManager::Drain(const br::TaskContext& context)
+{
+	ZoneScopedN("TextureStreamingWorker::Drain");
+	std::deque<WorkerCommand> commands;
+	{
+		std::lock_guard lock(m_workerCommandMutex);
+		const auto count = (std::min<std::size_t>)(m_workerCommands.size(), 256u);
+		for (std::size_t i = 0; i < count; ++i) {
+			commands.push_back(std::move(m_workerCommands.front()));
+			m_workerCommands.pop_front();
 		}
-		PollCompletedReadbackSlots(lastProcessedReadbackFence);
+	}
+	if (!context.StopRequested()) PollCompletedReadbackSlots(m_lastProcessedReadbackFence);
 
 		uint64_t newestFrame = 0;
 		for (auto& command : commands) {
@@ -272,7 +278,13 @@ void TextureStreamingManager::WorkerMain()
 		if (newestFrame != 0 && m_textureFactory) {
 			ProcessPendingTextureUpdates(newestFrame, *m_textureFactory);
 		}
+	bool hasMore = false;
+	{
+		std::lock_guard lock(m_workerCommandMutex);
+		hasMore = !m_workerCommands.empty();
 	}
+	m_drainScheduled.store(false, std::memory_order_release);
+	if (hasMore && !context.StopRequested()) ScheduleDrain();
 }
 
 void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessedFence)
@@ -281,21 +293,7 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 	if (!m_readbackFence.IsValid() || submitted <= lastProcessedFence) {
 		return;
 	}
-	{
-		ZoneScopedN("TextureStreamingWorker::WaitReadbackFence");
-		if (m_readbackFence.GetCompletedValue() < submitted) {
-			// A delayed feedback copy must not monopolize the streaming worker.
-			// Poll once, then service queued reload/processing completions and retry
-			// the feedback fence on the next worker iteration.
-			const auto result = m_readbackFence.HostWait(submitted, 5u);
-			if (m_workerQuit.load(std::memory_order_acquire) || result == rhi::Result::WaitTimeout) {
-				return;
-			}
-			if (result != rhi::Result::Ok) {
-				return;
-			}
-		}
-	}
+	if (m_readbackFence.GetCompletedValue() < submitted) return;
 	const uint64_t completed = m_readbackFence.GetCompletedValue();
 	struct CompletedSlot {
 		uint32_t index = 0;
@@ -860,7 +858,7 @@ std::shared_ptr<CopyPass> TextureStreamingManager::CreateTextureStreamingFeedbac
 				fenceValue = m_readbackFenceCounter.fetch_add(1u, std::memory_order_acq_rel) + 1u;
 				m_readbackSlots[selectedSlot].fenceValue = fenceValue;
 			}
-			m_workerCV.notify_one();
+			ScheduleDrain();
 			return {m_readbackFence, fenceValue};
 		},
 		[this, selectedSlot]() {

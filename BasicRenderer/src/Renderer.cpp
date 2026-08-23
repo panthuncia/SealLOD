@@ -721,11 +721,10 @@ void Renderer::Initialize(
         org::runtime::SetActiveDescriptorService(descriptorService);
     }
     ::ResourceManager::GetInstance().Initialize();
-    const uint32_t ioWorkerCount = ReadBoundedEnvironmentUint(
-        "SARP_CLOD_IO_WORKER_COUNT", 32u, 1u, 64u);
-    TaskSchedulerManager::GetInstance().Initialize(ioWorkerCount);
+    TaskSchedulerManager::GetInstance().Initialize();
     SetAsyncBufferBackingResizeScheduler([](std::string taskName, std::function<void()>&& task) {
-        TaskSchedulerManager::GetInstance().RunBackgroundTask(taskName, std::move(task));
+        TaskSchedulerManager::GetInstance().Submit(
+            TaskLane::Background, TaskDomain::Cleanup, taskName, std::move(task));
     });
     currentRenderGraph->SetTaskService(std::make_shared<br::TbbTaskService>());
     spdlog::info("Renderer initialization: initializing PSO manager");
@@ -1283,7 +1282,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
     verticalAngle = 0.0f;
     horizontalAngle = 0.0f;
 
-    TaskSchedulerManager::GetInstance().RunBackgroundTask("SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
+    TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::General, "SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
         ZoneScopedN("Renderer::SceneUpdateOverlap");
         const auto taskStart = std::chrono::steady_clock::now();
 

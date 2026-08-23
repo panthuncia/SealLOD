@@ -1,120 +1,122 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <algorithm>
-#include <atomic>
-#include <condition_variable>
-#include <deque>
 #include <exception>
-#include <future>
-#include <mutex>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace br {
 
+enum class TaskLane : std::uint8_t { FrameCritical, Streaming, Background, Count };
+enum class TaskDomain : std::uint8_t {
+    General, StaticImport, AssetImport, TextureProcessing, ShaderCompile, Cleanup, Count
+};
+
+class TaskScope {
+public:
+    struct State;
+    TaskScope() = default;
+
+    [[nodiscard]] bool Valid() const noexcept { return static_cast<bool>(m_state); }
+    [[nodiscard]] bool StopRequested() const noexcept;
+    void Cancel() const noexcept;
+    void Wait() const;
+    void CancelAndWait() const;
+
+private:
+    explicit TaskScope(std::shared_ptr<State> state) : m_state(std::move(state)) {}
+    std::shared_ptr<State> m_state;
+    friend class TaskSchedulerManager;
+};
+
+class TaskContext {
+public:
+    struct State;
+    [[nodiscard]] bool StopRequested() const noexcept;
+
+private:
+    explicit TaskContext(std::shared_ptr<State> state) : m_state(std::move(state)) {}
+    std::shared_ptr<State> m_state;
+    friend class TaskSchedulerManager;
+};
+
 class TaskSchedulerManager {
 public:
+    struct RuntimeState;
+    struct Config {
+        std::uint32_t workerCount = 0;
+        std::uint32_t blockingThreadCount = 0;
+        std::uint32_t staticConcurrency = 0;
+        std::uint32_t shaderConcurrency = 0;
+        bool reserveRenderCpu = true;
+    };
+    struct DomainStats {
+        std::uint64_t queued = 0, active = 0, completed = 0, cancelled = 0, failed = 0;
+        std::uint64_t queueWaitMicros = 0, executionMicros = 0, highWatermark = 0, longTasks = 0;
+    };
     struct QueueStats {
-        uint32_t ioQueued = 0;
-        uint32_t ioActive = 0;
-        uint32_t backgroundQueued = 0;
-        uint32_t backgroundActive = 0;
-        uint32_t shaderCompileQueued = 0;
-        uint32_t shaderCompileActive = 0;
+        DomainStats domains[static_cast<std::size_t>(TaskDomain::Count)]{};
+        std::uint32_t blockingQueued = 0, blockingActive = 0;
+        std::uint32_t ioQueued = 0, ioActive = 0;
+        std::uint32_t backgroundQueued = 0, backgroundActive = 0;
+        std::uint32_t shaderCompileQueued = 0, shaderCompileActive = 0;
     };
 
     static TaskSchedulerManager& GetInstance();
-
-    void Initialize(uint32_t ioThreadCount = 2, uint32_t backgroundThreadCount = 0);
+    void Initialize();
+    void Initialize(Config config);
+    void InitializeForPlugin(std::uint32_t workerCount = 1);
     void Cleanup();
-    void RunIoTask(std::function<void()>&& task);
-    void RunIoTask(std::string_view taskName, std::function<void()>&& task);
-    void QueueIoTask(std::function<void()>&& task);
-    void QueueIoTask(std::string_view taskName, std::function<void()>&& task);
-    void RunBackgroundTask(std::function<void()>&& task);
-    void RunBackgroundTask(std::string_view taskName, std::function<void()>&& task);
-    void QueueShaderCompileTask(std::function<void()>&& task);
-    void QueueShaderCompileTask(std::string_view taskName, std::function<void()>&& task);
 
-    bool IsInitialized() const {
-        return m_initialized;
-    }
+    [[nodiscard]] bool IsInitialized() const noexcept { return m_initialized.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint32_t WorkerCount() const noexcept { return m_workerCount; }
+    [[nodiscard]] std::uint32_t BlockingThreadCount() const noexcept;
+    [[nodiscard]] std::uint32_t DomainConcurrency(TaskDomain domain) const noexcept;
+    [[nodiscard]] QueueStats GetQueueStats() const;
+    [[nodiscard]] TaskScope CreateScope(std::string_view name);
+    [[nodiscard]] TaskScope ProcessScope(TaskDomain domain) const;
 
-    uint32_t GetNumTaskThreads() const {
-        return m_initialized ? m_workerThreadCount : 0u;
-    }
-
-    uint32_t GetNumIoThreads() const {
-        return static_cast<uint32_t>(m_ioThreads.size());
-    }
-
-    uint32_t GetNumBackgroundThreads() const {
-        return static_cast<uint32_t>(m_backgroundThreads.size());
-    }
-
-    uint32_t GetNumShaderCompileThreads() const {
-        return static_cast<uint32_t>(m_shaderCompileThreads.size());
-    }
-
-    QueueStats GetQueueStats() const;
+    bool Submit(const TaskScope&, TaskLane, TaskDomain, std::string_view,
+        std::function<void(const TaskContext&)>&& task);
+    bool Submit(TaskLane, TaskDomain, std::string_view, std::function<void()>&& task);
+    bool ScheduleAfter(const TaskScope&, std::chrono::steady_clock::duration, TaskLane, TaskDomain,
+        std::string_view, std::function<void(const TaskContext&)>&& task);
+    bool SubmitBlockingIo(const TaskScope&, TaskDomain, std::string_view,
+        std::function<void(const TaskContext&)>&& blockingOperation, TaskLane continuationLane,
+        std::function<void(const TaskContext&)>&& continuation);
 
     template <typename Func>
-    void ParallelFor(size_t itemCount, Func&& func) {
+    void ParallelFor(std::size_t itemCount, Func&& func) {
         ParallelFor({}, itemCount, std::forward<Func>(func));
     }
-
     template <typename Func>
-    void ParallelFor(std::string_view taskName, size_t itemCount, Func&& func) {
+    void ParallelFor(std::string_view name, std::size_t itemCount, Func&& func) {
         using Callable = std::decay_t<Func>;
         Callable callable = std::forward<Func>(func);
-
-        ParallelForImpl(taskName, itemCount, [callable = std::move(callable)](size_t itemIndex) mutable {
-            callable(itemIndex);
-        });
+        ParallelForImpl(name, itemCount, [callable = std::move(callable)](std::size_t i) mutable { callable(i); });
     }
 
 private:
-    struct RuntimeState;
-
     TaskSchedulerManager() = default;
-
-    void IoWorkerLoop();
-    void BackgroundWorkerLoop();
-    void ShaderCompileWorkerLoop();
-    void ParallelForImpl(std::string_view taskName, size_t itemCount, std::function<void(size_t)>&& func);
-
+    void DispatchDomain(TaskDomain domain);
+    void ParallelForImpl(std::string_view, std::size_t, std::function<void(std::size_t)>&&);
     std::unique_ptr<RuntimeState> m_runtimeState;
-    std::vector<std::thread> m_ioThreads;
-    std::vector<std::thread> m_backgroundThreads;
-    std::vector<std::thread> m_shaderCompileThreads;
-    std::deque<std::function<void()>> m_ioTasks;
-    std::deque<std::function<void()>> m_backgroundTasks;
-    std::deque<std::function<void()>> m_shaderCompileTasks;
-    mutable std::mutex m_ioMutex;
-    mutable std::mutex m_backgroundMutex;
-    mutable std::mutex m_shaderCompileMutex;
-    std::condition_variable m_ioCv;
-    std::condition_variable m_backgroundCv;
-    std::condition_variable m_shaderCompileCv;
-    std::atomic<uint32_t> m_ioRoundRobin = 0;
-    std::atomic<uint32_t> m_ioActive = 0;
-    std::atomic<uint32_t> m_backgroundActive = 0;
-    std::atomic<uint32_t> m_shaderCompileActive = 0;
-    std::atomic<bool> m_ioShutdownRequested = false;
-    std::atomic<bool> m_backgroundShutdownRequested = false;
-    std::atomic<bool> m_shaderCompileShutdownRequested = false;
-    uint32_t m_workerThreadCount = 0;
-    bool m_initialized = false;
+    std::atomic_bool m_initialized{ false };
+    std::uint32_t m_workerCount = 0;
 };
 
-}
+} // namespace br
 
 using TaskSchedulerManager = br::TaskSchedulerManager;
+using TaskLane = br::TaskLane;
+using TaskDomain = br::TaskDomain;
+using TaskScope = br::TaskScope;

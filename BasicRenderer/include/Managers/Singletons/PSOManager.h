@@ -460,7 +460,9 @@ private:
 
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
         const std::string queueTaskName = taskName;
-        TaskSchedulerManager::GetInstance().QueueShaderCompileTask(
+        TaskSchedulerManager::GetInstance().Submit(
+            TaskLane::Background,
+            TaskDomain::ShaderCompile,
             queueTaskName,
             [this,
                 cacheMember,

@@ -5,9 +5,9 @@
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
-#include <tbb/parallel_for.h>
 #include <tracy/Tracy.hpp>
 
+#include "Managers/Singletons/TaskSchedulerManager.h"
 #include "Render/MemoryIntrospectionAPI.h"
 #include "Resources/Buffers/Buffer.h"
 
@@ -93,10 +93,9 @@ void CLodUploadStream::EndBulkUpload() {
 
     {
         ZoneScopedN("CLodUploadStream::EndBulkUpload::ParallelCopyPayloads");
-        tbb::parallel_for(
-            size_t{0u},
-            stagedUploads.size(),
-            [&stagedUploads](size_t index) {
+		TaskSchedulerManager::GetInstance().ParallelFor(
+			"CLodUploadStream::CopyPayloads", stagedUploads.size(),
+			[&stagedUploads](size_t index) {
                 const auto& staged = stagedUploads[index];
                 if (staged.mappedData == nullptr) {
                     return;

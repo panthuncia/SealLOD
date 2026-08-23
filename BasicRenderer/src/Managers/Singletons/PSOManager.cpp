@@ -3684,7 +3684,9 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, RecompileOp
         });
     }
 
-    TaskSchedulerManager::GetInstance().QueueShaderCompileTask(
+    TaskSchedulerManager::GetInstance().Submit(
+        TaskLane::Background,
+        TaskDomain::ShaderCompile,
         "PSOManager::LiveRecompile::" + pipelineId,
         [this,
             pipelineId,

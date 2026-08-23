@@ -266,17 +266,13 @@ ObjectManager::~ObjectManager() {
 
 void ObjectManager::StartDeferredRetireWorker() {
 	m_deferredRetireStop.store(false, std::memory_order_release);
-	m_deferredRetireWorker = std::thread([this]() {
-		DeferredRetireWorkerMain();
-	});
+	m_deferredRetireScope = TaskSchedulerManager::GetInstance().CreateScope("ObjectManager::DeferredRetire");
 }
 
 void ObjectManager::StopDeferredRetireWorker() {
 	m_deferredRetireStop.store(true, std::memory_order_release);
-	m_deferredRetireCv.notify_all();
-	if (m_deferredRetireWorker.joinable()) {
-		m_deferredRetireWorker.join();
-	}
+	if (m_deferredRetireScope.Valid()) m_deferredRetireScope.CancelAndWait();
+	m_deferredRetireDrainScheduled.store(false, std::memory_order_release);
 
 	std::deque<DeferredBufferRangeRetire> pending;
 	{
@@ -304,45 +300,39 @@ void ObjectManager::StopDeferredRetireWorker() {
 	}
 }
 
-void ObjectManager::DeferredRetireWorkerMain() {
-	while (true) {
-		std::vector<DeferredBufferRangeRetire> ready;
-		{
-			std::unique_lock lock(m_deferredRetireMutex);
-			m_deferredRetireCv.wait(lock, [this]() {
-				if (m_deferredRetireStop.load(std::memory_order_acquire)) {
-					return true;
-				}
-				const auto completedFrame = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
-				for (const auto& retire : m_deferredRetireQueue) {
-					if (retire.retireFrame <= completedFrame) {
-						return true;
-					}
-				}
-				return false;
-			});
+void ObjectManager::ScheduleDeferredRetireDrain() {
+	if (m_deferredRetireStop.load(std::memory_order_acquire) || !m_deferredRetireScope.Valid()) return;
+	bool expected = false;
+	if (!m_deferredRetireDrainScheduled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
+	if (!TaskSchedulerManager::GetInstance().Submit(m_deferredRetireScope, TaskLane::Background,
+		TaskDomain::Cleanup, "ObjectManager::DeferredRetireDrain",
+		[this](const br::TaskContext& context) { DeferredRetireDrain(context); })) {
+		m_deferredRetireDrainScheduled.store(false, std::memory_order_release);
+	}
+}
 
-			if (m_deferredRetireStop.load(std::memory_order_acquire)) {
-				break;
+void ObjectManager::DeferredRetireDrain(const br::TaskContext& context) {
+	std::vector<DeferredBufferRangeRetire> ready;
+	ready.reserve(256);
+	bool moreReady = false;
+	{
+		std::lock_guard lock(m_deferredRetireMutex);
+		const auto completedFrame = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
+		for (auto it = m_deferredRetireQueue.begin(); it != m_deferredRetireQueue.end() && ready.size() < 256;) {
+			if (it->retireFrame <= completedFrame) {
+				ready.push_back(std::move(*it));
+				it = m_deferredRetireQueue.erase(it);
+			} else {
+				++it;
 			}
-
-			const auto completedFrame = m_deferredRetireCompletedFrame.load(std::memory_order_acquire);
-			for (auto it = m_deferredRetireQueue.begin(); it != m_deferredRetireQueue.end();) {
-				if (it->retireFrame <= completedFrame) {
-					ready.push_back(std::move(*it));
-					it = m_deferredRetireQueue.erase(it);
-				}
-				else {
-					++it;
-				}
-			}
-			m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
 		}
-
-		if (ready.empty()) {
-			continue;
+		for (const auto& retire : m_deferredRetireQueue) {
+			if (retire.retireFrame <= completedFrame) { moreReady = true; break; }
 		}
+		m_deferredRetireQueueDepth.store(m_deferredRetireQueue.size(), std::memory_order_relaxed);
+	}
 
+	if (!context.StopRequested() && !ready.empty()) {
 		const auto begin = std::chrono::steady_clock::now();
 		std::uint64_t retiredRanges = 0;
 		std::uint64_t retiredBytes = 0;
@@ -359,6 +349,8 @@ void ObjectManager::DeferredRetireWorkerMain() {
 			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count()),
 			std::memory_order_relaxed);
 	}
+	m_deferredRetireDrainScheduled.store(false, std::memory_order_release);
+	if (moreReady && !context.StopRequested()) ScheduleDeferredRetireDrain();
 }
 
 void ObjectManager::EnqueueDeferredBufferRangeRetire(
@@ -425,22 +417,17 @@ void ObjectManager::EnqueueDeferredBufferRangeRetires(std::vector<DeferredBuffer
 	}
 	m_deferredRetireRangesQueued.fetch_add(queuedRanges, std::memory_order_relaxed);
 	m_deferredRetireBytesQueued.fetch_add(queuedBytes, std::memory_order_relaxed);
-	m_deferredRetireCv.notify_one();
+	ScheduleDeferredRetireDrain();
 }
 
 void ObjectManager::StartActiveDrawSetCompactionWorker() {
 	m_activeDrawSetCompactionStop.store(false, std::memory_order_release);
-	m_activeDrawSetCompactionWorker = std::thread([this]() {
-		ActiveDrawSetCompactionWorkerMain();
-	});
+	m_activeDrawSetCompactionScope = TaskSchedulerManager::GetInstance().CreateScope("ObjectManager::ActiveDrawSetCompaction");
 }
 
 void ObjectManager::StopActiveDrawSetCompactionWorker() {
 	m_activeDrawSetCompactionStop.store(true, std::memory_order_release);
-	m_activeDrawSetCompactionCv.notify_all();
-	if (m_activeDrawSetCompactionWorker.joinable()) {
-		m_activeDrawSetCompactionWorker.join();
-	}
+	if (m_activeDrawSetCompactionScope.Valid()) m_activeDrawSetCompactionScope.CancelAndWait();
 
 	std::lock_guard lock(m_activeDrawSetCompactionMutex);
 	m_activeDrawSetCompactionRequests.clear();
@@ -449,22 +436,8 @@ void ObjectManager::StopActiveDrawSetCompactionWorker() {
 	m_activeDrawSetCompactionQueued.clear();
 }
 
-void ObjectManager::ActiveDrawSetCompactionWorkerMain() {
-	while (true) {
-		ActiveDrawSetCompactionJob job;
-		{
-			std::unique_lock lock(m_activeDrawSetCompactionMutex);
-			m_activeDrawSetCompactionCv.wait(lock, [this]() {
-				return m_activeDrawSetCompactionStop.load(std::memory_order_acquire) ||
-					!m_activeDrawSetCompactionJobs.empty();
-			});
-			if (m_activeDrawSetCompactionStop.load(std::memory_order_acquire)) {
-				break;
-			}
-			job = std::move(m_activeDrawSetCompactionJobs.front());
-			m_activeDrawSetCompactionJobs.pop_front();
-		}
-
+void ObjectManager::RunActiveDrawSetCompaction(ActiveDrawSetCompactionJob job, const br::TaskContext& context) {
+		if (context.StopRequested()) return;
 		ZoneScopedN("ObjectManager::ActiveDrawSetCompactionWorker");
 		ZoneValue(job.entries.size());
 		const auto begin = std::chrono::steady_clock::now();
@@ -493,7 +466,6 @@ void ObjectManager::ActiveDrawSetCompactionWorkerMain() {
 			std::lock_guard lock(m_activeDrawSetCompactionMutex);
 			m_activeDrawSetCompactionResults.push_back(std::move(result));
 		}
-	}
 }
 
 void ObjectManager::MaybeQueueActiveDrawSetCompaction(
@@ -577,14 +549,14 @@ void ObjectManager::PumpActiveDrawSetCompactionRequests(std::size_t maxRequests)
 		return;
 	}
 
-	{
-		std::lock_guard lock(m_activeDrawSetCompactionMutex);
-		for (auto& job : jobs) {
-			m_activeDrawSetCompactionJobs.push_back(std::move(job));
-			++m_stats.activeDrawSetCompactionJobsQueued;
-		}
+	for (auto& job : jobs) {
+		++m_stats.activeDrawSetCompactionJobsQueued;
+		TaskSchedulerManager::GetInstance().Submit(m_activeDrawSetCompactionScope,
+			TaskLane::Background, TaskDomain::Cleanup, "ObjectManager::ActiveDrawSetCompaction",
+			[this, job = std::move(job)](const br::TaskContext& context) mutable {
+				RunActiveDrawSetCompaction(std::move(job), context);
+			});
 	}
-	m_activeDrawSetCompactionCv.notify_one();
 }
 
 std::vector<ObjectManager::ActiveDrawSetCompactionPublishResult> ObjectManager::PublishActiveDrawSetCompactionResults(std::size_t maxResults) {
@@ -709,7 +681,7 @@ void ObjectManager::PublishDeferredRetireCompletedFrame(std::uint64_t completedF
 			std::memory_order_acquire)) {
 	}
 	if (completedFrame >= observed) {
-		m_deferredRetireCv.notify_all();
+		ScheduleDeferredRetireDrain();
 	}
 }
 

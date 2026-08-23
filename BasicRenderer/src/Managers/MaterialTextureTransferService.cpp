@@ -216,7 +216,9 @@ void MaterialTextureTransferService::ReapCompletedLocked()
 			record->second.state = State::Ready;
 		}
 		for (auto& readback : batch.readbacks) {
-			TaskSchedulerManager::GetInstance().RunBackgroundTask(
+			TaskSchedulerManager::GetInstance().Submit(
+				TaskLane::Background,
+				TaskDomain::Cleanup,
 				"MaterialTextureTransferService::SaveReadback",
 				[completion = std::move(readback)]() mutable { SaveReadbackToDds(std::move(completion)); });
 		}

@@ -286,7 +286,7 @@ void ReadbackManager::SaveCubemapToDDS(
     readbackRequest.outputFile = outputFile;
     readbackRequest.fenceValue = fenceValue;
     readbackRequest.callback = [=]() {
-        TaskSchedulerManager::GetInstance().RunBackgroundTask("ReadbackManager::SaveCubemapToDDS", [=]() {
+        TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::Cleanup, "ReadbackManager::SaveCubemapToDDS", [=]() {
             SaveCubemapReadbackToDds(readbackBuffer, fps, width, height, format, numMipLevels, outputFile);
         });
         };
@@ -356,7 +356,7 @@ void ReadbackManager::SaveTextureToDDS(
     readbackRequest.outputFile = outputFile;
     readbackRequest.fenceValue = fenceValue;
     readbackRequest.callback = [=]() {
-        TaskSchedulerManager::GetInstance().RunBackgroundTask("ReadbackManager::SaveTextureToDDS", [=]() {
+        TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::Cleanup, "ReadbackManager::SaveTextureToDDS", [=]() {
             SaveTextureReadbackToDds(readbackBuffer, fps, width, height, dxgiFmt, numMipLevels, outputFile);
         });
         };

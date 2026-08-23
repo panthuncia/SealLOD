@@ -1767,7 +1767,7 @@ std::shared_ptr<TextureProcessingJobHandle> TextureProcessingManager::RequestPro
 		}
 	}
 
-	TaskSchedulerManager::GetInstance().RunBackgroundTask("TextureProcessingManager::RequestProcessing", [handle, sourceData, meta, key, cacheKey]() {
+	TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::TextureProcessing, "TextureProcessingManager::RequestProcessing", [handle, sourceData, meta, key, cacheKey]() {
 		handle->state.store(TextureProcessingJobState::CpuPreparing, std::memory_order_release);
 		try {
 			const std::wstring conditionedCachePath = BuildProcessingConditionedCachePath(cacheKey);
@@ -1955,7 +1955,9 @@ void TextureProcessingManager::CompleteGpuProcessing(
 			"TextureProcessingManager: rejected unexpected transparent-black GPU BC7 output for '{}'; retrying this texture on CPU",
 			processingKey);
 		handle->state.store(TextureProcessingJobState::CpuPreparing, std::memory_order_release);
-		TaskSchedulerManager::GetInstance().RunBackgroundTask(
+		TaskSchedulerManager::GetInstance().Submit(
+			TaskLane::Background,
+			TaskDomain::TextureProcessing,
 			"TextureProcessingManager::GpuBc7ValidationFallback",
 			[handle, preparedSourceData, requestMeta, cacheKey, processingKey]() {
 				try {

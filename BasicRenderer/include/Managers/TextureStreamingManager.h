@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cstddef>
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -14,11 +13,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <thread>
 
 #include "Interfaces/IResourceProvider.h"
 #include "Resources/Buffers/DynamicStructuredBuffer.h"
 #include "Resources/Texture.h"
+#include "Managers/Singletons/TaskSchedulerManager.h"
 
 class TextureFactory;
 namespace org { class CopyPass; }
@@ -127,7 +126,8 @@ public:
 
 private:
 	TextureStreamingManager();
-	void WorkerMain();
+	void ScheduleDrain();
+	void Drain(const br::TaskContext& context);
 
 	struct TextureBindingOwner {
 		uint64_t bindingID = 0;
@@ -210,11 +210,12 @@ private:
 	std::atomic<uint64_t> m_nextBindingID{1u};
 	TextureFactory* m_textureFactory = nullptr;
 	std::unique_ptr<MaterialTextureTransferService> m_materialTextureTransfers;
-	std::thread m_workerThread;
+	TaskScope m_taskScope;
 	std::mutex m_workerCommandMutex;
-	std::condition_variable m_workerCV;
 	std::deque<WorkerCommand> m_workerCommands;
+	std::atomic<bool> m_drainScheduled{false};
 	std::atomic<bool> m_workerQuit{false};
+	uint64_t m_lastProcessedReadbackFence = 0;
 	std::atomic<bool> m_initialized{false};
 	struct ReadbackSlot {
 		std::shared_ptr<Buffer> staging;

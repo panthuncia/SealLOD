@@ -58,7 +58,7 @@ uint32_t CLodIoAdmissionTarget() {
 		// workers do not go idle between service ticks, while remaining far
 		// below the previous 512--2048 fire-and-forget backlog.
 		uint32_t result = std::max<uint32_t>(
-			TaskSchedulerManager::GetInstance().GetNumIoThreads() * 48u,
+			TaskSchedulerManager::GetInstance().BlockingThreadCount() * 48u,
 			96u);
 		char* value = nullptr;
 		size_t length = 0u;
@@ -295,7 +295,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 		for (size_t requestIndex = batchBegin; requestIndex < batchEnd; ++requestIndex) {
 			taskRequests.push_back(std::move(batch[requestIndex]));
 		}
-		scheduler.QueueIoTask("CLodDiskStreaming",
+		scheduler.Submit(TaskLane::Streaming, TaskDomain::AssetImport, "CLodDiskStreaming",
 			[this, requests = std::move(taskRequests)]() mutable {
 			std::vector<CLodDiskStreamingResult> completedResults;
 			completedResults.reserve(requests.size());
@@ -3420,7 +3420,7 @@ MeshManager::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() c
 		m_debugResidentAllocationBytes.load(std::memory_order_relaxed);
 	stats.totalStreamedBytes = m_debugTotalStreamedBytes.load(std::memory_order_relaxed);
 	stats.ioAdmissionTarget = CLodIoAdmissionTarget();
-	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().GetNumIoThreads();
+	stats.ioWorkerCount = TaskSchedulerManager::GetInstance().BlockingThreadCount();
 	stats.ioTaskBatchSize = CLodIoTaskBatchSize();
 	{
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);

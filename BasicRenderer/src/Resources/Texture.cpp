@@ -1318,7 +1318,7 @@ std::shared_ptr<TextureReloadJobHandle> RequestReloadSourceDataAsync(
 	handle->targetTopMip = targetTopMip;
 	handle->state.store(TextureReloadJobState::Queued, std::memory_order_release);
 
-	TaskSchedulerManager::GetInstance().RunBackgroundTask("TextureAsset::RequestReloadSourceDataAsync", [handle, filePath = std::move(filePath), preferSRGB, targetTopMip, streamingEnabled, reason = std::move(reason)]() mutable {
+	TaskSchedulerManager::GetInstance().Submit(TaskLane::Background, TaskDomain::TextureProcessing, "TextureAsset::RequestReloadSourceDataAsync", [handle, filePath = std::move(filePath), preferSRGB, targetTopMip, streamingEnabled, reason = std::move(reason)]() mutable {
 		ZoneScopedN("TextureAsset::RequestReloadSourceDataAsync::BuildSourceData");
 		ZoneText(filePath.data(), filePath.size());
 		if (!reason.empty()) {
@@ -1578,7 +1578,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadDDSFilePathDirec
 	handle->targetTopMip.store(topMip, std::memory_order_release);
 	handle->state.store(TextureDirectStorageReloadJobState::Queued, std::memory_order_release);
 
-	TaskSchedulerManager::GetInstance().QueueIoTask("TextureAsset::BeginUploadDDSFilePathDirectToVRAMAsync", [handle, path, preferSRGB, topMip, allowRTV, allowUAV]() mutable {
+	TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::TextureProcessing, "TextureAsset::BeginUploadDDSFilePathDirectToVRAMAsync", [handle, path, preferSRGB, topMip, allowRTV, allowUAV]() mutable {
 		if (handle->cancelRequested.load(std::memory_order_acquire)) {
 			handle->state.store(TextureDirectStorageReloadJobState::Failed, std::memory_order_release);
 			return;
@@ -1765,7 +1765,7 @@ std::shared_ptr<TextureDirectStorageReloadJobHandle> BeginUploadConditionedCache
 	handle->targetTopMip.store(topMip, std::memory_order_release);
 	handle->state.store(TextureDirectStorageReloadJobState::Queued, std::memory_order_release);
 
-	TaskSchedulerManager::GetInstance().QueueIoTask("TextureAsset::BeginUploadConditionedCacheFilePathDirectToVRAMAsync", [handle, path, topMip, allowRTV, allowUAV]() mutable {
+	TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::TextureProcessing, "TextureAsset::BeginUploadConditionedCacheFilePathDirectToVRAMAsync", [handle, path, topMip, allowRTV, allowUAV]() mutable {
 		ZoneScopedN("TextureAsset::BeginUploadConditionedCacheFilePathDirectToVRAMAsync::IoTask");
 		if (handle->cancelRequested.load(std::memory_order_acquire)) {
 			handle->state.store(TextureDirectStorageReloadJobState::Failed, std::memory_order_release);
